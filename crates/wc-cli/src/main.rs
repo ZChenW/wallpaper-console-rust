@@ -29,9 +29,6 @@ enum Commands {
     /// Restore the last applied wallpaper
     Restore,
 
-    /// Show help
-    Help,
-
     // ── Sources ──────────────────────────────────────────────────────
     /// Add a source directory
     Add { dir: String },
@@ -120,7 +117,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        None | Some(Commands::Help) => {
+        None => {
             print_help();
             return Ok(());
         }
@@ -136,8 +133,6 @@ fn main() -> anyhow::Result<()> {
 
 fn run_command(cmd: Commands, cd: &ConfigDir) -> anyhow::Result<()> {
     match cmd {
-        Commands::Help => print_help(),
-
         Commands::Apply { file } => {
             let ext = formats::get_extension(&file)
                 .ok_or_else(|| anyhow::anyhow!("unsupported file: {}", file))?;
