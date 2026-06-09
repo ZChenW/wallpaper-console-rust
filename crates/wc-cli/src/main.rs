@@ -467,11 +467,12 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 "video" => Some(wc_core::types::FileType::Video),
                 other => anyhow::bail!("unknown type '{}' — use image, gif, or video", other),
             };
-            let paths = library_paths(s, filter)?;
-            if paths.is_empty() {
+            // Live scan (matches Bash: scan_wallpapers_by_type), not library.tsv
+            let candidates = scan_paths(s, filter)?;
+            if candidates.is_empty() {
                 anyhow::bail!("no wallpapers of type: {}", q);
             }
-            let selection = fzf_select(&paths, &format!("search-type:{}> ", q))?;
+            let selection = fzf_select(&candidates, &format!("search-type:{}> ", q))?;
             if let Some(path) = selection {
                 apply_selected(s, &path)?;
             }

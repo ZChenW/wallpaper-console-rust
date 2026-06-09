@@ -247,29 +247,34 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         }
     }
 
-    // State: current
+    // State: current — missing row is OK (empty), SQL error is NOT.
     {
         let flat_cur = flat::current_read(cd)?.unwrap_or_default();
-        let db_cur: String = conn
-            .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
+        let db_cur: String =
+            match conn.query_row("SELECT value FROM state WHERE key='current'", [], |row| {
                 row.get(0)
-            })
-            .unwrap_or_default();
+            }) {
+                Ok(v) => v,
+                Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+                Err(e) => return Err(WcError::Sqlite(e.to_string())),
+            };
         if flat_cur != db_cur {
             errors.push("current".into());
         }
     }
 
-    // State: last_backend
+    // State: last_backend — missing row is OK, SQL error is NOT.
     {
         let flat_be = flat::last_backend_read(cd)?.unwrap_or_default();
-        let db_be: String = conn
-            .query_row(
-                "SELECT value FROM state WHERE key='last_backend'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap_or_default();
+        let db_be: String = match conn.query_row(
+            "SELECT value FROM state WHERE key='last_backend'",
+            [],
+            |row| row.get(0),
+        ) {
+            Ok(v) => v,
+            Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
+            Err(e) => return Err(WcError::Sqlite(e.to_string())),
+        };
         if flat_be != db_be {
             errors.push("last_backend".into());
         }
@@ -515,15 +520,17 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
         std::fs::write(tmp_dir.join("history"), content).map_err(WcError::Io)?;
     }
 
-    // State
+    // State — missing row is OK (empty), SQL error is NOT.
     for (key, file) in &[("current", "current"), ("last_backend", "last_backend")] {
-        let val: Option<String> = conn
-            .query_row(
-                "SELECT value FROM state WHERE key=?1",
-                params![key],
-                |row| row.get(0),
-            )
-            .ok();
+        let val: Option<String> = match conn.query_row(
+            "SELECT value FROM state WHERE key=?1",
+            params![key],
+            |row| row.get(0),
+        ) {
+            Ok(v) => Some(v),
+            Err(rusqlite::Error::QueryReturnedNoRows) => None,
+            Err(e) => return Err(WcError::Sqlite(e.to_string())),
+        };
         let content = val.map(|v| v + "\n").unwrap_or_default();
         std::fs::write(tmp_dir.join(file), content).map_err(WcError::Io)?;
     }

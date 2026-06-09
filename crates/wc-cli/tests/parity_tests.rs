@@ -383,3 +383,102 @@ fn sqlite_export_flat_is_atomic() {
     let srcs = std::fs::read_to_string(format!("{}/sources", wc_dir)).unwrap();
     assert!(srcs.contains(&src), "sources export: {}", srcs);
 }
+
+#[test]
+fn sqlite_verify_fails_on_missing_state_table() {
+    let (_d, cd) = temp_config();
+    let src = format!("{}/walls", cd);
+    std::fs::create_dir_all(&src).unwrap();
+    rust(&["add", &src], &cd);
+    rust(&["migrate-to-sqlite"], &cd);
+
+    // Drop the state table — verify must fail (SQL error, not silent empty)
+    let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("DROP TABLE state;").unwrap();
+    conn.close().unwrap();
+
+    let out = rust(&["sqlite-verify"], &cd);
+    assert!(
+        !out.status.success(),
+        "verify should fail when state table is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("VERIFY OK"),
+        "should not print VERIFY OK: {}",
+        stderr
+    );
+}
+
+#[test]
+fn sqlite_export_flat_fails_on_missing_state_table() {
+    let (_d, cd) = temp_config();
+    let src = format!("{}/walls", cd);
+    std::fs::create_dir_all(&src).unwrap();
+    rust(&["add", &src], &cd);
+    rust(&["migrate-to-sqlite"], &cd);
+
+    // Drop the state table — export must fail
+    let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute_batch("DROP TABLE state;").unwrap();
+    conn.close().unwrap();
+
+    let out = rust(&["sqlite-export-flat"], &cd);
+    assert!(
+        !out.status.success(),
+        "export should fail when state table is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("Export complete"),
+        "should not print Export complete: {}",
+        stderr
+    );
+}
+
+// ── search-type uses live scan ─────────────────────────────────────────────
+
+#[test]
+fn search_type_live_scan_independent_of_library_tsv() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    std::fs::write(format!("{}/video.mp4", walls), b"").unwrap();
+    rust(&["add", &walls], &cd);
+
+    // Before rescan, library.tsv is empty
+    let lib_path = format!("{}/wallpaper-console/library.tsv", cd);
+    let lib_content = std::fs::read_to_string(&lib_path).unwrap_or_default();
+    let entries: Vec<&str> = lib_content.lines().filter(|l| !l.is_empty()).collect();
+    assert!(
+        entries.is_empty(),
+        "library.tsv should be empty before rescan, got: {:?}",
+        entries
+    );
+
+    // library-json (from tsv) must also be empty before rescan
+    let out = rust(&["library-json"], &cd);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !s.contains("video.mp4"),
+        "library-json before rescan should be empty"
+    );
+
+    // After rescan (which uses the same live scanner as search-type),
+    // the video file is discovered
+    rust(&["rescan"], &cd);
+    let out = rust(&["library-json"], &cd);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains("video.mp4"),
+        "live scanner should find video.mp4 after rescan: {}",
+        s
+    );
+    assert!(
+        s.contains("\"type\": \"video\""),
+        "should be classified as video: {}",
+        s
+    );
+}
