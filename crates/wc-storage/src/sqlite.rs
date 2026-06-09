@@ -184,11 +184,11 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         let mut stmt = conn
             .prepare("SELECT key, value FROM config ORDER BY key")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let db_rows: Result<Vec<(String, String)>, _> = stmt
+        let db_rows: Vec<(String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .collect();
-        let db_rows = db_rows.map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let db_cfg: std::collections::HashMap<String, String> = db_rows.into_iter().collect();
         if flat_cfg != db_cfg {
             errors.push("config".into());
@@ -205,8 +205,8 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         let db_src: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         if flat_src != db_src {
             errors.push("sources".into());
         }
@@ -222,8 +222,8 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         let db_fav: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         if flat_fav != db_fav {
             errors.push("favorites".into());
         }
@@ -239,8 +239,8 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         let mut db_hist: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         db_hist.sort();
         if flat_hist != db_hist {
             errors.push("history".into());
@@ -459,53 +459,58 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     let tmp_dir = cd.path.join(format!("export-tmp-{}", ts));
     std::fs::create_dir_all(&tmp_dir).map_err(WcError::Io)?;
 
-    // Config
+    // Config — propagate row errors
     {
-        let rows: Vec<(String, String)> = {
-            let mut stmt = conn
-                .prepare("SELECT key, value FROM config ORDER BY key")
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
-            let x = stmt
-                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-                .map_err(|e| WcError::Sqlite(e.to_string()))?
-                .filter_map(|r| r.ok())
-                .collect();
-            x
-        };
+        let mut stmt = conn
+            .prepare("SELECT key, value FROM config ORDER BY key")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let content: String = rows.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
         std::fs::write(tmp_dir.join("config"), content).map_err(WcError::Io)?;
     }
 
-    // Sources, favorites, history
-    for (table, file) in &[("sources", "sources"), ("favorites", "favorites")] {
-        let rows: Vec<String> = {
-            let mut stmt = conn
-                .prepare(&format!("SELECT path FROM {} ORDER BY path", table))
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
-            let x = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| WcError::Sqlite(e.to_string()))?
-                .filter_map(|r| r.ok())
-                .collect();
-            x
-        };
+    // Sources — propagate row errors
+    {
+        let mut stmt = conn
+            .prepare("SELECT path FROM sources ORDER BY path")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let content = rows.join("\n") + "\n";
-        std::fs::write(tmp_dir.join(file), content).map_err(WcError::Io)?;
+        std::fs::write(tmp_dir.join("sources"), content).map_err(WcError::Io)?;
     }
 
-    // History (newest first: ORDER BY id DESC)
+    // Favorites — propagate row errors
     {
-        let rows: Vec<String> = {
-            let mut stmt = conn
-                .prepare("SELECT path FROM history ORDER BY id DESC")
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
-            let x = stmt
-                .query_map([], |row| row.get(0))
-                .map_err(|e| WcError::Sqlite(e.to_string()))?
-                .filter_map(|r| r.ok())
-                .collect();
-            x
-        };
+        let mut stmt = conn
+            .prepare("SELECT path FROM favorites ORDER BY path")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let content = rows.join("\n") + "\n";
+        std::fs::write(tmp_dir.join("favorites"), content).map_err(WcError::Io)?;
+    }
+
+    // History (newest first: ORDER BY id DESC) — propagate row errors
+    {
+        let mut stmt = conn
+            .prepare("SELECT path FROM history ORDER BY id DESC")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join("history"), content).map_err(WcError::Io)?;
     }
@@ -645,7 +650,6 @@ fn chrono_now() -> String {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default();
     let secs = now.as_secs();
-    // Simple formatting: YYYY-MM-DDTHH:MM:SS
     let days_since_epoch = secs / 86400;
     let (y, m, d) = civil_from_days(days_since_epoch as i64);
     let time_secs = secs % 86400;

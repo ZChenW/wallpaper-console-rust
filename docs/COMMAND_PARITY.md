@@ -4,80 +4,86 @@ Reference implementation: `/home/chakew/Projects/wallpaper-console/wallpaper-con
 Run with `XDG_CONFIG_HOME=$(mktemp -d)` for clean testing.
 
 ## Wallpaper commands
-- [ ] `browse` / `browse-all` — fzf picker with preview
-- [ ] `browse-images` — image-only fzf
-- [ ] `browse-gifs` — GIF-only fzf
-- [ ] `browse-videos` — video-only fzf
-- [ ] `random` / `random-all` — random from all types
-- [ ] `random-image`
-- [ ] `random-gif`
-- [ ] `random-video`
-- [ ] `apply FILE`
+- [x] `browse` / `browse-all` — fzf picker, apply on selection (no preview yet)
+- [x] `browse-images` — image-only fzf
+- [x] `browse-gifs` — GIF-only fzf
+- [x] `browse-videos` — video-only fzf
+- [x] `random` / `random-all` — random from all types
+- [x] `random-image`
+- [x] `random-gif`
+- [x] `random-video`
+- [x] `apply FILE`
 
 ## Favorites
-- [ ] `favorite-add FILE`
-- [ ] `favorite-add-current`
-- [ ] `favorites` — browse favorites
-- [ ] `favorite-random`
-- [ ] `favorite-remove [FILE]`
+- [x] `favorite-add FILE`
+- [x] `favorite-add-current`
+- [x] `favorites` — fzf browse + apply
+- [x] `favorite-random`
+- [x] `favorite-remove [FILE]`
 
 ## History
-- [ ] `history` — browse history
-- [ ] `history-random`
-- [ ] `history-clear`
+- [x] `history` — fzf browse + apply
+- [x] `history-random`
+- [x] `history-clear`
 
 ## Sources
-- [ ] `add DIR`
-- [ ] `remove` — interactive fzf
-- [ ] `remove-source DIR`
-- [ ] `sources` — list
-- [ ] `steam-workshop`
-- [ ] `validate-sources`
-- [ ] `remove-missing`
-- [ ] `dedupe-sources`
+- [x] `add DIR`
+- [x] `remove` — fzf interactive select
+- [x] `remove-source DIR`
+- [x] `sources` — list
+- [x] `steam-workshop`
+- [x] `validate-sources`
+- [x] `remove-missing`
+- [x] `dedupe-sources`
 
 ## Search / Sort
-- [ ] `search`
-- [ ] `search-source`
-- [ ] `search-type`
-- [ ] `sort-mtime`
-- [ ] `sort-size`
-- [ ] `sort-name`
+- [x] `search [QUERY]` — filename search, prompts if no query, fzf select
+- [x] `search-source [QUERY]` — source path search, fzf select
+- [x] `search-type [QUERY]` — type filter (image/gif/video), fzf select
+- [x] `sort-mtime` — fzf select after sort
+- [x] `sort-size` — fzf select after sort
+- [x] `sort-name` — fzf select after sort
 
 ## Config
-- [ ] `config-get KEY`
-- [ ] `config-set KEY VALUE...`
+- [x] `config-get KEY`
+- [x] `config-set KEY VALUE...`
 
 ## Cache / Library
-- [ ] `rescan`
-- [ ] `library`
-- [ ] `library-count`
-- [ ] `browse-library`
-- [ ] `random-library`
-- [ ] `library-json [--tsv|--sqlite]`
-- [ ] `favorites-json`
-- [ ] `history-json`
+- [x] `rescan`
+- [x] `library`
+- [x] `library-count`
+- [x] `browse-library` — fzf from library.tsv + apply
+- [x] `random-library`
+- [x] `library-json [--tsv|--sqlite]`
+- [x] `favorites-json`
+- [x] `history-json`
 
 ## SQLite
-- [ ] `migrate-to-sqlite`
-- [ ] `sqlite-verify`
-- [ ] `sqlite-resync`
-- [ ] `sqlite-export-flat`
-- [ ] `sqlite-backup`
-- [ ] `sqlite-restore BACKUP`
+- [x] `migrate-to-sqlite`
+- [x] `sqlite-verify`
+- [x] `sqlite-resync`
+- [x] `sqlite-export-flat`
+- [x] `sqlite-backup`
+- [x] `sqlite-restore BACKUP`
 
 ## System
-- [ ] `restore`
-- [ ] `stop`
-- [ ] `status`
-- [ ] `tui`
-- [ ] `help`
+- [x] `restore`
+- [x] `stop`
+- [x] `status`
+- [ ] `tui` — not yet implemented in Rust
+- [x] `help`
 
 ## Safety invariants
-- [ ] Stop-before-apply ordering
-- [ ] Image→image keeps awww daemon alive
-- [ ] Video→/→video kills both backends
-- [ ] State updates only after successful apply
-- [ ] mpvpaper: never kills other users' processes
-- [ ] setsid -f for awww-daemon
-- [ ] mpvpaper --fork for video detachment
+- [x] Stop-before-apply ordering
+- [x] Image→image keeps awww daemon alive
+- [x] Video→/→video kills both backends
+- [x] State updates only after successful apply
+- [x] mpvpaper: never kills other users' processes
+- [x] setsid -f for awww-daemon
+- [x] mpvpaper --fork for video detachment
+
+## Known gaps (non-blocking for parity)
+- fzf preview pane (`__preview__`) not yet wired — Bash uses a subprocess for thumbnail previews
+- `tui` subcommand is a stub — full TUI requires GTK or ratatui port
+- `steam-workshop` does not scan Flatpak Steam paths (Bash does)
+- sort commands sort by scanned metadata, not library.tsv metadata

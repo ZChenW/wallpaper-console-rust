@@ -86,15 +86,28 @@ enum Commands {
     HistoryClear,
 
     // ── Search / Sort ────────────────────────────────────────────────
-    Search,
+    /// Search wallpapers by filename (fzf interactive).
+    Search {
+        /// Search query (prompts interactively if omitted)
+        query: Vec<String>,
+    },
+    /// Search wallpapers by source directory (fzf interactive).
     #[command(name = "search-source")]
-    SearchSource,
+    SearchSource {
+        query: Vec<String>,
+    },
+    /// Search wallpapers by type: image, gif, or video (fzf interactive).
     #[command(name = "search-type")]
-    SearchType,
+    SearchType {
+        query: Vec<String>,
+    },
+    /// Sort wallpapers by modification time (fzf interactive).
     #[command(name = "sort-mtime")]
     SortMtime,
+    /// Sort wallpapers by file size (fzf interactive).
     #[command(name = "sort-size")]
     SortSize,
+    /// Sort wallpapers by filename (fzf interactive).
     #[command(name = "sort-name")]
     SortName,
 
@@ -171,40 +184,15 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     match cmd {
         // ── Wallpaper ────────────────────────────────────────────────
         Commands::Apply { file } => {
-            // Safety: check file exists
             let p = std::path::Path::new(&file);
             if !p.is_file() {
                 anyhow::bail!("not a regular file: {}", file);
             }
-            let ext = formats::get_extension(&file).ok_or_else(|| {
-                anyhow::anyhow!("unsupported file type: .{} ({}", "unknown", file)
-            })?;
+            let ext = formats::get_extension(&file)
+                .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", file))?;
             let (ftype, _default_backend) = formats::classify_extension(&ext)
                 .ok_or_else(|| anyhow::anyhow!("unsupported file: {}", file))?;
-            // Config-driven backend routing
-            let backend = match ftype {
-                wc_core::types::FileType::Image => {
-                    let be = s.config_get("image_backend", "awww");
-                    match be.as_str() {
-                        "mpvpaper" => Backend::Mpvpaper,
-                        _ => Backend::Awww,
-                    }
-                }
-                wc_core::types::FileType::Gif => {
-                    let be = s.config_get("gif_backend", "awww");
-                    match be.as_str() {
-                        "mpvpaper" => Backend::Mpvpaper,
-                        _ => Backend::Awww,
-                    }
-                }
-                wc_core::types::FileType::Video => {
-                    let be = s.config_get("video_backend", "mpvpaper");
-                    match be.as_str() {
-                        "awww" => Backend::Awww,
-                        _ => Backend::Mpvpaper,
-                    }
-                }
-            };
+            let backend = config_backend_for_type(s, ftype);
             wc_backend::apply_wallpaper(s, &file, backend)?;
             println!("Applied: {}", file);
         }
@@ -229,24 +217,29 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             println!("Wallpaper restored.");
         }
 
-        // Browse / Random (non-interactive: pipe to fzf)
+        // ── Browse (fzf interactive, apply on selection) ─────────────
         Commands::Browse
         | Commands::BrowseAll
         | Commands::BrowseImages
         | Commands::BrowseGifs
         | Commands::BrowseVideos => {
-            let filter = match &cmd {
-                Commands::BrowseImages => Some(wc_core::types::FileType::Image),
-                Commands::BrowseGifs => Some(wc_core::types::FileType::Gif),
-                Commands::BrowseVideos => Some(wc_core::types::FileType::Video),
-                _ => None,
+            let (filter, label) = match &cmd {
+                Commands::BrowseImages => (Some(wc_core::types::FileType::Image), "browse-images"),
+                Commands::BrowseGifs => (Some(wc_core::types::FileType::Gif), "browse-gifs"),
+                Commands::BrowseVideos => (Some(wc_core::types::FileType::Video), "browse-videos"),
+                _ => (None, "browse"),
             };
-            let paths = library_paths(s, filter)?;
-            for p in &paths {
-                println!("{}", p);
+            let candidates = scan_paths(s, filter)?;
+            if candidates.is_empty() {
+                anyhow::bail!("no wallpapers found");
+            }
+            let selection = fzf_select(&candidates, &format!("{}> ", label))?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
             }
         }
 
+        // ── Random ───────────────────────────────────────────────────
         Commands::Random
         | Commands::RandomAll
         | Commands::RandomImage
@@ -262,18 +255,9 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             if paths.is_empty() {
                 anyhow::bail!("no matching wallpapers found");
             }
-            // Pick random
-            let idx = (std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .subsec_nanos() as usize)
-                % paths.len();
+            let idx = rand::random::<usize>() % paths.len();
             let chosen = &paths[idx];
-            let ext = formats::get_extension(chosen).unwrap_or_default();
-            let (ftype, _) = formats::classify_extension(&ext)
-                .ok_or_else(|| anyhow::anyhow!("unsupported: {}", chosen))?;
-            let backend = config_backend_for_type(s, ftype);
-            wc_backend::apply_wallpaper(s, chosen, backend)?;
+            apply_selected(s, chosen)?;
         }
 
         // ── Sources ──────────────────────────────────────────────────
@@ -301,9 +285,11 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             if paths.is_empty() {
                 anyhow::bail!("no sources configured");
             }
-            // Non-interactive: pick first (for tests); TUI uses fzf
-            s.sources_remove(&paths[0])?;
-            println!("Removed source: {}", paths[0]);
+            let selection = fzf_select(&paths, "remove source> ")?;
+            if let Some(path) = selection {
+                s.sources_remove(&path)?;
+                println!("Removed source: {}", path);
+            }
         }
 
         Commands::RemoveSource { dir } => {
@@ -382,8 +368,14 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::Favorites => {
-            for f in s.favorites_list()? {
-                println!("{}", f);
+            let favs = s.favorites_list()?;
+            if favs.is_empty() {
+                println!("(no favorites)");
+                return Ok(());
+            }
+            let selection = fzf_select(&favs, "favorites> ")?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
             }
         }
 
@@ -394,11 +386,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
             let idx = rand::random::<usize>() % favs.len();
             let chosen = &favs[idx];
-            let ext = formats::get_extension(chosen).unwrap_or_default();
-            let (ftype, _) = formats::classify_extension(&ext)
-                .ok_or_else(|| anyhow::anyhow!("unsupported: {}", chosen))?;
-            let backend = config_backend_for_type(s, ftype);
-            wc_backend::apply_wallpaper(s, chosen, backend)?;
+            apply_selected(s, chosen)?;
         }
 
         Commands::FavoriteRemove { file } => {
@@ -406,7 +394,6 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 s.favorites_remove(&path)?;
                 println!("Removed favorite: {}", path);
             } else {
-                // Interactive fzf
                 let favs = s.favorites_list()?;
                 if favs.is_empty() {
                     anyhow::bail!("no favorites configured");
@@ -421,8 +408,14 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         // ── History ──────────────────────────────────────────────────
         Commands::History => {
-            for h in s.history_list()? {
-                println!("{}", h);
+            let hist = s.history_list()?;
+            if hist.is_empty() {
+                println!("(no history)");
+                return Ok(());
+            }
+            let selection = fzf_select(&hist, "history> ")?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
             }
         }
 
@@ -433,11 +426,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
             let idx = rand::random::<usize>() % hist.len();
             let chosen = &hist[idx];
-            let ext = formats::get_extension(chosen).unwrap_or_default();
-            let (ftype, _) = formats::classify_extension(&ext)
-                .ok_or_else(|| anyhow::anyhow!("unsupported: {}", chosen))?;
-            let backend = config_backend_for_type(s, ftype);
-            wc_backend::apply_wallpaper(s, chosen, backend)?;
+            apply_selected(s, chosen)?;
         }
 
         Commands::HistoryClear => {
@@ -446,21 +435,63 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         // ── Search / Sort ────────────────────────────────────────────
-        Commands::Search
-        | Commands::SearchSource
-        | Commands::SearchType
-        | Commands::SortMtime
-        | Commands::SortSize
-        | Commands::SortName => {
-            let mut entries = library_entries(s)?;
-            match &cmd {
-                Commands::SortMtime => entries.sort_by_key(|e| std::cmp::Reverse(e.mtime)),
-                Commands::SortSize => entries.sort_by_key(|e| std::cmp::Reverse(e.size)),
-                Commands::SortName => entries.sort_by(|a, b| a.filename().cmp(b.filename())),
-                _ => {}
+        Commands::Search { query } => {
+            let q = resolve_query(&query, "Search query")?;
+            let candidates = scan_paths_matching_filename(s, &q)?;
+            if candidates.is_empty() {
+                anyhow::bail!("no wallpapers matching: {}", q);
             }
-            for e in &entries {
-                println!("{}", e.path);
+            let selection = fzf_select(&candidates, &format!("search:{}> ", q))?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
+            }
+        }
+
+        Commands::SearchSource { query } => {
+            let q = resolve_query(&query, "Source query")?;
+            let candidates = scan_paths_matching_source(s, &q)?;
+            if candidates.is_empty() {
+                anyhow::bail!("no sources matching: {}", q);
+            }
+            let selection = fzf_select(&candidates, &format!("search-source:{}> ", q))?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
+            }
+        }
+
+        Commands::SearchType { query } => {
+            let q = resolve_query(&query, "Type (image/gif/video)")?;
+            let filter = match q.to_lowercase().as_str() {
+                "image" => Some(wc_core::types::FileType::Image),
+                "gif" => Some(wc_core::types::FileType::Gif),
+                "video" => Some(wc_core::types::FileType::Video),
+                other => anyhow::bail!("unknown type '{}' — use image, gif, or video", other),
+            };
+            let paths = library_paths(s, filter)?;
+            if paths.is_empty() {
+                anyhow::bail!("no wallpapers of type: {}", q);
+            }
+            let selection = fzf_select(&paths, &format!("search-type:{}> ", q))?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
+            }
+        }
+
+        Commands::SortMtime | Commands::SortSize | Commands::SortName => {
+            let candidates = scan_paths(s, None)?;
+            if candidates.is_empty() {
+                anyhow::bail!("no wallpapers found");
+            }
+            let sorted = sort_paths(&candidates, &cmd);
+            let label = match &cmd {
+                Commands::SortMtime => "sort:mtime",
+                Commands::SortSize => "sort:size",
+                Commands::SortName => "sort:name",
+                _ => "sort",
+            };
+            let selection = fzf_select(&sorted, &format!("{}> ", label))?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
             }
         }
 
@@ -557,8 +588,14 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::BrowseLibrary => {
-            for e in library_entries(s)? {
-                println!("{}", e.path);
+            let entries = library_entries(s)?;
+            if entries.is_empty() {
+                anyhow::bail!("library is empty — run rescan first");
+            }
+            let paths: Vec<String> = entries.iter().map(|e| e.path.to_string()).collect();
+            let selection = fzf_select(&paths, "browse-library> ")?;
+            if let Some(path) = selection {
+                apply_selected(s, &path)?;
             }
         }
 
@@ -569,10 +606,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
             let idx = rand::random::<usize>() % entries.len();
             let e = &entries[idx];
-            let (_, _backend) = formats::classify_extension(&e.ext)
-                .ok_or_else(|| anyhow::anyhow!("unsupported: {}", e.path))?;
-            let backend = config_backend_for_type(s, e.file_type);
-            wc_backend::apply_wallpaper(s, e.path.as_ref(), backend)?;
+            apply_selected(s, e.path.as_ref())?;
         }
 
         Commands::LibraryJson {
@@ -667,6 +701,16 @@ fn config_backend_for_type(s: &StorageApi, ftype: wc_core::types::FileType) -> B
     }
 }
 
+fn apply_selected(s: &StorageApi, path: &str) -> anyhow::Result<()> {
+    let ext = formats::get_extension(path).unwrap_or_default();
+    let (ftype, _) = formats::classify_extension(&ext)
+        .ok_or_else(|| anyhow::anyhow!("unsupported: {}", path))?;
+    let backend = config_backend_for_type(s, ftype);
+    wc_backend::apply_wallpaper(s, path, backend)?;
+    println!("Applied: {}", path);
+    Ok(())
+}
+
 fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::WallpaperEntry>> {
     let content = std::fs::read_to_string(s.cd.library_tsv_path()).unwrap_or_default();
     let mut entries = Vec::new();
@@ -710,6 +754,118 @@ fn library_paths(
         .collect())
 }
 
+/// Live-scan all sources for wallpaper paths (bypasses library.tsv cache).
+fn scan_paths(
+    s: &StorageApi,
+    filter: Option<wc_core::types::FileType>,
+) -> anyhow::Result<Vec<String>> {
+    let sources = s.sources_list()?;
+    let all = wc_scan::scan_wallpapers(&sources);
+    if let Some(ft) = filter {
+        Ok(all
+            .into_iter()
+            .filter(|p| {
+                let ext = formats::get_extension(p).unwrap_or_default();
+                matches!(formats::classify_extension(&ext), Some((f, _)) if f == ft)
+            })
+            .collect())
+    } else {
+        Ok(all)
+    }
+}
+
+/// Live-scan and filter by filename (case-insensitive substring match).
+fn scan_paths_matching_filename(s: &StorageApi, query: &str) -> anyhow::Result<Vec<String>> {
+    let sources = s.sources_list()?;
+    let all = wc_scan::scan_wallpapers(&sources);
+    let q = query.to_lowercase();
+    Ok(all
+        .into_iter()
+        .filter(|p| {
+            std::path::Path::new(p)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.to_lowercase().contains(&q))
+                .unwrap_or(false)
+        })
+        .collect())
+}
+
+/// Live-scan sources whose path contains the query, return all files.
+fn scan_paths_matching_source(s: &StorageApi, query: &str) -> anyhow::Result<Vec<String>> {
+    let sources = s.sources_list()?;
+    let q = query.to_lowercase();
+    let matching: Vec<String> = sources
+        .into_iter()
+        .filter(|src| src.to_lowercase().contains(&q))
+        .collect();
+    if matching.is_empty() {
+        return Ok(Vec::new());
+    }
+    Ok(wc_scan::scan_wallpapers(&matching))
+}
+
+fn sort_paths(candidates: &[String], cmd: &Commands) -> Vec<String> {
+    // Build (key, path) pairs
+    let mut pairs: Vec<(String, String)> = candidates
+        .iter()
+        .map(|p| {
+            let key = match cmd {
+                Commands::SortMtime => {
+                    let m = std::fs::metadata(p)
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    format!("{:020}", m)
+                }
+                Commands::SortSize => {
+                    let s = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+                    format!("{:020}", s)
+                }
+                Commands::SortName => std::path::Path::new(p)
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("")
+                    .to_lowercase(),
+                _ => String::new(),
+            };
+            (key, p.clone())
+        })
+        .collect();
+
+    match cmd {
+        Commands::SortMtime | Commands::SortSize => {
+            pairs.sort_by(|a, b| b.0.cmp(&a.0)); // descending
+        }
+        Commands::SortName => {
+            pairs.sort_by(|a, b| a.0.cmp(&b.0)); // ascending
+        }
+        _ => {}
+    }
+    pairs.into_iter().map(|(_, p)| p).collect()
+}
+
+/// Get the query string, prompting interactively if empty.
+fn resolve_query(args: &[String], prompt: &str) -> anyhow::Result<String> {
+    if !args.is_empty() {
+        return Ok(args.join(" "));
+    }
+    use std::io::{BufRead, Write};
+    let mut stderr = std::io::stderr();
+    write!(stderr, "{}: ", prompt)?;
+    stderr.flush()?;
+    let stdin = std::io::stdin();
+    let mut line = String::new();
+    stdin.lock().read_line(&mut line)?;
+    let trimmed = line.trim().to_string();
+    if trimmed.is_empty() {
+        anyhow::bail!("cancelled");
+    }
+    Ok(trimmed)
+}
+
 fn fzf_select(items: &[String], prompt: &str) -> anyhow::Result<Option<String>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
@@ -734,6 +890,7 @@ fn fzf_select(items: &[String], prompt: &str) -> anyhow::Result<Option<String>> 
             Ok(Some(s))
         }
     } else {
+        // fzf exits 130 on Ctrl-C / Esc
         Ok(None)
     }
 }
@@ -746,17 +903,17 @@ fn print_help() {
         "  browse-images        browse-gifs         browse-videos\n",
         "  random               random-all          random-image/gif/video\n",
         "  stop                 status               restore\n",
-        "  add DIR              sources             remove-source DIR\n",
-        "  steam-workshop       validate-sources     remove-missing\n",
-        "  dedupe-sources\n",
-        "  favorite-add FILE    favorite-add-current favorites\n",
+        "  add DIR              sources             remove (fzf)\n",
+        "  remove-source DIR    steam-workshop      validate-sources\n",
+        "  remove-missing       dedupe-sources\n",
+        "  favorite-add FILE    favorite-add-current favorites (fzf)\n",
         "  favorite-random      favorite-remove [FILE]\n",
-        "  history              history-random      history-clear\n",
-        "  search               search-source       search-type\n",
+        "  history (fzf)        history-random      history-clear\n",
+        "  search [QUERY]       search-source [Q]   search-type [Q]\n",
         "  sort-mtime           sort-size            sort-name\n",
         "  config-get KEY       config-set KEY VAL\n",
         "  rescan               library              library-count\n",
-        "  browse-library       random-library       library-json [--tsv|--sqlite]\n",
+        "  browse-library (fzf) random-library       library-json [--tsv|--sqlite]\n",
         "  favorites-json       history-json\n",
         "  migrate-to-sqlite    sqlite-verify        sqlite-resync\n",
         "  sqlite-export-flat   sqlite-backup         sqlite-restore BACKUP\n",
@@ -794,7 +951,8 @@ fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
     let mut stmt = conn.prepare(
         "SELECT path, type, ext, backend, size, mtime, resolution FROM wallpapers ORDER BY path",
     )?;
-    let rows: Vec<serde_json::Value> = stmt
+    // Propagate row errors instead of silently ignoring them.
+    let rows: Result<Vec<serde_json::Value>, rusqlite::Error> = stmt
         .query_map([], |row: &rusqlite::Row<'_>| {
             Ok(serde_json::json!({
                 "path": row.get::<_, String>(0)?,
@@ -806,8 +964,8 @@ fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
                 "resolution": row.get::<_, String>(6)?,
             }))
         })?
-        .filter_map(|r: Result<serde_json::Value, rusqlite::Error>| r.ok())
         .collect();
+    let rows = rows?;
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())
 }

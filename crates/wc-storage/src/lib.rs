@@ -82,8 +82,8 @@ impl StorageApi {
                 let rows: Vec<String> = stmt
                     .query_map([], |row| row.get(0))
                     .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
                 Ok(rows)
             }
             _ => flat::sources_list(&self.cd),
@@ -107,8 +107,8 @@ impl StorageApi {
                 let rows: Vec<String> = stmt
                     .query_map([], |row| row.get(0))
                     .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
                 Ok(rows)
             }
             _ => flat::favorites_list(&self.cd),
@@ -132,8 +132,8 @@ impl StorageApi {
                 let rows: Vec<String> = stmt
                     .query_map([], |row| row.get(0))
                     .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .filter_map(|r| r.ok())
-                    .collect();
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
                 Ok(rows)
             }
             _ => flat::history_list(&self.cd),
