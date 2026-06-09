@@ -57,6 +57,16 @@ pub fn default_backend_for(ft: FileType) -> Backend {
     }
 }
 
+/// Return the file type as a display string ("image" / "gif" / "video" / "?").
+pub fn file_type_for_ext_str(ext: &str) -> &'static str {
+    match ext.to_lowercase().as_str() {
+        "png" | "jpg" | "jpeg" | "webp" | "bmp" => "image",
+        "gif" => "gif",
+        "mp4" | "webm" | "mkv" | "mov" => "video",
+        _ => "?",
+    }
+}
+
 /// Preview/metadata display modes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewMode {

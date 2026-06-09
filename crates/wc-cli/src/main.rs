@@ -162,6 +162,13 @@ enum Commands {
 
     // ── System ───────────────────────────────────────────────────────
     Tui,
+
+    // ── Internal (hidden) ────────────────────────────────────────────
+    /// fzf preview renderer (called by fzf --preview)
+    #[command(name = "__preview__", hide = true)]
+    Preview {
+        file: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -677,6 +684,10 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         Commands::Tui => {
             println!("TUI not yet implemented in Rust — use the Bash wallpaper-console for TUI.");
         }
+
+        Commands::Preview { file } => {
+            wc_preview::render_preview(&s.cd, &file);
+        }
     }
     Ok(())
 }
@@ -870,9 +881,17 @@ fn resolve_query(args: &[String], prompt: &str) -> anyhow::Result<String> {
 fn fzf_select(items: &[String], prompt: &str) -> anyhow::Result<Option<String>> {
     use std::io::Write;
     use std::process::{Command, Stdio};
+
+    let self_path = std::env::current_exe()
+        .unwrap_or_else(|_| std::path::PathBuf::from("wallpaper-console-rust"));
+    let preview_cmd = format!("{} __preview__ {{}}", self_path.to_string_lossy());
+
     let mut child = Command::new("fzf")
         .arg("--prompt")
         .arg(prompt)
+        .arg("--preview")
+        .arg(&preview_cmd)
+        .arg("--preview-window=right:60%:wrap")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
