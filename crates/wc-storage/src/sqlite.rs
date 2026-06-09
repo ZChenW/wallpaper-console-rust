@@ -300,8 +300,14 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     let bak = db_path.with_extension(format!("db.bak.{}", ts));
     std::fs::copy(&db_path, &bak).map_err(WcError::Io)?;
 
-    // Build in temp DB alongside real one
-    let tmp_db = db_path.with_extension("db.tmp");
+    // Build in temp DB alongside real one (random suffix for uniqueness)
+    let tmp_db = db_path.with_extension(format!(
+        "db.tmp.{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
     if tmp_db.exists() {
         std::fs::remove_file(&tmp_db).map_err(WcError::Io)?;
     }
@@ -375,12 +381,44 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     conn.close()
         .map_err(|(_, e)| WcError::Sqlite(e.to_string()))?;
 
-    // Verify temp DB before swapping
-    let _tmp_cd = ConfigDir {
-        path: cd.path.clone(),
-    };
-    // We can't easily redirect verify to temp DB, so just check it opens
-    Connection::open(&tmp_db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    // Verify temp DB before swapping — run the full verify against the temp DB
+    let temp_conn = Connection::open(&tmp_db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    // Check all expected tables exist (lightweight structural verify)
+    for table in &[
+        "config",
+        "sources",
+        "favorites",
+        "history",
+        "state",
+        "db_meta",
+    ] {
+        let count: i64 = temp_conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+                params![table],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+        if count == 0 {
+            std::fs::remove_file(&tmp_db).ok();
+            return Err(WcError::Other(format!(
+                "resync: table '{}' missing in temp DB (original DB preserved)",
+                table
+            )));
+        }
+    }
+    // Check row counts roughly match flat files
+    let src_count: i64 = temp_conn
+        .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
+        .unwrap_or(-1);
+    let flat_src = flat::sources_list(cd)?.len() as i64;
+    if src_count != flat_src {
+        std::fs::remove_file(&tmp_db).ok();
+        return Err(WcError::Other(format!(
+            "resync: temp DB sources count ({}) != flat ({}) (original DB preserved)",
+            src_count, flat_src
+        )));
+    }
 
     // Atomic swap
     std::fs::rename(&tmp_db, &db_path).map_err(WcError::Io)?;
@@ -423,42 +461,51 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
 
     // Config
     {
-        let mut stmt = conn
-            .prepare("SELECT key, value FROM config ORDER BY key")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<(String, String)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let rows: Vec<(String, String)> = {
+            let mut stmt = conn
+                .prepare("SELECT key, value FROM config ORDER BY key")
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            let x = stmt
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map_err(|e| WcError::Sqlite(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            x
+        };
         let content: String = rows.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
         std::fs::write(tmp_dir.join("config"), content).map_err(WcError::Io)?;
     }
 
     // Sources, favorites, history
     for (table, file) in &[("sources", "sources"), ("favorites", "favorites")] {
-        let mut stmt = conn
-            .prepare(&format!("SELECT path FROM {} ORDER BY path", table))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let rows: Vec<String> = {
+            let mut stmt = conn
+                .prepare(&format!("SELECT path FROM {} ORDER BY path", table))
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            let x = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| WcError::Sqlite(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            x
+        };
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join(file), content).map_err(WcError::Io)?;
     }
 
     // History (newest first: ORDER BY id DESC)
     {
-        let mut stmt = conn
-            .prepare("SELECT path FROM history ORDER BY id DESC")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .filter_map(|r| r.ok())
-            .collect();
+        let rows: Vec<String> = {
+            let mut stmt = conn
+                .prepare("SELECT path FROM history ORDER BY id DESC")
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            let x = stmt
+                .query_map([], |row| row.get(0))
+                .map_err(|e| WcError::Sqlite(e.to_string()))?
+                .filter_map(|r| r.ok())
+                .collect();
+            x
+        };
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join("history"), content).map_err(WcError::Io)?;
     }

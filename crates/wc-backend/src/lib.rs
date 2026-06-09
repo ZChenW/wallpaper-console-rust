@@ -1,10 +1,9 @@
 //! wc-backend — wallpaper backend process management.
 
 use std::process::Command;
-use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::Backend;
-use wc_storage::flat;
+use wc_storage::StorageApi;
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends() -> Result<(), WcError> {
@@ -19,12 +18,11 @@ pub fn stop_all_backends() -> Result<(), WcError> {
 }
 
 /// Smart-stop: kill only what's needed for the target backend.
-pub fn stop_backends_for_target(cd: &ConfigDir, target_backend: Backend) -> Result<(), WcError> {
-    let last = flat::last_backend_read(cd)?.unwrap_or_default();
+pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Result<(), WcError> {
+    let last = s.last_backend_read()?.unwrap_or_default();
     if target_backend == Backend::Mpvpaper {
         return stop_all_backends();
     }
-    // image→image: keep awww daemon, only kill mpvpaper
     if last == "awww" {
         let user = whoami();
         let _ = Command::new("pkill")
@@ -37,14 +35,32 @@ pub fn stop_backends_for_target(cd: &ConfigDir, target_backend: Backend) -> Resu
 }
 
 /// Apply a wallpaper via the appropriate backend process.
-pub fn apply_wallpaper(cd: &ConfigDir, path: &str, backend: Backend) -> Result<(), WcError> {
-    stop_backends_for_target(cd, backend)?;
+/// State is written ONLY after successful backend execution.
+pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(), WcError> {
+    // Safety: verify file exists before attempting backend
+    let p = std::path::Path::new(path);
+    if !p.is_file() {
+        return Err(WcError::NotRegularFile(p.to_path_buf()));
+    }
+
+    stop_backends_for_target(s, backend)?;
 
     match backend {
         Backend::Awww => {
             ensure_awww_daemon()?;
+            let transition = s.config_get("awww_transition_type", "fade");
+            let duration = s.config_get("awww_transition_duration", "1");
+            let resize = s.config_get("awww_resize", "crop");
             let status = Command::new("awww")
                 .arg("img")
+                .arg("--transition-type")
+                .arg(&transition)
+                .arg("--transition-duration")
+                .arg(&duration)
+                .arg("--resize")
+                .arg(&resize)
+                .arg("--filter")
+                .arg("Lanczos3")
                 .arg(path)
                 .status()
                 .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
@@ -53,8 +69,10 @@ pub fn apply_wallpaper(cd: &ConfigDir, path: &str, backend: Backend) -> Result<(
             }
         }
         Backend::Mpvpaper => {
+            let opts = s.config_get("mpvpaper_options", "no-audio --loop-file=inf");
+            let output = s.config_get("mpvpaper_output", "*");
             let status = Command::new("setsid")
-                .args(["-f", "mpvpaper", "--fork", "--", path])
+                .args(["-f", "mpvpaper", "--fork", "-o", &opts, &output, "--", path])
                 .status()
                 .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
             if !status.success() {
@@ -64,16 +82,17 @@ pub fn apply_wallpaper(cd: &ConfigDir, path: &str, backend: Backend) -> Result<(
     }
 
     // Write state only after successful apply
-    flat::current_write(cd, path)?;
-    flat::last_backend_write(cd, backend.as_str())?;
-    flat::history_add(cd, path, 100)?;
+    s.current_write(path)?;
+    s.last_backend_write(backend.as_str())?;
+    s.history_add(path, backend.as_str())?;
 
     Ok(())
 }
 
 /// Restore the last wallpaper.
-pub fn restore(cd: &ConfigDir) -> Result<(), WcError> {
-    let current = flat::current_read(cd)?
+pub fn restore(s: &StorageApi) -> Result<(), WcError> {
+    let current = s
+        .current_read()?
         .ok_or_else(|| WcError::Other("no previous wallpaper to restore".into()))?;
     let p = std::path::Path::new(&current);
     if !p.is_file() {
@@ -81,9 +100,26 @@ pub fn restore(cd: &ConfigDir) -> Result<(), WcError> {
     }
     let ext = wc_core::formats::get_extension(&current)
         .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    let (_ftype, backend) = wc_core::formats::classify_extension(&ext)
+    let (_ftype, _default) = wc_core::formats::classify_extension(&ext)
         .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    apply_wallpaper(cd, &current, backend)
+    // Route through config
+    let backend = match _ftype {
+        wc_core::types::FileType::Image => match s.config_get("image_backend", "awww").as_str() {
+            "mpvpaper" => Backend::Mpvpaper,
+            _ => Backend::Awww,
+        },
+        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
+            "mpvpaper" => Backend::Mpvpaper,
+            _ => Backend::Awww,
+        },
+        wc_core::types::FileType::Video => {
+            match s.config_get("video_backend", "mpvpaper").as_str() {
+                "awww" => Backend::Awww,
+                _ => Backend::Mpvpaper,
+            }
+        }
+    };
+    apply_wallpaper(s, &current, backend)
 }
 
 fn ensure_awww_daemon() -> Result<(), WcError> {
