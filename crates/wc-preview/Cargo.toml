@@ -1,0 +1,8 @@
+[package]
+name = "wc-preview"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wc-core.workspace = true
+anyhow.workspace = true

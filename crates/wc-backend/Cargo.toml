@@ -1,0 +1,9 @@
+[package]
+name = "wc-backend"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wc-core.workspace = true
+wc-storage.workspace = true
+anyhow.workspace = true

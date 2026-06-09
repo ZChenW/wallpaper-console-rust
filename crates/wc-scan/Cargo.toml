@@ -1,0 +1,12 @@
+[package]
+name = "wc-scan"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wc-core.workspace = true
+anyhow.workspace = true
+walkdir.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+camino.workspace = true
