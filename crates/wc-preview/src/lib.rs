@@ -396,3 +396,280 @@ fn gui_thumb_cache_key(entry: &WallpaperEntry) -> String {
     raw.hash(&mut hasher);
     format!("{:x}.webp", hasher.finish())
 }
+
+// ── GUI Thumbnail v2 ───────────────────────────────────────────────────────
+//
+// Generates 400px-wide thumbnails with:
+//   - Multi-point frame selection for videos (avoids black/title frames)
+//   - Atomic writes (.tmp → rename)
+//   - v2- cache key prefix (invalidates old bad thumbnails)
+
+/// Cache key for a GUI thumbnail (v2 — incompatible with v1 keys).
+pub fn gui_thumb_cache_key_v2(path: &str, mtime: u64, size: u64) -> String {
+    let real = std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    let raw = format!("v2-{}:{}:{}", real, mtime, size);
+    let mut hasher = DefaultHasher::new();
+    raw.hash(&mut hasher);
+    format!("{:x}.webp", hasher.finish())
+}
+
+/// Generate a GUI thumbnail into `cache/gui-thumbnails/`, returning the path.
+/// Returns `None` if no generator is available.
+pub fn generate_gui_thumbnail(
+    cache_dir: &Path,
+    path: &str,
+    mtime: u64,
+    size: u64,
+) -> Option<PathBuf> {
+    std::fs::create_dir_all(cache_dir).ok()?;
+
+    let key = gui_thumb_cache_key_v2(path, mtime, size);
+    let dst = cache_dir.join(&key);
+
+    // Already cached — return immediately.
+    if dst.exists() {
+        return Some(dst);
+    }
+
+    let ext = wc_core::formats::get_extension(path)
+        .unwrap_or_default()
+        .to_lowercase();
+
+    // Atomic write: generate to .tmp, then rename.
+    let tmp = cache_dir.join(format!(".{}.tmp", key));
+    let _ = std::fs::remove_file(&tmp);
+
+    let ok = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
+        generate_video_thumbnail_v2(path, &tmp)
+    } else {
+        generate_image_thumbnail(path, &tmp)
+    };
+
+    if ok {
+        let _ = std::fs::rename(&tmp, &dst);
+        if dst.exists() {
+            return Some(dst);
+        }
+    }
+    let _ = std::fs::remove_file(&tmp);
+    None
+}
+
+/// Result of an attempted thumbnail generation.
+pub struct ThumbnailResult {
+    pub path: String,
+    pub thumbnail: Option<String>,
+    pub cache_hit: bool,
+    pub error: Option<String>,
+}
+
+/// Full thumbnail-for API suitable for Tauri/Wails commands.
+pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
+    let meta = match std::fs::metadata(path) {
+        Ok(m) => m,
+        Err(e) => {
+            return ThumbnailResult {
+                path: path.to_string(),
+                thumbnail: None,
+                cache_hit: false,
+                error: Some(format!("cannot stat file: {}", e)),
+            }
+        }
+    };
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    match generate_gui_thumbnail(cache_dir, path, mtime, size) {
+        Some(thumb) => {
+            let hit = true; // checked existence inside generate_gui_thumbnail
+            ThumbnailResult {
+                path: path.to_string(),
+                thumbnail: Some(thumb.to_string_lossy().to_string()),
+                cache_hit: hit,
+                error: None,
+            }
+        }
+        None => ThumbnailResult {
+            path: path.to_string(),
+            thumbnail: None,
+            cache_hit: false,
+            error: Some("no thumbnail generator available (install ffmpeg + imagemagick)".into()),
+        },
+    }
+}
+
+// ── Internal generators ────────────────────────────────────────────────────
+
+fn generate_image_thumbnail(src: &str, dst: &Path) -> bool {
+    for program in &["magick", "convert"] {
+        if !command_exists(program) {
+            continue;
+        }
+        let ok = Command::new(program)
+            .arg(src)
+            .args(["-resize", "400x", "-quality", "80", "-auto-orient"])
+            .arg(dst)
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            return true;
+        }
+    }
+    false
+}
+
+/// Generate a video thumbnail using multi-point frame selection.
+fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
+    if !command_exists("ffmpeg") {
+        return false;
+    }
+
+    // Get duration.
+    let duration = get_video_duration(src).unwrap_or(0.0);
+    if duration <= 0.0 {
+        return false;
+    }
+
+    // Candidate timestamps: 25%, 50%, 10%, 5s, 75%.
+    let candidates: Vec<f64> = vec![
+        duration * 0.25,
+        duration * 0.50,
+        duration * 0.10,
+        5.0_f64.min(duration * 0.8),
+        duration * 0.75,
+    ];
+
+    // Try ffmpegthumbnailer first (fast, good defaults).
+    if command_exists("ffmpegthumbnailer") {
+        for &ts in &candidates {
+            let tmp = dst.with_extension("tmp.jpg");
+            let _ = std::fs::remove_file(&tmp);
+            let ok = Command::new("ffmpegthumbnailer")
+                .args(["-i", src, "-o"])
+                .arg(&tmp)
+                .args(["-t", &format!("{}", ts as u64), "-s", "400", "-q", "8"])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if ok && tmp.exists() {
+                // Convert to 400px webp.
+                let _ = std::fs::remove_file(dst);
+                let ok = Command::new("ffmpeg")
+                    .args([
+                        "-y",
+                        "-i",
+                        tmp.to_str().unwrap_or(""),
+                        "-vf",
+                        "scale=400:-1:flags=lanczos",
+                        "-quality",
+                        "80",
+                        dst.to_str().unwrap_or(""),
+                    ])
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false);
+                let _ = std::fs::remove_file(&tmp);
+                if ok && dst.exists() && frame_has_content(dst) {
+                    return true;
+                }
+                let _ = std::fs::remove_file(dst);
+            }
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
+    // Fallback: ffmpeg multi-point with scale filter.
+    for &ts in &candidates {
+        let _ = std::fs::remove_file(dst);
+        let ok = Command::new("ffmpeg")
+            .args([
+                "-y",
+                "-ss",
+                &format!("{:.1}", ts),
+                "-i",
+                src,
+                "-frames:v",
+                "1",
+                "-vf",
+                "scale=400:-1:flags=lanczos",
+                "-quality",
+                "80",
+                dst.to_str().unwrap_or(""),
+            ])
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok && dst.exists() && frame_has_content(dst) {
+            return true;
+        }
+        let _ = std::fs::remove_file(dst);
+    }
+
+    // Last resort: just pick the middle frame regardless of content.
+    let ts = duration * 0.5;
+    let _ = std::fs::remove_file(dst);
+    let ok = Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-ss",
+            &format!("{:.1}", ts),
+            "-i",
+            src,
+            "-frames:v",
+            "1",
+            "-vf",
+            "scale=400:-1:flags=lanczos",
+            "-quality",
+            "80",
+            dst.to_str().unwrap_or(""),
+        ])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    ok && dst.exists()
+}
+
+fn get_video_duration(path: &str) -> Option<f64> {
+    let out = Command::new("ffprobe")
+        .args([
+            "-v",
+            "quiet",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "csv=p=0",
+            path,
+        ])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    s.parse().ok()
+}
+
+/// Quick check: is this frame too dark or too light?
+/// Uses identify to get mean pixel value; rejects extremes.
+fn frame_has_content(path: &Path) -> bool {
+    if !command_exists("identify") {
+        return true; // can't check, accept it
+    }
+    let out = Command::new("identify")
+        .args(["-format", "%[mean]", path.to_str().unwrap_or("")])
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            let s = String::from_utf8_lossy(&o.stdout).to_string();
+            let mean: f64 = s.parse().unwrap_or(128.0);
+            // Reject very dark (< 20) or very bright (> 240) frames.
+            mean > 20.0 && mean < 240.0
+        }
+        _ => true, // can't check, accept it
+    }
+}

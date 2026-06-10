@@ -198,6 +198,11 @@ enum Commands {
     Preview {
         file: String,
     },
+    /// Generate a GUI thumbnail for a wallpaper file.
+    #[command(name = "thumbnail", hide = true)]
+    Thumbnail {
+        file: String,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -846,6 +851,20 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         Commands::Preview { file } => {
             wc_preview::render_preview(&s.cd, &file);
+        }
+
+        Commands::Thumbnail { file } => {
+            let cache_dir = s.cd.gui_thumbnail_cache_dir();
+            let result = wc_preview::thumbnail_for(&cache_dir, &file);
+            if let Some(thumb) = result.thumbnail {
+                println!("{}", thumb);
+            } else if let Some(err) = result.error {
+                eprintln!("{}", err);
+                std::process::exit(1);
+            } else {
+                eprintln!("thumbnail generation failed");
+                std::process::exit(1);
+            }
         }
     }
     Ok(())

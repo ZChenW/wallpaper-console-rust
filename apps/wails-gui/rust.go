@@ -303,78 +303,17 @@ func (r *Runner) ConfigSet(key, value string) CommandResult {
 func (r *Runner) ThumbnailFor(path string) (*ThumbnailDTO, error) {
 	dto := &ThumbnailDTO{Path: path}
 
-	// Determine config dir for GUI thumbnail cache
-	configDir := os.Getenv("XDG_CONFIG_HOME")
-	if configDir == "" {
-		home, _ := os.UserHomeDir()
-		configDir = filepath.Join(home, ".config", "wallpaper-console")
-	} else {
-		configDir = filepath.Join(configDir, "wallpaper-console")
-	}
-	cacheDir := filepath.Join(configDir, "cache", "gui-thumbnails")
-
-	// Build cache key from canonical path + mtime + size
-	fi, err := os.Stat(path)
-	if err != nil {
-		return dto, nil
-	}
-	mtime := fi.ModTime().Unix()
-	size := fi.Size()
-
-	realPath := path
-	if resolved, err := filepath.EvalSymlinks(path); err == nil {
-		realPath = resolved
-	}
-
-	key := fmt.Sprintf("%s:%d:%d", realPath, mtime, size)
-	hash := fmt.Sprintf("%x", md5Sum([]byte(key)))
-	thumbPath := filepath.Join(cacheDir, hash+".webp")
-
-	if _, err := os.Stat(thumbPath); err == nil {
-		dto.Thumbnail = thumbPath
-		dto.CacheHit = true
-		return dto, nil
-	}
-
-	thumbnailMu.Lock()
-	if thumbnailFailed[thumbPath] {
-		thumbnailMu.Unlock()
-		return dto, nil
-	}
-	if waiter, ok := thumbnailInFlight[thumbPath]; ok {
-		thumbnailMu.Unlock()
-		<-waiter.done
-		if waiter.err == nil && waiter.path != "" {
-			dto.Thumbnail = waiter.path
-			dto.CacheHit = false
+	// Delegate to Rust CLI `thumbnail` subcommand (v2 thumbnail logic).
+	out := r.run("thumbnail", path)
+	if out.Success {
+		thumb := strings.TrimSpace(out.Stdout)
+		if thumb != "" {
+			if _, err := os.Stat(thumb); err == nil {
+				dto.Thumbnail = thumb
+				dto.CacheHit = true
+				return dto, nil
+			}
 		}
-		return dto, nil
-	}
-	waiter := &thumbnailWaiter{done: make(chan struct{})}
-	thumbnailInFlight[thumbPath] = waiter
-	thumbnailMu.Unlock()
-
-	defer func() {
-		thumbnailMu.Lock()
-		if waiter.err != nil {
-			thumbnailFailed[thumbPath] = true
-		}
-		delete(thumbnailInFlight, thumbPath)
-		thumbnailMu.Unlock()
-		close(waiter.done)
-	}()
-
-	// Generate thumbnail on the fly with global backpressure.
-	os.MkdirAll(cacheDir, 0755)
-	thumbnailSem <- struct{}{}
-	err = generateThumbnail(path, thumbPath)
-	<-thumbnailSem
-	if err == nil {
-		dto.Thumbnail = thumbPath
-		dto.CacheHit = false
-		waiter.path = thumbPath
-	} else {
-		waiter.err = err
 	}
 	return dto, nil
 }

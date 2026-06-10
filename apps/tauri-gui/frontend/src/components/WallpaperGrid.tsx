@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect, useMemo } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { convertFileSrc } from '@tauri-apps/api/core';
 import { WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { useThumbnailQueue } from '../hooks/useThumbnailQueue';
@@ -118,7 +119,7 @@ export default function WallpaperGrid({
                 >
                   <div className="wallpaper-thumb">
                     {thumbCache[e.path] ? (
-                      <img src={`file://${thumbCache[e.path]}`} alt="" loading="lazy" />
+                      <img src={convertFileSrc(thumbCache[e.path])} alt="" loading="lazy" />
                     ) : (
                       <div className="wallpaper-thumb-placeholder">
                         <span className="wallpaper-type-icon">{typeIcon(e.type)}</span>

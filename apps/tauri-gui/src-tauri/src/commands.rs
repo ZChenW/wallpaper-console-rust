@@ -514,36 +514,15 @@ pub fn sqlite_export_flat() -> CommandResult {
 #[tauri::command]
 pub fn thumbnail_for(path: String) -> Result<ThumbnailDto, String> {
     let s = storage()?;
-    let mut dto = ThumbnailDto {
-        path: path.clone(),
-        thumbnail: None,
-        cache_hit: false,
-    };
-    let meta = match std::fs::metadata(&path) {
-        Ok(meta) => meta,
-        Err(_) => return Ok(dto),
-    };
-    let real = std::fs::canonicalize(&path).unwrap_or_else(|_| PathBuf::from(&path));
-    let mtime = meta
-        .modified()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
-    let key = format!("{}:{}:{}", real.to_string_lossy(), mtime, meta.len());
-    let hash = format!("{:x}", md5_hash(key.as_bytes()));
     let cache_dir = s.cd.gui_thumbnail_cache_dir();
-    std::fs::create_dir_all(&cache_dir).map_err(|e| e.to_string())?;
-    let thumb = cache_dir.join(format!("{}.webp", hash));
-    if thumb.exists() {
-        dto.thumbnail = Some(thumb.to_string_lossy().to_string());
-        dto.cache_hit = true;
-        return Ok(dto);
-    }
-    if generate_thumbnail(&path, &thumb).is_ok() {
-        dto.thumbnail = Some(thumb.to_string_lossy().to_string());
-    }
-    Ok(dto)
+    let result = wc_preview::thumbnail_for(&cache_dir, &path);
+    Ok(ThumbnailDto {
+        path: result.path,
+        thumbnail: result.thumbnail,
+        cache_hit: result.cache_hit,
+        // Note: error field intentionally left off the DTO for now;
+        // the frontend falls back to type icons gracefully.
+    })
 }
 
 #[tauri::command]
@@ -760,40 +739,6 @@ fn source_label(path: &str) -> String {
         .file_name()
         .map(|v| v.to_string_lossy().to_string())
         .unwrap_or_else(|| path.to_string())
-}
-
-fn generate_thumbnail(src: &str, dst: &Path) -> Result<(), String> {
-    let ext = Path::new(src)
-        .extension()
-        .and_then(|v| v.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
-        let status = Command::new("ffmpeg")
-            .args(["-y", "-ss", "1", "-i", src, "-frames:v", "1", "-q:v", "3"])
-            .arg(dst)
-            .status()
-            .map_err(|e| e.to_string())?;
-        if status.success() {
-            return Ok(());
-        }
-        return Err("ffmpeg thumbnail generation failed".into());
-    }
-    for program in ["magick", "convert"] {
-        let status = Command::new(program)
-            .arg(src)
-            .args(["-resize", "400x", "-quality", "80", "-auto-orient"])
-            .arg(dst)
-            .status();
-        if matches!(status, Ok(status) if status.success()) {
-            return Ok(());
-        }
-    }
-    Err("no thumbnail generator available".into())
-}
-
-fn md5_hash(bytes: &[u8]) -> md5::Digest {
-    md5::compute(bytes)
 }
 
 fn format_bytes(bytes: u64) -> String {
