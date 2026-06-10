@@ -1,4 +1,5 @@
-import { useState, useCallback, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useMemo } from 'react';
+import { useVirtualizer } from '@tanstack/react-virtual';
 import { WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { useThumbnailQueue } from '../hooks/useThumbnailQueue';
@@ -17,7 +18,9 @@ export interface ContextAction {
   danger?: boolean;
 }
 
-const PAGE_SIZE = 36;
+const COL_MIN_WIDTH = 180;
+const CARD_HEIGHT = 176;
+const OVERSCAN = 2;
 
 export default function WallpaperGrid({
   entries,
@@ -26,29 +29,43 @@ export default function WallpaperGrid({
   emptyText = 'No wallpapers found',
   contextActions = [],
 }: Props) {
-  const [visible, setVisible] = useState(PAGE_SIZE);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
-  const gridRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
   const { thumbs: thumbCache, enqueue, reset } = useThumbnailQueue(2);
 
-  // Reset visible count when entries change
+  const [colCount, setColCount] = useState(4);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const obs = new ResizeObserver(([entry]) => {
+      const w = entry.contentRect.width;
+      setColCount(Math.max(1, Math.floor(w / COL_MIN_WIDTH)));
+    });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, []);
+
+  const rowCount = Math.ceil(entries.length / colCount);
+
+  const virtualizer = useVirtualizer({
+    count: rowCount,
+    getScrollElement: () => containerRef.current,
+    estimateSize: () => CARD_HEIGHT,
+    overscan: OVERSCAN,
+  });
+
   useEffect(() => {
     reset();
-    setVisible(PAGE_SIZE);
-  }, [entries, reset]);
+    virtualizer.scrollToIndex(0);
+  }, [entries]);
 
-  // Queue thumbnail work with bounded concurrency.
   useEffect(() => {
-    enqueue(entries.slice(0, visible).map((entry) => entry.path));
-  }, [entries, visible, enqueue]);
-
-  const handleScroll = useCallback(() => {
-    if (!gridRef.current) return;
-    const { scrollTop, scrollHeight, clientHeight } = gridRef.current;
-    if (scrollHeight - scrollTop - clientHeight < 200) {
-      setVisible((v) => Math.min(v + PAGE_SIZE, entries.length));
-    }
-  }, [entries.length]);
+    const range = virtualizer.range;
+    if (!range) return;
+    const startIdx = range.startIndex * colCount;
+    const endIdx = Math.min((range.endIndex + 1) * colCount, entries.length);
+    enqueue(entries.slice(startIdx, endIdx).map((e) => e.path));
+  }, [entries, colCount, virtualizer.range, enqueue]);
 
   const handleContextMenu = (e: React.MouseEvent, path: string) => {
     e.preventDefault();
@@ -59,46 +76,68 @@ export default function WallpaperGrid({
     onApply(path);
   };
 
-  const visibleEntries = entries.slice(0, visible);
+  const rows = useMemo(() => {
+    const r: WallpaperDTO[][] = [];
+    for (let i = 0; i < entries.length; i += colCount) {
+      r.push(entries.slice(i, i + colCount));
+    }
+    return r;
+  }, [entries, colCount]);
 
   if (entries.length === 0) {
     return <div className="empty-state">{emptyText}</div>;
   }
 
   return (
-    <div className="wallpaper-grid" ref={gridRef} onScroll={handleScroll}>
-      {visibleEntries.map((e) => (
-        <div
-          key={e.path}
-          className={`wallpaper-card ${applying ? 'disabled' : ''}`}
-          onContextMenu={(ev) => handleContextMenu(ev, e.path)}
-          onDoubleClick={() => handleDoubleClick(e.path)}
-          title={e.path}
-        >
-          <div className="wallpaper-thumb">
-            {thumbCache[e.path] ? (
-              <img src={`file://${thumbCache[e.path]}`} alt="" loading="lazy" />
-            ) : (
-              <div className="wallpaper-thumb-placeholder">
-                <span className="wallpaper-type-icon">{typeIcon(e.type)}</span>
-              </div>
-            )}
-          </div>
-          <div className="wallpaper-info">
-            <span className="wallpaper-name">{e.path.split('/').pop()}</span>
-            <span className="wallpaper-meta">
-              {e.resolution} · {e.type} · {formatSize(e.size)}
-            </span>
-          </div>
-        </div>
-      ))}
-      {visible < entries.length && (
-        <div className="load-more">
-          <button onClick={() => setVisible((v) => v + PAGE_SIZE)}>
-            Load more ({entries.length - visible} remaining)
-          </button>
-        </div>
-      )}
+    <div className="wallpaper-grid" ref={containerRef}>
+      <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
+        {virtualizer.getVirtualItems().map((virtualRow) => {
+          const rowEntries = rows[virtualRow.index] ?? [];
+          return (
+            <div
+              key={virtualRow.key}
+              style={{
+                position: 'absolute',
+                top: 0,
+                left: 0,
+                width: '100%',
+                height: virtualRow.size,
+                transform: `translateY(${virtualRow.start}px)`,
+                display: 'grid',
+                gridTemplateColumns: `repeat(${colCount}, 1fr)`,
+                gap: '10px',
+              }}
+            >
+              {rowEntries.map((e) => (
+                <div
+                  key={e.path}
+                  className={`wallpaper-card ${applying ? 'disabled' : ''}`}
+                  onContextMenu={(ev) => handleContextMenu(ev, e.path)}
+                  onDoubleClick={() => handleDoubleClick(e.path)}
+                  title={e.path}
+                >
+                  <div className="wallpaper-thumb">
+                    {thumbCache[e.path] ? (
+                      <img src={`file://${thumbCache[e.path]}`} alt="" loading="lazy" />
+                    ) : (
+                      <div className="wallpaper-thumb-placeholder">
+                        <span className="wallpaper-type-icon">{typeIcon(e.type)}</span>
+                      </div>
+                    )}
+                  </div>
+                  <div className="wallpaper-info">
+                    <span className="wallpaper-name">{e.path.split('/').pop()}</span>
+                    <span className="wallpaper-meta">
+                      {e.resolution} · {e.type} · {formatSize(e.size)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          );
+        })}
+      </div>
+
       {contextMenu && (
         <ContextMenu
           x={contextMenu.x}
@@ -115,10 +154,10 @@ export default function WallpaperGrid({
 
 function typeIcon(type: string): string {
   switch (type) {
-    case 'image': return '🖼';
-    case 'gif': return '🎞';
-    case 'video': return '🎬';
-    default: return '📄';
+    case 'image': return '\u{1F5BC}';
+    case 'gif': return '\u{1F39E}';
+    case 'video': return '\u{1F3AC}';
+    default: return '\u{1F4C4}';
   }
 }
 
