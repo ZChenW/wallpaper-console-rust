@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, CommandResult, ThumbnailCacheDTO } from '../api/bridge';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { AlertTriangle, CheckCircle, Loader } from 'lucide-react';
@@ -41,8 +41,8 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
   const [result, setResult] = useState<CommandResult | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ title: string; msg: string; fn: () => void } | null>(null);
   const [thumbCache, setThumbCache] = useState<ThumbnailCacheDTO | null>(null);
+  const restoreInputRef = useRef<HTMLInputElement>(null);
 
-  // Load all configs
   const loadConfigs = useCallback(async () => {
     setLoading(true);
     const allKeys = [...BACKEND_CONFIGS, ...LIBRARY_CONFIGS].map((c) => c.key);
@@ -63,10 +63,64 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
 
   const handleSet = async (key: string, value: string) => {
     setSaving(key);
+    setResult(null);
     const r = await api.configSet(key, value);
     setResult(r);
-    setConfigs((prev) => ({ ...prev, [key]: value }));
+    if (r.success) {
+      setConfigs((prev) => ({ ...prev, [key]: value }));
+    }
     setSaving(null);
+  };
+
+  const handleStorageBackendChange = (newValue: string) => {
+    const current = configs['storage_backend'] ?? 'file';
+    if (newValue === current) return;
+
+    // Safety gate: switching to sqlite requires successful verify first
+    if (newValue === 'sqlite') {
+      setConfirmAction({
+        title: 'Switch to SQLite',
+        msg: 'Switching to SQLite mode requires the database to be verified.\n\nA verify will run first. If it fails, the switch will be blocked.',
+        fn: async () => {
+          setConfirmAction(null);
+          setResult(null);
+          const vr = await api.sqliteVerify();
+          if (vr.success) {
+            await handleSet('storage_backend', 'sqlite');
+          } else {
+            setResult({ success: false, stdout: '', stderr: 'Verify failed — cannot switch to sqlite mode. Run migrate-to-sqlite first.', exitCode: 1 });
+          }
+        },
+      });
+      return;
+    }
+
+    // Safety gate: switching to hybrid needs DB to exist
+    if (newValue === 'hybrid') {
+      setConfirmAction({
+        title: 'Switch to Hybrid',
+        msg: 'Hybrid mode writes to both flat files and SQLite.\n\nIf wallpapers.db does not exist, it will be created via migrate first.',
+        fn: async () => {
+          setConfirmAction(null);
+          setResult(null);
+          // Try verify first; if DB missing, offer migrate
+          const vr = await api.sqliteVerify();
+          if (!vr.success) {
+            // DB likely missing — try migrate
+            const mr = await api.migrateToSqlite();
+            if (!mr.success) {
+              setResult({ success: false, stdout: '', stderr: 'Cannot migrate to SQLite — hybrid mode unavailable. ' + mr.stderr, exitCode: 1 });
+              return;
+            }
+          }
+          await handleSet('storage_backend', 'hybrid');
+        },
+      });
+      return;
+    }
+
+    // Switching to file is always safe
+    handleSet('storage_backend', newValue);
   };
 
   const handleDbAction = async (fn: () => Promise<CommandResult>, title: string) => {
@@ -74,6 +128,27 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
     const r = await fn();
     setResult(r);
     if (r.success) setConfirmAction(null);
+  };
+
+  const handleRestore = () => {
+    restoreInputRef.current?.click();
+  };
+
+  const handleRestoreFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const path = (file as unknown as { path?: string }).path ?? file.name;
+    setConfirmAction({
+      title: 'Restore Database',
+      msg: `Restore wallpapers.db from:\n${path}\n\nCurrent database will be backed up first.`,
+      fn: async () => {
+        const r = await api.sqliteRestore(path);
+        setResult(r);
+        setConfirmAction(null);
+      },
+    });
+    // Reset input so the same file can be selected again
+    e.target.value = '';
   };
 
   return (
@@ -95,7 +170,6 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
             {LIBRARY_CONFIGS.map((c) => (
               <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
             ))}
-            {/* Thumbnail cache */}
             <div className="config-row">
               <div className="config-info">
                 <span className="config-label">Thumbnail cache</span>
@@ -128,16 +202,7 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
               config={{ key: 'storage_backend', label: 'Storage backend', type: 'select', options: ['file', 'hybrid', 'sqlite'] }}
               value={configs['storage_backend'] ?? 'file'}
               saving={saving === 'storage_backend'}
-              onSet={(v) => {
-                setConfirmAction({
-                  title: 'Switch Storage Backend',
-                  msg: `Change storage backend to "${v}"? This may require a verify or migrate first.`,
-                  fn: async () => {
-                    await handleSet('storage_backend', v);
-                    setConfirmAction(null);
-                  },
-                });
-              }}
+              onSet={handleStorageBackendChange}
             />
             <div className="db-actions">
               <button className="btn small" onClick={() => handleDbAction(() => api.sqliteVerify(), 'Verify')}>Verify</button>
@@ -151,6 +216,14 @@ export default function SettingsView({ onRefresh: _onRefresh }: Props) {
               <button className="btn small" onClick={() => setConfirmAction({
                 title: 'Export Flat', msg: 'Export SQLite back to flat files?', fn: () => handleDbAction(() => api.sqliteExportFlat(), 'Export'),
               })}>Export</button>
+              <button className="btn small" onClick={handleRestore}>Restore</button>
+              <input
+                ref={restoreInputRef}
+                type="file"
+                accept=".db,.db.bak*"
+                style={{ display: 'none' }}
+                onChange={handleRestoreFileSelected}
+              />
             </div>
           </section>
 
