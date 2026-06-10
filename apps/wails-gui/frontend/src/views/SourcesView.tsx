@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
-import { api, SourceDTO } from '../api/bridge';
+import { api, SourceDTO, CommandResult } from '../api/bridge';
 import ConfirmDialog from '../components/ConfirmDialog';
-import { FolderPlus, Trash2, CheckCircle, XCircle, Scan, Plus } from 'lucide-react';
+import { FolderPlus, Trash2, CheckCircle, XCircle, Scan, AlertTriangle } from 'lucide-react';
 
 interface Props {
   onRefresh: () => void;
@@ -12,12 +12,16 @@ export default function SourcesView({ onRefresh }: Props) {
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
   const [scanning, setScanning] = useState(false);
+  const [result, setResult] = useState<CommandResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
     try {
       setSources(await api.sourcesList());
-    } catch {
+      setError(null);
+    } catch (e) {
+      setError(String(e));
       setSources([]);
     }
     setLoading(false);
@@ -25,40 +29,71 @@ export default function SourcesView({ onRefresh }: Props) {
 
   useEffect(() => { load(); }, [load]);
 
+  const clearResult = () => { setResult(null); setError(null); };
+
   const handleAdd = async () => {
+    clearResult();
     setAdding(true);
     try {
       const dir = await api.browseDirectory();
-      if (dir) {
-        await api.sourceAdd(dir);
-        await load();
-        onRefresh();
+      if (!dir) {
+        setError('No directory selected, or no directory picker available.\nInstall zenity, kdialog, or yad.');
+        return;
       }
-    } catch { /* cancelled */ }
-    setAdding(false);
+      const r = await api.sourceAdd(dir);
+      if (!r.success) {
+        setResult(r);
+        return;
+      }
+      await load();
+      onRefresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setAdding(false);
+    }
   };
 
   const handleRemove = async (path: string) => {
-    await api.sourceRemove(path);
+    clearResult();
+    const r = await api.sourceRemove(path);
+    if (!r.success) {
+      setResult(r);
+      return;
+    }
     await load();
     onRefresh();
   };
 
   const handleScanWorkshop = async () => {
+    clearResult();
     setScanning(true);
-    await api.scanSteamWorkshop();
-    await load();
-    onRefresh();
-    setScanning(false);
+    try {
+      const r = await api.scanSteamWorkshop();
+      if (!r.success) {
+        setResult(r);
+        return;
+      }
+      await load();
+      onRefresh();
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setScanning(false);
+    }
   };
 
   const handleRemoveMissing = async () => {
-    await api.removeMissingSources();
+    clearResult();
+    const r = await api.removeMissingSources();
+    if (!r.success) {
+      setResult(r);
+      return;
+    }
     await load();
     onRefresh();
   };
 
-  // Group sources: Wallpaper Engine vs Other
   const weSources = sources.filter((s) => s.isWE);
   const otherSources = sources.filter((s) => !s.isWE);
 
@@ -78,6 +113,15 @@ export default function SourcesView({ onRefresh }: Props) {
           </button>
         </div>
       </div>
+
+      {(result || error) && (
+        <div className={`result-banner ${result?.success === false || error ? 'error' : 'success'}`}>
+          <AlertTriangle size={14} />
+          <span>{error || result?.stderr || result?.stdout || 'Operation failed'}</span>
+          <button className="btn small" onClick={clearResult} style={{marginLeft:'auto'}}>Dismiss</button>
+        </div>
+      )}
+
       {loading ? (
         <div className="loading">Loading sources...</div>
       ) : sources.length === 0 ? (
@@ -111,6 +155,8 @@ export default function SourcesView({ onRefresh }: Props) {
 }
 
 function SourceItem({ source, onRemove }: { source: SourceDTO; onRemove: (p: string) => void }) {
+  const [confirm, setConfirm] = useState(false);
+
   return (
     <div className="source-item">
       <span className="source-status">
@@ -120,9 +166,18 @@ function SourceItem({ source, onRemove }: { source: SourceDTO; onRemove: (p: str
         <span className="source-label">{source.label}</span>
         <span className="source-path" title={source.path}>{source.path}</span>
       </div>
-      <button className="source-remove" onClick={() => onRemove(source.path)} title="Remove source">
+      <button className="source-remove" onClick={() => setConfirm(true)} title="Remove source">
         <Trash2 size={14} />
       </button>
+      {confirm && (
+        <ConfirmDialog
+          title="Remove Source"
+          message={`Remove this source?\n\n${source.path}`}
+          onConfirm={() => { onRemove(source.path); setConfirm(false); }}
+          onCancel={() => setConfirm(false)}
+          danger
+        />
+      )}
     </div>
   );
 }

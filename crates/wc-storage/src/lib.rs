@@ -193,19 +193,42 @@ impl StorageApi {
     }
 
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
-        let added = flat::sources_add(&self.cd, path)?;
-        if added {
-            mirror::mirror_source_add(&self.cd, path).ok();
+        match self.mode {
+            StorageBackend::Sqlite => {
+                // SQLite must succeed — GUI reads from DB in sqlite mode.
+                let added = flat::sources_add(&self.cd, path)?;
+                if added {
+                    mirror::mirror_source_add(&self.cd, path)?;
+                }
+                Ok(added)
+            }
+            _ => {
+                let added = flat::sources_add(&self.cd, path)?;
+                if added {
+                    mirror::mirror_source_add(&self.cd, path).ok();
+                }
+                Ok(added)
+            }
         }
-        Ok(added)
     }
 
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
-        let removed = flat::sources_remove(&self.cd, path)?;
-        if removed {
-            mirror::mirror_source_remove(&self.cd, path).ok();
+        match self.mode {
+            StorageBackend::Sqlite => {
+                let removed = flat::sources_remove(&self.cd, path)?;
+                if removed {
+                    mirror::mirror_source_remove(&self.cd, path)?;
+                }
+                Ok(removed)
+            }
+            _ => {
+                let removed = flat::sources_remove(&self.cd, path)?;
+                if removed {
+                    mirror::mirror_source_remove(&self.cd, path).ok();
+                }
+                Ok(removed)
+            }
         }
-        Ok(removed)
     }
 
     pub fn favorites_add(&self, path: &str) -> Result<bool, WcError> {

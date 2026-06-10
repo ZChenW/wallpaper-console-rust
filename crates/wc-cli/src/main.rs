@@ -300,29 +300,50 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::RemoveSource { dir } => {
+            // Try exact match first (works even when dir no longer exists).
+            let removed = s.sources_remove(&dir)?;
+            if removed {
+                println!("Removed source: {}", dir);
+                return Ok(());
+            }
+            // Canonicalise and scan stored sources for a match.
             let canonical = std::fs::canonicalize(&dir)
                 .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(dir.clone());
-            let removed = s.sources_remove(&canonical)?;
-            if removed {
-                println!("Removed source: {}", canonical);
-            } else {
-                anyhow::bail!("source not found: {}", dir);
+                .unwrap_or_else(|_| dir.clone());
+            let sources = s.sources_list()?;
+            for stored in &sources {
+                let stored_canon = std::fs::canonicalize(stored)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| stored.clone());
+                if stored_canon == canonical {
+                    s.sources_remove(stored)?;
+                    println!("Removed source: {}", stored);
+                    return Ok(());
+                }
             }
+            anyhow::bail!("source not found: {}", dir);
         }
 
         Commands::SteamWorkshop => {
             let home = std::env::var("HOME").unwrap_or_default();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            // Prefer ~/.local/share/Steam; fall back to ~/.steam/steam.
             for base in &[
-                format!("{}/.steam/steam", home),
                 format!("{}/.local/share/Steam", home),
+                format!("{}/.steam/steam", home),
             ] {
                 let ws = std::path::Path::new(base).join("steamapps/workshop/content/431960");
                 if ws.is_dir() {
                     for entry in std::fs::read_dir(&ws)? {
                         let entry = entry?;
                         if entry.file_type()?.is_dir() {
-                            s.sources_add(&entry.path().to_string_lossy())?;
+                            let canonical = std::fs::canonicalize(entry.path())
+                                .map(|p| p.to_string_lossy().to_string())
+                                .unwrap_or_else(|_| entry.path().to_string_lossy().to_string());
+                            if seen.insert(canonical.clone()) {
+                                s.sources_add(&canonical)?;
+                                println!("Added: {}", canonical);
+                            }
                         }
                     }
                 }

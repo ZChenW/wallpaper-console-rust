@@ -224,45 +224,22 @@ func (r *Runner) HistoryClear() CommandResult {
 }
 
 func (r *Runner) SourcesList() ([]SourceDTO, error) {
-	out := r.run("validate-sources")
-	lines := strings.Split(out.Stdout, "\n")
+	// Use `sources` command for reliable path list, os.Stat for exists check.
+	out := r.run("sources")
 	var sources []SourceDTO
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "─") || strings.Contains(line, "valid") {
+	for _, path := range strings.Split(strings.TrimSpace(out.Stdout), "\n") {
+		path = strings.TrimSpace(path)
+		if path == "" || path == "(no source directories configured)" {
 			continue
 		}
-		exists := strings.HasPrefix(line, "✓") || strings.HasPrefix(line, "OK")
-		path := line
-		if parts := strings.SplitN(line, "  ", 2); len(parts) > 1 {
-			path = strings.TrimSpace(parts[1])
-		} else {
-			path = strings.TrimPrefix(path, "✓ ")
-			path = strings.TrimPrefix(path, "✕ ")
-		}
+		fi, err := os.Stat(path)
+		exists := err == nil && fi.IsDir()
 		sources = append(sources, SourceDTO{
 			Path:   path,
 			Exists: exists,
 			IsWE:   strings.Contains(path, "/steamapps/workshop/content/431960"),
 			Label:  fileLabel(path),
 		})
-	}
-	if len(sources) == 0 {
-		srcOut := r.run("sources")
-		for _, path := range strings.Split(strings.TrimSpace(srcOut.Stdout), "\n") {
-			path = strings.TrimSpace(path)
-			if path == "" || path == "(no source directories configured)" {
-				continue
-			}
-			fi, err := os.Stat(path)
-			exists := err == nil && fi.IsDir()
-			sources = append(sources, SourceDTO{
-				Path:   path,
-				Exists: exists,
-				IsWE:   strings.Contains(path, "/steamapps/workshop/content/431960"),
-				Label:  fileLabel(path),
-			})
-		}
 	}
 	return sources, nil
 }
