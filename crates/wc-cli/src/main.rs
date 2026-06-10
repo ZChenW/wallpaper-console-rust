@@ -590,7 +590,18 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let sources = wc_scan::dedupe_sources(&raw_sources);
             let dup_count = raw_sources.len() - sources.len();
 
-            wc_storage::sqlite::library_clear(&s.cd).ok();
+            // Clear wallpapers table if DB exists; log and continue if it doesn't.
+            match wc_storage::sqlite::library_clear(&s.cd) {
+                Ok(()) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    if msg.contains("not found") {
+                        // No DB yet — fine, skip.
+                    } else {
+                        anyhow::bail!("failed to clear wallpapers table: {}", msg);
+                    }
+                }
+            }
             let files = wc_scan::scan_wallpapers(&sources);
             let walk_time = t0.elapsed();
 
@@ -619,7 +630,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                     )
                 })
                 .collect();
-            let sqlite_count = wc_storage::sqlite::library_insert_batch(&s.cd, &batch).unwrap_or(0);
+            let sqlite_count = wc_storage::sqlite::library_insert_batch(&s.cd, &batch)?;
             let sqlite_time = t2.elapsed();
 
             let mut tsv = String::new();
@@ -643,7 +654,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let total_time = t0.elapsed();
             println!(
                 "sources: {} canonical{}  walked: {} files  entries: {}  sqlite: {}\n\
-                 wallk: {:.2}s  probe: {:.2}s  sqlite: {}ms  total: {:.2}s",
+                 walk: {:.2}s  probe: {:.2}s  sqlite: {}ms  total: {:.2}s",
                 sources.len(),
                 if dup_count > 0 {
                     format!(" ({} duplicates skipped)", dup_count)
