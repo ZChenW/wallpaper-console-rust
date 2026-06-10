@@ -16,8 +16,8 @@
 | 7 | Sources View (grouped, add/remove/scan) | ✅ Complete |
 | 8 | Settings View (backends, library, storage/SQLite) | ✅ Complete |
 | 9 | Apply/Stop/Restore UX (status bar, async apply) | ✅ Complete |
-| 10 | Packaging and Install | ⬜ Pending (needs wails build) |
-| 11 | niri Integration | ⬜ Pending (needs installed binary) |
+| 10 | Packaging and Install | 🟡 Partial (build ok, install script: see install.sh) |
+| 11 | niri Integration | ⬜ Pending (needs real-use validation) |
 | 12 | Deprecate Bash/Python | ⬜ Deferred (needs real-use validation) |
 
 ## Baseline Checks
@@ -41,8 +41,30 @@
 
 | Check | Status |
 |-------|--------|
-| `go build` | ⬜ blocked — needs `webkitgtk-6.0` system package |
-| Install command | `sudo pacman -S webkitgtk-6.0` |
+| `go build ./...` | ✅ passes |
+| `wails3 build` | ✅ passes → `apps/wails-gui/bin/wallpaper-console-gui` (19MB ELF) |
+| `wails3` CLI | ✅ installed at `~/go/bin/wails3` (v3.0.0-alpha.98) |
+
+## Installation
+
+See [install.sh](../install.sh) in the repository root.
+
+Quick install (side-by-side with existing Bash/Python versions):
+```bash
+./install.sh
+```
+
+This installs to:
+- `~/.local/bin/wallpaper-console-rust` (Rust CLI)
+- `~/.local/bin/wallpaper-console-gui-rust` (Wails GUI)
+
+**Rollback** (restore original Bash/Python):
+```bash
+ln -sf /path/to/bash/wallpaper-console ~/.local/bin/wallpaper-console
+ln -sf /path/to/python/wallpaper-console-gui ~/.local/bin/wallpaper-console-gui
+```
+
+The original Bash/Python install is never removed.
 
 ## CLI Command Parity
 
