@@ -285,6 +285,122 @@ fn detect_resolution(path: &str, ftype: wc_core::types::FileType) -> String {
     "?x?".to_string()
 }
 
+/// Load prior metadata from a library TSV file into a HashMap keyed by canonical path.
+pub fn prior_metadata_cache(tsv_path: &Path) -> std::collections::HashMap<String, WallpaperEntry> {
+    let mut cache = std::collections::HashMap::new();
+    let content = match fs::read_to_string(tsv_path) {
+        Ok(c) => c,
+        Err(_) => return cache,
+    };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let path = parts[6];
+        let canon = std::fs::canonicalize(path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.to_string());
+        let ftype = match parts[0] {
+            "gif" => wc_core::types::FileType::Gif,
+            "video" => wc_core::types::FileType::Video,
+            _ => wc_core::types::FileType::Image,
+        };
+        let ext = parts[1].to_string();
+        let backend = match parts[2] {
+            "mpvpaper" => wc_core::types::Backend::Mpvpaper,
+            _ => wc_core::types::Backend::Awww,
+        };
+        let size: u64 = parts[3].parse().unwrap_or(0);
+        let mtime: u64 = parts[4].parse().unwrap_or(0);
+        let resolution = parts[5].to_string();
+        cache.insert(
+            canon,
+            WallpaperEntry {
+                path: Utf8PathBuf::from(path),
+                file_type: ftype,
+                ext,
+                backend,
+                size,
+                mtime,
+                resolution,
+            },
+        );
+    }
+    cache
+}
+
+/// Build an entry for a wallpaper file, reusing prior metadata when the file's
+/// size and mtime haven't changed.  Returns (entry, reused).
+pub fn make_entry_cached(
+    path: &str,
+    cache: &std::collections::HashMap<String, WallpaperEntry>,
+) -> (Option<WallpaperEntry>, bool) {
+    let p = Path::new(path);
+    if !p.is_file() {
+        return (None, false);
+    }
+    let ext = match formats::get_extension(path) {
+        Some(e) => e,
+        None => return (None, false),
+    };
+    let (ftype, backend) = match formats::classify_extension(&ext) {
+        Some(fb) => fb,
+        None => return (None, false),
+    };
+    let meta = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => return (None, false),
+    };
+    let size = meta.len();
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    // Check prior cache — same canonical path + same size + same mtime = reuse.
+    let canon = std::fs::canonicalize(p)
+        .map(|cp| cp.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+    if let Some(prior) = cache.get(&canon) {
+        if prior.size == size && prior.mtime == mtime {
+            return (
+                Some(WallpaperEntry {
+                    path: Utf8PathBuf::from(path),
+                    resolution: prior.resolution.clone(),
+                    file_type: prior.file_type,
+                    ext: prior.ext.clone(),
+                    backend: prior.backend,
+                    size,
+                    mtime,
+                }),
+                true, // reused
+            );
+        }
+    }
+
+    // Probe resolution.
+    let resolution = detect_resolution(path, ftype);
+    (
+        Some(WallpaperEntry {
+            path: Utf8PathBuf::from(path),
+            file_type: ftype,
+            ext,
+            backend,
+            size,
+            mtime,
+            resolution,
+        }),
+        false, // probed
+    )
+}
+
 pub fn passes_resolution_filter(resolution: &str, min_width: u32, min_height: u32) -> bool {
     if min_width == 0 && min_height == 0 {
         return true;
@@ -479,4 +595,84 @@ mod tests {
             "fallback pic.jpg should be in results"
         );
     }
+}
+
+#[test]
+fn cached_entry_reuses_prior_metadata() {
+    use std::collections::HashMap;
+    use std::io::Write;
+
+    let dir = tempfile::tempdir().unwrap();
+    let img = dir.path().join("test.png");
+    std::fs::write(&img, b"test data").unwrap();
+
+    // Build a prior cache entry for the same file.
+    let canon = std::fs::canonicalize(&img)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let prior = WallpaperEntry {
+        path: Utf8PathBuf::from(img.to_string_lossy().to_string()),
+        file_type: wc_core::types::FileType::Image,
+        ext: "png".to_string(),
+        backend: wc_core::types::Backend::Awww,
+        size: img.metadata().unwrap().len(),
+        mtime: img
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        resolution: "1920x1080".to_string(), // known prior value
+    };
+    let mut cache = HashMap::new();
+    cache.insert(canon, prior);
+
+    let (entry, reused) = make_entry_cached(&img.to_string_lossy().to_string(), &cache);
+    assert!(entry.is_some());
+    assert!(reused, "unchanged file should reuse metadata");
+    assert_eq!(
+        entry.unwrap().resolution,
+        "1920x1080",
+        "resolution should come from cache"
+    );
+}
+
+#[test]
+fn cached_entry_probes_when_size_changed() {
+    use std::collections::HashMap;
+
+    let dir = tempfile::tempdir().unwrap();
+    let img = dir.path().join("changed.png");
+    std::fs::write(&img, b"new content").unwrap();
+
+    let canon = std::fs::canonicalize(&img)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    // Prior has a different size.
+    let prior = WallpaperEntry {
+        path: Utf8PathBuf::from(img.to_string_lossy().to_string()),
+        file_type: wc_core::types::FileType::Image,
+        ext: "png".to_string(),
+        backend: wc_core::types::Backend::Awww,
+        size: 999, // different from actual
+        mtime: img
+            .metadata()
+            .unwrap()
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+        resolution: "old".to_string(),
+    };
+    let mut cache = HashMap::new();
+    cache.insert(canon, prior);
+
+    let (entry, reused) = make_entry_cached(&img.to_string_lossy().to_string(), &cache);
+    assert!(entry.is_some());
+    assert!(!reused, "changed file must be re-probed");
 }

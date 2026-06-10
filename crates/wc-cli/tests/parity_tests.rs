@@ -759,3 +759,64 @@ fn library_page_json_reports_missing_sqlite_database() {
         stderr
     );
 }
+
+// ── Incremental rescan ────────────────────────────────────────────────────
+
+#[test]
+fn second_rescan_reuses_metadata_for_unchanged_files() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    std::fs::write(format!("{}/a.png", walls), b"test1").unwrap();
+    std::fs::write(format!("{}/b.jpg", walls), b"test2").unwrap();
+    rust(&["add", &walls], &cd);
+
+    // First rescan — must probe resolutions.
+    let out1 = rust(&["rescan"], &cd);
+    let s1 = String::from_utf8_lossy(&out1.stdout);
+    assert!(out1.status.success(), "first rescan failed: {}", s1);
+    assert!(
+        s1.contains("probed_metadata:"),
+        "first rescan should show probed_metadata: {}",
+        s1
+    );
+    // All files are new, so probed_metadata should equal entries.
+    assert!(s1.contains("entries: 2"), "first rescan: {}", s1);
+
+    // Second rescan — same files, same size/mtime, must reuse all metadata.
+    let out2 = rust(&["rescan"], &cd);
+    let s2 = String::from_utf8_lossy(&out2.stdout);
+    assert!(out2.status.success(), "second rescan failed: {}", s2);
+    assert!(
+        s2.contains("reused_metadata: 2") || s2.contains("reused_metadata: 2"),
+        "second rescan should reuse metadata: {}",
+        s2
+    );
+    assert!(
+        s2.contains("probed_metadata: 0"),
+        "second rescan should probe 0: {}",
+        s2
+    );
+}
+
+#[test]
+fn rescan_probes_changed_files_only() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    std::fs::write(format!("{}/x.png", walls), b"original").unwrap();
+    rust(&["add", &walls], &cd);
+    rust(&["rescan"], &cd);
+
+    // Modify one file — it should be re-probed.
+    std::fs::write(format!("{}/x.png", walls), b"modified content here").unwrap();
+
+    let out = rust(&["rescan"], &cd);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "rescan failed: {}", s);
+    assert!(
+        s.contains("probed_metadata: 1"),
+        "changed file should be re-probed: {}",
+        s
+    );
+}

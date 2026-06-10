@@ -605,10 +605,21 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let files = wc_scan::scan_wallpapers(&sources);
             let walk_time = t0.elapsed();
 
+            // Load prior metadata to skip unchanged files.
+            let prior_cache = wc_scan::prior_metadata_cache(&s.cd.library_tsv_path());
+
             let t1 = std::time::Instant::now();
             let mut entries: Vec<wc_core::types::WallpaperEntry> = Vec::new();
+            let mut reused = 0usize;
+            let mut probed = 0usize;
             for path in &files {
-                if let Some(entry) = wc_scan::make_entry(path) {
+                let (entry, was_reused) = wc_scan::make_entry_cached(path, &prior_cache);
+                if let Some(entry) = entry {
+                    if was_reused {
+                        reused += 1;
+                    } else {
+                        probed += 1;
+                    }
                     entries.push(entry);
                 }
             }
@@ -654,6 +665,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let total_time = t0.elapsed();
             println!(
                 "sources: {} canonical{}  walked: {} files  entries: {}  sqlite: {}\n\
+                 reused_metadata: {}  probed_metadata: {}\n\
                  walk: {:.2}s  probe: {:.2}s  sqlite: {}ms  total: {:.2}s",
                 sources.len(),
                 if dup_count > 0 {
@@ -664,6 +676,8 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 files.len(),
                 entries.len(),
                 sqlite_count,
+                reused,
+                probed,
                 walk_time.as_secs_f64(),
                 probe_time.as_secs_f64(),
                 sqlite_time.as_millis(),
