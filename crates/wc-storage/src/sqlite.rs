@@ -637,6 +637,43 @@ pub fn library_insert(
     Ok(())
 }
 
+// ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────
+
+/// Add a source directly to the SQLite sources table.
+/// Fails if wallpapers.db does not exist or the write fails.
+pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    let db = cd.db_path();
+    if !db.exists() {
+        return Err(WcError::Other(
+            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
+        ));
+    }
+    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let n = conn
+        .execute(
+            "INSERT OR IGNORE INTO sources (path) VALUES (?1)",
+            params![path],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(n > 0)
+}
+
+/// Remove a source directly from the SQLite sources table.
+/// Fails if wallpapers.db does not exist or the write fails.
+pub fn sqlite_source_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    let db = cd.db_path();
+    if !db.exists() {
+        return Err(WcError::Other(
+            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
+        ));
+    }
+    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let n = conn
+        .execute("DELETE FROM sources WHERE path = (?1)", params![path])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(n > 0)
+}
+
 pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {

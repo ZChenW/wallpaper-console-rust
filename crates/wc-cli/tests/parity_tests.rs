@@ -482,3 +482,74 @@ fn search_type_live_scan_independent_of_library_tsv() {
         s
     );
 }
+
+// ── SQLite mode source writes ─────────────────────────────────────────────
+
+#[test]
+fn sqlite_mode_add_fails_when_db_missing() {
+    let (_d, cd) = temp_config();
+    // Switch to sqlite mode without migrating first — DB does not exist.
+    rust(&["config-set", "storage_backend", "sqlite"], &cd);
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    let out = rust(&["add", &walls], &cd);
+    assert!(
+        !out.status.success(),
+        "add must fail when storage_backend=sqlite and DB is missing"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("not found") || stderr.contains("migrate"),
+        "error should mention missing DB: {}",
+        stderr
+    );
+}
+
+#[test]
+fn sqlite_mode_add_and_sources_roundtrip() {
+    let (_d, cd) = temp_config();
+    // Set up sqlite mode with a real DB.
+    rust(&["config-set", "storage_backend", "sqlite"], &cd);
+    rust(&["migrate-to-sqlite"], &cd);
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    // Add should succeed.
+    let out = rust(&["add", &walls], &cd);
+    assert!(
+        out.status.success(),
+        "add failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // sources must list it immediately.
+    let out = rust(&["sources"], &cd);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        s.contains(&walls),
+        "sources should contain added path: {}",
+        s
+    );
+}
+
+#[test]
+fn sqlite_mode_remove_source_roundtrip() {
+    let (_d, cd) = temp_config();
+    rust(&["config-set", "storage_backend", "sqlite"], &cd);
+    rust(&["migrate-to-sqlite"], &cd);
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    rust(&["add", &walls], &cd);
+
+    let out = rust(&["remove-source", &walls], &cd);
+    assert!(
+        out.status.success(),
+        "remove-source failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = rust(&["sources"], &cd);
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !s.contains(&walls),
+        "sources should not contain removed path: {}",
+        s
+    );
+}

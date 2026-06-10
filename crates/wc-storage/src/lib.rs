@@ -195,11 +195,11 @@ impl StorageApi {
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
         match self.mode {
             StorageBackend::Sqlite => {
-                // SQLite must succeed — GUI reads from DB in sqlite mode.
-                let added = flat::sources_add(&self.cd, path)?;
-                if added {
-                    mirror::mirror_source_add(&self.cd, path)?;
-                }
+                // SQLite must succeed first — GUI reads from DB in sqlite mode.
+                // Flat-file write follows only as a compatibility copy.
+                let added = sqlite::sqlite_source_add(&self.cd, path)?;
+                // Sync flat as a best-effort compatibility copy.
+                flat::sources_add(&self.cd, path).ok();
                 Ok(added)
             }
             _ => {
@@ -215,10 +215,10 @@ impl StorageApi {
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
         match self.mode {
             StorageBackend::Sqlite => {
-                let removed = flat::sources_remove(&self.cd, path)?;
-                if removed {
-                    mirror::mirror_source_remove(&self.cd, path)?;
-                }
+                // SQLite must succeed first.
+                let removed = sqlite::sqlite_source_remove(&self.cd, path)?;
+                // Sync flat as a best-effort compatibility copy.
+                flat::sources_remove(&self.cd, path).ok();
                 Ok(removed)
             }
             _ => {

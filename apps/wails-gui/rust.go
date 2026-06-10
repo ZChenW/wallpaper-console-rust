@@ -226,6 +226,9 @@ func (r *Runner) HistoryClear() CommandResult {
 func (r *Runner) SourcesList() ([]SourceDTO, error) {
 	// Use `sources` command for reliable path list, os.Stat for exists check.
 	out := r.run("sources")
+	if !out.Success {
+		return nil, fmt.Errorf("sources failed: %s", out.Stderr)
+	}
 	var sources []SourceDTO
 	for _, path := range strings.Split(strings.TrimSpace(out.Stdout), "\n") {
 		path = strings.TrimSpace(path)
