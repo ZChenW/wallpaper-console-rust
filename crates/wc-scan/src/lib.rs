@@ -600,7 +600,6 @@ mod tests {
 #[test]
 fn cached_entry_reuses_prior_metadata() {
     use std::collections::HashMap;
-    use std::io::Write;
 
     let dir = tempfile::tempdir().unwrap();
     let img = dir.path().join("test.png");

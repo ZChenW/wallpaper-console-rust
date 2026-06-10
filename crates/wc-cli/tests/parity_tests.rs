@@ -788,7 +788,7 @@ fn second_rescan_reuses_metadata_for_unchanged_files() {
     let s2 = String::from_utf8_lossy(&out2.stdout);
     assert!(out2.status.success(), "second rescan failed: {}", s2);
     assert!(
-        s2.contains("reused_metadata: 2") || s2.contains("reused_metadata: 2"),
+        s2.contains("reused_metadata: 2"),
         "second rescan should reuse metadata: {}",
         s2
     );
