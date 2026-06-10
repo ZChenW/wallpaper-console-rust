@@ -108,7 +108,7 @@ apps/wails-gui/
 | SqliteRestore(path) | `sqlite-restore <path>` | CommandResult |
 | SqliteExportFlat() | `sqlite-export-flat` | CommandResult |
 | MigrateToSqlite() | `migrate-to-sqlite` | CommandResult |
-| ThumbnailFor(path) | `thumbnail-path <path>` | ThumbnailDTO |
+| ThumbnailFor(path) | (Go-side: magick/convert/ffmpeg → cache/gui-thumbnails) | ThumbnailDTO |
 | ThumbnailCacheStatus() | (fs read cache dir) | ThumbnailCacheDTO |
 | ThumbnailCacheClear() | (fs remove cache dir) | CommandResult |
 | OpenPath(path) | `xdg-open <path>` | CommandResult |

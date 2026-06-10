@@ -1,0 +1,57 @@
+version: '3'
+
+vars:
+  APP_NAME: "wallpaper-console-gui{{exeExt}}"
+
+tasks:
+  build:
+    summary: Builds the application (default — calls platform:build)
+    cmds:
+      - task: linux:build
+
+  linux:build:
+    summary: Builds the application for Linux
+    platforms:
+      - linux
+    cmds:
+      - task: build:frontend
+      - task: build:backend
+
+  build:frontend:
+    summary: Builds the React frontend with Vite
+    dir: frontend
+    cmds:
+      - npm run build
+
+  build:backend:
+    summary: Builds the Go binary for development
+    cmds:
+      - go build -o bin/{{.APP_NAME}}
+    env:
+      CGO_ENABLED: "1"
+
+  dev:
+    summary: Runs the application in development mode
+    cmds:
+      - task: build:frontend
+      - go run .
+
+  package:
+    summary: Packages a production build
+    cmds:
+      - task: linux:package
+
+  linux:package:
+    summary: Packages a production build for Linux
+    platforms:
+      - linux
+    deps:
+      - task: build:frontend
+    cmds:
+      - CGO_ENABLED=1 go build -tags production -ldflags="-w -s" -o bin/{{.APP_NAME}}
+
+  clean:
+    summary: Removes build artifacts
+    cmds:
+      - rm -rf bin/
+      - rm -rf frontend/dist/

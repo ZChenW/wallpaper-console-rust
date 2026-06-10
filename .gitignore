@@ -5,3 +5,5 @@ Cargo.lock
 apps/wails-gui/frontend/node_modules/
 apps/wails-gui/frontend/dist/
 apps/wails-gui/frontend/tsconfig.tsbuildinfo
+apps/wails-gui/bin/
+apps/wails-gui/wallpaper-console-gui
