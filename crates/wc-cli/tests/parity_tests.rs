@@ -820,3 +820,71 @@ fn rescan_probes_changed_files_only() {
         s
     );
 }
+
+// ── Thumbnail CLI ─────────────────────────────────────────────────────────
+
+#[test]
+fn thumbnail_command_generates_valid_webp() {
+    // Skip if ffmpeg not available.
+    if !std::process::Command::new("ffmpeg")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping: ffmpeg not available");
+        return;
+    }
+
+    let (_d, cd) = temp_config();
+    // Create a tiny test video (1 second, single color).
+    let video = format!("{}/test.mp4", cd);
+    let status = std::process::Command::new("ffmpeg")
+        .args([
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=0x808080:s=320x240:d=1",
+            "-frames:v",
+            "25",
+            &video,
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "failed to create test video");
+
+    // Generate thumbnail.
+    let out = rust(&["thumbnail", &video], &cd);
+    assert!(
+        out.status.success(),
+        "thumbnail failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let thumb_path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(!thumb_path.is_empty(), "no thumbnail path in output");
+
+    let meta = std::fs::metadata(&thumb_path).unwrap();
+    assert!(meta.len() > 100, "thumbnail file too small");
+
+    // Verify it's a valid WebP at ≤ 400px wide.
+    if std::process::Command::new("identify")
+        .arg("-version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        let id_out = std::process::Command::new("identify")
+            .args(["-format", "%wx%h", &thumb_path])
+            .output()
+            .unwrap();
+        let dims = String::from_utf8_lossy(&id_out.stdout).to_string();
+        let width: u32 = dims.split('x').next().unwrap_or("0").parse().unwrap_or(0);
+        assert!(
+            width > 0 && width <= 400,
+            "thumbnail width {} not in 1..400",
+            width
+        );
+    }
+}

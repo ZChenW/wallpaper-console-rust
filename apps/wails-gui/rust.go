@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/md5"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -316,54 +315,6 @@ func (r *Runner) ThumbnailFor(path string) (*ThumbnailDTO, error) {
 		}
 	}
 	return dto, nil
-}
-
-// generateThumbnail creates a 400px-wide webp thumbnail.
-// Images/GIFs use ImageMagick; videos use ffmpeg directly.
-func generateThumbnail(src, dst string) error {
-	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(src), "."))
-	if isVideoExt(ext) {
-		if _, err := exec.LookPath("ffmpeg"); err == nil {
-			cmd := exec.Command("ffmpeg", "-y", "-ss", "1", "-i", src,
-				"-frames:v", "1", "-q:v", "3", dst)
-			if err := cmd.Run(); err == nil {
-				return nil
-			}
-		}
-		return fmt.Errorf("no video thumbnail generator available")
-	}
-
-	// ImageMagick (works for images and GIFs)
-	if _, err := exec.LookPath("magick"); err == nil {
-		cmd := exec.Command("magick", src, "-resize", "400x", "-quality", "80",
-			"-auto-orient", dst)
-		if out, err := cmd.CombinedOutput(); err == nil {
-			return nil
-		} else if len(out) > 0 {
-			// Try convert fallback
-		}
-	}
-	if _, err := exec.LookPath("convert"); err == nil {
-		cmd := exec.Command("convert", src, "-resize", "400x", "-quality", "80",
-			"-auto-orient", dst)
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
-	}
-	return fmt.Errorf("no thumbnail generator available")
-}
-
-func isVideoExt(ext string) bool {
-	switch ext {
-	case "mp4", "webm", "mkv", "mov":
-		return true
-	default:
-		return false
-	}
-}
-
-func md5Sum(data []byte) [16]byte {
-	return md5.Sum(data)
 }
 
 func (r *Runner) ThumbnailCacheStatus() (*ThumbnailCacheDTO, error) {

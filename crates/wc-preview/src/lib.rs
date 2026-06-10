@@ -437,8 +437,8 @@ pub fn generate_gui_thumbnail(
         .unwrap_or_default()
         .to_lowercase();
 
-    // Atomic write: generate to .tmp, then rename.
-    let tmp = cache_dir.join(format!(".{}.tmp", key));
+    // Atomic write: generate to .tmp.webp so ffmpeg detects the output format.
+    let tmp = cache_dir.join(format!(".{}.tmp.webp", key));
     let _ = std::fs::remove_file(&tmp);
 
     let ok = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
@@ -654,21 +654,30 @@ fn get_video_duration(path: &str) -> Option<f64> {
     s.parse().ok()
 }
 
-/// Quick check: is this frame too dark or too light?
-/// Uses identify to get mean pixel value; rejects extremes.
+/// Quick check: is this frame too dark, too bright, or too flat?
+/// Uses identify fx:mean and fx:standard_deviation (0..1 range).
 fn frame_has_content(path: &Path) -> bool {
     if !command_exists("identify") {
         return true; // can't check, accept it
     }
     let out = Command::new("identify")
-        .args(["-format", "%[mean]", path.to_str().unwrap_or("")])
+        .args([
+            "-format",
+            "%[fx:mean] %[fx:standard_deviation]",
+            path.to_str().unwrap_or(""),
+        ])
         .output();
     match out {
         Ok(o) if o.status.success() => {
             let s = String::from_utf8_lossy(&o.stdout).to_string();
-            let mean: f64 = s.parse().unwrap_or(128.0);
-            // Reject very dark (< 20) or very bright (> 240) frames.
-            mean > 20.0 && mean < 240.0
+            let parts: Vec<f64> = s
+                .split_whitespace()
+                .filter_map(|v| v.parse().ok())
+                .collect();
+            let mean = parts.first().copied().unwrap_or(0.5);
+            let stddev = parts.get(1).copied().unwrap_or(0.1);
+            // Reject very dark (< 0.06), very bright (> 0.94), or flat (< 0.015 stddev).
+            mean > 0.06 && mean < 0.94 && stddev > 0.015
         }
         _ => true, // can't check, accept it
     }
