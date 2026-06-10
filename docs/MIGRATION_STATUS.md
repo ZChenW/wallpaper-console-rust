@@ -35,7 +35,7 @@ management, image/video apply, favorites/history, and SQLite maintenance.
 |-------|--------|
 | `cargo fmt --check` | ✅ passes |
 | `cargo clippy --workspace -- -D warnings` | ✅ clean |
-| `cargo test --workspace` | ✅ 44/44 (32 integration + 7 wc-core + 5 wc-scan) |
+| `cargo test --workspace` | ✅ 54/54 (35 wc-cli integration + 7 wc-core + 12 wc-scan) |
 | Smoke: `status` with temp XDG_CONFIG_HOME | ✅ works |
 | Smoke: `add` + `rescan` + `library-count` | ✅ works |
 
@@ -50,11 +50,24 @@ management, image/video apply, favorites/history, and SQLite maintenance.
 
 | Check | Status |
 |-------|--------|
-| `go test ./...` | ✅ passes |
 | `go vet ./...` | ✅ passes |
 | `go build ./...` | ✅ passes |
 | `PATH="$HOME/go/bin:$PATH" wails3 build` | ✅ passes → `apps/wails-gui/bin/wallpaper-console-gui` |
 | `wails3` CLI | ✅ installed at `~/go/bin/wails3` (v3.0.0-alpha.98) |
+
+## Tauri Build (experimental)
+
+| Check | Status |
+|-------|--------|
+| `cargo check` (src-tauri) | ✅ passes |
+| `cargo tauri build --bundles deb,rpm` | ✅ passes → .deb + .rpm bundles |
+| `webkit2gtk-4.1` | ✅ installed (v2.52.4) alongside `webkitgtk-6.0` |
+| Asset protocol (local thumbnail loading) | ✅ enabled (`protocol-asset` feature, scope configured) |
+
+Tauri v2 compiles and produces `.deb`/`.rpm` bundles. It calls Rust crates directly (no subprocess bridge).
+The asset protocol has been configured to allow loading thumbnails from the local cache directory.
+Tauri is not yet the default GUI; Wails remains the stable/supported target until Tauri passes full
+real-use smoke testing.
 
 ## Installation
 
@@ -71,8 +84,8 @@ This installs to:
 
 **Rollback** (restore original Bash/Python):
 ```bash
-ln -sf /path/to/bash/wallpaper-console ~/.local/bin/wallpaper-console
-ln -sf /path/to/python/wallpaper-console-gui ~/.local/bin/wallpaper-console-gui
+rm ~/.local/bin/wallpaper-console-rust
+rm ~/.local/bin/wallpaper-console-gui-rust
 ```
 
 The original Bash/Python install is never removed.
@@ -81,24 +94,27 @@ The original Bash/Python install is never removed.
 
 See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 
-- **Completed:** all non-TUI commands plus hidden `__preview__`
+- **Completed:** all non-TUI commands (50+), `__preview__`, all SQLite debug commands, Flatpak Steam paths
 - **Remaining:** `tui` (stub — Wails/Tauri GUI replaces the old control TUI unless a Rust terminal TUI is explicitly requested)
 
 ## GUI Architecture Decision
 
-The production GUI path is currently **Wails + React + Rust CLI bridge**, with the following performance
-fixes implemented:
+The production GUI path is currently **Wails v3 + React + Rust CLI bridge**, with the following
+performance optimizations implemented:
 
-- paginated library loading through `library-page-json`
+- Paginated library loading through `library-page-json`
 - SQLite-backed library pages when `storage_backend=sqlite`
-- frontend thumbnail queue with concurrency 2
-- Go-side thumbnail generation pool with duplicate in-flight suppression
-- smaller initial page size and incremental "load more" behavior
+- Frontend thumbnail queue with concurrency 2
+- Video thumbnail v2: multi-point smart frame sampling (25%/50%/10%/5s/75%), 400px WebP output, atomic `.tmp.webp` writes
+- ThumbnailFor delegated to Rust CLI `thumbnail` subcommand (Go no longer spawns magick/ffmpeg directly)
+- Virtualized grid via `@tanstack/react-virtual` with `useVirtualizer`
+- Incremental rescan: unchanged files reuse cached metadata (no identify/ffprobe)
+- Source deduplication and SQLite batch write transactions
 
-An experimental Tauri app exists under `apps/tauri-gui/`, but it is excluded from the default Cargo
-workspace. Tauri v2 currently pulls `webkit2gtk-4.1` on Linux; this machine has `webkitgtk-6.0`
-installed and does not have `webkit2gtk-4.1.pc`. Until that dependency is installed or the GUI strategy
-switches to a framework that uses WebKitGTK 6 directly, Tauri is not part of the supported build gate.
+An experimental Tauri v2 app exists under `apps/tauri-gui/`. It builds successfully and produces
+`.deb`/`.rpm` bundles. Tauri commands call Rust crates directly (no subprocess bridge). The Tauri
+build requires `webkit2gtk-4.1` which is installed alongside `webkitgtk-6.0`. The asset protocol
+is configured (`protocol-asset` feature + scope) for local thumbnail loading via `convertFileSrc()`.
 
 ## Known CLI Gaps
 
@@ -119,19 +135,21 @@ switches to a framework that uses WebKitGTK 6 directly, Tauri is not part of the
 | History | HistoryView (grid, random, clear with confirm) | 6 ✅ |
 | Sources | SourcesView (grouped, add/remove/scan WE) | 7 ✅ |
 | Settings | SettingsView (backends, library, storage/SQLite, cache) | 8 ✅ |
-| Thumbnail cache | Lazy loading, cache/icon/original modes | 5 ✅ |
+| Thumbnail cache | Lazy loading, cache/icon/original modes, v2 smart sampling | 5 ✅ |
 
 ## Test Count
 
 | Crate | Unit | Integration |
 |-------|------|-------------|
 | wc-core | 7 | — |
-| wc-scan | 5 | — |
+| wc-scan | 12 | — |
 | wc-storage | 0 | — |
 | wc-backend | 0 | — |
 | wc-preview | 0 | — |
-| wc-cli | 0 | 32 |
-| **Total** | **12** | **32** |
+| wc-cli | 0 | 35 |
+| **Total** | **19** | **35** |
+
+Grand total: 54 tests.
 
 ## Storage Backend Compatibility
 
@@ -140,3 +158,4 @@ switches to a framework that uses WebKitGTK 6 directly, Tauri is not part of the
 - [x] Hybrid dual-write
 - [x] `storage_backend=sqlite` reads from DB
 - [x] Bootstrap-safe config reads
+- [x] All SQLite debug commands: `sqlite-config-get`, `sqlite-sources-list`, `sqlite-favorites-list`, `sqlite-history-list`, `sqlite-current-read`, `sqlite-last-backend-read`

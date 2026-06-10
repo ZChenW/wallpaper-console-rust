@@ -13,7 +13,7 @@ body {
 /* ── App Layout ───────────────────────────────────────────────────── */
 .app { display: flex; flex-direction: column; height: 100%; }
 .app-body { display: flex; flex: 1; overflow: hidden; }
-.main-content { flex: 1; overflow-y: auto; padding: 16px; }
+.main-content { flex: 1; overflow: hidden; padding: 16px; min-height: 0; }
 
 /* ── Sidebar ──────────────────────────────────────────────────────── */
 .sidebar {
@@ -92,7 +92,7 @@ body {
 .statusbar-sep { color: #444; margin: 0 4px; }
 
 /* ── View ──────────────────────────────────────────────────────────── */
-.view { display: flex; flex-direction: column; gap: 12px; }
+.view { display: flex; flex-direction: column; gap: 12px; min-height: 0; height: 100%; }
 .view-header { display: flex; align-items: center; justify-content: space-between; }
 .view-header h2 { font-size: 18px; font-weight: 600; color: #ccc; }
 .view-controls { display: flex; gap: 8px; align-items: center; }
@@ -130,9 +130,10 @@ select:focus, input:focus { border-color: #555; }
 
 /* ── Wallpaper Grid ────────────────────────────────────────────────── */
 .wallpaper-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
+  display: block;
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
   padding-bottom: 100px;
 }
 .wallpaper-card {

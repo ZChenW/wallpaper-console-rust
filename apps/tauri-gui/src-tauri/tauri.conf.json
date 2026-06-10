@@ -20,7 +20,15 @@
       }
     ],
     "security": {
-      "csp": null
+      "csp": null,
+      "assetProtocol": {
+        "enable": true,
+        "scope": {
+          "allow": [
+            "$HOME/.config/wallpaper-console/cache/gui-thumbnails/**"
+          ]
+        }
+      }
     }
   },
   "bundle": {

@@ -10,7 +10,7 @@
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use wc_core::config::ConfigDir;
 
@@ -516,6 +516,8 @@ fn generate_image_thumbnail(src: &str, dst: &Path) -> bool {
             .arg(src)
             .args(["-resize", "400x", "-quality", "80", "-auto-orient"])
             .arg(dst)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -556,6 +558,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                 .args(["-i", src, "-o"])
                 .arg(&tmp)
                 .args(["-t", &format!("{}", ts as u64), "-s", "400", "-q", "8"])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
@@ -564,6 +568,10 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                 let _ = std::fs::remove_file(dst);
                 let ok = Command::new("ffmpeg")
                     .args([
+                        "-hide_banner",
+                        "-loglevel",
+                        "error",
+                        "-nostats",
                         "-y",
                         "-i",
                         tmp.to_str().unwrap_or(""),
@@ -573,6 +581,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                         "80",
                         dst.to_str().unwrap_or(""),
                     ])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
                     .status()
                     .map(|s| s.success())
                     .unwrap_or(false);
@@ -591,6 +601,10 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
         let _ = std::fs::remove_file(dst);
         let ok = Command::new("ffmpeg")
             .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
                 "-y",
                 "-ss",
                 &format!("{:.1}", ts),
@@ -604,6 +618,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                 "80",
                 dst.to_str().unwrap_or(""),
             ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
@@ -618,6 +634,10 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
     let _ = std::fs::remove_file(dst);
     let ok = Command::new("ffmpeg")
         .args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-nostats",
             "-y",
             "-ss",
             &format!("{:.1}", ts),
@@ -631,6 +651,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
             "80",
             dst.to_str().unwrap_or(""),
         ])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|s| s.success())
         .unwrap_or(false);
