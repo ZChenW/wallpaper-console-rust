@@ -7,3 +7,8 @@ apps/wails-gui/frontend/dist/
 apps/wails-gui/frontend/tsconfig.tsbuildinfo
 apps/wails-gui/bin/
 apps/wails-gui/wallpaper-console-gui
+
+# Tauri / frontend
+apps/tauri-gui/frontend/node_modules/
+apps/tauri-gui/frontend/dist/
+apps/tauri-gui/frontend/tsconfig.tsbuildinfo
