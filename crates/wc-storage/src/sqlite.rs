@@ -637,6 +637,43 @@ pub fn library_insert(
     Ok(())
 }
 
+/// Insert many wallpaper entries in a single transaction.
+pub fn library_insert_batch(
+    cd: &ConfigDir,
+    entries: &[(&str, &str, &str, &str, u64, u64, &str)],
+) -> Result<usize, WcError> {
+    let db_path = cd.db_path();
+    if !db_path.exists() || entries.is_empty() {
+        return Ok(0);
+    }
+    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, ftype, ext, backend, size, mtime, resolution) in entries {
+            stmt.execute(params![
+                path,
+                ftype,
+                ext,
+                backend,
+                *size as i64,
+                *mtime as i64,
+                resolution
+            ])
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(entries.len())
+}
+
 // ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────
 
 /// Add a source directly to the SQLite sources table.

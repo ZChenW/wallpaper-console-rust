@@ -359,7 +359,6 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         Commands::SteamWorkshop => {
             let home = std::env::var("HOME").unwrap_or_default();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            // Prefer native Steam paths, then Flatpak Steam paths.
             for base in &[
                 format!("{}/.local/share/Steam", home),
                 format!("{}/.steam/steam", home),
@@ -369,8 +368,14 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 ),
                 format!("{}/.var/app/com.valvesoftware.Steam/.steam/steam", home),
             ] {
-                let ws = std::path::Path::new(base).join("steamapps/workshop/content/431960");
+                let ws_rel = std::path::Path::new(base).join("steamapps/workshop/content/431960");
+                let ws = std::fs::canonicalize(&ws_rel).unwrap_or(ws_rel);
                 if ws.is_dir() {
+                    // Skip if this canonical workshop root was already processed.
+                    let ws_canon = ws.to_string_lossy().to_string();
+                    if !seen.insert(ws_canon) {
+                        continue;
+                    }
                     for entry in std::fs::read_dir(&ws)? {
                         let entry = entry?;
                         if entry.file_type()?.is_dir() {
@@ -575,30 +580,48 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         // ── Library ──────────────────────────────────────────────────
         Commands::Rescan => {
-            let sources = s.sources_list()?;
-            if sources.is_empty() {
+            let t0 = std::time::Instant::now();
+            let raw_sources = s.sources_list()?;
+            if raw_sources.is_empty() {
                 println!("(no sources configured)");
                 return Ok(());
             }
+            // Dedupe by canonical path (catches symlinks, .steam vs .local/share).
+            let sources = wc_scan::dedupe_sources(&raw_sources);
+            let dup_count = raw_sources.len() - sources.len();
+
             wc_storage::sqlite::library_clear(&s.cd).ok();
             let files = wc_scan::scan_wallpapers(&sources);
+            let walk_time = t0.elapsed();
+
+            let t1 = std::time::Instant::now();
             let mut entries: Vec<wc_core::types::WallpaperEntry> = Vec::new();
             for path in &files {
                 if let Some(entry) = wc_scan::make_entry(path) {
-                    wc_storage::sqlite::library_insert(
-                        &s.cd,
-                        path,
-                        entry.file_type.as_str(),
-                        &entry.ext,
-                        entry.backend.as_str(),
-                        entry.size,
-                        entry.mtime,
-                        &entry.resolution,
-                    )
-                    .ok();
                     entries.push(entry);
                 }
             }
+            let probe_time = t1.elapsed();
+
+            // Batch SQLite insert in a single transaction.
+            let t2 = std::time::Instant::now();
+            let batch: Vec<(&str, &str, &str, &str, u64, u64, &str)> = entries
+                .iter()
+                .map(|e| {
+                    (
+                        e.path.as_str(),
+                        e.file_type.as_str(),
+                        e.ext.as_str(),
+                        e.backend.as_str(),
+                        e.size,
+                        e.mtime,
+                        e.resolution.as_str(),
+                    )
+                })
+                .collect();
+            let sqlite_count = wc_storage::sqlite::library_insert_batch(&s.cd, &batch).unwrap_or(0);
+            let sqlite_time = t2.elapsed();
+
             let mut tsv = String::new();
             for e in &entries {
                 tsv.push_str(&format!(
@@ -617,10 +640,23 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             if dirty.exists() {
                 std::fs::remove_file(&dirty).ok();
             }
+            let total_time = t0.elapsed();
             println!(
-                "library.tsv written ({} entries)  SQLite: {} wallpapers",
+                "sources: {} canonical{}  walked: {} files  entries: {}  sqlite: {}\n\
+                 wallk: {:.2}s  probe: {:.2}s  sqlite: {}ms  total: {:.2}s",
+                sources.len(),
+                if dup_count > 0 {
+                    format!(" ({} duplicates skipped)", dup_count)
+                } else {
+                    String::new()
+                },
+                files.len(),
                 entries.len(),
-                wc_storage::sqlite::library_count(&s.cd).unwrap_or(0)
+                sqlite_count,
+                walk_time.as_secs_f64(),
+                probe_time.as_secs_f64(),
+                sqlite_time.as_millis(),
+                total_time.as_secs_f64(),
             );
         }
 

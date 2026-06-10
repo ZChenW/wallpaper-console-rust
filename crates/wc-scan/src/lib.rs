@@ -11,31 +11,101 @@ use wc_core::types::WallpaperEntry;
 
 const WE_MARKER: &str = "/steamapps/workshop/content/431960";
 
+/// Deduplicate sources by canonical path before scanning.
+pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut result: Vec<String> = Vec::new();
+    for src in sources {
+        let p = Path::new(src);
+        if !p.is_dir() {
+            continue;
+        }
+        let canon = std::fs::canonicalize(p)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| src.clone());
+        if seen.insert(canon.clone()) {
+            result.push(canon);
+        }
+    }
+    result
+}
+
 /// Scan all sources for wallpaper files.
 ///
-/// For Wallpaper Engine workshop-root sources, iterates project subdirectories
-/// one level deep, reads project.json to pick the `file` field (skipping
-/// scene / web / application types), and falls back to a recursive scan only
-/// when no project.json exists.  This matches the Bash scanner behaviour.
+/// Sources are deduplicated by canonical path first.
+///
+/// Wallpaper Engine source detection:
+///   - Workshop root (.../431960) → iterate one level of project subdirs,
+///     read each project.json, skip scene/web/application.
+///   - Single project dir (.../431960/<id> with project.json) → read its
+///     project.json directly.
+///   - Other dirs → recursive walkdir scan.
 pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
+    let deduped = dedupe_sources(sources);
     let mut seen: HashSet<String> = HashSet::new();
     let mut files: Vec<String> = Vec::new();
 
-    for source in sources {
+    for source in &deduped {
         let src_path = Path::new(source);
         if !src_path.is_dir() {
             continue;
         }
 
-        if is_wallpaper_engine_source(source) {
-            scan_we_workshop_root(src_path, &mut seen, &mut files);
-            continue;
+        match we_source_kind(source) {
+            WeKind::WorkshopRoot => {
+                scan_we_workshop_root(src_path, &mut seen, &mut files);
+            }
+            WeKind::ProjectDir => {
+                // Single WE project — read its project.json directly.
+                if let Some(wp) = read_we_project_json(src_path) {
+                    let p = Path::new(&wp);
+                    let c = canonicalize_str(
+                        &std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
+                    );
+                    if seen.insert(c.clone()) {
+                        files.push(c);
+                    }
+                }
+            }
+            WeKind::Normal => {
+                scan_dir_recursive(src_path, &mut seen, &mut files);
+            }
         }
-
-        // ── Normal source directory ─────────────────────────────────
-        scan_dir_recursive(src_path, &mut seen, &mut files);
     }
     files
+}
+
+/// Classify a WE source path.
+#[derive(Debug, PartialEq)]
+enum WeKind {
+    /// .../431960 — iterate subdirectories as projects.
+    WorkshopRoot,
+    /// .../431960/<project_id> — read this project's project.json.
+    ProjectDir,
+    /// Not a WE path at all.
+    Normal,
+}
+
+fn we_source_kind(path: &str) -> WeKind {
+    if !path.contains(WE_MARKER) {
+        return WeKind::Normal;
+    }
+    // Find the position of the marker in the path.
+    if let Some(pos) = path.find(WE_MARKER) {
+        let after = &path[pos + WE_MARKER.len()..];
+        let after = after.trim_start_matches('/');
+        // If there's a numeric project ID (and possibly trailing slash), it's a project dir.
+        if !after.is_empty() {
+            // Check if it looks like a Steam workshop ID (all digits).
+            let first_seg = after.split('/').next().unwrap_or("");
+            if first_seg.chars().all(|c| c.is_ascii_digit()) {
+                return WeKind::ProjectDir;
+            }
+        }
+        // Otherwise it's the workshop root itself.
+        return WeKind::WorkshopRoot;
+    }
+    WeKind::Normal
 }
 
 /// Scan a Wallpaper Engine workshop root: iterate one level of project
@@ -53,13 +123,11 @@ fn scan_we_workshop_root(root: &Path, seen: &mut HashSet<String>, files: &mut Ve
         }
         let project_dir = entry.path();
 
-        // Try to read the project.json for this project.
         let has_proj = project_dir.join("project.json").exists();
         let we_file = read_we_project_json(&project_dir);
 
         if let Some(ref wp) = we_file {
-            // project.json gave us a usable file.
-            let p = std::path::Path::new(wp);
+            let p = Path::new(wp);
             let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
             if seen.insert(c.clone()) {
                 files.push(c);
@@ -68,12 +136,11 @@ fn scan_we_workshop_root(root: &Path, seen: &mut HashSet<String>, files: &mut Ve
         }
 
         if has_proj {
-            // project.json exists but was unreadable or an unsupported type
-            // (scene / web / application).  Skip the whole project.
+            // project.json exists but unreadable or unsupported type → skip.
             continue;
         }
 
-        // No project.json at all — fall back to recursive scan.
+        // No project.json — fall back to recursive scan.
         scan_dir_recursive(&project_dir, seen, files);
     }
 }
@@ -106,7 +173,7 @@ fn scan_dir_recursive(dir: &Path, seen: &mut HashSet<String>, files: &mut Vec<St
     }
 }
 
-fn canonicalize_str(p: &std::path::Path) -> String {
+fn canonicalize_str(p: &Path) -> String {
     p.to_string_lossy().to_string()
 }
 
@@ -115,11 +182,6 @@ pub fn is_wallpaper_engine_source(path: &str) -> bool {
 }
 
 /// Read a Wallpaper Engine project.json from `project_dir`.
-///
-/// Returns `Some(full_path)` for image/video projects that have a valid
-/// `file` field pointing to an existing file with a supported extension.
-/// Returns `None` for scene / web / application types, missing project.json,
-/// unreadable JSON, or when the referenced file doesn't exist.
 pub fn read_we_project_json(project_dir: &Path) -> Option<String> {
     let proj_path = project_dir.join("project.json");
     if !proj_path.exists() {
@@ -129,13 +191,11 @@ pub fn read_we_project_json(project_dir: &Path) -> Option<String> {
     let proj: serde_json::Value = serde_json::from_str(&content).ok()?;
 
     let proj_type = proj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    // scene / web / application types are not wallpapers
     if matches!(proj_type, "scene" | "web" | "application") {
         return None;
     }
 
     let file = proj.get("file").and_then(|v| v.as_str())?;
-    // scene.json / scene.pkg / *.html / *.htm are not displayable
     let file_lower = file.to_lowercase();
     if file_lower == "scene.json"
         || file_lower == "scene.pkg"
@@ -171,7 +231,7 @@ pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let resolution = detect_resolution(path);
+    let resolution = detect_resolution(path, ftype);
     Some(WallpaperEntry {
         path: Utf8PathBuf::from(path),
         file_type: ftype,
@@ -183,35 +243,42 @@ pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
     })
 }
 
-fn detect_resolution(path: &str) -> String {
-    if let Ok(output) = std::process::Command::new("identify")
-        .args(["-format", "%wx%h", path, "[0]"])
-        .output()
-    {
-        let s = String::from_utf8_lossy(&output.stdout).to_string();
-        if !s.is_empty() && s.contains('x') {
-            return s;
+/// Detect resolution using the right tool per file type:
+///   - image/gif → identify (ImageMagick)
+///   - video    → ffprobe (never runs identify on video)
+fn detect_resolution(path: &str, ftype: wc_core::types::FileType) -> String {
+    match ftype {
+        wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
+            if let Ok(output) = std::process::Command::new("identify")
+                .args(["-format", "%wx%h", path, "[0]"])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&output.stdout).to_string();
+                if !s.is_empty() && s.contains('x') {
+                    return s;
+                }
+            }
         }
-    }
-    if let Ok(output) = std::process::Command::new("ffprobe")
-        .args([
-            "-v",
-            "error",
-            "-select_streams",
-            "v:0",
-            "-show_entries",
-            "stream=width,height",
-            "-of",
-            "csv=p=0",
-            path,
-        ])
-        .output()
-    {
-        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if s.contains(',') {
-            let parts: Vec<&str> = s.split(',').collect();
-            if parts.len() >= 2 {
-                return format!("{}x{}", parts[0], parts[1]);
+        wc_core::types::FileType::Video => {
+            if let Ok(output) = std::process::Command::new("ffprobe")
+                .args([
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=width,height",
+                    "-of",
+                    "csv=p=0",
+                    path,
+                ])
+                .output()
+            {
+                let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let parts: Vec<&str> = s.split(',').collect();
+                if parts.len() >= 2 {
+                    return format!("{}x{}", parts[0], parts[1]);
+                }
             }
         }
     }
@@ -237,6 +304,77 @@ pub fn passes_resolution_filter(resolution: &str, min_width: u32, min_height: u3
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn we_source_kind_workshop_root() {
+        assert_eq!(
+            we_source_kind("/home/user/.steam/steam/steamapps/workshop/content/431960"),
+            WeKind::WorkshopRoot
+        );
+        assert_eq!(
+            we_source_kind("/home/user/.steam/steam/steamapps/workshop/content/431960/"),
+            WeKind::WorkshopRoot
+        );
+    }
+
+    #[test]
+    fn we_source_kind_project_dir() {
+        assert_eq!(
+            we_source_kind(
+                "/home/user/.local/share/Steam/steamapps/workshop/content/431960/123456"
+            ),
+            WeKind::ProjectDir
+        );
+    }
+
+    #[test]
+    fn we_source_kind_normal() {
+        assert_eq!(we_source_kind("/home/user/Pictures"), WeKind::Normal);
+    }
+
+    #[test]
+    fn source_dedupe_removes_symlink_duplicates() {
+        // Create a dir and a symlink pointing to it — they should dedupe to one.
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("walls");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("walls-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let sources = vec![
+            real.to_string_lossy().to_string(),
+            link.to_string_lossy().to_string(),
+        ];
+        let deduped = dedupe_sources(&sources);
+        assert_eq!(
+            deduped.len(),
+            1,
+            "duplicate sources should be deduped: {:?}",
+            deduped
+        );
+    }
+
+    #[test]
+    fn we_project_dir_reads_project_json() {
+        let root = tempfile::tempdir().unwrap();
+        let proj_dir = root.path().join("431960").join("821372791");
+        std::fs::create_dir_all(&proj_dir).unwrap();
+        let img = proj_dir.join("bg.mp4");
+        std::fs::write(&img, b"").unwrap();
+        std::fs::write(
+            proj_dir.join("project.json"),
+            r#"{"type":"video","file":"bg.mp4"}"#,
+        )
+        .unwrap();
+
+        let source = proj_dir.to_string_lossy().to_string();
+        let result = scan_wallpapers(&[source]);
+        assert!(
+            result.iter().any(|p| p.contains("bg.mp4")),
+            "project dir should be read via project.json: {:?}",
+            result
+        );
+    }
 
     #[test]
     fn we_marker_detection() {
@@ -285,7 +423,6 @@ mod tests {
 
     #[test]
     fn we_workshop_root_scans_subdirs() {
-        // Simulate a workshop root with two project dirs: one scene, one image.
         let root = tempfile::tempdir().unwrap();
         let root_path = format!(
             "{}/steamapps/workshop/content/431960",
@@ -293,7 +430,6 @@ mod tests {
         );
         std::fs::create_dir_all(&root_path).unwrap();
 
-        // Scene project
         let scene_dir = format!("{}/111", root_path);
         std::fs::create_dir_all(&scene_dir).unwrap();
         std::fs::write(
@@ -302,7 +438,6 @@ mod tests {
         )
         .unwrap();
 
-        // Image project
         let img_dir = format!("{}/222", root_path);
         std::fs::create_dir_all(&img_dir).unwrap();
         let img = format!("{}/bg.png", img_dir);
@@ -313,7 +448,6 @@ mod tests {
         )
         .unwrap();
 
-        // No-project dir (fallback scan)
         let fallback_dir = format!("{}/333", root_path);
         std::fs::create_dir_all(&fallback_dir).unwrap();
         std::fs::write(format!("{}/pic.jpg", fallback_dir), b"").unwrap();
@@ -330,25 +464,19 @@ mod tests {
             .to_string_lossy()
             .to_string();
 
-        // Scene project must NOT be in results.
         let scene_assets: Vec<&String> = result.iter().filter(|p| p.contains("111")).collect();
         assert!(
             scene_assets.is_empty(),
-            "scene project should not produce any entries, got: {:?}",
+            "scene should not appear: {:?}",
             scene_assets
         );
-
-        // Image project's bg.png must be in results.
         assert!(
             result.contains(&img_canon),
-            "image project's bg.png should be in results"
+            "image bg.png should be in results"
         );
-
-        // Fallback dir's pic.jpg (no project.json) must be in results.
         assert!(
             result.contains(&jpg_canon),
-            "no-project dir should be scanned recursively, got: {:?}",
-            result
+            "fallback pic.jpg should be in results"
         );
     }
 }
