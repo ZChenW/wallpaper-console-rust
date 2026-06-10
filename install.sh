@@ -82,11 +82,12 @@ info "Verifying binaries..."
 
 # Smoke test with temp config — never touches real ~/.config/wallpaper-console
 tmp_config="$(mktemp -d)"
-trap "rm -rf '$tmp_config'" EXIT
+	cleanup_tmp_config() { rm -rf "$tmp_config"; }
+trap cleanup_tmp_config EXIT
 XDG_CONFIG_HOME="$tmp_config" "$RUST_CLI" status >/dev/null 2>&1 \
   || warn "Rust CLI smoke test failed (may be ok if no config exists)"
 "$RUST_CLI" --version >/dev/null 2>&1 || warn "Rust CLI --version failed"
-rm -rf "$tmp_config"
+cleanup_tmp_config
 trap - EXIT
 
 if [[ ! -x "$WAILS_GUI" ]]; then
