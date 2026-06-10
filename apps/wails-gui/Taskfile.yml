@@ -19,9 +19,16 @@ tasks:
 
   build:frontend:
     summary: Builds the React frontend with Vite
+    deps:
+      - task: build:bindings
     dir: frontend
     cmds:
       - npm run build
+
+  build:bindings:
+    summary: Generates Wails TypeScript bindings
+    cmds:
+      - wails3 generate bindings -ts -i -names -b ./...
 
   build:backend:
     summary: Builds the Go binary for development

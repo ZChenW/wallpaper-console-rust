@@ -17,7 +17,7 @@ export default function FavoritesView({ onApply, applying }: Props) {
     try {
       const paths = await api.favoritesList();
       // Build lightweight entries from paths
-      const mapped: WallpaperDTO[] = paths.map((p) => ({
+      const mapped: WallpaperDTO[] = paths.map((p: string) => ({
         path: p,
         type: inferType(p),
         ext: p.split('.').pop() ?? '',

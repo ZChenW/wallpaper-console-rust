@@ -1,119 +1,85 @@
-// Wails bridge API — all calls to the Go backend.
-// In Wails v3, the backend methods are available on the global `wails` object.
+// Wails bridge API — delegates to generated bindings from Wails v3.
+// DO NOT use window.wails.Call directly; always go through this module.
 
-declare global {
-  interface Window {
-    wails: {
-      Call: (method: string, ...args: unknown[]) => Promise<unknown>;
-    };
-  }
-}
+import * as Bridge from '../../bindings/wallpaper-console-gui/bridge';
+import type {
+  CommandResult,
+  HistoryDTO,
+  LibraryCountDTO,
+  SourceDTO,
+  StatusDTO,
+  ThumbnailCacheDTO,
+  ThumbnailDTO,
+  WallpaperDTO,
+} from '../../bindings/wallpaper-console-gui/models';
 
-function call<T>(method: string, ...args: unknown[]): Promise<T> {
-  if (window.wails) {
-    return window.wails.Call(method, ...args) as Promise<T>;
-  }
-  // Fallback for dev mode without Wails runtime
-  return Promise.reject(new Error(`Wails not available (method: ${method})`));
-}
+// Re-export model types so views don't need to import from bindings directly.
+export type {
+  CommandResult,
+  HistoryDTO,
+  LibraryCountDTO,
+  SourceDTO,
+  StatusDTO,
+  ThumbnailCacheDTO,
+  ThumbnailDTO,
+  WallpaperDTO,
+};
 
-// ── Types ───────────────────────────────────────────────────────────
-
-export interface WallpaperDTO {
-  path: string;
-  type: 'image' | 'gif' | 'video';
-  ext: string;
-  backend: string;
-  size: number;
-  mtime: number;
-  resolution: string;
-}
-
-export interface LibraryCountDTO {
-  total: number;
-  images: number;
-  gifs: number;
-  videos: number;
-}
-
-export interface StatusDTO {
-  configDir: string;
-  current: string;
-  lastBackend: string;
-  sourceCount: number;
-}
-
-export interface CommandResult {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-export interface SourceDTO {
-  path: string;
-  exists: boolean;
-  isWE: boolean;
-  label: string;
-}
-
-export interface HistoryDTO {
-  path: string;
-}
-
-export interface ThumbnailDTO {
-  path: string;
-  thumbnail?: string;
-  cacheHit: boolean;
-}
-
-export interface ThumbnailCacheDTO {
-  dir: string;
-  size: string;
-  entries: number;
-}
-
-// ── API functions ───────────────────────────────────────────────────
+// ── API functions (camelCase wrappers around generated PascalCase) ────────
 
 export const api = {
-  status: () => call<StatusDTO>('Status'),
-  apply: (path: string) => call<CommandResult>('Apply', path),
-  stop: () => call<CommandResult>('Stop'),
-  restore: () => call<CommandResult>('Restore'),
+  status: (): Promise<StatusDTO> =>
+    Bridge.Status().then((s: StatusDTO | null) => { if (!s) throw new Error('Status returned null'); return s; }),
 
-  libraryList: (source: string) => call<WallpaperDTO[]>('LibraryList', source),
-  libraryCount: () => call<LibraryCountDTO>('LibraryCount'),
-  rescan: () => call<CommandResult>('Rescan'),
+  apply: (path: string) => Bridge.Apply(path),
+  stop: () => Bridge.Stop(),
+  restore: () => Bridge.Restore(),
 
-  favoritesList: () => call<string[]>('FavoritesList'),
-  favoriteAdd: (path: string) => call<CommandResult>('FavoriteAdd', path),
-  favoriteRemove: (path: string) => call<CommandResult>('FavoriteRemove', path),
+  libraryList: (source: string): Promise<WallpaperDTO[]> =>
+    Bridge.LibraryList(source).then((v: WallpaperDTO[] | null) => v ?? []),
 
-  historyList: () => call<HistoryDTO[]>('HistoryList'),
-  historyClear: () => call<CommandResult>('HistoryClear'),
+  libraryCount: (): Promise<LibraryCountDTO> =>
+    Bridge.LibraryCount().then((v: LibraryCountDTO | null) => v ?? { total: 0, images: 0, gifs: 0, videos: 0 }),
 
-  sourcesList: () => call<SourceDTO[]>('SourcesList'),
-  sourceAdd: (path: string) => call<CommandResult>('SourceAdd', path),
-  sourceRemove: (path: string) => call<CommandResult>('SourceRemove', path),
-  validateSources: () => call<CommandResult>('ValidateSources'),
-  removeMissingSources: () => call<CommandResult>('RemoveMissingSources'),
-  scanSteamWorkshop: () => call<CommandResult>('ScanSteamWorkshop'),
+  rescan: () => Bridge.Rescan(),
 
-  configGet: (key: string) => call<string>('ConfigGet', key),
-  configSet: (key: string, value: string) => call<CommandResult>('ConfigSet', key, value),
+  favoritesList: (): Promise<string[]> =>
+    Bridge.FavoritesList().then((v: string[] | null) => v ?? []),
 
-  sqliteVerify: () => call<CommandResult>('SqliteVerify'),
-  sqliteResync: () => call<CommandResult>('SqliteResync'),
-  sqliteBackup: () => call<CommandResult>('SqliteBackup'),
-  sqliteRestore: (path: string) => call<CommandResult>('SqliteRestore', path),
-  sqliteExportFlat: () => call<CommandResult>('SqliteExportFlat'),
-  migrateToSqlite: () => call<CommandResult>('MigrateToSqlite'),
+  favoriteAdd: (path: string) => Bridge.FavoriteAdd(path),
+  favoriteRemove: (path: string) => Bridge.FavoriteRemove(path),
 
-  thumbnailFor: (path: string) => call<ThumbnailDTO>('ThumbnailFor', path),
-  thumbnailCacheStatus: () => call<ThumbnailCacheDTO>('ThumbnailCacheStatus'),
-  thumbnailCacheClear: () => call<CommandResult>('ThumbnailCacheClear'),
+  historyList: (): Promise<HistoryDTO[]> =>
+    Bridge.HistoryList().then((v: HistoryDTO[] | null) => v ?? []),
 
-  openPath: (path: string) => call<CommandResult>('OpenPath', path),
-  revealInFileManager: (path: string) => call<CommandResult>('RevealInFileManager', path),
-  browseDirectory: () => call<string>('BrowseDirectory'),
+  historyClear: () => Bridge.HistoryClear(),
+
+  sourcesList: (): Promise<SourceDTO[]> =>
+    Bridge.SourcesList().then((v: SourceDTO[] | null) => v ?? []),
+
+  sourceAdd: (path: string) => Bridge.SourceAdd(path),
+  sourceRemove: (path: string) => Bridge.SourceRemove(path),
+  validateSources: () => Bridge.ValidateSources(),
+  removeMissingSources: () => Bridge.RemoveMissingSources(),
+  scanSteamWorkshop: () => Bridge.ScanSteamWorkshop(),
+
+  configGet: (key: string) => Bridge.ConfigGet(key),
+  configSet: (key: string, value: string) => Bridge.ConfigSet(key, value),
+
+  sqliteVerify: () => Bridge.SqliteVerify(),
+  sqliteResync: () => Bridge.SqliteResync(),
+  sqliteBackup: () => Bridge.SqliteBackup(),
+  sqliteRestore: (path: string) => Bridge.SqliteRestore(path),
+  sqliteExportFlat: () => Bridge.SqliteExportFlat(),
+  migrateToSqlite: () => Bridge.MigrateToSqlite(),
+
+  thumbnailFor: (path: string) =>
+    Bridge.ThumbnailFor(path).then((v: ThumbnailDTO | null) => v ?? { path, cacheHit: false }),
+
+  thumbnailCacheStatus: () => Bridge.ThumbnailCacheStatus(),
+  thumbnailCacheClear: () => Bridge.ThumbnailCacheClear(),
+
+  openPath: (path: string) => Bridge.OpenPath(path),
+  revealInFileManager: (path: string) => Bridge.RevealInFileManager(path),
+  browseDirectory: () => Bridge.BrowseDirectory(),
 };
