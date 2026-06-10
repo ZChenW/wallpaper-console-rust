@@ -19,6 +19,11 @@ export interface LibraryCountDTO {
     "videos": number;
 }
 
+export interface LibraryPageDTO {
+    "total": number;
+    "items": WallpaperDTO[] | null;
+}
+
 export interface SourceDTO {
     "path": string;
     "exists": boolean;

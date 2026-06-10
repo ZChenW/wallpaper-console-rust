@@ -16,9 +16,18 @@
 | 7 | Sources View (grouped, add/remove/scan) | ✅ Complete |
 | 8 | Settings View (backends, library, storage/SQLite) | ✅ Complete |
 | 9 | Apply/Stop/Restore UX (status bar, async apply) | ✅ Complete |
-| 10 | Packaging and Install | 🟡 Partial (build ok, install script: see install.sh) |
+| 10 | Packaging and Install | ✅ Complete (side-by-side Rust CLI + Wails GUI install) |
 | 11 | niri Integration | ⬜ Pending (needs real-use validation) |
 | 12 | Deprecate Bash/Python | ⬜ Deferred (needs real-use validation) |
+
+## Current Migration Verdict
+
+The Rust implementation is now a usable side-by-side replacement candidate for the Bash/Python
+implementation, with the Rust CLI and Wails GUI as the supported path.
+
+Do not replace the original `wallpaper-console` / `wallpaper-console-gui` commands by default yet.
+Keep using the `-rust` command names until real-use validation passes for niri startup, source
+management, image/video apply, favorites/history, and SQLite maintenance.
 
 ## Baseline Checks
 
@@ -26,7 +35,7 @@
 |-------|--------|
 | `cargo fmt --check` | ✅ passes |
 | `cargo clippy --workspace -- -D warnings` | ✅ clean |
-| `cargo test --workspace` | ✅ 35/35 (23 integration + 7 wc-core + 5 wc-scan) |
+| `cargo test --workspace` | ✅ 44/44 (32 integration + 7 wc-core + 5 wc-scan) |
 | Smoke: `status` with temp XDG_CONFIG_HOME | ✅ works |
 | Smoke: `add` + `rescan` + `library-count` | ✅ works |
 
@@ -34,15 +43,17 @@
 
 | Check | Status |
 |-------|--------|
-| `npx tsc --noEmit` | ✅ passes |
-| `npx vite build` | ✅ 225KB JS + 7.5KB CSS (1591 modules) |
+| `npm run typecheck` | ✅ passes |
+| `npm run build` | ✅ passes |
 
 ## Wails Build
 
 | Check | Status |
 |-------|--------|
+| `go test ./...` | ✅ passes |
+| `go vet ./...` | ✅ passes |
 | `go build ./...` | ✅ passes |
-| `wails3 build` | ✅ passes → `apps/wails-gui/bin/wallpaper-console-gui` (19MB ELF) |
+| `PATH="$HOME/go/bin:$PATH" wails3 build` | ✅ passes → `apps/wails-gui/bin/wallpaper-console-gui` |
 | `wails3` CLI | ✅ installed at `~/go/bin/wails3` (v3.0.0-alpha.98) |
 
 ## Installation
@@ -70,8 +81,24 @@ The original Bash/Python install is never removed.
 
 See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 
-- **Completed:** 53/54 commands (+ `__preview__`)
-- **Remaining:** `tui` (stub — Wails GUI replaces TUI)
+- **Completed:** all non-TUI commands plus hidden `__preview__`
+- **Remaining:** `tui` (stub — Wails/Tauri GUI replaces the old control TUI unless a Rust terminal TUI is explicitly requested)
+
+## GUI Architecture Decision
+
+The production GUI path is currently **Wails + React + Rust CLI bridge**, with the following performance
+fixes implemented:
+
+- paginated library loading through `library-page-json`
+- SQLite-backed library pages when `storage_backend=sqlite`
+- frontend thumbnail queue with concurrency 2
+- Go-side thumbnail generation pool with duplicate in-flight suppression
+- smaller initial page size and incremental "load more" behavior
+
+An experimental Tauri app exists under `apps/tauri-gui/`, but it is excluded from the default Cargo
+workspace. Tauri v2 currently pulls `webkit2gtk-4.1` on Linux; this machine has `webkitgtk-6.0`
+installed and does not have `webkit2gtk-4.1.pc`. Until that dependency is installed or the GUI strategy
+switches to a framework that uses WebKitGTK 6 directly, Tauri is not part of the supported build gate.
 
 ## Known CLI Gaps
 
@@ -81,7 +108,7 @@ See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 | kitty icat / chafa image preview in fzf | ✅ Done | Phase 1 |
 | ffmpegthumbnailer video preview in fzf | ✅ Done | Phase 1 |
 | Rust `tui` (ratatui) | Low | Deferred — Wails GUI replaces TUI |
-| Flatpak Steam paths in `steam-workshop` | Low | Deferred |
+| Flatpak Steam paths in `steam-workshop` | ✅ Done | Native and Flatpak Steam paths are scanned |
 
 ## GUI Replacement Scope
 
@@ -103,8 +130,8 @@ See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 | wc-storage | 0 | — |
 | wc-backend | 0 | — |
 | wc-preview | 0 | — |
-| wc-cli | 0 | 23 |
-| **Total** | **12** | **23** |
+| wc-cli | 0 | 32 |
+| **Total** | **12** | **32** |
 
 ## Storage Backend Compatibility
 

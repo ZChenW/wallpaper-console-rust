@@ -10,6 +10,7 @@ export type {
     CommandResult,
     HistoryDTO,
     LibraryCountDTO,
+    LibraryPageDTO,
     SourceDTO,
     StatusDTO,
     ThumbnailCacheDTO,

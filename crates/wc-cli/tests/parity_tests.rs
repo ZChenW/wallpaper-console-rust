@@ -19,6 +19,15 @@ fn rust(args: &[&str], cd: &str) -> std::process::Output {
         .unwrap()
 }
 
+fn rust_with_home(args: &[&str], cd: &str, home: &str) -> std::process::Output {
+    Command::new(RUST_BIN)
+        .args(args)
+        .env("XDG_CONFIG_HOME", cd)
+        .env("HOME", home)
+        .output()
+        .unwrap()
+}
+
 #[test]
 fn add_and_sources() {
     let (_d, cd) = temp_config();
@@ -256,6 +265,32 @@ fn we_no_project_json_fallback_scan() {
         s.contains("pic.jpg"),
         "no-project dir should be fallback scanned: {}",
         s
+    );
+}
+
+#[test]
+fn steam_workshop_detects_flatpak_steam_path() {
+    let (_d, cd) = temp_config();
+    let home = format!("{}/home", cd);
+    let project = format!(
+        "{}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/workshop/content/431960/987",
+        home
+    );
+    std::fs::create_dir_all(&project).unwrap();
+
+    let out = rust_with_home(&["steam-workshop"], &cd, &home);
+    assert!(
+        out.status.success(),
+        "steam-workshop failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let out = rust(&["sources"], &cd);
+    let sources = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        sources.contains(&project),
+        "Flatpak Steam workshop project should be added: {}",
+        sources
     );
 }
 
@@ -551,5 +586,176 @@ fn sqlite_mode_remove_source_roundtrip() {
         !s.contains(&walls),
         "sources should not contain removed path: {}",
         s
+    );
+}
+
+// ── Direct SQLite read/debug commands ─────────────────────────────────────
+
+#[test]
+fn sqlite_debug_read_commands_read_database_directly() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    let fav = format!("{}/fav.png", cd);
+    let hist_new = format!("{}/new.png", cd);
+    let hist_old = format!("{}/old.mp4", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    std::fs::write(&fav, b"").unwrap();
+
+    rust(&["add", &walls], &cd);
+    rust(&["config-set", "alpha", "from-db"], &cd);
+    rust(&["favorite-add", &fav], &cd);
+    assert!(rust(&["migrate-to-sqlite"], &cd).status.success());
+
+    let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
+    let conn = rusqlite::Connection::open(&db_path).unwrap();
+    conn.execute("DELETE FROM history", []).unwrap();
+    conn.execute(
+        "INSERT INTO history (path, backend) VALUES (?1, 'awww')",
+        [&hist_old],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO history (path, backend) VALUES (?1, 'mpvpaper')",
+        [&hist_new],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
+        [&fav],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', 'awww')",
+        [],
+    )
+    .unwrap();
+    conn.close().unwrap();
+
+    let out = rust(&["sqlite-config-get", "alpha"], &cd);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "from-db");
+
+    let out = rust(&["sqlite-sources-list"], &cd);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&walls));
+
+    let out = rust(&["sqlite-favorites-list"], &cd);
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains(&fav));
+
+    let out = rust(&["sqlite-history-list"], &cd);
+    assert!(out.status.success());
+    let history = String::from_utf8_lossy(&out.stdout);
+    let first = history.lines().next().unwrap_or_default();
+    assert_eq!(
+        first, hist_new,
+        "history should be newest first: {}",
+        history
+    );
+
+    let out = rust(&["sqlite-current-read"], &cd);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), fav);
+
+    let out = rust(&["sqlite-last-backend-read"], &cd);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "awww");
+}
+
+#[test]
+fn sqlite_debug_read_commands_fail_without_database() {
+    let (_d, cd) = temp_config();
+    let out = rust(&["sqlite-sources-list"], &cd);
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wallpapers.db not found") || stderr.contains("migrate-to-sqlite"),
+        "missing DB error should be actionable: {}",
+        stderr
+    );
+}
+
+#[test]
+fn no_args_points_to_gui_or_tui_instead_of_plain_help_only() {
+    let (_d, cd) = temp_config();
+    let out = rust(&[], &cd);
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("wallpaper-console-gui-rust")
+            || stdout.contains("Rust TUI is not implemented")
+            || stdout.contains("GUI"),
+        "no-arg output should explain the interactive Rust entry point: {}",
+        stdout
+    );
+}
+
+#[test]
+fn library_page_json_filters_sorts_and_paginates_sqlite() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    std::fs::write(format!("{}/a.png", walls), b"small").unwrap();
+    std::fs::write(format!("{}/b.png", walls), b"larger image").unwrap();
+    std::fs::write(format!("{}/movie.mp4", walls), b"video").unwrap();
+    rust(&["add", &walls], &cd);
+    assert!(rust(&["migrate-to-sqlite"], &cd).status.success());
+    assert!(rust(&["rescan"], &cd).status.success());
+
+    let out = rust(
+        &[
+            "library-page-json",
+            "--source",
+            "sqlite",
+            "--filter",
+            "image",
+            "--sort",
+            "name",
+            "--search",
+            ".png",
+            "--offset",
+            "1",
+            "--limit",
+            "1",
+        ],
+        &cd,
+    );
+    assert!(
+        out.status.success(),
+        "library-page-json failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let json: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(json["total"].as_u64(), Some(2));
+    let items = json["items"].as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert!(
+        items[0]["path"].as_str().unwrap().ends_with("b.png"),
+        "second name-sorted image should be b.png: {}",
+        json
+    );
+}
+
+#[test]
+fn library_page_json_reports_missing_sqlite_database() {
+    let (_d, cd) = temp_config();
+    let out = rust(
+        &[
+            "library-page-json",
+            "--source",
+            "sqlite",
+            "--offset",
+            "0",
+            "--limit",
+            "10",
+        ],
+        &cd,
+    );
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wallpapers.db not found"),
+        "missing DB error should be actionable: {}",
+        stderr
     );
 }

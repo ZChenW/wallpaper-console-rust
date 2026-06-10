@@ -139,6 +139,21 @@ enum Commands {
         #[arg(long)]
         sqlite: bool,
     },
+    #[command(name = "library-page-json")]
+    LibraryPageJson {
+        #[arg(long, default_value = "sqlite")]
+        source: String,
+        #[arg(long, default_value = "all")]
+        filter: String,
+        #[arg(long, default_value = "newest")]
+        sort: String,
+        #[arg(long, default_value = "")]
+        search: String,
+        #[arg(long, default_value_t = 0)]
+        offset: usize,
+        #[arg(long, default_value_t = 100)]
+        limit: usize,
+    },
     #[command(name = "favorites-json")]
     FavoritesJson,
     #[command(name = "history-json")]
@@ -159,6 +174,20 @@ enum Commands {
     SqliteRestore {
         backup: String,
     },
+    #[command(name = "sqlite-config-get")]
+    SqliteConfigGet {
+        key: String,
+    },
+    #[command(name = "sqlite-sources-list")]
+    SqliteSourcesList,
+    #[command(name = "sqlite-favorites-list")]
+    SqliteFavoritesList,
+    #[command(name = "sqlite-history-list")]
+    SqliteHistoryList,
+    #[command(name = "sqlite-current-read")]
+    SqliteCurrentRead,
+    #[command(name = "sqlite-last-backend-read")]
+    SqliteLastBackendRead,
 
     // ── System ───────────────────────────────────────────────────────
     Tui,
@@ -175,6 +204,9 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         None => {
+            println!(
+                "Rust TUI is not implemented yet. Use wallpaper-console-gui-rust for the GUI.\n"
+            );
             print_help();
             Ok(())
         }
@@ -327,10 +359,15 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         Commands::SteamWorkshop => {
             let home = std::env::var("HOME").unwrap_or_default();
             let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            // Prefer ~/.local/share/Steam; fall back to ~/.steam/steam.
+            // Prefer native Steam paths, then Flatpak Steam paths.
             for base in &[
                 format!("{}/.local/share/Steam", home),
                 format!("{}/.steam/steam", home),
+                format!(
+                    "{}/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+                    home
+                ),
+                format!("{}/.var/app/com.valvesoftware.Steam/.steam/steam", home),
             ] {
                 let ws = std::path::Path::new(base).join("steamapps/workshop/content/431960");
                 if ws.is_dir() {
@@ -648,6 +685,16 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 json_library_from_tsv(s)?;
             }
         }
+        Commands::LibraryPageJson {
+            source,
+            filter,
+            sort,
+            search,
+            offset,
+            limit,
+        } => {
+            json_library_page(s, &source, &filter, &sort, &search, offset, limit)?;
+        }
 
         Commands::FavoritesJson => {
             let favs = s.favorites_list()?;
@@ -701,6 +748,36 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             wc_storage::sqlite::restore(&s.cd, &PathBuf::from(&backup))?;
             println!("Restored.");
         }
+        Commands::SqliteConfigGet { key } => {
+            if let Some(value) = sqlite_config_get(&s.cd, &key)? {
+                println!("{}", value);
+            }
+        }
+        Commands::SqliteSourcesList => {
+            for path in sqlite_list_table_paths(&s.cd, "sources", "ORDER BY path")? {
+                println!("{}", path);
+            }
+        }
+        Commands::SqliteFavoritesList => {
+            for path in sqlite_list_table_paths(&s.cd, "favorites", "ORDER BY path")? {
+                println!("{}", path);
+            }
+        }
+        Commands::SqliteHistoryList => {
+            for path in sqlite_list_table_paths(&s.cd, "history", "ORDER BY id DESC")? {
+                println!("{}", path);
+            }
+        }
+        Commands::SqliteCurrentRead => {
+            if let Some(value) = sqlite_state_get(&s.cd, "current")? {
+                println!("{}", value);
+            }
+        }
+        Commands::SqliteLastBackendRead => {
+            if let Some(value) = sqlite_state_get(&s.cd, "last_backend")? {
+                println!("{}", value);
+            }
+        }
 
         Commands::Tui => {
             println!("TUI not yet implemented in Rust — use the Bash wallpaper-console for TUI.");
@@ -714,6 +791,64 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
+
+fn sqlite_connection(cd: &ConfigDir) -> anyhow::Result<rusqlite::Connection> {
+    let db_path = cd.db_path();
+    if !db_path.exists() {
+        anyhow::bail!("wallpapers.db not found. Run migrate-to-sqlite first.");
+    }
+    rusqlite::Connection::open(&db_path)
+        .map_err(|e| anyhow::anyhow!("failed to open wallpapers.db: {}", e))
+}
+
+fn sqlite_config_get(cd: &ConfigDir, key: &str) -> anyhow::Result<Option<String>> {
+    let conn = sqlite_connection(cd)?;
+    match conn.query_row(
+        "SELECT value FROM config WHERE key=?1",
+        rusqlite::params![key],
+        |row| row.get(0),
+    ) {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("SQLite config read failed: {}", e)),
+    }
+}
+
+fn sqlite_state_get(cd: &ConfigDir, key: &str) -> anyhow::Result<Option<String>> {
+    let conn = sqlite_connection(cd)?;
+    match conn.query_row(
+        "SELECT value FROM state WHERE key=?1",
+        rusqlite::params![key],
+        |row| row.get(0),
+    ) {
+        Ok(value) => Ok(Some(value)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(anyhow::anyhow!("SQLite state read failed: {}", e)),
+    }
+}
+
+fn sqlite_list_table_paths(
+    cd: &ConfigDir,
+    table: &str,
+    order_clause: &str,
+) -> anyhow::Result<Vec<String>> {
+    let conn = sqlite_connection(cd)?;
+    let sql = match table {
+        "sources" | "favorites" | "history" => {
+            format!("SELECT path FROM {} {}", table, order_clause)
+        }
+        _ => anyhow::bail!("unsupported SQLite path table: {}", table),
+    };
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| anyhow::anyhow!("SQLite {} read failed: {}", table, e))?;
+    let rows = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| anyhow::anyhow!("SQLite {} read failed: {}", table, e))?
+        .collect::<Result<Vec<String>, _>>()
+        .map_err(|e| anyhow::anyhow!("SQLite {} read failed: {}", table, e))?;
+    Ok(rows)
+}
 
 fn config_backend_for_type(s: &StorageApi, ftype: wc_core::types::FileType) -> Backend {
     match ftype {
@@ -955,9 +1090,11 @@ fn print_help() {
         "  config-get KEY       config-set KEY VAL\n",
         "  rescan               library              library-count\n",
         "  browse-library (fzf) random-library       library-json [--tsv|--sqlite]\n",
-        "  favorites-json       history-json\n",
+        "  library-page-json    favorites-json       history-json\n",
         "  migrate-to-sqlite    sqlite-verify        sqlite-resync\n",
         "  sqlite-export-flat   sqlite-backup         sqlite-restore BACKUP\n",
+        "  sqlite-config-get KEY sqlite-sources-list   sqlite-favorites-list\n",
+        "  sqlite-history-list  sqlite-current-read   sqlite-last-backend-read\n",
         "  tui\n",
     ));
 }
@@ -1008,5 +1145,150 @@ fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
         .collect();
     let rows = rows?;
     println!("{}", serde_json::to_string_pretty(&rows)?);
+    Ok(())
+}
+
+fn json_library_page(
+    s: &StorageApi,
+    source: &str,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    match source {
+        "sqlite" => json_library_page_from_sqlite(s, filter, sort, search, offset, limit),
+        "tsv" => json_library_page_from_tsv(s, filter, sort, search, offset, limit),
+        other => anyhow::bail!("unknown library source: {}", other),
+    }
+}
+
+fn validate_library_filter(filter: &str) -> anyhow::Result<&str> {
+    match filter {
+        "all" | "image" | "gif" | "video" => Ok(filter),
+        other => anyhow::bail!("unknown library filter: {}", other),
+    }
+}
+
+fn validate_library_sort(sort: &str) -> anyhow::Result<&str> {
+    match sort {
+        "newest" | "largest" | "name" => Ok(sort),
+        other => anyhow::bail!("unknown library sort: {}", other),
+    }
+}
+
+fn json_library_page_from_sqlite(
+    s: &StorageApi,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    use rusqlite::{params, Connection};
+
+    let filter = validate_library_filter(filter)?;
+    let sort = validate_library_sort(sort)?;
+    let db = s.cd.db_path();
+    if !db.exists() {
+        anyhow::bail!("wallpapers.db not found. Run migrate-to-sqlite and rescan first.");
+    }
+    let conn = Connection::open(&db)?;
+    let order_by = match sort {
+        "newest" => "mtime DESC, path ASC",
+        "largest" => "size DESC, path ASC",
+        "name" => "path ASC",
+        _ => unreachable!(),
+    };
+    let where_clause =
+        "WHERE (?1 = 'all' OR type = ?1) AND (?2 = '' OR lower(path) LIKE '%' || lower(?2) || '%')";
+
+    let total: i64 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM wallpapers {}", where_clause),
+        params![filter, search],
+        |row| row.get(0),
+    )?;
+
+    let sql = format!(
+        "SELECT path, type, ext, backend, size, mtime, resolution FROM wallpapers {} ORDER BY {} LIMIT ?3 OFFSET ?4",
+        where_clause, order_by
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows: Result<Vec<serde_json::Value>, rusqlite::Error> = stmt
+        .query_map(
+            params![filter, search, limit as i64, offset as i64],
+            |row: &rusqlite::Row<'_>| {
+                Ok(serde_json::json!({
+                    "path": row.get::<_, String>(0)?,
+                    "type": row.get::<_, String>(1)?,
+                    "ext": row.get::<_, String>(2)?,
+                    "backend": row.get::<_, String>(3)?,
+                    "size": row.get::<_, i64>(4)?,
+                    "mtime": row.get::<_, i64>(5)?,
+                    "resolution": row.get::<_, String>(6)?,
+                }))
+            },
+        )?
+        .collect();
+    let items = rows?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total": total,
+            "items": items,
+        }))?
+    );
+    Ok(())
+}
+
+fn json_library_page_from_tsv(
+    s: &StorageApi,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let filter = validate_library_filter(filter)?;
+    let sort = validate_library_sort(sort)?;
+    let search_lower = search.to_lowercase();
+    let mut entries: Vec<wc_core::types::WallpaperEntry> = library_entries(s)?
+        .into_iter()
+        .filter(|entry| filter == "all" || entry.file_type.as_str() == filter)
+        .filter(|entry| {
+            search.is_empty() || entry.path.as_str().to_lowercase().contains(&search_lower)
+        })
+        .collect();
+    match sort {
+        "newest" => entries.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path))),
+        "largest" => entries.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path))),
+        "name" => entries.sort_by(|a, b| a.path.cmp(&b.path)),
+        _ => unreachable!(),
+    }
+    let total = entries.len();
+    let items: Vec<serde_json::Value> = entries
+        .iter()
+        .skip(offset)
+        .take(limit)
+        .map(|e| {
+            serde_json::json!({
+                "path": e.path.to_string(),
+                "type": e.file_type.as_str(),
+                "ext": e.ext,
+                "backend": e.backend.as_str(),
+                "size": e.size,
+                "mtime": e.mtime,
+                "resolution": e.resolution,
+            })
+        })
+        .collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total": total,
+            "items": items,
+        }))?
+    );
     Ok(())
 }

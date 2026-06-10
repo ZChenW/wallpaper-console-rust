@@ -47,6 +47,11 @@ type LibraryCountDTO struct {
 	Videos int `json:"videos"`
 }
 
+type LibraryPageDTO struct {
+	Total int            `json:"total"`
+	Items []WallpaperDTO `json:"items"`
+}
+
 type HistoryDTO struct {
 	Path string `json:"path"`
 }
@@ -154,6 +159,23 @@ func (r *Runner) LibraryList(source string) ([]WallpaperDTO, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+func (r *Runner) LibraryPage(source, filter, sort, search string, offset, limit int) (*LibraryPageDTO, error) {
+	args := []string{
+		"library-page-json",
+		"--source", source,
+		"--filter", filter,
+		"--sort", sort,
+		"--search", search,
+		"--offset", fmt.Sprintf("%d", offset),
+		"--limit", fmt.Sprintf("%d", limit),
+	}
+	var page LibraryPageDTO
+	if err := r.runJSON(&page, args...); err != nil {
+		return nil, err
+	}
+	return &page, nil
 }
 
 func (r *Runner) LibraryCount() (*LibraryCountDTO, error) {
@@ -314,18 +336,64 @@ func (r *Runner) ThumbnailFor(path string) (*ThumbnailDTO, error) {
 		return dto, nil
 	}
 
-	// Generate thumbnail on the fly
+	thumbnailMu.Lock()
+	if thumbnailFailed[thumbPath] {
+		thumbnailMu.Unlock()
+		return dto, nil
+	}
+	if waiter, ok := thumbnailInFlight[thumbPath]; ok {
+		thumbnailMu.Unlock()
+		<-waiter.done
+		if waiter.err == nil && waiter.path != "" {
+			dto.Thumbnail = waiter.path
+			dto.CacheHit = false
+		}
+		return dto, nil
+	}
+	waiter := &thumbnailWaiter{done: make(chan struct{})}
+	thumbnailInFlight[thumbPath] = waiter
+	thumbnailMu.Unlock()
+
+	defer func() {
+		thumbnailMu.Lock()
+		if waiter.err != nil {
+			thumbnailFailed[thumbPath] = true
+		}
+		delete(thumbnailInFlight, thumbPath)
+		thumbnailMu.Unlock()
+		close(waiter.done)
+	}()
+
+	// Generate thumbnail on the fly with global backpressure.
 	os.MkdirAll(cacheDir, 0755)
-	if err := generateThumbnail(path, thumbPath); err == nil {
+	thumbnailSem <- struct{}{}
+	err = generateThumbnail(path, thumbPath)
+	<-thumbnailSem
+	if err == nil {
 		dto.Thumbnail = thumbPath
 		dto.CacheHit = false
+		waiter.path = thumbPath
+	} else {
+		waiter.err = err
 	}
 	return dto, nil
 }
 
 // generateThumbnail creates a 400px-wide webp thumbnail.
-// Tries ImageMagick first, then ffmpeg for videos.
+// Images/GIFs use ImageMagick; videos use ffmpeg directly.
 func generateThumbnail(src, dst string) error {
+	ext := strings.ToLower(strings.TrimPrefix(filepath.Ext(src), "."))
+	if isVideoExt(ext) {
+		if _, err := exec.LookPath("ffmpeg"); err == nil {
+			cmd := exec.Command("ffmpeg", "-y", "-ss", "1", "-i", src,
+				"-frames:v", "1", "-q:v", "3", dst)
+			if err := cmd.Run(); err == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("no video thumbnail generator available")
+	}
+
 	// ImageMagick (works for images and GIFs)
 	if _, err := exec.LookPath("magick"); err == nil {
 		cmd := exec.Command("magick", src, "-resize", "400x", "-quality", "80",
@@ -343,15 +411,16 @@ func generateThumbnail(src, dst string) error {
 			return nil
 		}
 	}
-	// ffmpeg for videos
-	if _, err := exec.LookPath("ffmpeg"); err == nil {
-		cmd := exec.Command("ffmpeg", "-y", "-ss", "1", "-i", src,
-			"-frames:v", "1", "-q:v", "3", dst)
-		if err := cmd.Run(); err == nil {
-			return nil
-		}
-	}
 	return fmt.Errorf("no thumbnail generator available")
+}
+
+func isVideoExt(ext string) bool {
+	switch ext {
+	case "mp4", "webm", "mkv", "mov":
+		return true
+	default:
+		return false
+	}
 }
 
 func md5Sum(data []byte) [16]byte {

@@ -51,6 +51,9 @@ func (b *Bridge) Restore() CommandResult          { return b.runner.Restore() }
 func (b *Bridge) LibraryList(source string) ([]WallpaperDTO, error) {
 	return b.runner.LibraryList(source)
 }
+func (b *Bridge) LibraryPage(source, filter, sort, search string, offset, limit int) (*LibraryPageDTO, error) {
+	return b.runner.LibraryPage(source, filter, sort, search, offset, limit)
+}
 func (b *Bridge) LibraryCount() (*LibraryCountDTO, error) { return b.runner.LibraryCount() }
 func (b *Bridge) Rescan() CommandResult                   { return b.runner.Rescan() }
 

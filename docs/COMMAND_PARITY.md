@@ -4,7 +4,7 @@ Reference implementation: `/home/chakew/Projects/wallpaper-console/wallpaper-con
 Run with `XDG_CONFIG_HOME=$(mktemp -d)` for clean testing.
 
 ## Wallpaper commands
-- [x] `browse` / `browse-all` — fzf picker, apply on selection (no preview yet)
+- [x] `browse` / `browse-all` — fzf picker with preview, apply on selection
 - [x] `browse-images` — image-only fzf
 - [x] `browse-gifs` — GIF-only fzf
 - [x] `browse-videos` — video-only fzf
@@ -65,6 +65,12 @@ Run with `XDG_CONFIG_HOME=$(mktemp -d)` for clean testing.
 - [x] `sqlite-export-flat`
 - [x] `sqlite-backup`
 - [x] `sqlite-restore BACKUP`
+- [x] `sqlite-config-get KEY`
+- [x] `sqlite-sources-list`
+- [x] `sqlite-favorites-list`
+- [x] `sqlite-history-list`
+- [x] `sqlite-current-read`
+- [x] `sqlite-last-backend-read`
 
 ## System
 - [x] `restore`
@@ -82,8 +88,6 @@ Run with `XDG_CONFIG_HOME=$(mktemp -d)` for clean testing.
 - [x] setsid -f for awww-daemon
 - [x] mpvpaper --fork for video detachment
 
-## Known gaps (non-blocking for parity)
-- fzf preview pane (`__preview__`) not yet wired — Bash uses a subprocess for thumbnail previews
-- `tui` subcommand is a stub — full TUI requires GTK or ratatui port
-- `steam-workshop` does not scan Flatpak Steam paths (Bash does)
-- sort commands sort by scanned metadata, not library.tsv metadata
+## Known gaps
+- `tui` subcommand is a stub — Wails/Tauri GUI is intended to replace the old Bash control TUI unless the user explicitly asks for a Rust terminal TUI.
+- sort commands sort by scanned metadata, not library.tsv metadata.

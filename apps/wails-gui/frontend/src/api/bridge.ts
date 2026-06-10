@@ -6,6 +6,7 @@ import type {
   CommandResult,
   HistoryDTO,
   LibraryCountDTO,
+  LibraryPageDTO,
   SourceDTO,
   StatusDTO,
   ThumbnailCacheDTO,
@@ -18,6 +19,7 @@ export type {
   CommandResult,
   HistoryDTO,
   LibraryCountDTO,
+  LibraryPageDTO,
   SourceDTO,
   StatusDTO,
   ThumbnailCacheDTO,
@@ -40,6 +42,17 @@ export const api = {
 
   libraryCount: (): Promise<LibraryCountDTO> =>
     Bridge.LibraryCount().then((v: LibraryCountDTO | null) => v ?? { total: 0, images: 0, gifs: 0, videos: 0 }),
+
+  libraryPage: (
+    source: string,
+    filter: string,
+    sort: string,
+    search: string,
+    offset: number,
+    limit: number,
+  ): Promise<LibraryPageDTO> =>
+    Bridge.LibraryPage(source, filter, sort, search, offset, limit)
+      .then((v: LibraryPageDTO | null) => v ?? { total: 0, items: [] }),
 
   rescan: () => Bridge.Rescan(),
 

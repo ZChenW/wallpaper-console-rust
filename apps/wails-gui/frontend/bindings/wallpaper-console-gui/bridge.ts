@@ -69,6 +69,10 @@ export function LibraryList(source: string): $CancellablePromise<$models.Wallpap
     return $Call.ByName("main.Bridge.LibraryList", source);
 }
 
+export function LibraryPage(source: string, filter: string, sort: string, search: string, offset: number, limit: number): $CancellablePromise<$models.LibraryPageDTO | null> {
+    return $Call.ByName("main.Bridge.LibraryPage", source, filter, sort, search, offset, limit);
+}
+
 export function MigrateToSqlite(): $CancellablePromise<$models.CommandResult> {
     return $Call.ByName("main.Bridge.MigrateToSqlite");
 }
