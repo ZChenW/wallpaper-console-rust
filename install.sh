@@ -18,24 +18,37 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PREFIX="${PREFIX:-$HOME/.local}"
-BUILD_ONLY=false
-
-for arg in "$@"; do
-  case "$arg" in
-    --build-only) BUILD_ONLY=true ;;
-    --prefix) shift; PREFIX="$1"; shift ;;
-    --prefix=*) PREFIX="${arg#*=}" ;;
-  esac
-done
-
-BIN_DIR="$PREFIX/bin"
 
 # ── Colour helpers ────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 info()  { printf "${GREEN}[INFO]${NC} %s\n" "$*"; }
 warn()  { printf "${YELLOW}[WARN]${NC} %s\n" "$*" >&2; }
 err()   { printf "${RED}[ERROR]${NC} %s\n" "$*" >&2; exit 1; }
+
+PREFIX="${PREFIX:-$HOME/.local}"
+BUILD_ONLY=false
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --build-only) BUILD_ONLY=true ;;
+    --prefix)
+      if [[ $# -lt 2 || "$2" == --* ]]; then
+        err "--prefix requires a value (e.g. --prefix /usr/local)"
+      fi
+      PREFIX="$2"; shift ;;
+    --prefix=*) PREFIX="${1#*=}" ;;
+    *)
+      err "Unknown option: $1
+
+Usage: $0 [--build-only] [--prefix DIR]
+
+  --build-only  Build only, don't install
+  --prefix DIR  Install prefix (default: ~/.local)" ;;
+  esac
+  shift
+done
+
+BIN_DIR="$PREFIX/bin"
 
 # ── Prerequisites check ───────────────────────────────────────────────────
 check_cmd() { command -v "$1" >/dev/null 2>&1 || err "$1 is required but not found. Install it first."; }
@@ -67,8 +80,14 @@ info "Wails GUI built: $WAILS_GUI"
 # ── Verify binaries ────────────────────────────────────────────────────────
 info "Verifying binaries..."
 
-"$RUST_CLI" status >/dev/null 2>&1 || warn "Rust CLI smoke test failed (may be ok if no config exists)"
+# Smoke test with temp config — never touches real ~/.config/wallpaper-console
+tmp_config="$(mktemp -d)"
+trap "rm -rf '$tmp_config'" EXIT
+XDG_CONFIG_HOME="$tmp_config" "$RUST_CLI" status >/dev/null 2>&1 \
+  || warn "Rust CLI smoke test failed (may be ok if no config exists)"
 "$RUST_CLI" --version >/dev/null 2>&1 || warn "Rust CLI --version failed"
+rm -rf "$tmp_config"
+trap - EXIT
 
 if [[ ! -x "$WAILS_GUI" ]]; then
   err "Wails GUI binary not found or not executable: $WAILS_GUI"
