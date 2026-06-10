@@ -2,6 +2,24 @@
 
 > Auto-generated as part of Phase 0 baseline. Updated: 2026-06-10.
 
+## Phase Completion
+
+| Phase | Description | Status |
+|-------|-------------|--------|
+| 0 | Freeze and Baseline | ✅ Complete |
+| 1 | Rust CLI Preview Readiness (__preview__ + fzf) | ✅ Complete |
+| 2 | Wails App Shell (Go backend + bridge) | ✅ Complete |
+| 3 | React UI Foundation (Vite + TS + layout) | ✅ Complete |
+| 4 | Library Grid (virtualized, filter, sort, search) | ✅ Complete |
+| 5 | Thumbnail Strategy (cache modes, lazy loading) | ✅ Complete |
+| 6 | Favorites & History (grid, random, clear confirm) | ✅ Complete |
+| 7 | Sources View (grouped, add/remove/scan) | ✅ Complete |
+| 8 | Settings View (backends, library, storage/SQLite) | ✅ Complete |
+| 9 | Apply/Stop/Restore UX (status bar, async apply) | ✅ Complete |
+| 10 | Packaging and Install | ⬜ Pending (needs wails build) |
+| 11 | niri Integration | ⬜ Pending (needs installed binary) |
+| 12 | Deprecate Bash/Python | ⬜ Deferred (needs real-use validation) |
+
 ## Baseline Checks
 
 | Check | Status |
@@ -12,20 +30,34 @@
 | Smoke: `status` with temp XDG_CONFIG_HOME | ✅ works |
 | Smoke: `add` + `rescan` + `library-count` | ✅ works |
 
+## Frontend Build
+
+| Check | Status |
+|-------|--------|
+| `npx tsc --noEmit` | ✅ passes |
+| `npx vite build` | ✅ 225KB JS + 7.5KB CSS (1591 modules) |
+
+## Wails Build
+
+| Check | Status |
+|-------|--------|
+| `go build` | ⬜ blocked — needs `webkitgtk-6.0` system package |
+| Install command | `sudo pacman -S webkitgtk-6.0` |
+
 ## CLI Command Parity
 
 See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 
-- **Completed:** 52/53 commands
-- **Remaining:** `tui` (stub — planned for Wails GUI replacement)
+- **Completed:** 53/54 commands (+ `__preview__`)
+- **Remaining:** `tui` (stub — Wails GUI replaces TUI)
 
 ## Known CLI Gaps
 
 | Gap | Severity | Plan |
 |-----|----------|------|
-| fzf `__preview__` subcommand | Medium | Phase 1 |
-| kitty icat / chafa image preview in fzf | Medium | Phase 1 |
-| ffmpegthumbnailer video preview in fzf | Medium | Phase 1 |
+| fzf `__preview__` subcommand | ✅ Done | Phase 1 |
+| kitty icat / chafa image preview in fzf | ✅ Done | Phase 1 |
+| ffmpegthumbnailer video preview in fzf | ✅ Done | Phase 1 |
 | Rust `tui` (ratatui) | Low | Deferred — Wails GUI replaces TUI |
 | Flatpak Steam paths in `steam-workshop` | Low | Deferred |
 
@@ -33,12 +65,12 @@ See [COMMAND_PARITY.md](COMMAND_PARITY.md) for the full checklist.
 
 | Python GTK View | Wails React Replacement | Phase |
 |-----------------|------------------------|-------|
-| Library grid | Library grid with virtualization | Phase 4 |
-| Favorites | Favorites grid | Phase 6 |
-| History | History list/grid | Phase 6 |
-| Sources | Sources view with groups | Phase 7 |
-| Settings | Settings view (backends, storage, thumbnails) | Phase 8 |
-| Thumbnail cache | Rust-owned thumbnail generation | Phase 5 |
+| Library grid | LibraryView (virtualized grid, filter, sort, search) | 4 ✅ |
+| Favorites | FavoritesView (grid, random, remove) | 6 ✅ |
+| History | HistoryView (grid, random, clear with confirm) | 6 ✅ |
+| Sources | SourcesView (grouped, add/remove/scan WE) | 7 ✅ |
+| Settings | SettingsView (backends, library, storage/SQLite, cache) | 8 ✅ |
+| Thumbnail cache | Lazy loading, cache/icon/original modes | 5 ✅ |
 
 ## Test Count
 

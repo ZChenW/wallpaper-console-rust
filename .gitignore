@@ -1,2 +1,6 @@
 target/
 Cargo.lock
+
+# Wails / frontend
+apps/wails-gui/frontend/node_modules/
+apps/wails-gui/frontend/dist/
