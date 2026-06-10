@@ -130,10 +130,10 @@ select:focus, input:focus { border-color: #555; }
 
 /* ── Wallpaper Grid ────────────────────────────────────────────────── */
 .wallpaper-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
-  gap: 10px;
-  padding-bottom: 100px;
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* Virtualizer rows handle grid layout — container is scrollport only. */
 }
 .wallpaper-card {
   background: #1e1e1e;

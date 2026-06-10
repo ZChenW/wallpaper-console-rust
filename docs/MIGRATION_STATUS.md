@@ -10,8 +10,8 @@
 | 1 | Rust CLI Preview Readiness (__preview__ + fzf) | ✅ Complete |
 | 2 | Wails App Shell (Go backend + bridge) | ✅ Complete |
 | 3 | React UI Foundation (Vite + TS + layout) | ✅ Complete |
-| 4 | Library Grid (virtualized, filter, sort, search) | ✅ Complete |
-| 5 | Thumbnail Strategy (cache modes, lazy loading) | ✅ Complete |
+| 4 | Library Grid (virtual scroll via @tanstack/react-virtual, filter, sort, search) | ✅ Complete |
+| 5 | Thumbnail Strategy (useThumbnailQueue, Go pool, lazy loading, dedup) | ✅ Complete |
 | 6 | Favorites & History (grid, random, clear confirm) | ✅ Complete |
 | 7 | Sources View (grouped, add/remove/scan) | ✅ Complete |
 | 8 | Settings View (backends, library, storage/SQLite) | ✅ Complete |

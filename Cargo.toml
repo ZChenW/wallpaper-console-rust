@@ -8,11 +8,10 @@ members = [
     "crates/wc-cli",
     "crates/wc-preview",
     "xtask",
+    "apps/tauri-gui/src-tauri",
 ]
 exclude = [
-    # Optional experiment. Tauri v2 currently requires webkit2gtk-4.1 on Linux,
-    # while the Arch/Wails path uses webkitgtk-6.0.
-    "apps/tauri-gui/src-tauri",
+    # Tauri v2 now builds — webkit2gtk-4.1 is available alongside webkitgtk-6.0.
 ]
 
 [workspace.package]

@@ -23,11 +23,10 @@ The Wails path has received the planned performance fixes: paginated SQLite-back
 frontend thumbnail queueing, Go-side thumbnail worker limiting, duplicate in-flight suppression, and a
 smaller initial page size.
 
-The Tauri path exists under `apps/tauri-gui/` as an experiment, but is not part of the default build
-gate on this machine. Tauri v2 currently resolves to `webkit2gtk-4.1` on Linux; this Arch environment
-has `webkitgtk-6.0` available and does not provide `webkit2gtk-4.1.pc`. Until that dependency is
-installed or the GUI strategy changes to a WebKitGTK 6-compatible shell, Wails remains the supported
-GUI target.
+The Tauri path exists under `apps/tauri-gui/` as an experiment. `webkit2gtk-4.1` (v2.52.4) is now
+installed alongside `webkitgtk-6.0` (v2.52.4). Tauri v2 compiles (`cargo check` passes), but is not
+yet the default GUI. Wails remains the stable/supported GUI target until Tauri passes full build
+verification and real-use smoke testing.
 
 The migration should not replace the old Bash/Python command names by default until real-use validation
 passes.
