@@ -276,6 +276,202 @@ select:focus, input:focus { border-color: #555; }
 }
 .load-more button:hover { background: #2a2a2a; }
 
+/* ── Light Theme ───────────────────────────────────────────────────── */
+:root {
+  color-scheme: light;
+  --bg: #f6f7fb;
+  --panel: #ffffff;
+  --panel-alt: #f1f4f8;
+  --panel-hover: #e8edf4;
+  --text: #20242c;
+  --text-muted: #667085;
+  --text-soft: #8a94a6;
+  --border: #d9dee8;
+  --border-strong: #c4ccda;
+  --primary-bg: #e9f1ff;
+  --primary-bg-hover: #dceaff;
+  --primary: #2563eb;
+  --primary-strong: #1d4ed8;
+  --danger-bg: #fff1f1;
+  --danger-bg-hover: #ffe1e1;
+  --danger: #dc2626;
+  --success-bg: #ecfdf3;
+  --success-border: #bbf7d0;
+  --success: #15803d;
+  --warning-bg: #fff7dc;
+  --warning: #a16207;
+  --shadow: rgba(15, 23, 42, 0.14);
+}
+
+body {
+  color: var(--text);
+  background: var(--bg);
+}
+
+.main-content { background: var(--bg); }
+
+.sidebar,
+.toolbar,
+.statusbar {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.sidebar-btn,
+.toolbar-btn,
+.statusbar,
+.toolbar-title,
+.view-header h2,
+.wallpaper-name,
+.context-menu button,
+.dialog-title,
+.source-label,
+.config-label,
+.btn,
+.dialog-actions button {
+  color: var(--text);
+}
+
+.sidebar-btn { color: var(--text-muted); }
+.sidebar-btn:hover { background: var(--panel-hover); color: var(--text); }
+.sidebar-btn.active { background: var(--primary-bg); color: var(--primary); }
+
+.toolbar-btn { color: var(--text-muted); }
+.toolbar-btn:hover { background: var(--panel-hover); color: var(--text); }
+.toolbar-btn.danger:hover { background: var(--danger-bg-hover); color: var(--danger); }
+
+.statusbar { color: var(--text-muted); }
+.statusbar-badge {
+  background: var(--primary-bg);
+  color: var(--primary);
+}
+.statusbar-sep { color: var(--border-strong); }
+
+.search-box,
+select,
+input[type="text"],
+input[type="number"],
+.btn,
+.load-more button {
+  background: var(--panel);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.search-box input {
+  color: var(--text);
+}
+
+.search-box input::placeholder,
+.wallpaper-meta,
+.source-path,
+.source-remove,
+.config-key,
+.config-desc,
+.loading,
+.empty-state {
+  color: var(--text-muted);
+}
+
+select:focus,
+input:focus {
+  border-color: var(--primary);
+}
+
+.btn:hover,
+.load-more button:hover {
+  background: var(--panel-hover);
+}
+
+.btn.primary,
+.dialog-actions button.primary {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #ffffff;
+}
+
+.btn.primary:hover,
+.dialog-actions button.primary:hover {
+  background: var(--primary-strong);
+}
+
+.btn.danger,
+.context-menu button.danger,
+.dialog-actions button.danger {
+  color: var(--danger);
+  border-color: #fecaca;
+}
+
+.btn.danger:hover,
+.context-menu button.danger:hover,
+.dialog-actions button.danger:hover {
+  background: var(--danger-bg-hover);
+}
+
+.wallpaper-card,
+.source-item {
+  background: var(--panel);
+  border-color: var(--border);
+}
+
+.wallpaper-card:hover { border-color: var(--primary); }
+
+.wallpaper-thumb {
+  background: var(--panel-alt);
+}
+
+.context-menu,
+.dialog {
+  background: var(--panel);
+  border-color: var(--border);
+  box-shadow: 0 10px 32px var(--shadow);
+}
+
+.context-menu button:hover,
+.dialog-actions button:hover {
+  background: var(--panel-hover);
+}
+
+.dialog-overlay {
+  background: rgba(15, 23, 42, 0.24);
+}
+
+.dialog-message,
+.source-group-header,
+.settings-group h3 {
+  color: var(--text-muted);
+}
+
+.source-group-header {
+  background: var(--panel);
+  border: 1px solid var(--border);
+}
+
+.source-remove:hover { color: var(--danger); }
+.text-green { color: var(--success); }
+.text-red { color: var(--danger); }
+
+.settings-group h3 {
+  border-color: var(--border);
+}
+
+.result-banner.success {
+  background: var(--success-bg);
+  border-color: var(--success-border);
+  color: var(--success);
+}
+
+.result-banner.error {
+  background: var(--danger-bg);
+  border-color: #fecaca;
+  color: var(--danger);
+}
+
+.stale-badge {
+  background: var(--warning-bg);
+  color: var(--warning);
+}
+
 /* ── Animation ─────────────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 .spin { animation: spin 1s linear infinite; }

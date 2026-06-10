@@ -2,6 +2,7 @@ package main
 
 import (
 	"embed"
+	"io/fs"
 	"net/http"
 	"os"
 
@@ -13,12 +14,17 @@ var assets embed.FS
 
 func main() {
 	bridge := NewBridge()
+	dist, err := fs.Sub(assets, "frontend/dist")
+	if err != nil {
+		println("Error:", err.Error())
+		os.Exit(1)
+	}
 
 	app := application.New(application.Options{
 		Name:        "wallpaper-console-gui",
 		Description: "Terminal wallpaper manager GUI",
 		Assets: application.AssetOptions{
-			Handler: http.FileServer(http.FS(assets)),
+			Handler: http.FileServer(http.FS(dist)),
 		},
 		Services: []application.Service{
 			application.NewService(bridge),
@@ -45,8 +51,7 @@ func main() {
 	})
 
 	window.Center()
-	err := app.Run()
-	if err != nil {
+	if err := app.Run(); err != nil {
 		println("Error:", err.Error())
 		os.Exit(1)
 	}
