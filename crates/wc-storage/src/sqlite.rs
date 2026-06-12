@@ -1222,6 +1222,36 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn verify_returns_err_on_missing_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // Corrupt the schema by dropping the config table.
+        let conn = rusqlite::Connection::open(&cd.db_path()).expect("should open db");
+        conn.execute("DROP TABLE config", [])
+            .expect("should drop config table");
+
+        let result = crate::sqlite::verify(&cd);
+        assert!(
+            result.is_err(),
+            "missing table should return Err, got: {:?}",
+            result
+        );
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.to_lowercase().contains("sqlite")
+                || err_msg.to_lowercase().contains("no such table"),
+            "error should indicate SQLite problem, got: {}",
+            err_msg
+        );
+    }
 }
 
 // ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────

@@ -282,18 +282,29 @@ pub fn preflight(project_dir: &str, s: &StorageApi) -> Result<PreflightResult, W
     })
 }
 
-/// Check whether a browser process is still running with the given profile dir.
-/// Returns true if pgrep finds a matching process.
-fn check_browser_handoff(profile_dir: &std::path::Path) -> bool {
+/// Find the PID of a browser process still using the given profile dir.
+/// Returns None if no matching process is found.
+fn find_browser_handoff_pid(profile_dir: &std::path::Path) -> Option<u32> {
     let pattern = format!("--user-data-dir={}", profile_dir.display());
     match std::process::Command::new("pgrep")
         .args(["-f", "--", &pattern])
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
-        .status()
+        .output()
     {
-        Ok(status) => status.success(),
-        Err(_) => false,
+        Ok(output) if output.status.success() => {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let our_pid = std::process::id();
+            stdout.lines().find_map(|line| {
+                let pid: u32 = line.trim().parse().ok()?;
+                if pid != our_pid {
+                    Some(pid)
+                } else {
+                    None
+                }
+            })
+        }
+        _ => None,
     }
 }
 
@@ -342,10 +353,12 @@ pub fn apply_preflighted(s: &StorageApi, p: &PreflightResult) -> Result<(), WcEr
 
     std::thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        if status.success()
-            && check_browser_handoff(&profile_dir) {
+        if status.success() {
+            if let Some(actual_pid) = find_browser_handoff_pid(&profile_dir) {
+                let _ = s.config_set(PID_CONFIG_KEY, &actual_pid.to_string());
                 return Ok(());
             }
+        }
         let _ = s.config_set(PID_CONFIG_KEY, "");
         return Err(WcError::Other(format!(
             "Web wallpaper browser exited with status {}. \
@@ -447,6 +460,7 @@ pub fn stop(s: Option<&StorageApi>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::os::unix::fs::PermissionsExt;
 
     fn temp_project(json: &str) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -593,32 +607,170 @@ mod tests {
     }
 
     #[test]
-    fn handoff_detects_running_process() {
+    fn handoff_detects_running_pid() {
         let dir = tempfile::tempdir().unwrap();
         let profile = dir.path().join("web-wallpaper-profile");
         std::fs::create_dir_all(&profile).unwrap();
 
-        // sh -c execs the last command. Use && so sh stays alive with the
-        // --user-data-dir flag visible to pgrep -f.
-        let mut child = std::process::Command::new("sh")
+        let mut child = std::process::Command::new("python3")
             .arg("-c")
-            .arg("sleep 5 && true")
+            .arg("import time; time.sleep(5)")
             .arg(format!("--user-data-dir={}", profile.display()))
             .spawn()
             .unwrap();
+        let expected_pid = child.id();
 
-        assert!(check_browser_handoff(&profile));
+        let found = find_browser_handoff_pid(&profile);
+        assert!(
+            found.is_some(),
+            "should find a process with the profile pattern"
+        );
+        assert_eq!(found, Some(expected_pid));
 
         child.kill().ok();
         child.wait().ok();
     }
 
     #[test]
-    fn handoff_reports_false_when_no_process() {
+    fn handoff_returns_none_when_no_process() {
         let dir = tempfile::tempdir().unwrap();
-        let profile = dir.path().join("nonexistent-profile-12345");
+        let profile = dir.path().join("nonexistent-profile-56789");
         std::fs::create_dir_all(&profile).unwrap();
 
-        assert!(!check_browser_handoff(&profile));
+        assert_eq!(find_browser_handoff_pid(&profile), None);
+    }
+
+    fn make_test_preflight(mock_browser_path: &str, file_url: &str) -> PreflightResult {
+        PreflightResult {
+            browser: ResolvedBrowser {
+                path: mock_browser_path.to_string(),
+            },
+            file_url: file_url.to_string(),
+            config: WebWallpaperConfig {
+                enabled: true,
+                browser_path: mock_browser_path.to_string(),
+                audio: false,
+                extra_args: vec![],
+                window_width: 1920,
+                window_height: 1080,
+            },
+        }
+    }
+
+    fn make_test_storage(dir: &std::path::Path) -> StorageApi {
+        let cd = ConfigDir {
+            path: dir.to_path_buf(),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        StorageApi::new(cd)
+    }
+
+    #[test]
+    fn apply_exit_zero_with_handoff_records_actual_pid() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("wc-cfg");
+        let profile_dir = cfg_path.join("web-wallpaper-profile");
+
+        let mock_browser = dir.path().join("mock-browser.sh");
+        std::fs::write(
+            &mock_browser,
+            format!(
+                "#!/bin/sh\npython3 -c \"import time; time.sleep(5)\" --user-data-dir={} &\nexit 0\n",
+                profile_dir.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&mock_browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let project_dir = dir.path().join("webproj");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("index.html"), b"<html></html>").unwrap();
+
+        let s = make_test_storage(&cfg_path);
+        let preflight = make_test_preflight(
+            &mock_browser.to_string_lossy(),
+            &format!("file://{}", project_dir.join("index.html").display()),
+        );
+
+        let result = apply_preflighted(&s, &preflight);
+        assert!(
+            result.is_ok(),
+            "exit 0 with handoff should succeed, got: {:?}",
+            result
+        );
+
+        let stored_pid: u32 = s.config_get("web_wallpaper_pid", "0").parse().unwrap_or(0);
+        assert!(
+            stored_pid > 0,
+            "should have stored a valid PID, got: {}",
+            stored_pid
+        );
+
+        // Cleanup background process.
+        std::process::Command::new("kill")
+            .args(["-TERM", &stored_pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .ok();
+    }
+
+    #[test]
+    fn apply_exit_zero_no_handoff_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mock_browser = dir.path().join("mock-exit-0.sh");
+        std::fs::write(&mock_browser, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&mock_browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let project_dir = dir.path().join("webproj2");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("index.html"), b"<html></html>").unwrap();
+
+        let s = make_test_storage(&dir.path().join("wc-cfg-2"));
+        let preflight = make_test_preflight(
+            &mock_browser.to_string_lossy(),
+            &format!("file://{}", project_dir.join("index.html").display()),
+        );
+
+        let result = apply_preflighted(&s, &preflight);
+        assert!(result.is_err(), "exit 0 without handoff should be an error");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exited with status"),
+            "error should mention exit status"
+        );
+    }
+
+    #[test]
+    fn apply_exit_nonzero_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let mock_browser = dir.path().join("mock-exit-1.sh");
+        std::fs::write(&mock_browser, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&mock_browser, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let project_dir = dir.path().join("webproj3");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("index.html"), b"<html></html>").unwrap();
+
+        let s = make_test_storage(&dir.path().join("wc-cfg-3"));
+        let preflight = make_test_preflight(
+            &mock_browser.to_string_lossy(),
+            &format!("file://{}", project_dir.join("index.html").display()),
+        );
+
+        let result = apply_preflighted(&s, &preflight);
+        assert!(result.is_err(), "exit non-zero should be an error");
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("exited with status"),
+            "error should mention exit status"
+        );
     }
 }
