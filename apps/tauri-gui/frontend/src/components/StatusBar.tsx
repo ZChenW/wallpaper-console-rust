@@ -1,23 +1,25 @@
 import { Monitor, HardDrive, Image, Loader } from 'lucide-react';
 import { StatusDTO } from '../api/bridge';
+import { CommandFeedback } from '../api/feedback';
 
 interface Props {
   status: StatusDTO | null;
   applying: boolean;
+  feedback: CommandFeedback;
 }
 
-export default function StatusBar({ status, applying }: Props) {
+export default function StatusBar({ status, applying, feedback }: Props) {
   return (
     <footer className="statusbar">
       <div className="statusbar-left">
-        {applying && <Loader size={14} className="spin" />}
+        {applying && feedback.state === 'idle' && <Loader size={14} className="spin" />}
+        {feedback.state === 'running' && <Loader size={14} className="spin" />}
         <Monitor size={14} />
         <span className="statusbar-text">
-          {status?.current
-            ? status.current.split('/').pop()
-            : '(none)'}
+          {feedback.state === 'running' && feedback.label}
+          {feedback.state !== 'running' && (status?.current ? status.current.split('/').pop() : '(none)')}
         </span>
-        {status?.lastBackend && status.lastBackend !== '(none)' && (
+        {feedback.state === 'idle' && status?.lastBackend && status.lastBackend !== '(none)' && (
           <span className="statusbar-badge">{status.lastBackend}</span>
         )}
       </div>

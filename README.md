@@ -5,7 +5,7 @@ Rust rewrite of [wallpaper-console](https://github.com/ZChenW/wallpaper-console)
 ## Status
 
 **Beta — side-by-side with the Bash/Python version.**  
-All core CLI commands, SQLite storage, fzf browsing with preview, and a Wails React GUI are implemented. The original `wallpaper-console` (Bash) and `wallpaper-console-gui` (Python GTK) are not replaced; install uses `-rust` suffixed commands.
+All core CLI commands, SQLite storage, fzf browsing with preview, and React GUI (Tauri 2) are implemented. The original `wallpaper-console` (Bash) and `wallpaper-console-gui` (Python GTK) are not replaced; install uses `-rust` suffixed commands.
 
 ## Quick Start
 
@@ -13,11 +13,19 @@ All core CLI commands, SQLite storage, fzf browsing with preview, and a Wails Re
 # Build and install (CLI + GUI) side-by-side
 ./install.sh
 
+# Custom prefix / uninstall
+./install.sh --prefix "$HOME/.local"
+./install.sh --prefix "$HOME/.local" --uninstall
+
+# Installed commands:
+#   wallpaper-console-rust          (Rust CLI)
+#   wallpaper-console-gui-rust      (Tauri GUI)
+
 # Try the CLI with a temp config
 XDG_CONFIG_HOME=$(mktemp -d) wallpaper-console-rust status
 
-# Launch the GUI
-WALLPAPER_CONSOLE_RUST="$HOME/.local/bin/wallpaper-console-rust" wallpaper-console-gui-rust
+# Raw Tauri binary (before install)
+./target/release/wallpaper-console-tauri
 ```
 
 ## Features
@@ -32,40 +40,47 @@ WALLPAPER_CONSOLE_RUST="$HOME/.local/bin/wallpaper-console-rust" wallpaper-conso
 | History | `history` (fzf), `history-random`, `history-clear` |
 | Search / Sort | `search`, `search-source`, `search-type`, `sort-mtime`, `sort-size`, `sort-name` |
 | Config | `config-get`, `config-set` |
-| Library | `rescan` (incremental, profiled), `library`, `library-count`, `browse-library`, `random-library`, `library-json`, `library-page-json`, `favorites-json`, `history-json` |
+| Library | `rescan` (incremental, profiled), `library`, `library-count`, `browse-library`, `random-library`, `library-json`, `library-page-json`, `favorites-json`, `history-json`, `inspect` |
 | SQLite | `migrate-to-sqlite`, `sqlite-verify`, `sqlite-resync`, `sqlite-export-flat`, `sqlite-backup`, `sqlite-restore`, `sqlite-config-get`, `sqlite-sources-list`, `sqlite-favorites-list`, `sqlite-history-list`, `sqlite-current-read`, `sqlite-last-backend-read` |
 
 All browse/search/sort/favorites/history commands use fzf with image/video preview via `__preview__`.
 
-### Wails GUI (`wallpaper-console-gui-rust`)
+### React GUI (`wallpaper-console-gui-rust`, Tauri 2 app)
 
 - React 19 + TypeScript + Vite
 - Virtualized wallpaper grid (@tanstack/react-virtual)
-- Library: filter by type, sort, filename search, TSV/SQLite source toggle
+- Library: SQLite-backed paging, filter by type, sort, filename/title/Workshop ID search
 - Favorites & History views with apply, random, remove
 - Sources management: grouped (Wallpaper Engine / Other), add/remove/validate/scan
-- Settings: all backends (awww/mpvpaper), library config, SQLite management, thumbnail cache
-- Smart video thumbnails (multi-point frame sampling, 400px scaled, atomic writes)
+- Wallpaper Engine scene/web project indexing. Scene wallpapers use `linux-wallpaperengine`; Web wallpapers use the Chromium Web backend.
+- Settings: all backends (awww/mpvpaper/linux-wallpaperengine), library config, SQLite management, thumbnail cache
+- Smart video thumbnails (multi-point frame sampling, 400px scaled, atomic writes, short-lived failure cache)
 - Async apply/stop/restore with status bar
-- Light theme
+- Scan progress and cancellation with single-scan guard
+- Structured GUI command errors, optional debug logging, and developer performance overlay
+- Dark/light theme support
+- Installable as `.deb`/`.rpm` bundle
 
 ### Architecture
 
 ```
-┌────────────────────────────────┐
-│  React 19 + TypeScript         │  Wails GUI or Tauri GUI
-│  @tanstack/react-virtual       │
-├────────────────────────────────┤
-│  Wails v3 Go bridge (thin)     │  OR  Tauri v2 Rust commands
-├────────────────────────────────┤
-│  Rust CLI / crates             │
-│  wc-core  wc-storage  wc-scan  │
-│  wc-backend  wc-preview  wc-cli│
-├────────────────────────────────┤
-│  Runtime files                 │
-│  Flat files + SQLite           │
+┌──────────────────────────────┐
+│  React 19 + TypeScript       │
+│  @tanstack/react-virtual      │
+├──────────────────────────────┤
+│  Tauri v2 Rust commands       │
+│  Direct crate calls (no CLI) │
+├──────────────────────────────┤
+│  wc-app service layer         │
+│  apply / inspect / errors     │
+├──────────────────────────────┤
+│  Rust crates                  │
+│  wc-core  wc-storage  wc-scan│
+│  wc-backend  wc-preview       │
+├──────────────────────────────┤
+│  Runtime files + SQLite       │
 │  $XDG_CONFIG_HOME/wallpaper-console│
-└────────────────────────────────┘
+└──────────────────────────────┘
 ```
 
 ### Storage
@@ -77,48 +92,67 @@ Three modes: `file` (flat files only), `hybrid` (flat + SQLite mirror), `sqlite`
 - **Incremental rescan**: unchanged files reuse cached metadata (no identify/ffprobe)
 - **Source deduplication**: canonical paths eliminate symlink duplicates
 - **SQLite batch writes**: single transaction per rescan
+- **Atomic SQLite library replacement**: scan writes either fully commit or preserve the old library
+- **SQLite query indexes**: indexed type/sort paths for paged GUI loading
 - **Virtualized grid**: only visible rows rendered
-- **Thumbnail queue**: bounded concurrency, in-flight deduplication
+- **Thumbnail queue**: bounded concurrency, visible-item priority, stale-request cancellation, batched UI updates
+- **Tauri heavy commands**: scanning and thumbnail generation run on blocking worker threads
 
 ## Build & Verify
 
 ```bash
 # Rust
 cargo build --workspace
-cargo test --workspace          # 54/54
+cargo test --workspace
 cargo clippy --workspace -- -D warnings
-cargo fmt --check
+cargo fmt --all -- --check
 
-# Wails GUI
-cd apps/wails-gui
-go vet ./...
-go build ./...
-cd frontend && npm run typecheck && npm run build
-cd .. && wails3 build
+# Tauri frontend
+cd apps/tauri-gui/frontend
+npm run test:unit
+npm run typecheck
+npm run build
+npm run smoke
 
-# Tauri GUI (experimental)
-cd apps/tauri-gui/src-tauri
+# Tauri bundle
+cd ../src-tauri
 cargo tauri build --bundles deb,rpm
+
+# Install path verification
+cd ../../..
+./install.sh --build-only
+./scripts/test_install_build_only.sh
+
+# Library performance baseline
+SIZES="1000 10000 50000" ./scripts/benchmark_library.sh
 ```
+
+See [docs/TAURI_MANUAL_SMOKE_CHECKLIST.md](docs/TAURI_MANUAL_SMOKE_CHECKLIST.md) for manual GUI verification.
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development setup.
+See [docs/RELEASE.md](docs/RELEASE.md) for release and checksum commands.
+See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable library benchmark commands and current baseline numbers.
 
 ## Prerequisites
 
 - Rust 1.77+
-- Go 1.26+
 - Node.js 22+
-- `webkitgtk-6.0` (Wails) / `webkit2gtk-4.1` (Tauri)
-- `wails3` CLI (`go install github.com/wailsapp/wails/v3/cmd/wails3@latest`)
+- `webkit2gtk-4.1` (Tauri 2)
 - Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
+- Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
+  - Arch/AUR: `yay -S linux-wallpaperengine-git`
+- Optional: Chromium-based browser for Wallpaper Engine web wallpapers
+  - `chromium`, `google-chrome-stable`, `google-chrome`, `brave`, or `vivaldi`
+
+> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired and is not part of the current install/build path. See [docs/HISTORICAL_WAILS_ARCHIVE.md](docs/HISTORICAL_WAILS_ARCHIVE.md) for background.
 
 ## Rollback
 
 The original Bash/Python commands are never modified:
 
 ```bash
-# Remove the Rust variants
-rm ~/.local/bin/wallpaper-console-rust
-rm ~/.local/bin/wallpaper-console-gui-rust
+# Remove files installed by this script
+./install.sh --prefix "$HOME/.local" --uninstall
 ```
 
 ## License

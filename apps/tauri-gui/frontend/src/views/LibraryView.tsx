@@ -1,90 +1,128 @@
-import { useState, useEffect, useCallback, useMemo } from 'react';
+import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Search, Filter } from 'lucide-react';
 import { api, WallpaperDTO } from '../api/bridge';
+import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
+import { useAppState } from '../state/AppStateContext';
+import { invalidateFavoritesCache } from './FavoritesView';
 
 interface Props {
   onApply: (path: string) => void;
   applying: boolean;
+  active?: boolean;
 }
 
-type FilterType = 'all' | 'image' | 'gif' | 'video';
+type FilterType = 'all' | 'image' | 'gif' | 'video' | 'we_scene' | 'we_web' | 'unsupported';
 type SortMode = 'name' | 'newest' | 'largest';
 const PAGE_SIZE = 120;
 
-export default function LibraryView({ onApply, applying }: Props) {
+export default function LibraryView({ onApply, applying, active = true }: Props) {
   const [entries, setEntries] = useState<WallpaperDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [sort, setSort] = useState<SortMode>('newest');
-  const [source, setSource] = useState('tsv');
   const [total, setTotal] = useState(0);
-  const [stale, setStale] = useState(false);
+  const { libraryVersion, invalidateLibrary } = useAppState();
+  const requestSeq = useRef(0);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 200);
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const [configuredSource, storageBackend] = await Promise.all([
-          api.configGet('gui_library_source'),
-          api.configGet('storage_backend'),
-        ]);
-        if (cancelled) return;
-        if (configuredSource === 'sqlite' || configuredSource === 'tsv') {
-          setSource(configuredSource);
-        } else if (storageBackend === 'sqlite') {
-          setSource('sqlite');
-        }
-      } catch {
-        // Keep the default source.
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
   const load = useCallback(async (append = false, offset = 0) => {
+    const requestId = requestSeq.current + 1;
+    requestSeq.current = requestId;
+    const isCurrent = () => requestSeq.current === requestId;
     setLoading(true);
+
     try {
-      const page = await api.libraryPage(source, filter, sort, debouncedSearch, offset, PAGE_SIZE);
+      const page = await measureAsync('library.page.ms', () =>
+        api.libraryPage(filter, sort, debouncedSearch, offset, PAGE_SIZE)
+      );
+      if (!isCurrent()) return;
+      recordMetric('library.page.total', page.total);
       setTotal(page.total);
       setEntries((prev) => append ? [...prev, ...(page.items ?? [])] : (page.items ?? []));
-      setStale(false);
     } catch {
-      // Try fallback to the other source
-      try {
-        const fallback = source === 'sqlite' ? 'tsv' : 'sqlite';
-        const page = await api.libraryPage(fallback, filter, sort, debouncedSearch, 0, PAGE_SIZE);
-        setTotal(page.total);
-        setEntries(page.items ?? []);
-      } catch {
-        setEntries([]);
-        setTotal(0);
+      if (!isCurrent()) return;
+      setEntries([]);
+      setTotal(0);
+    } finally {
+      if (isCurrent()) {
+        setLoading(false);
       }
     }
-    setLoading(false);
-  }, [debouncedSearch, filter, sort, source]);
+  }, [debouncedSearch, filter, sort, libraryVersion]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => () => { requestSeq.current += 1; }, []);
 
   const filtered = useMemo(() => {
     return entries;
   }, [entries]);
+  const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
+
+  const isWeEntry = useCallback((path: string) => {
+    const entry = entryByPath.get(path);
+    return entry?.type === 'we_scene';
+  }, [entryByPath]);
+
+  const isWeWeb = useCallback((path: string) => {
+    const entry = entryByPath.get(path);
+    return entry?.type === 'we_web';
+  }, [entryByPath]);
+
+  const isFailedScene = useCallback((path: string) => {
+    const entry = entryByPath.get(path);
+    return entry?.type === 'we_scene' && entry?.backendStatus === 'failed';
+  }, [entryByPath]);
 
   const contextActions: ContextAction[] = [
     {
-      label: 'Add to Favorites',
-      action: async (path: string) => { await api.favoriteAdd(path); },
+      label: 'Apply with linux-wallpaperengine',
+      visible: (path: string) => isWeEntry(path) && !isFailedScene(path),
+      action: (path: string) => { onApply(path); },
     },
     {
-      label: 'Open Containing Folder',
+      label: 'Retry backend apply',
+      visible: isFailedScene,
+      action: async (path: string) => {
+        try { await api.weClearBackendError(path); } catch { /* */ }
+        onApply(path);
+        setTimeout(() => invalidateLibrary(), 500);
+      },
+    },
+    {
+      label: 'Apply Web wallpaper',
+      visible: (path: string) => Boolean(entryByPath.get(path)?.type === 'we_web'),
+      action: (path: string) => { onApply(path); },
+    },
+    {
+      label: 'Apply preview GIF',
+      visible: (path: string) => Boolean(entryByPath.get(path)?.previewPath),
+      action: (path: string) => {
+        const previewPath = entryByPath.get(path)?.previewPath;
+        if (previewPath) onApply(previewPath);
+      },
+    },
+    {
+      label: 'Add to Favorites',
+      action: async (path: string) => { await api.favoriteAdd(path); invalidateFavoritesCache(); },
+    },
+    {
+      label: 'Open Project Folder',
       action: async (path: string) => { await api.revealInFileManager(path); },
+    },
+    {
+      label: 'Copy Workshop ID',
+      visible: (path: string) => Boolean(entryByPath.get(path)?.workshopId),
+      action: async (path: string) => {
+        const workshopId = entryByPath.get(path)?.workshopId;
+        if (workshopId) await navigator.clipboard?.writeText(workshopId);
+      },
     },
   ];
 
@@ -107,20 +145,18 @@ export default function LibraryView({ onApply, applying }: Props) {
             <option value="image">Images</option>
             <option value="gif">GIFs</option>
             <option value="video">Videos</option>
+            <option value="we_scene">WE Scene</option>
+            <option value="we_web">WE Web</option>
+            <option value="unsupported">Unsupported</option>
           </select>
           <select value={sort} onChange={(e) => setSort(e.target.value as SortMode)}>
             <option value="newest">Newest</option>
             <option value="largest">Largest</option>
             <option value="name">Name</option>
           </select>
-          <select value={source} onChange={(e) => setSource(e.target.value)}>
-            <option value="tsv">TSV</option>
-            <option value="sqlite">SQLite</option>
-          </select>
           <span className="library-count">
             {entries.length} / {total}
           </span>
-          {stale && <span className="stale-badge">Library stale — rescan</span>}
         </div>
       </div>
       {loading ? (
@@ -130,8 +166,9 @@ export default function LibraryView({ onApply, applying }: Props) {
           entries={filtered}
           onApply={onApply}
           applying={applying}
-          emptyText="Library empty — add sources and rescan"
+          emptyText="Library is empty. Add sources or scan Wallpaper Engine."
           contextActions={contextActions}
+          active={active}
         />
       )}
       {!loading && entries.length < total && (

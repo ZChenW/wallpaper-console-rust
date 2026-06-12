@@ -5,9 +5,14 @@ use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
+pub mod linux_wallpaperengine;
+pub mod web_wallpaper;
+
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends() -> Result<(), WcError> {
     let user = whoami();
+    linux_wallpaperengine::stop(None);
+    web_wallpaper::stop(None);
     let _ = Command::new("pkill")
         .args(["-u", &user, "-x", "mpvpaper"])
         .status();
@@ -20,7 +25,7 @@ pub fn stop_all_backends() -> Result<(), WcError> {
 /// Smart-stop: kill only what's needed for the target backend.
 pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Result<(), WcError> {
     let last = s.last_backend_read()?.unwrap_or_default();
-    if target_backend == Backend::Mpvpaper {
+    if target_backend == Backend::Mpvpaper || target_backend == Backend::LinuxWallpaperEngine {
         return stop_all_backends();
     }
     if last == "awww" {
@@ -39,6 +44,23 @@ pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Resu
 pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(), WcError> {
     // Safety: verify file exists before attempting backend
     let p = std::path::Path::new(path);
+    if backend == Backend::LinuxWallpaperEngine {
+        let project = linux_wallpaperengine::project_from_path(path)?;
+        return linux_wallpaperengine::apply(s, project);
+    }
+    if backend == Backend::ChromiumWeb {
+        let p = web_wallpaper::preflight(path, s)?;
+        stop_all_backends()?;
+        web_wallpaper::apply_preflighted(s, &p)?;
+        // Write state after successful backend execution.
+        s.current_write(path)?;
+        s.last_backend_write(backend.as_str())?;
+        s.history_add(path, backend.as_str())?;
+        return Ok(());
+    }
+    if backend == Backend::Unsupported {
+        return Err(WcError::UnsupportedFileType(path.to_string()));
+    }
     if !p.is_file() {
         return Err(WcError::NotRegularFile(p.to_path_buf()));
     }
@@ -79,6 +101,9 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
                 return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
             }
         }
+        Backend::LinuxWallpaperEngine | Backend::Unsupported | Backend::ChromiumWeb => {
+            unreachable!()
+        }
     }
 
     // Write state only after successful apply
@@ -95,15 +120,13 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
         .current_read()?
         .ok_or_else(|| WcError::Other("no previous wallpaper to restore".into()))?;
     let p = std::path::Path::new(&current);
-    if !p.is_file() {
+    if !p.is_file() && !p.is_dir() {
         return Err(WcError::WallpaperMissing(p.to_path_buf()));
     }
-    let ext = wc_core::formats::get_extension(&current)
-        .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    let (_ftype, _default) = wc_core::formats::classify_extension(&ext)
+    let entry = wc_scan::make_entry(&current)
         .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
     // Route through config
-    let backend = match _ftype {
+    let backend = match entry.file_type {
         wc_core::types::FileType::Image => match s.config_get("image_backend", "awww").as_str() {
             "mpvpaper" => Backend::Mpvpaper,
             _ => Backend::Awww,
@@ -118,6 +141,9 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
                 _ => Backend::Mpvpaper,
             }
         }
+        wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
+        wc_core::types::FileType::WeWeb => Backend::ChromiumWeb,
+        wc_core::types::FileType::WeApplication => Backend::Unsupported,
     };
     apply_wallpaper(s, &current, backend)
 }

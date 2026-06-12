@@ -12,9 +12,9 @@ All paths under `$XDG_CONFIG_HOME/wallpaper-console` (default `~/.config/wallpap
 | `history` | path per line | Last 100 applied paths (newest first) |
 | `current` | single path | Last successfully applied wallpaper |
 | `last_backend` | single name | Backend used by last apply |
-| `library.tsv` | tab-separated | Cached library index |
-| `library.dirty` | empty file | Cache staleness flag |
-| `wallpapers.db` | SQLite | SQLite storage (opt-in) |
+| `library.tsv` | tab-separated | Legacy compatibility library export |
+| `library.dirty` | empty file | Legacy cache staleness flag |
+| `wallpapers.db` | SQLite | Primary GUI storage |
 | `wallpapers.db.bak.*` | SQLite | Timestamped DB backups |
 | `cache/previews/` | JPEG images | Video thumbnail cache |
 | `cache/gui-thumbnails/` | WebP images | GUI thumbnail cache |
@@ -42,12 +42,17 @@ min_wallpaper_width=1280
 min_wallpaper_height=720
 preview_metadata=compact
 gui_thumbnail_mode=cache
-storage_backend=file
-gui_library_source=tsv
+gui_thumbnail_cleanup_days=30
+gui_thumbnail_failure_ttl_secs=900
+gui_debug_logs=off
+storage_backend=sqlite
 ```
 
 ## SQLite schema
 
-See `sqlite_schema()` in `lib/wallpaper-console/sqlite.sh` for the authoritative DDL.
+See `create_schema()` in `crates/wc-storage/src/sqlite.rs` for the authoritative DDL.
 
 Tables: `db_meta`, `config`, `sources`, `wallpapers`, `favorites`, `history`, `state`
+
+The `wallpapers` table includes Wallpaper Engine metadata columns used by the GUI:
+`project_type`, `preview_path`, `workshop_id`, `title`, `we_file`, and `unsupported_reason`.

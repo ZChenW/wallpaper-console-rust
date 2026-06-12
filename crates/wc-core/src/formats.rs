@@ -54,6 +54,9 @@ pub fn default_backend_for(ft: FileType) -> Backend {
         FileType::Image => Backend::Awww,
         FileType::Gif => Backend::Awww,
         FileType::Video => Backend::Mpvpaper,
+        FileType::WeScene => Backend::LinuxWallpaperEngine,
+        FileType::WeWeb => Backend::ChromiumWeb,
+        FileType::WeApplication => Backend::Unsupported,
     }
 }
 
@@ -83,5 +86,42 @@ impl std::str::FromStr for PreviewMode {
             "full" => PreviewMode::Full,
             _ => PreviewMode::Compact,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Backend;
+
+    #[test]
+    fn default_backend_image_is_awww() {
+        assert_eq!(default_backend_for(FileType::Image), Backend::Awww);
+    }
+
+    #[test]
+    fn default_backend_video_is_mpvpaper() {
+        assert_eq!(default_backend_for(FileType::Video), Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn default_backend_we_scene_is_lwe() {
+        assert_eq!(
+            default_backend_for(FileType::WeScene),
+            Backend::LinuxWallpaperEngine
+        );
+    }
+
+    #[test]
+    fn default_backend_we_web_is_chromium_web() {
+        assert_eq!(default_backend_for(FileType::WeWeb), Backend::ChromiumWeb);
+    }
+
+    #[test]
+    fn default_backend_we_application_is_unsupported() {
+        assert_eq!(
+            default_backend_for(FileType::WeApplication),
+            Backend::Unsupported
+        );
     }
 }

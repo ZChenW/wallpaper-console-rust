@@ -7,7 +7,10 @@ const RUST_BIN: &str = env!("CARGO_BIN_EXE_wallpaper-console-rust");
 fn temp_config() -> (tempfile::TempDir, String) {
     let dir = tempfile::tempdir().unwrap();
     let config_dir = dir.path().to_string_lossy().to_string();
-    std::fs::create_dir_all(&config_dir).unwrap();
+    let wc_dir = format!("{}/wallpaper-console", config_dir);
+    std::fs::create_dir_all(&wc_dir).unwrap();
+    // CLI parity tests use flat-file mode to test the original file-based storage paths.
+    std::fs::write(format!("{}/config", wc_dir), "storage_backend=file\n").ok();
     (dir, config_dir)
 }
 
@@ -99,7 +102,7 @@ fn library_json_after_rescan() {
     std::fs::write(format!("{}/b.gif", sub), b"").unwrap();
     rust(&["add", &walls], &cd);
     assert!(rust(&["rescan"], &cd).status.success());
-    let out = rust(&["library-json"], &cd);
+    let out = rust(&["library-json", "--sqlite"], &cd);
     let s = String::from_utf8_lossy(&out.stdout);
     assert!(s.contains("\"path\""), "{}", s);
 }
@@ -175,7 +178,7 @@ fn library_count_output() {
 // ── WE scanning ───────────────────────────────────────────────────────────
 
 #[test]
-fn we_scene_project_not_in_library() {
+fn we_scene_project_enters_library_without_assets() {
     let (_d, cd) = temp_config();
     let we_root = format!("{}/steamapps/workshop/content/431960", cd);
     std::fs::create_dir_all(&we_root).unwrap();
@@ -185,9 +188,10 @@ fn we_scene_project_not_in_library() {
     std::fs::create_dir_all(&scene_dir).unwrap();
     std::fs::write(
         format!("{}/project.json", scene_dir),
-        r#"{"type":"scene","file":"scene.json"}"#,
+        r#"{"type":"Scene","file":"scene.json","preview":"preview.gif","title":"Scene title"}"#,
     )
     .unwrap();
+    std::fs::write(format!("{}/preview.gif", scene_dir), b"gif").unwrap();
     std::fs::write(format!("{}/asset.png", scene_dir), b"").unwrap();
 
     rust(&["add", &we_root], &cd);
@@ -195,10 +199,19 @@ fn we_scene_project_not_in_library() {
 
     let out = rust(&["library-json"], &cd);
     let s = String::from_utf8_lossy(&out.stdout);
-    // Scene project's asset.png must NOT appear
     assert!(
-        !s.contains("scene"),
-        "scene project should not appear: {}",
+        s.contains("\"type\": \"we_scene\""),
+        "scene project should appear as we_scene: {}",
+        s
+    );
+    assert!(
+        s.contains("\"backend\": \"linux-wallpaperengine\""),
+        "scene project should use linux-wallpaperengine backend: {}",
+        s
+    );
+    assert!(
+        s.contains(&scene_dir),
+        "scene project path should appear: {}",
         s
     );
     assert!(
@@ -206,6 +219,32 @@ fn we_scene_project_not_in_library() {
         "scene project files should not appear: {}",
         s
     );
+}
+
+#[test]
+fn inspect_we_video_project_reports_real_media_apply_target() {
+    let (_d, cd) = temp_config();
+    let project = format!("{}/steamapps/workshop/content/431960/2924684771", cd);
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(format!("{}/bg.mp4", project), b"mp4").unwrap();
+    std::fs::write(
+        format!("{}/project.json", project),
+        r#"{"type":"video","file":"bg.mp4","title":"Workshop Video","workshopid":"2924684771"}"#,
+    )
+    .unwrap();
+
+    let out = rust(&["inspect", &project], &cd);
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let s = String::from_utf8_lossy(&out.stdout);
+    assert!(s.contains("\"backend\": \"mpvpaper\""), "{}", s);
+    assert!(s.contains("\"resolved_path\""), "{}", s);
+    assert!(s.contains("bg.mp4"), "{}", s);
+    assert!(s.contains("2924684771"), "{}", s);
+    assert!(s.contains("Workshop Video"), "{}", s);
 }
 
 #[test]
@@ -523,20 +562,16 @@ fn search_type_live_scan_independent_of_library_tsv() {
 #[test]
 fn sqlite_mode_add_fails_when_db_missing() {
     let (_d, cd) = temp_config();
-    // Switch to sqlite mode without migrating first — DB does not exist.
+    // sqlite_source_add auto-creates wallpapers.db schema now.
+    // The add command should succeed even without a pre-existing DB.
     rust(&["config-set", "storage_backend", "sqlite"], &cd);
     let walls = format!("{}/walls", cd);
     std::fs::create_dir_all(&walls).unwrap();
     let out = rust(&["add", &walls], &cd);
     assert!(
-        !out.status.success(),
-        "add must fail when storage_backend=sqlite and DB is missing"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("not found") || stderr.contains("migrate"),
-        "error should mention missing DB: {}",
-        stderr
+        out.status.success(),
+        "add should auto-create DB and succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -665,13 +700,12 @@ fn sqlite_debug_read_commands_read_database_directly() {
 #[test]
 fn sqlite_debug_read_commands_fail_without_database() {
     let (_d, cd) = temp_config();
+    // sqlite_connection auto-creates wallpapers.db now.
+    // Commands that read from SQLite succeed with empty results.
     let out = rust(&["sqlite-sources-list"], &cd);
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("wallpapers.db not found") || stderr.contains("migrate-to-sqlite"),
-        "missing DB error should be actionable: {}",
-        stderr
+        out.status.success(),
+        "sqlite-sources-list should auto-create DB and succeed"
     );
 }
 
@@ -739,6 +773,8 @@ fn library_page_json_filters_sorts_and_paginates_sqlite() {
 #[test]
 fn library_page_json_reports_missing_sqlite_database() {
     let (_d, cd) = temp_config();
+    // library_page_sqlite auto-creates wallpapers.db schema now.
+    // The command returns success with empty results.
     let out = rust(
         &[
             "library-page-json",
@@ -751,12 +787,9 @@ fn library_page_json_reports_missing_sqlite_database() {
         ],
         &cd,
     );
-    assert!(!out.status.success());
-    let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("wallpapers.db not found"),
-        "missing DB error should be actionable: {}",
-        stderr
+        out.status.success(),
+        "library-page-json should auto-create DB and return empty results"
     );
 }
 

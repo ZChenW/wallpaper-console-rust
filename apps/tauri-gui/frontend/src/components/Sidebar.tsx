@@ -24,6 +24,7 @@ export default function Sidebar({ view, onNavigate }: Props) {
           className={`sidebar-btn ${view === id ? 'active' : ''}`}
           onClick={() => onNavigate(id)}
           title={label}
+          aria-current={view === id ? 'page' : undefined}
         >
           <Icon size={20} />
           <span className="sidebar-label">{label}</span>

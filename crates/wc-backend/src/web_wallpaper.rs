@@ -342,11 +342,10 @@ pub fn apply_preflighted(s: &StorageApi, p: &PreflightResult) -> Result<(), WcEr
 
     std::thread::sleep(Duration::from_millis(300));
     if let Ok(Some(status)) = child.try_wait() {
-        if status.success() {
-            if check_browser_handoff(&profile_dir) {
+        if status.success()
+            && check_browser_handoff(&profile_dir) {
                 return Ok(());
             }
-        }
         let _ = s.config_set(PID_CONFIG_KEY, "");
         return Err(WcError::Other(format!(
             "Web wallpaper browser exited with status {}. \

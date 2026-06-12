@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "cd frontend && npm run dev -- --host 127.0.0.1 --port 5174",
-    "beforeBuildCommand": "cd frontend && npm run build"
+    "beforeDevCommand": "if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run dev -- --host 127.0.0.1 --port 5174",
+    "beforeBuildCommand": "if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run build"
   },
   "app": {
     "windows": [
@@ -25,7 +25,10 @@
         "enable": true,
         "scope": {
           "allow": [
-            "$HOME/.config/wallpaper-console/cache/gui-thumbnails/**"
+            "$HOME/.config/wallpaper-console/cache/gui-thumbnails/**",
+            "$HOME/.local/share/Steam/steamapps/workshop/content/431960/**",
+            "$HOME/.steam/steam/steamapps/workshop/content/431960/**",
+            "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960/**"
           ]
         }
       }

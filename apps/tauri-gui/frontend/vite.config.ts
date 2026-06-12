@@ -7,8 +7,6 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
-    rollupOptions: {
-      external: (id: string) => id === '/wails/runtime.js',
-    },
+    rollupOptions: {},
   },
 });

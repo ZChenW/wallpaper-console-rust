@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, WallpaperDTO } from '../api/bridge';
 import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
 import { Shuffle } from 'lucide-react';
@@ -6,34 +6,50 @@ import { Shuffle } from 'lucide-react';
 interface Props {
   onApply: (path: string) => void;
   applying: boolean;
+  active?: boolean;
 }
 
-export default function FavoritesView({ onApply, applying }: Props) {
-  const [entries, setEntries] = useState<WallpaperDTO[]>([]);
-  const [loading, setLoading] = useState(true);
+const PAGE_SIZE = 120;
 
-  const load = useCallback(async () => {
+export function invalidateFavoritesCache() {
+  window.dispatchEvent(new CustomEvent('favorites-cache-invalidated'));
+}
+
+export default function FavoritesView({ onApply, applying, active = true }: Props) {
+  const [entries, setEntries] = useState<WallpaperDTO[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const requestSeq = useRef(0);
+
+  const load = useCallback(async (offset = 0, append = false) => {
+    const seq = ++requestSeq.current;
     setLoading(true);
     try {
-      const paths = await api.favoritesList();
-      // Build lightweight entries from paths
-      const mapped: WallpaperDTO[] = paths.map((p: string) => ({
-        path: p,
-        type: inferType(p),
-        ext: p.split('.').pop() ?? '',
-        backend: '',
-        size: 0,
-        mtime: 0,
-        resolution: '',
-      }));
-      setEntries(mapped);
+      const page = await api.favoritesPage(offset, PAGE_SIZE);
+      if (requestSeq.current !== seq) return;
+      setTotal(page.total);
+      if (append) {
+        setEntries(prev => [...prev, ...(page.items ?? [])]);
+      } else {
+        setEntries(page.items ?? []);
+      }
     } catch {
-      setEntries([]);
+      if (requestSeq.current !== seq) return;
+      if (!append) {
+        setEntries([]);
+        setTotal(0);
+      }
     }
     setLoading(false);
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => {
+    const handler = () => { load(); };
+    window.addEventListener('favorites-cache-invalidated', handler);
+    return () => window.removeEventListener('favorites-cache-invalidated', handler);
+  }, [load]);
 
   const contextActions: ContextAction[] = [
     {
@@ -75,15 +91,16 @@ export default function FavoritesView({ onApply, applying }: Props) {
           applying={applying}
           emptyText="No favorites yet — right-click a wallpaper in Library to add"
           contextActions={contextActions}
+          active={active}
         />
+      )}
+      {!loading && entries.length < total && (
+        <div className="load-more">
+          <button onClick={() => load(entries.length, true)}>
+            Load more ({total - entries.length} remaining)
+          </button>
+        </div>
       )}
     </div>
   );
-}
-
-function inferType(path: string): 'image' | 'gif' | 'video' {
-  const ext = (path.split('.').pop() ?? '').toLowerCase();
-  if (ext === 'mp4' || ext === 'webm' || ext === 'mkv' || ext === 'mov') return 'video';
-  if (ext === 'gif') return 'gif';
-  return 'image';
 }

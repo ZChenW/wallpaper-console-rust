@@ -1,5 +1,9 @@
 # Wails Architecture
 
+> **ARCHIVED — June 2026:** Wails has been retired. Tauri 2 is the supported GUI.
+> This document is preserved for historical reference only.
+> See [TAURI_ARCHITECTURE.md](TAURI_ARCHITECTURE.md) for the current architecture.
+
 ## Stack
 
 ```text

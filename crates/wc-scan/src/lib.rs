@@ -7,7 +7,7 @@ use std::path::Path;
 use camino::Utf8PathBuf;
 use walkdir::WalkDir;
 use wc_core::formats;
-use wc_core::types::WallpaperEntry;
+use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
 const WE_MARKER: &str = "/steamapps/workshop/content/431960";
 
@@ -57,7 +57,7 @@ pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
             }
             WeKind::ProjectDir => {
                 // Single WE project — read its project.json directly.
-                if let Some(wp) = read_we_project_json(src_path) {
+                if let Some(wp) = indexed_we_project_path(src_path) {
                     let p = Path::new(&wp);
                     let c = canonicalize_str(
                         &std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
@@ -124,7 +124,7 @@ fn scan_we_workshop_root(root: &Path, seen: &mut HashSet<String>, files: &mut Ve
         let project_dir = entry.path();
 
         let has_proj = project_dir.join("project.json").exists();
-        let we_file = read_we_project_json(&project_dir);
+        let we_file = indexed_we_project_path(&project_dir);
 
         if let Some(ref wp) = we_file {
             let p = Path::new(wp);
@@ -181,8 +181,51 @@ pub fn is_wallpaper_engine_source(path: &str) -> bool {
     path.contains(WE_MARKER)
 }
 
-/// Read a Wallpaper Engine project.json from `project_dir`.
-pub fn read_we_project_json(project_dir: &Path) -> Option<String> {
+/// Parsed Wallpaper Engine project.json metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WeProjectInfo {
+    pub project_dir: String,
+    pub project_type: String,
+    pub file: Option<String>,
+    pub preview_path: Option<String>,
+    pub workshop_id: Option<String>,
+    pub title: Option<String>,
+    pub entry_type: FileType,
+    pub backend: Backend,
+    pub unsupported_reason: Option<String>,
+}
+
+impl WeProjectInfo {
+    fn project_entry_path(&self) -> String {
+        self.project_dir.clone()
+    }
+
+    fn file_entry_path(&self) -> Option<String> {
+        let file = self.file.as_ref()?;
+        let root = Path::new(&self.project_dir);
+        let full = safe_join(root, file).ok()?;
+        if full.is_file() {
+            Some(full.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn wallpaper_project(&self) -> WallpaperProject {
+        WallpaperProject {
+            project_type: self.entry_type.as_str().to_string(),
+            preview_path: self.preview_path.clone(),
+            workshop_id: self.workshop_id.clone(),
+            title: self.title.clone(),
+            we_file: self.file.clone(),
+            backend: Some(self.backend.as_str().to_string()),
+            unsupported_reason: self.unsupported_reason.clone(),
+        }
+    }
+}
+
+/// Read and classify a Wallpaper Engine project.json from `project_dir`.
+pub fn read_we_project_info(project_dir: &Path) -> Option<WeProjectInfo> {
     let proj_path = project_dir.join("project.json");
     if !proj_path.exists() {
         return None;
@@ -190,34 +233,224 @@ pub fn read_we_project_json(project_dir: &Path) -> Option<String> {
     let content = fs::read_to_string(&proj_path).ok()?;
     let proj: serde_json::Value = serde_json::from_str(&content).ok()?;
 
-    let proj_type = proj.get("type").and_then(|v| v.as_str()).unwrap_or("");
-    if matches!(proj_type, "scene" | "web" | "application") {
+    let raw_type = proj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    let normalized_type = raw_type.trim().to_lowercase();
+    let file = proj
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let preview_path = proj
+        .get("preview")
+        .and_then(|v| v.as_str())
+        .map(|preview| project_dir.join(preview).to_string_lossy().to_string())
+        .filter(|preview| Path::new(preview).is_file());
+    let title = proj
+        .get("title")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let workshop_id = workshop_id_from_path(project_dir);
+    let (entry_type, backend, unsupported_reason) = match normalized_type.as_str() {
+        "scene" => (FileType::WeScene, Backend::LinuxWallpaperEngine, None),
+        "web" => (FileType::WeWeb, Backend::ChromiumWeb, None),
+        "application" => (
+            FileType::WeApplication,
+            Backend::Unsupported,
+            Some("Wallpaper Engine application projects are not supported.".to_string()),
+        ),
+        "image" | "gif" | "video" => {
+            let file = file.as_deref()?;
+            let ext = formats::get_extension(file)?;
+            let (ftype, backend) = formats::classify_extension(&ext)?;
+            (ftype, backend, None)
+        }
+        other => (
+            FileType::WeApplication,
+            Backend::Unsupported,
+            Some(format!(
+                "Unsupported Wallpaper Engine project type: {}",
+                other
+            )),
+        ),
+    };
+
+    Some(WeProjectInfo {
+        project_dir: project_dir.to_string_lossy().to_string(),
+        project_type: normalized_type,
+        file,
+        preview_path,
+        workshop_id,
+        title,
+        entry_type,
+        backend,
+        unsupported_reason,
+    })
+}
+
+/// Read a Wallpaper Engine project.json from `project_dir` and return
+/// the indexed file path (real media file for image/video/gif, or
+/// None for scene/web/application which are handled at the project level).
+pub fn read_we_project_json(project_dir: &Path) -> Option<String> {
+    let info = read_we_project_info(project_dir)?;
+    match info.entry_type {
+        FileType::Image | FileType::Gif | FileType::Video => info.file_entry_path(),
+        _ => None,
+    }
+}
+
+fn indexed_we_project_path(project_dir: &Path) -> Option<String> {
+    let info = read_we_project_info(project_dir)?;
+    match info.entry_type {
+        FileType::WeScene | FileType::WeWeb | FileType::WeApplication => {
+            Some(info.project_entry_path())
+        }
+        FileType::Image | FileType::Gif | FileType::Video => info.file_entry_path(),
+    }
+}
+
+/// Safely resolve a relative file path under `root`, rejecting traversal,
+/// absolute paths, and symlink escapes.
+pub fn safe_join(root: &Path, file: &str) -> Result<std::path::PathBuf, String> {
+    let file_path = Path::new(file);
+    for comp in file_path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                return Err("path traversal rejected".to_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => {
+                return Err("absolute path rejected".to_string());
+            }
+            _ => {}
+        }
+    }
+    let joined = root.join(file_path);
+    let root_canon = root
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize root: {}", e))?;
+    let joined_canon = joined
+        .canonicalize()
+        .map_err(|e| format!("cannot canonicalize candidate: {}", e))?;
+    if !joined_canon.starts_with(&root_canon) {
+        return Err("symlink escape rejected".to_string());
+    }
+    Ok(joined)
+}
+
+pub fn workshop_id_from_path(project_dir: &Path) -> Option<String> {
+    let path_str = project_dir.to_string_lossy();
+    let pos = path_str.find("/431960/")?;
+    let after = &path_str[pos + 7..];
+    let after = after.trim_start_matches('/');
+    let first_seg = after.split('/').next()?;
+    if first_seg.chars().all(|c| c.is_ascii_digit()) {
+        Some(first_seg.to_string())
+    } else {
+        None
+    }
+}
+
+/// If a regular file lies inside a WE project directory and matches the
+/// file field of project.json (type=image/gif/video), return its WallpaperProject
+/// metadata so title / preview_path / workshop_id / we_file are preserved.
+fn try_we_project_metadata(file_path: &Path) -> Option<WallpaperProject> {
+    let parent = file_path.parent()?;
+    if !is_wallpaper_engine_source(parent.to_string_lossy().as_ref()) {
         return None;
+    }
+    let info = read_we_project_info(parent)?;
+    match info.entry_type {
+        FileType::Image | FileType::Gif | FileType::Video => {
+            let we_file = info.file.as_ref()?;
+            if file_path.file_name().and_then(|n| n.to_str()) == Some(we_file.as_str()) {
+                Some(info.wallpaper_project())
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn make_we_project_entry(project_dir: &Path) -> Option<WallpaperEntry> {
+    let info = read_we_project_info(project_dir)?;
+
+    if matches!(
+        info.entry_type,
+        FileType::Image | FileType::Gif | FileType::Video
+    ) {
+        let file = info.file.as_ref()?;
+        let media_path = safe_join(project_dir, file).ok()?;
+        if !media_path.is_file() {
+            return None;
+        }
+        let ext = formats::get_extension(file)?;
+        let meta = fs::metadata(&media_path).ok()?;
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let path = media_path.to_string_lossy().to_string();
+        let resolution = detect_resolution(&path, info.entry_type);
+        return Some(WallpaperEntry {
+            path: Utf8PathBuf::from(path),
+            file_type: info.entry_type,
+            ext,
+            backend: info.backend,
+            size,
+            mtime,
+            resolution,
+            project: Some(info.wallpaper_project()),
+        });
     }
 
-    let file = proj.get("file").and_then(|v| v.as_str())?;
-    let file_lower = file.to_lowercase();
-    if file_lower == "scene.json"
-        || file_lower == "scene.pkg"
-        || file_lower.ends_with(".html")
-        || file_lower.ends_with(".htm")
-    {
-        return None;
+    let project_json = project_dir.join("project.json");
+    let meta = fs::metadata(&project_json)
+        .or_else(|_| fs::metadata(project_dir))
+        .ok()?;
+    let size = project_entry_size_hint(project_dir, info.preview_path.as_deref());
+    let mtime = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let ext = match info.entry_type {
+        FileType::WeScene => "scene",
+        FileType::WeWeb => "web",
+        FileType::WeApplication => "application",
+        FileType::Image | FileType::Gif | FileType::Video => unreachable!(),
     }
+    .to_string();
 
-    let full = project_dir.join(file);
-    if !full.is_file() {
-        return None;
+    Some(WallpaperEntry {
+        path: Utf8PathBuf::from(info.project_entry_path()),
+        file_type: info.entry_type,
+        ext,
+        backend: info.backend,
+        size,
+        mtime,
+        resolution: "WE".to_string(),
+        project: Some(info.wallpaper_project()),
+    })
+}
+
+fn project_entry_size_hint(project_dir: &Path, preview_path: Option<&str>) -> u64 {
+    let mut size = fs::metadata(project_dir.join("project.json"))
+        .map(|m| m.len())
+        .unwrap_or(0);
+    if let Some(preview) = preview_path {
+        size += fs::metadata(preview).map(|m| m.len()).unwrap_or(0);
     }
-    let ext = formats::get_extension(&full.to_string_lossy())?;
-    if !formats::is_supported_extension(&ext) {
-        return None;
-    }
-    Some(full.to_string_lossy().to_string())
+    size
 }
 
 pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
     let p = Path::new(path);
+    if p.is_dir() {
+        return make_we_project_entry(p);
+    }
     if !p.is_file() {
         return None;
     }
@@ -240,6 +473,7 @@ pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
         size,
         mtime,
         resolution,
+        project: try_we_project_metadata(p),
     })
 }
 
@@ -281,6 +515,9 @@ fn detect_resolution(path: &str, ftype: wc_core::types::FileType) -> String {
                 }
             }
         }
+        wc_core::types::FileType::WeScene
+        | wc_core::types::FileType::WeWeb
+        | wc_core::types::FileType::WeApplication => {}
     }
     "?x?".to_string()
 }
@@ -328,6 +565,7 @@ pub fn prior_metadata_cache(tsv_path: &Path) -> std::collections::HashMap<String
                 size,
                 mtime,
                 resolution,
+                project: None,
             },
         );
     }
@@ -341,6 +579,9 @@ pub fn make_entry_cached(
     cache: &std::collections::HashMap<String, WallpaperEntry>,
 ) -> (Option<WallpaperEntry>, bool) {
     let p = Path::new(path);
+    if p.is_dir() {
+        return (make_we_project_entry(p), false);
+    }
     if !p.is_file() {
         return (None, false);
     }
@@ -379,6 +620,7 @@ pub fn make_entry_cached(
                     backend: prior.backend,
                     size,
                     mtime,
+                    project: prior.project.clone(),
                 }),
                 true, // reused
             );
@@ -396,6 +638,7 @@ pub fn make_entry_cached(
             size,
             mtime,
             resolution,
+            project: try_we_project_metadata(p),
         }),
         false, // probed
     )
@@ -575,16 +818,26 @@ mod tests {
             .unwrap()
             .to_string_lossy()
             .to_string();
+        let scene_canon = std::fs::canonicalize(&scene_dir)
+            .unwrap()
+            .to_string_lossy()
+            .to_string();
         let jpg_canon = std::fs::canonicalize(format!("{}/pic.jpg", fallback_dir))
             .unwrap()
             .to_string_lossy()
             .to_string();
 
-        let scene_assets: Vec<&String> = result.iter().filter(|p| p.contains("111")).collect();
         assert!(
-            scene_assets.is_empty(),
-            "scene should not appear: {:?}",
-            scene_assets
+            result.contains(&scene_canon),
+            "scene project should appear once: {:?}",
+            result
+        );
+        assert!(
+            !result
+                .iter()
+                .any(|p| p.ends_with("scene.json") || p.ends_with("project.json")),
+            "scene internals should not appear: {:?}",
+            result
         );
         assert!(
             result.contains(&img_canon),
@@ -595,6 +848,106 @@ mod tests {
             "fallback pic.jpg should be in results"
         );
     }
+}
+
+#[test]
+fn we_video_project_make_entry_returns_media_path_with_metadata() {
+    let dir = tempfile::tempdir().unwrap();
+    let bg = dir.path().join("bg.mp4");
+    std::fs::write(&bg, b"").unwrap();
+    std::fs::write(dir.path().join("preview.gif"), b"").unwrap();
+    let proj = serde_json::json!({
+        "type": "video",
+        "file": "bg.mp4",
+        "preview": "preview.gif",
+        "title": "My Video Wallpaper"
+    });
+    std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
+    let entry = make_entry(&dir.path().to_string_lossy().to_string());
+    assert!(entry.is_some());
+    let entry = entry.unwrap();
+    assert!(
+        entry.path.to_string().ends_with("bg.mp4"),
+        "path should point to the media file, got: {}",
+        entry.path
+    );
+    assert_eq!(entry.file_type, FileType::Video);
+    assert_eq!(entry.backend, Backend::Mpvpaper);
+    let proj_meta = entry
+        .project
+        .as_ref()
+        .expect("should have project metadata");
+    assert_eq!(proj_meta.title.as_deref(), Some("My Video Wallpaper"));
+    assert!(
+        proj_meta
+            .preview_path
+            .as_ref()
+            .map_or(false, |p| p.ends_with("preview.gif")),
+        "preview_path should point to preview.gif"
+    );
+    assert!(proj_meta.we_file.as_deref() == Some("bg.mp4"));
+}
+
+#[test]
+fn we_video_file_make_entry_detects_project_parent() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir
+        .path()
+        .join("steamapps/workshop/content/431960/2924684771");
+    std::fs::create_dir_all(&marker).unwrap();
+    let bg = marker.join("bg.mp4");
+    std::fs::write(&bg, b"").unwrap();
+    let proj = serde_json::json!({
+        "type": "video",
+        "file": "bg.mp4",
+        "title": "Workshop Video"
+    });
+    std::fs::write(marker.join("project.json"), proj.to_string()).unwrap();
+
+    let canon = std::fs::canonicalize(&bg)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let entry = make_entry(&canon);
+    assert!(entry.is_some());
+    let entry = entry.unwrap();
+    assert_eq!(entry.file_type, FileType::Video);
+    assert_eq!(entry.backend, Backend::Mpvpaper);
+    let proj_meta = entry
+        .project
+        .as_ref()
+        .expect("file inside WE project dir should have project metadata");
+    assert_eq!(proj_meta.title.as_deref(), Some("Workshop Video"));
+    assert!(proj_meta.we_file.as_deref() == Some("bg.mp4"));
+    assert_eq!(proj_meta.workshop_id.as_deref(), Some("2924684771"));
+}
+
+#[test]
+fn missing_we_video_file_returns_none() {
+    let dir = tempfile::tempdir().unwrap();
+    let proj = serde_json::json!({
+        "type": "video",
+        "file": "nonexistent.mp4"
+    });
+    std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
+    let entry = make_entry(&dir.path().to_string_lossy().to_string());
+    assert!(
+        entry.is_none(),
+        "missing WE media file should not produce an entry"
+    );
+}
+
+#[test]
+fn safe_join_rejects_traversal() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(safe_join(dir.path(), "../evil").is_err());
+    assert!(safe_join(dir.path(), "foo/../../bar").is_err());
+}
+
+#[test]
+fn safe_join_rejects_absolute_path() {
+    let dir = tempfile::tempdir().unwrap();
+    assert!(safe_join(dir.path(), "/etc/passwd").is_err());
 }
 
 #[test]
@@ -625,6 +978,7 @@ fn cached_entry_reuses_prior_metadata() {
             .unwrap()
             .as_secs(),
         resolution: "1920x1080".to_string(), // known prior value
+        project: None,
     };
     let mut cache = HashMap::new();
     cache.insert(canon, prior);
@@ -667,6 +1021,7 @@ fn cached_entry_probes_when_size_changed() {
             .unwrap()
             .as_secs(),
         resolution: "old".to_string(),
+        project: None,
     };
     let mut cache = HashMap::new();
     cache.insert(canon, prior);

@@ -87,10 +87,24 @@ pub fn clear_file(path: &Path) -> Result<(), WcError> {
     Ok(())
 }
 
+/// Resolve a path to its canonical form. Falls back to the original path on
+/// any filesystem error (e.g. broken symlink or missing file).
+pub fn try_canonicalize(path: &str) -> String {
+    std::fs::canonicalize(path)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string())
+}
+
 // ── High-level storage operations through ConfigDir ──────────────────────
 
 pub fn sources_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
-    read_lines(&cd.sources_path())
+    let lines = read_lines(&cd.sources_path())?;
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<String> = lines
+        .into_iter()
+        .filter(|l| seen.insert(try_canonicalize(l)))
+        .collect();
+    Ok(deduped)
 }
 
 pub fn sources_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
@@ -124,13 +138,19 @@ pub fn favorites_has(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
 }
 
 pub fn history_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
-    read_lines(&cd.history_path())
+    let lines = read_lines(&cd.history_path())?;
+    let mut seen = std::collections::HashSet::new();
+    let deduped: Vec<String> = lines
+        .into_iter()
+        .filter(|l| seen.insert(try_canonicalize(l)))
+        .collect();
+    Ok(deduped)
 }
 
 pub fn history_add(cd: &ConfigDir, path: &str, max_entries: usize) -> Result<(), WcError> {
     let mut lines = read_lines(&cd.history_path())?;
-    // Remove existing entry (dedup), then prepend
-    lines.retain(|l| l != path);
+    let canon = try_canonicalize(path);
+    lines.retain(|l| try_canonicalize(l) != canon);
     lines.insert(0, path.to_string());
     // Trim to max
     if lines.len() > max_entries {

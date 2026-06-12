@@ -5,10 +5,15 @@ export interface CommandResult {
   stdout: string;
   stderr: string;
   exitCode: number;
+  error?: CommandErrorDTO;
 }
 
-export interface HistoryDTO {
-  path: string;
+export interface CommandErrorDTO {
+  kind: string;
+  message: string;
+  detail?: string;
+  recoverable: boolean;
+  suggestion?: string;
 }
 
 export interface LibraryCountDTO {
@@ -21,6 +26,29 @@ export interface LibraryCountDTO {
 export interface LibraryPageDTO {
   total: number;
   items: WallpaperDTO[];
+}
+
+export interface LibrarySourceStatusDTO {
+  configured: string;
+  effective: string;
+  sqliteReady: boolean;
+  sqliteRows: number;
+  tsvRows: number;
+  stale: boolean;
+  message: string;
+}
+
+export interface ScanProgressDTO {
+  running: boolean;
+  stage: string;
+  scanned: number;
+  totalHint?: number;
+  reusedMetadata: number;
+  probedMetadata: number;
+  insertedSqlite: number;
+  currentPath?: string;
+  cancelRequested: boolean;
+  error?: string;
 }
 
 export interface SourceDTO {
@@ -37,16 +65,35 @@ export interface StatusDTO {
   sourceCount: number;
 }
 
+export interface LinuxWallpaperEngineStatusDTO {
+  available: boolean;
+  path?: string;
+  message: string;
+  detail?: string;
+}
+
+export interface WebWallpaperStatusDTO {
+  available: boolean;
+  path?: string;
+  message: string;
+  detail?: string;
+}
+
 export interface ThumbnailCacheDTO {
   dir: string;
   size: string;
   entries: number;
+  oldestMtime?: number;
+  newestMtime?: number;
+  failureEntries: number;
+  cleanupDays: number;
 }
 
 export interface ThumbnailDTO {
   path: string;
   thumbnail?: string;
   cacheHit: boolean;
+  failureReason?: string;
 }
 
 export interface WallpaperDTO {
@@ -57,13 +104,29 @@ export interface WallpaperDTO {
   size: number;
   mtime: number;
   resolution: string;
+  projectType?: string;
+  previewPath?: string;
+  workshopId?: string;
+  title?: string;
+  weFile?: string;
+  unsupportedReason?: string,
+  backendStatus?: string;
+  backendErrorKind?: string;
+  backendErrorMessage?: string;
+  backendErrorDetail?: string;
+  backendFailedAt?: string;
 }
 
 export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
+  linuxWallpaperEngineStatus: (): Promise<LinuxWallpaperEngineStatusDTO> =>
+    invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
+  webWallpaperStatus: (): Promise<WebWallpaperStatusDTO> =>
+    invoke<WebWallpaperStatusDTO>('web_wallpaper_status'),
 
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
+  weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
 
   libraryList: (source: string): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('library_list', { source }),
@@ -72,22 +135,29 @@ export const api = {
     invoke<LibraryCountDTO>('library_count').catch(() => ({ total: 0, images: 0, gifs: 0, videos: 0 })),
 
   libraryPage: (
-    source: string,
     filter: string,
     sort: string,
     search: string,
     offset: number,
     limit: number,
   ): Promise<LibraryPageDTO> =>
-    invoke<LibraryPageDTO>('library_page', { source, filter, sort, search, offset, limit }),
+    invoke<LibraryPageDTO>('library_page_gui', { filter, sort, search, offset, limit }),
 
   rescan: (): Promise<CommandResult> => invoke<CommandResult>('rescan'),
+  scanProgress: (): Promise<ScanProgressDTO> => invoke<ScanProgressDTO>('scan_progress'),
+  scanCancel: (): Promise<CommandResult> => invoke<CommandResult>('scan_cancel'),
+  librarySourceStatus: (): Promise<LibrarySourceStatusDTO> =>
+    invoke<LibrarySourceStatusDTO>('library_source_status'),
 
-  favoritesList: (): Promise<string[]> => invoke<string[]>('favorites_list'),
+  favoritesList: (): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('favorites_list'),
+  favoritesPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
+    invoke<LibraryPageDTO>('favorites_page', { offset, limit }),
   favoriteAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_add', { path }),
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
 
-  historyList: (): Promise<HistoryDTO[]> => invoke<HistoryDTO[]>('history_list'),
+  historyList: (): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('history_list'),
+  historyPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
+    invoke<LibraryPageDTO>('history_page', { offset, limit }),
   historyClear: (): Promise<CommandResult> => invoke<CommandResult>('history_clear'),
 
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
@@ -112,8 +182,12 @@ export const api = {
 
   thumbnailCacheStatus: (): Promise<ThumbnailCacheDTO> => invoke<ThumbnailCacheDTO>('thumbnail_cache_status'),
   thumbnailCacheClear: (): Promise<CommandResult> => invoke<CommandResult>('thumbnail_cache_clear'),
+  thumbnailCacheCleanupOld: (days: number): Promise<CommandResult> =>
+    invoke<CommandResult>('thumbnail_cache_cleanup_old', { days }),
 
   openPath: (path: string): Promise<CommandResult> => invoke<CommandResult>('open_path', { path }),
   revealInFileManager: (path: string): Promise<CommandResult> => invoke<CommandResult>('reveal_in_file_manager', { path }),
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),
+
+  exportDiagnostics: (): Promise<CommandResult> => invoke<CommandResult>('export_diagnostics'),
 };

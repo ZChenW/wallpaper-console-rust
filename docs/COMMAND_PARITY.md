@@ -89,5 +89,5 @@ Run with `XDG_CONFIG_HOME=$(mktemp -d)` for clean testing.
 - [x] mpvpaper --fork for video detachment
 
 ## Known gaps
-- `tui` subcommand is a stub — Wails/Tauri GUI is intended to replace the old Bash control TUI unless the user explicitly asks for a Rust terminal TUI.
+- `tui` subcommand is a stub — Tauri GUI is intended to replace the old Bash control TUI unless the user explicitly asks for a Rust terminal TUI.
 - sort commands sort by scanned metadata, not library.tsv metadata.

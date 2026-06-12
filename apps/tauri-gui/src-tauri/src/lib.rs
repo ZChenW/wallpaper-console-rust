@@ -15,8 +15,11 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::status,
+            commands::linux_wallpaperengine_status,
+            commands::web_wallpaper_status,
             commands::apply,
             commands::stop,
+            commands::we_clear_backend_error,
             commands::restore,
             commands::config_get,
             commands::config_set,
@@ -29,11 +32,14 @@ pub fn run() {
             commands::favorites_list,
             commands::favorite_add,
             commands::favorite_remove,
+            commands::favorites_page,
             commands::history_list,
             commands::history_clear,
+            commands::history_page,
             commands::library_count,
             commands::library_list,
             commands::library_page,
+            commands::library_page_gui,
             commands::rescan,
             commands::migrate_to_sqlite,
             commands::sqlite_verify,
@@ -44,9 +50,14 @@ pub fn run() {
             commands::thumbnail_for,
             commands::thumbnail_cache_status,
             commands::thumbnail_cache_clear,
+            commands::thumbnail_cache_cleanup_old,
+            commands::scan_progress,
+            commands::scan_cancel,
+            commands::library_source_status,
             commands::open_path,
             commands::reveal_in_file_manager,
             commands::browse_directory,
+            commands::export_diagnostics,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

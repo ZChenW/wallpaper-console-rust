@@ -26,12 +26,29 @@ pub fn default_config() -> HashMap<String, String> {
     defaults.insert("awww_transition_type".into(), "fade".into());
     defaults.insert("awww_transition_duration".into(), "1".into());
     defaults.insert("awww_resize".into(), "crop".into());
+    defaults.insert("linux_wallpaperengine_enabled".into(), "on".into());
+    defaults.insert("linux_wallpaperengine_path".into(), "auto".into());
+    defaults.insert("linux_wallpaperengine_scaling".into(), "default".into());
+    defaults.insert("linux_wallpaperengine_fps".into(), "60".into());
+    defaults.insert("linux_wallpaperengine_muted".into(), "off".into());
+    defaults.insert("linux_wallpaperengine_volume".into(), "100".into());
+    defaults.insert("linux_wallpaperengine_assets_dir".into(), "auto".into());
+    defaults.insert("linux_wallpaperengine_target_mode".into(), "auto".into());
+    defaults.insert("linux_wallpaperengine_target".into(), "".into());
+    defaults.insert("web_wallpaper_enabled".into(), "on".into());
+    defaults.insert("web_wallpaper_browser".into(), "auto".into());
+    defaults.insert("web_wallpaper_audio".into(), "on".into());
+    defaults.insert("web_wallpaper_extra_args".into(), "".into());
+    defaults.insert("web_wallpaper_window_width".into(), "1920".into());
+    defaults.insert("web_wallpaper_window_height".into(), "1080".into());
     defaults.insert("min_wallpaper_width".into(), "1280".into());
     defaults.insert("min_wallpaper_height".into(), "720".into());
     defaults.insert("preview_metadata".into(), "compact".into());
     defaults.insert("gui_thumbnail_mode".into(), "cache".into());
-    defaults.insert("storage_backend".into(), "file".into());
-    defaults.insert("gui_library_source".into(), "tsv".into());
+    defaults.insert("gui_thumbnail_cleanup_days".into(), "30".into());
+    defaults.insert("gui_thumbnail_failure_ttl_secs".into(), "900".into());
+    defaults.insert("gui_debug_logs".into(), "off".into());
+    defaults.insert("storage_backend".into(), "sqlite".into());
     defaults
 }
 

@@ -7,10 +7,11 @@
 //!   4. Cached video thumbnails in cache/previews/
 //!   5. Respects preview_metadata config: compact (default), visual, full
 
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{hash_map::DefaultHasher, HashMap};
 use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Mutex, OnceLock};
 
 use wc_core::config::ConfigDir;
 
@@ -347,11 +348,25 @@ fn detect_resolution(file: &str) -> String {
 }
 
 fn command_exists(cmd: &str) -> bool {
-    Command::new("which")
+    static CACHE: OnceLock<Mutex<HashMap<String, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Ok(guard) = cache.lock() {
+        if let Some(hit) = guard.get(cmd) {
+            return *hit;
+        }
+    }
+
+    let exists = Command::new("which")
         .arg(cmd)
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false)
+        .unwrap_or(false);
+
+    if let Ok(mut guard) = cache.lock() {
+        guard.insert(cmd.to_string(), exists);
+    }
+    exists
 }
 
 // ── Retained from original (thumbnail path helpers) ────────────────────────
@@ -404,6 +419,9 @@ fn gui_thumb_cache_key(entry: &WallpaperEntry) -> String {
 //   - Atomic writes (.tmp → rename)
 //   - v2- cache key prefix (invalidates old bad thumbnails)
 
+pub const DEFAULT_FAILURE_TTL_SECS: u64 = 15 * 60;
+const FAILURE_CACHE_DIR_NAME: &str = ".failures";
+
 /// Cache key for a GUI thumbnail (v2 — incompatible with v1 keys).
 pub fn gui_thumb_cache_key_v2(path: &str, mtime: u64, size: u64) -> String {
     let real = std::fs::canonicalize(path)
@@ -415,27 +433,29 @@ pub fn gui_thumb_cache_key_v2(path: &str, mtime: u64, size: u64) -> String {
     format!("{:x}.webp", hasher.finish())
 }
 
-/// Generate a GUI thumbnail into `cache/gui-thumbnails/`, returning the path.
-/// Returns `None` if no generator is available.
+/// Generate a GUI thumbnail. Returns (path, was_cached) or failure reason.
 pub fn generate_gui_thumbnail(
     cache_dir: &Path,
     path: &str,
     mtime: u64,
     size: u64,
-) -> Option<PathBuf> {
-    std::fs::create_dir_all(cache_dir).ok()?;
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
+    std::fs::create_dir_all(cache_dir).map_err(|_| ThumbnailFailure::CacheWriteFailed)?;
 
     let key = gui_thumb_cache_key_v2(path, mtime, size);
     let dst = cache_dir.join(&key);
 
     // Already cached — return immediately.
     if dst.exists() {
-        return Some(dst);
+        return Ok((dst, true));
     }
 
     let ext = wc_core::formats::get_extension(path)
         .unwrap_or_default()
         .to_lowercase();
+    if !wc_core::formats::is_supported_extension(&ext) {
+        return Err(ThumbnailFailure::Unsupported);
+    }
 
     // Atomic write: generate to .tmp.webp so ffmpeg detects the output format.
     let tmp = cache_dir.join(format!(".{}.tmp.webp", key));
@@ -450,11 +470,13 @@ pub fn generate_gui_thumbnail(
     if ok {
         let _ = std::fs::rename(&tmp, &dst);
         if dst.exists() {
-            return Some(dst);
+            return Ok((dst, false));
         }
+        // rename succeeded but dst doesn't exist → cache write failed
+        return Err(ThumbnailFailure::CacheWriteFailed);
     }
     let _ = std::fs::remove_file(&tmp);
-    None
+    Err(ThumbnailFailure::ProbeFailed)
 }
 
 /// Result of an attempted thumbnail generation.
@@ -463,10 +485,175 @@ pub struct ThumbnailResult {
     pub thumbnail: Option<String>,
     pub cache_hit: bool,
     pub error: Option<String>,
+    pub failure_reason: Option<ThumbnailFailure>,
 }
 
-/// Full thumbnail-for API suitable for Tauri/Wails commands.
+/// Typed classification of why thumbnail generation did not produce an image.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailFailure {
+    Unsupported,
+    Timeout,
+    ProbeFailed,
+    CacheWriteFailed,
+    MissingFile,
+}
+
+impl ThumbnailFailure {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ThumbnailFailure::Unsupported => "unsupported",
+            ThumbnailFailure::Timeout => "timeout",
+            ThumbnailFailure::ProbeFailed => "probe_failed",
+            ThumbnailFailure::CacheWriteFailed => "cache_write_failed",
+            ThumbnailFailure::MissingFile => "missing_file",
+        }
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value {
+            "unsupported" => Some(ThumbnailFailure::Unsupported),
+            "timeout" => Some(ThumbnailFailure::Timeout),
+            "probe_failed" => Some(ThumbnailFailure::ProbeFailed),
+            "cache_write_failed" => Some(ThumbnailFailure::CacheWriteFailed),
+            "missing_file" => Some(ThumbnailFailure::MissingFile),
+            _ => None,
+        }
+    }
+}
+
+/// Metadata about the thumbnail cache directory.
+pub struct ThumbnailCacheInfo {
+    pub entries: usize,
+    pub total_bytes: u64,
+    pub oldest_mtime: Option<u64>,
+    pub newest_mtime: Option<u64>,
+    pub failure_entries: usize,
+}
+
+/// Collect metadata about every file in the thumbnail cache directory.
+pub fn thumbnail_cache_info(cache_dir: &Path) -> ThumbnailCacheInfo {
+    let mut entries = 0usize;
+    let mut total_bytes = 0u64;
+    let mut oldest: Option<u64> = None;
+    let mut newest: Option<u64> = None;
+
+    if let Ok(read_dir) = std::fs::read_dir(cache_dir) {
+        for entry in read_dir.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            entries += 1;
+            total_bytes += meta.len();
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            match oldest {
+                None => oldest = Some(mtime),
+                Some(t) if mtime < t => oldest = Some(mtime),
+                _ => {}
+            }
+            match newest {
+                None => newest = Some(mtime),
+                Some(t) if mtime > t => newest = Some(mtime),
+                _ => {}
+            }
+        }
+    }
+
+    ThumbnailCacheInfo {
+        entries,
+        total_bytes,
+        oldest_mtime: oldest,
+        newest_mtime: newest,
+        failure_entries: count_failure_markers(cache_dir),
+    }
+}
+
+/// Clear thumbnail cache entries older than `max_age_days`. Returns count removed.
+pub fn thumbnail_cache_cleanup_old(cache_dir: &Path, max_age_days: u64) -> u64 {
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+        .saturating_sub(max_age_days * 86400);
+    let mut removed = 0u64;
+    if let Ok(read_dir) = std::fs::read_dir(cache_dir) {
+        for entry in read_dir.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if mtime < cutoff && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    let failures = failure_cache_dir(cache_dir);
+    if let Ok(read_dir) = std::fs::read_dir(failures) {
+        for entry in read_dir.flatten() {
+            let Ok(meta) = entry.metadata() else { continue };
+            if !meta.is_file() {
+                continue;
+            }
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            if mtime < cutoff && std::fs::remove_file(entry.path()).is_ok() {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Clear all files in the thumbnail cache directory. Returns count removed.
+pub fn thumbnail_cache_cleanup_all(cache_dir: &Path) -> u64 {
+    let mut removed = 0u64;
+    if let Ok(read_dir) = std::fs::read_dir(cache_dir) {
+        for entry in read_dir.flatten() {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    let failures = failure_cache_dir(cache_dir);
+    if let Ok(read_dir) = std::fs::read_dir(&failures) {
+        for entry in read_dir.flatten() {
+            if entry.file_type().map(|t| t.is_file()).unwrap_or(false)
+                && std::fs::remove_file(entry.path()).is_ok()
+            {
+                removed += 1;
+            }
+        }
+    }
+    removed
+}
+
+/// Full thumbnail-for API suitable for Tauri commands.
 pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
+    thumbnail_for_with_failure_ttl(cache_dir, path, DEFAULT_FAILURE_TTL_SECS)
+}
+
+pub fn thumbnail_for_with_failure_ttl(
+    cache_dir: &Path,
+    path: &str,
+    failure_ttl_secs: u64,
+) -> ThumbnailResult {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
@@ -475,6 +662,7 @@ pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
                 thumbnail: None,
                 cache_hit: false,
                 error: Some(format!("cannot stat file: {}", e)),
+                failure_reason: Some(ThumbnailFailure::MissingFile),
             }
         }
     };
@@ -485,24 +673,97 @@ pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-
-    match generate_gui_thumbnail(cache_dir, path, mtime, size) {
-        Some(thumb) => {
-            let hit = true; // checked existence inside generate_gui_thumbnail
-            ThumbnailResult {
-                path: path.to_string(),
-                thumbnail: Some(thumb.to_string_lossy().to_string()),
-                cache_hit: hit,
-                error: None,
-            }
-        }
-        None => ThumbnailResult {
+    let key = gui_thumb_cache_key_v2(path, mtime, size);
+    let marker = failure_marker_path(cache_dir, &key);
+    if let Some(failure) = read_failure_marker(&marker) {
+        return ThumbnailResult {
             path: path.to_string(),
             thumbnail: None,
             cache_hit: false,
-            error: Some("no thumbnail generator available (install ffmpeg + imagemagick)".into()),
-        },
+            error: Some(format!(
+                "thumbnail generation skipped: cached {}",
+                failure.as_str()
+            )),
+            failure_reason: Some(failure),
+        };
     }
+
+    match generate_gui_thumbnail(cache_dir, path, mtime, size) {
+        Ok((thumb, cached)) => ThumbnailResult {
+            path: path.to_string(),
+            thumbnail: Some(thumb.to_string_lossy().to_string()),
+            cache_hit: cached,
+            error: None,
+            failure_reason: None,
+        },
+        Err(failure) => {
+            let expires_at = current_epoch_secs().saturating_add(failure_ttl_secs);
+            let _ = write_failure_marker(&marker, failure, expires_at);
+            ThumbnailResult {
+                path: path.to_string(),
+                thumbnail: None,
+                cache_hit: false,
+                error: Some(format!("thumbnail generation failed: {:?}", failure)),
+                failure_reason: Some(failure),
+            }
+        }
+    }
+}
+
+fn current_epoch_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn failure_cache_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(FAILURE_CACHE_DIR_NAME)
+}
+
+fn failure_marker_path(cache_dir: &Path, key: &str) -> PathBuf {
+    failure_cache_dir(cache_dir).join(format!("{}.fail", key))
+}
+
+fn count_failure_markers(cache_dir: &Path) -> usize {
+    std::fs::read_dir(failure_cache_dir(cache_dir))
+        .map(|read_dir| {
+            read_dir
+                .flatten()
+                .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+fn read_failure_marker(marker: &Path) -> Option<ThumbnailFailure> {
+    let content = std::fs::read_to_string(marker).ok()?;
+    let mut lines = content.lines();
+    if lines.next()? != "v1" {
+        let _ = std::fs::remove_file(marker);
+        return None;
+    }
+    let failure = ThumbnailFailure::from_str(lines.next()?)?;
+    let expires_at = lines.next()?.parse::<u64>().ok()?;
+    if expires_at < current_epoch_secs() {
+        let _ = std::fs::remove_file(marker);
+        return None;
+    }
+    Some(failure)
+}
+
+fn write_failure_marker(
+    marker: &Path,
+    failure: ThumbnailFailure,
+    expires_at: u64,
+) -> std::io::Result<()> {
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        marker,
+        format!("v1\n{}\n{}\n", failure.as_str(), expires_at),
+    )
 }
 
 // ── Internal generators ────────────────────────────────────────────────────
@@ -702,5 +963,148 @@ fn frame_has_content(path: &Path) -> bool {
             mean > 0.06 && mean < 0.94 && stddev > 0.015
         }
         _ => true, // can't check, accept it
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_key_is_deterministic() {
+        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 1700000000, 12345);
+        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 1700000000, 12345);
+        assert_eq!(key1, key2, "same inputs must produce same cache key");
+    }
+
+    #[test]
+    fn cache_key_changes_with_mtime() {
+        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 12345);
+        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 200, 12345);
+        assert_ne!(key1, key2, "different mtime must produce different key");
+    }
+
+    #[test]
+    fn cache_key_changes_with_size() {
+        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 100);
+        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 200);
+        assert_ne!(key1, key2, "different size must produce different key");
+    }
+
+    #[test]
+    fn cache_key_changes_with_path() {
+        let key1 = gui_thumb_cache_key_v2("/a.jpg", 100, 100);
+        let key2 = gui_thumb_cache_key_v2("/b.jpg", 100, 100);
+        assert_ne!(key1, key2, "different path must produce different key");
+    }
+
+    #[test]
+    fn thumbnail_for_missing_file_returns_missing_file_failure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = thumbnail_for(tmp.path(), "/nonexistent/file.jpg");
+        assert_eq!(result.failure_reason, Some(ThumbnailFailure::MissingFile));
+        assert!(result.thumbnail.is_none());
+        assert!(!result.cache_hit);
+    }
+
+    #[test]
+    fn cache_info_returns_zero_for_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let info = thumbnail_cache_info(tmp.path());
+        assert_eq!(info.entries, 0);
+        assert_eq!(info.total_bytes, 0);
+        assert!(info.oldest_mtime.is_none());
+    }
+
+    #[test]
+    fn cleanup_old_removes_no_files_in_empty_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let removed = thumbnail_cache_cleanup_old(tmp.path(), 30);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn thumbnail_failure_cache_records_failed_generation() {
+        let cache = tempfile::tempdir().unwrap();
+        let media_dir = tempfile::tempdir().unwrap();
+        let bad_image = media_dir.path().join("bad.jpg");
+        std::fs::write(&bad_image, b"not an image").unwrap();
+
+        let result = thumbnail_for_with_failure_ttl(
+            cache.path(),
+            bad_image.to_str().unwrap(),
+            DEFAULT_FAILURE_TTL_SECS,
+        );
+
+        assert!(result.thumbnail.is_none());
+        assert!(result.failure_reason.is_some());
+        assert_eq!(thumbnail_cache_info(cache.path()).failure_entries, 1);
+    }
+
+    #[test]
+    fn thumbnail_failure_cache_uses_persisted_reason_until_ttl() {
+        let cache = tempfile::tempdir().unwrap();
+        let media_dir = tempfile::tempdir().unwrap();
+        let bad_image = media_dir.path().join("bad.jpg");
+        std::fs::write(&bad_image, b"not an image").unwrap();
+        let meta = std::fs::metadata(&bad_image).unwrap();
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let key = gui_thumb_cache_key_v2(bad_image.to_str().unwrap(), mtime, size);
+        let marker = failure_marker_path(cache.path(), &key);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        write_failure_marker(
+            &marker,
+            ThumbnailFailure::Unsupported,
+            current_epoch_secs() + 3600,
+        )
+        .unwrap();
+
+        let result = thumbnail_for_with_failure_ttl(
+            cache.path(),
+            bad_image.to_str().unwrap(),
+            DEFAULT_FAILURE_TTL_SECS,
+        );
+
+        assert_eq!(result.failure_reason, Some(ThumbnailFailure::Unsupported));
+    }
+
+    #[test]
+    fn thumbnail_failure_cache_expires_and_replaces_old_marker() {
+        let cache = tempfile::tempdir().unwrap();
+        let media_dir = tempfile::tempdir().unwrap();
+        let bad_image = media_dir.path().join("bad.jpg");
+        std::fs::write(&bad_image, b"not an image").unwrap();
+        let meta = std::fs::metadata(&bad_image).unwrap();
+        let size = meta.len();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let key = gui_thumb_cache_key_v2(bad_image.to_str().unwrap(), mtime, size);
+        let marker = failure_marker_path(cache.path(), &key);
+        std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
+        write_failure_marker(
+            &marker,
+            ThumbnailFailure::Unsupported,
+            current_epoch_secs() - 1,
+        )
+        .unwrap();
+
+        let result = thumbnail_for_with_failure_ttl(
+            cache.path(),
+            bad_image.to_str().unwrap(),
+            DEFAULT_FAILURE_TTL_SECS,
+        );
+
+        assert_ne!(result.failure_reason, Some(ThumbnailFailure::Unsupported));
+        assert_eq!(thumbnail_cache_info(cache.path()).failure_entries, 1);
     }
 }

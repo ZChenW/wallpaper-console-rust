@@ -1,64 +1,121 @@
-import { useState, useEffect, useCallback } from 'react';
-import { api, StatusDTO } from './api/bridge';
+import { startTransition, useEffect, useState, useCallback } from 'react';
+import { api, CommandResult } from './api/bridge';
+import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
-import FavoritesView from './views/FavoritesView';
-import HistoryView from './views/HistoryView';
+import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
+import HistoryView, { invalidateHistoryCache } from './views/HistoryView';
 import SourcesView from './views/SourcesView';
 import SettingsView from './views/SettingsView';
 import StatusBar from './components/StatusBar';
 import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
+import Toast from './components/Toast';
+import PerformanceOverlay from './components/PerformanceOverlay';
+import { AppStateProvider, useAppState } from './state/AppStateContext';
+import { ThumbnailStoreProvider } from './state/ThumbnailStoreContext';
 
 type View = 'library' | 'favorites' | 'history' | 'sources' | 'settings';
 
 export default function App() {
+  return (
+    <AppStateProvider>
+      <ThumbnailStoreProvider>
+        <AppShell />
+      </ThumbnailStoreProvider>
+    </AppStateProvider>
+  );
+}
+
+function AppShell() {
   const [view, setView] = useState<View>('library');
-  const [status, setStatus] = useState<StatusDTO | null>(null);
+  const [visitedViews, setVisitedViews] = useState<Set<View>>(new Set(['library']));
   const [applying, setApplying] = useState(false);
-
-  const refreshStatus = useCallback(async () => {
-    try {
-      const s = await api.status();
-      setStatus(s);
-    } catch {
-      // Wails not connected yet — use fallback
-    }
-  }, []);
-
-  useEffect(() => {
-    refreshStatus();
-    const interval = setInterval(refreshStatus, 5000);
-    return () => clearInterval(interval);
-  }, [refreshStatus]);
+  const {
+    status,
+    feedback,
+    refreshStatus,
+    setFeedbackWithAutoDismiss,
+    clearFeedback,
+  } = useAppState();
 
   const handleApply = useCallback(async (path: string) => {
     setApplying(true);
+    setFeedbackWithAutoDismiss({ state: 'running', label: 'Applying wallpaper' });
     try {
-      await api.apply(path);
+      const r = await api.apply(path);
+      if (r.success) {
+        invalidateHistoryCache();
+        setFeedbackWithAutoDismiss({ state: 'success', label: 'Applied', detail: path.split('/').pop() });
+      } else {
+        setFeedbackWithAutoDismiss(commandErrorFeedback('Apply', r));
+      }
       await refreshStatus();
+    } catch (e) {
+      setFeedbackWithAutoDismiss({ state: 'error', label: 'Apply failed', detail: String(e) });
     } finally {
       setApplying(false);
     }
-  }, [refreshStatus]);
+  }, [refreshStatus, setFeedbackWithAutoDismiss]);
+
+  const handleToolbarAction = useCallback(async (
+    action: () => Promise<CommandResult | void>,
+    label: string,
+  ) => {
+    setFeedbackWithAutoDismiss({ state: 'running', label });
+    try {
+      const r = await action();
+      if (r && !r.success) {
+        setFeedbackWithAutoDismiss(commandErrorFeedback(label, r));
+      } else {
+        setFeedbackWithAutoDismiss(commandSuccessFeedback(label, r));
+      }
+      await refreshStatus();
+    } catch (e) {
+      setFeedbackWithAutoDismiss(commandErrorFeedback(label, e));
+    }
+  }, [refreshStatus, setFeedbackWithAutoDismiss]);
+
+  const handleFeedback = useCallback((fb: CommandFeedback) => {
+    setFeedbackWithAutoDismiss(fb);
+  }, [setFeedbackWithAutoDismiss]);
+
+  const handleNavigate = useCallback((nextView: View) => {
+    startTransition(() => {
+      setView(nextView);
+      setVisitedViews(prev => new Set(prev).add(nextView));
+    });
+  }, []);
+
+  const persistentViews: View[] = ['library', 'favorites', 'history'];
 
   return (
     <div className="app">
       <Toolbar
         view={view}
-        onRefresh={refreshStatus}
+        onAction={handleToolbarAction}
         applying={applying}
       />
       <div className="app-body">
-        <Sidebar view={view} onNavigate={setView} />
+        <Sidebar view={view} onNavigate={handleNavigate} />
         <main className="main-content">
-          {view === 'library' && <LibraryView onApply={handleApply} applying={applying} />}
-          {view === 'favorites' && <FavoritesView onApply={handleApply} applying={applying} />}
-          {view === 'history' && <HistoryView onApply={handleApply} applying={applying} />}
-          {view === 'sources' && <SourcesView onRefresh={refreshStatus} />}
-          {view === 'settings' && <SettingsView onRefresh={refreshStatus} />}
+          {persistentViews.map(v => visitedViews.has(v) && (
+            <div key={v} className="view-shell" style={{ display: view === v ? 'flex' : 'none' }}>
+              {v === 'library' && <LibraryView onApply={handleApply} applying={applying} active={view === v} />}
+              {v === 'favorites' && <FavoritesView onApply={handleApply} applying={applying} active={view === v} />}
+              {v === 'history' && <HistoryView onApply={handleApply} applying={applying} active={view === v} />}
+            </div>
+          ))}
+          {(view === 'sources' || view === 'settings') && (
+            <div className="view-shell">
+              {view === 'sources' && <SourcesView onRefresh={refreshStatus} onFeedback={handleFeedback} />}
+              {view === 'settings' && <SettingsView onRefresh={refreshStatus} onFeedback={handleFeedback} />}
+            </div>
+          )}
         </main>
       </div>
-      <StatusBar status={status} applying={applying} />
+      <StatusBar status={status} applying={applying} feedback={feedback} />
+      <Toast feedback={feedback} onDismiss={clearFeedback} />
+      <PerformanceOverlay />
     </div>
   );
 }
