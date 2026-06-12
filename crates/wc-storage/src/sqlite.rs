@@ -1,17 +1,32 @@
 //! SQLite storage — schema, migration, verify, resync, backup, restore.
 
+use std::collections::HashMap;
 use std::path::Path;
 
+use camino::Utf8PathBuf;
 use rusqlite::{params, Connection};
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
+use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
 use crate::flat;
+
+const WALLPAPER_QUERY_INDEXES_SQL: &str = "
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_wallpapers_path ON wallpapers(path);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_type ON wallpapers(type);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_mtime ON wallpapers(mtime DESC, path ASC);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_size ON wallpapers(size DESC, path ASC);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_type_mtime ON wallpapers(type, mtime DESC, path ASC);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_type_size ON wallpapers(type, size DESC, path ASC);
+";
 
 /// Create the wallpaper-console SQLite schema.
 pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
     conn.execute_batch(
-        "PRAGMA user_version = 1;
+        "PRAGMA journal_mode = WAL;
+        PRAGMA synchronous = NORMAL;
+        PRAGMA temp_store = MEMORY;
+        PRAGMA user_version = 1;
 
         CREATE TABLE IF NOT EXISTS db_meta (
             key        TEXT PRIMARY KEY,
@@ -39,12 +54,15 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             size       INTEGER NOT NULL DEFAULT 0,
             mtime      INTEGER NOT NULL DEFAULT 0,
             resolution TEXT NOT NULL DEFAULT '?x?',
+            project_type TEXT NOT NULL DEFAULT '',
+            preview_path TEXT NOT NULL DEFAULT '',
+            workshop_id  TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL DEFAULT '',
+            we_file      TEXT NOT NULL DEFAULT '',
+            unsupported_reason TEXT NOT NULL DEFAULT '',
             source_id  INTEGER REFERENCES sources(id),
             last_seen  TEXT NOT NULL DEFAULT (datetime('now'))
         );
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_wallpapers_path ON wallpapers(path);
-        CREATE INDEX IF NOT EXISTS idx_wallpapers_type ON wallpapers(type);
-
         CREATE TABLE IF NOT EXISTS favorites (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             path        TEXT NOT NULL UNIQUE,
@@ -64,6 +82,45 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         );",
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    ensure_wallpaper_metadata_columns(conn)?;
+    ensure_wallpaper_query_indexes(conn)?;
+    Ok(())
+}
+
+/// Add project metadata columns to older wallpapers tables.
+pub fn ensure_wallpaper_metadata_columns(conn: &Connection) -> Result<(), WcError> {
+    let mut stmt = conn
+        .prepare("PRAGMA table_info(wallpapers)")
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let existing: std::collections::HashSet<String> = columns.into_iter().collect();
+    for (name, sql_type) in [
+        ("project_type", "TEXT NOT NULL DEFAULT ''"),
+        ("preview_path", "TEXT NOT NULL DEFAULT ''"),
+        ("workshop_id", "TEXT NOT NULL DEFAULT ''"),
+        ("title", "TEXT NOT NULL DEFAULT ''"),
+        ("we_file", "TEXT NOT NULL DEFAULT ''"),
+        ("unsupported_reason", "TEXT NOT NULL DEFAULT ''"),
+    ] {
+        if !existing.contains(name) {
+            conn.execute_batch(&format!(
+                "ALTER TABLE wallpapers ADD COLUMN {name} {sql_type};"
+            ))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Ensure existing databases have the indexes needed by paged GUI queries.
+pub fn ensure_wallpaper_query_indexes(conn: &Connection) -> Result<(), WcError> {
+    ensure_wallpaper_metadata_columns(conn)?;
+    conn.execute_batch(WALLPAPER_QUERY_INDEXES_SQL)
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
 }
 
@@ -117,10 +174,15 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
 
-    // History — reverse order so newest gets highest id
-    let mut history = flat::history_list(cd)?;
-    history.reverse();
-    for path in &history {
+    // History — canonical-deduplicate keeping newest (first occurrence in flat file),
+    // then reverse so newest gets highest id
+    let mut seen = std::collections::HashSet::new();
+    let history: Vec<String> = flat::history_list(cd)?
+        .into_iter()
+        .filter(|path| seen.insert(flat::try_canonicalize(path)))
+        .collect();
+    let history_rev: Vec<String> = history.into_iter().rev().collect();
+    for path in &history_rev {
         let ep = sqlite_escape(path);
         conn.execute(
             "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'unknown', ?2)",
@@ -162,12 +224,31 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
 
+    // Wallpapers — import from library.tsv if present
+    import_library_tsv_into(&conn, cd)?;
+
     Ok(())
 }
 
-/// Compare flat files vs SQLite. Returns Ok(()) if consistent,
-/// Err with mismatch details if not.
-pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
+/// Result of database verification.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum VerifyResult {
+    /// All categories match.
+    Ok,
+    /// Data integrity is fine, but flat-file compatibility copies have drifted.
+    OkWithWarnings(Vec<String>),
+    /// Real data mismatch detected (wallpapers, favorites, history, state).
+    Failed(Vec<String>),
+}
+
+/// Compare flat files vs SQLite. Returns:
+/// - `Ok(VerifyResult::Ok)` — all consistent
+/// - `Ok(VerifyResult::OkWithWarnings(w))` — config/sources compatibility copies
+///   have drifted; actual data is fine
+/// - `Ok(VerifyResult::Failed(e))` — real data mismatch (wallpapers, favorites,
+///   history, state)
+/// - `Err(WcError::Sqlite(...))` — schema corruption or missing DB
+pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Err(WcError::Other(
@@ -176,9 +257,10 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
     }
     let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
 
+    let mut warnings: Vec<String> = Vec::new();
     let mut errors: Vec<String> = Vec::new();
 
-    // Config
+    // Config — compatibility copy only; drift is a warning.
     {
         let flat_cfg = wc_core::config::parse_config_file(&cd.config_path())?;
         let mut stmt = conn
@@ -191,11 +273,11 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let db_cfg: std::collections::HashMap<String, String> = db_rows.into_iter().collect();
         if flat_cfg != db_cfg {
-            errors.push("config".into());
+            warnings.push("config".into());
         }
     }
 
-    // Sources
+    // Sources — compatibility copy only; drift is a warning.
     {
         let mut flat_src: Vec<String> = flat::sources_list(cd)?;
         flat_src.sort();
@@ -208,11 +290,11 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
         if flat_src != db_src {
-            errors.push("sources".into());
+            warnings.push("sources".into());
         }
     }
 
-    // Favorites
+    // Favorites — data integrity; mismatch is an error.
     {
         let mut flat_fav: Vec<String> = flat::favorites_list(cd)?;
         flat_fav.sort();
@@ -229,7 +311,7 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         }
     }
 
-    // History (sorted set comparison)
+    // History — data integrity; mismatch is an error.
     {
         let mut flat_hist: Vec<String> = flat::history_list(cd)?;
         flat_hist.sort();
@@ -247,7 +329,7 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         }
     }
 
-    // State: current — missing row is OK (empty), SQL error is NOT.
+    // State: current — data integrity; mismatch is an error.
     {
         let flat_cur = flat::current_read(cd)?.unwrap_or_default();
         let db_cur: String =
@@ -263,7 +345,7 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         }
     }
 
-    // State: last_backend — missing row is OK, SQL error is NOT.
+    // State: last_backend — data integrity; mismatch is an error.
     {
         let flat_be = flat::last_backend_read(cd)?.unwrap_or_default();
         let db_be: String = match conn.query_row(
@@ -280,14 +362,12 @@ pub fn verify(cd: &ConfigDir) -> Result<(), WcError> {
         }
     }
 
-    if errors.is_empty() {
-        Ok(())
+    if !errors.is_empty() {
+        Ok(VerifyResult::Failed(errors))
+    } else if !warnings.is_empty() {
+        Ok(VerifyResult::OkWithWarnings(warnings))
     } else {
-        Err(WcError::Other(format!(
-            "VERIFY FAILED: {} mismatch(es) found: {}",
-            errors.len(),
-            errors.join(", ")
-        )))
+        Ok(VerifyResult::Ok)
     }
 }
 
@@ -330,8 +410,13 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
-    // Sources
+    // Sources — canonical-deduplicate
+    let mut seen_src = std::collections::HashSet::new();
     for path in flat::sources_list(cd)? {
+        let canon = flat::try_canonicalize(&path);
+        if !seen_src.insert(canon) {
+            continue;
+        }
         conn.execute(
             "INSERT OR IGNORE INTO sources (path, added_at) VALUES (?1, ?2)",
             params![path, now],
@@ -346,10 +431,14 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
-    // History (reverse for id ordering)
-    let mut history = flat::history_list(cd)?;
-    history.reverse();
-    for path in &history {
+    // History (canonical-deduplicate keeping newest, then reverse for id ordering)
+    let mut seen_hist = std::collections::HashSet::new();
+    let history: Vec<String> = flat::history_list(cd)?
+        .into_iter()
+        .filter(|path| seen_hist.insert(flat::try_canonicalize(path)))
+        .collect();
+    let history_rev: Vec<String> = history.into_iter().rev().collect();
+    for path in &history_rev {
         conn.execute(
             "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'unknown', ?2)",
             params![path, now],
@@ -382,6 +471,9 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
         params![now],
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Wallpapers — import from library.tsv if present
+    import_library_tsv_into(&conn, cd)?;
 
     conn.close()
         .map_err(|(_, e)| WcError::Sqlite(e.to_string()))?;
@@ -620,9 +712,12 @@ pub fn library_insert(
         return Ok(());
     }
     let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    ensure_wallpaper_query_indexes(&conn)?;
     conn.execute(
-        "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        "INSERT OR IGNORE INTO wallpapers
+         (path, type, ext, backend, size, mtime, resolution,
+          project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', '', '', '', '')",
         params![
             path,
             ftype,
@@ -647,14 +742,17 @@ pub fn library_insert_batch(
         return Ok(0);
     }
     let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    ensure_wallpaper_query_indexes(&conn)?;
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     {
         let mut stmt = tx
             .prepare(
-                "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT OR IGNORE INTO wallpapers
+                 (path, type, ext, backend, size, mtime, resolution,
+                  project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', '', '', '', '')",
             )
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
         for (path, ftype, ext, backend, size, mtime, resolution) in entries {
@@ -674,17 +772,360 @@ pub fn library_insert_batch(
     Ok(entries.len())
 }
 
+/// Atomically replace the wallpapers table with a freshly scanned batch.
+///
+/// The old table remains visible if staging, delete, insert, or commit fails.
+pub fn library_replace_batch_atomic(
+    cd: &ConfigDir,
+    entries: &[(&str, &str, &str, &str, u64, u64, &str)],
+) -> Result<usize, WcError> {
+    let db_path = cd.db_path();
+    ensure_sqlite_db(cd);
+
+    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    ensure_wallpaper_query_indexes(&conn)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    tx.execute_batch(
+        "CREATE TEMP TABLE wc_wallpapers_replace (
+            path       TEXT NOT NULL UNIQUE,
+            type       TEXT NOT NULL,
+            ext        TEXT NOT NULL,
+            backend    TEXT NOT NULL,
+            size       INTEGER NOT NULL DEFAULT 0,
+            mtime      INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT '?x?',
+            project_type TEXT NOT NULL DEFAULT '',
+            preview_path TEXT NOT NULL DEFAULT '',
+            workshop_id  TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL DEFAULT '',
+            we_file      TEXT NOT NULL DEFAULT '',
+            unsupported_reason TEXT NOT NULL DEFAULT ''
+        );",
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT OR IGNORE INTO wc_wallpapers_replace
+                 (path, type, ext, backend, size, mtime, resolution,
+                  project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '', '', '', '', '', '')",
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, ftype, ext, backend, size, mtime, resolution) in entries {
+            stmt.execute(params![
+                path,
+                ftype,
+                ext,
+                backend,
+                *size as i64,
+                *mtime as i64,
+                resolution
+            ])
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+
+    tx.execute("DELETE FROM wallpapers", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO wallpapers
+             (path, type, ext, backend, size, mtime, resolution,
+              project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+             SELECT path, type, ext, backend, size, mtime, resolution,
+                    project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+             FROM wc_wallpapers_replace",
+            [],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute("DROP TABLE wc_wallpapers_replace", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    Ok(inserted)
+}
+
+/// Atomically replace the wallpapers table using full WallpaperEntry metadata.
+pub fn library_replace_entries_batch_atomic(
+    cd: &ConfigDir,
+    entries: &[WallpaperEntry],
+) -> Result<usize, WcError> {
+    let db_path = cd.db_path();
+    ensure_sqlite_db(cd);
+
+    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    ensure_wallpaper_query_indexes(&conn)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    tx.execute_batch(
+        "CREATE TEMP TABLE wc_wallpapers_replace (
+            path       TEXT NOT NULL UNIQUE,
+            type       TEXT NOT NULL,
+            ext        TEXT NOT NULL,
+            backend    TEXT NOT NULL,
+            size       INTEGER NOT NULL DEFAULT 0,
+            mtime      INTEGER NOT NULL DEFAULT 0,
+            resolution TEXT NOT NULL DEFAULT '?x?',
+            project_type TEXT NOT NULL DEFAULT '',
+            preview_path TEXT NOT NULL DEFAULT '',
+            workshop_id  TEXT NOT NULL DEFAULT '',
+            title        TEXT NOT NULL DEFAULT '',
+            we_file      TEXT NOT NULL DEFAULT '',
+            unsupported_reason TEXT NOT NULL DEFAULT ''
+        );",
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT OR IGNORE INTO wc_wallpapers_replace
+                 (path, type, ext, backend, size, mtime, resolution,
+                  project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for entry in entries {
+            let project = entry.project.as_ref();
+            stmt.execute(params![
+                entry.path.as_str(),
+                entry.file_type.as_str(),
+                entry.ext.as_str(),
+                entry.backend.as_str(),
+                entry.size as i64,
+                entry.mtime as i64,
+                entry.resolution.as_str(),
+                project.map(|p| p.project_type.as_str()).unwrap_or(""),
+                project
+                    .and_then(|p| p.preview_path.as_deref())
+                    .unwrap_or(""),
+                project.and_then(|p| p.workshop_id.as_deref()).unwrap_or(""),
+                project.and_then(|p| p.title.as_deref()).unwrap_or(""),
+                project.and_then(|p| p.we_file.as_deref()).unwrap_or(""),
+                project
+                    .and_then(|p| p.unsupported_reason.as_deref())
+                    .unwrap_or(""),
+            ])
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+
+    tx.execute("DELETE FROM wallpapers", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let inserted = tx
+        .execute(
+            "INSERT INTO wallpapers
+             (path, type, ext, backend, size, mtime, resolution,
+              project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+             SELECT path, type, ext, backend, size, mtime, resolution,
+                    project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+             FROM wc_wallpapers_replace",
+            [],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute("DROP TABLE wc_wallpapers_replace", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    Ok(inserted)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_config_dir() -> (tempfile::TempDir, ConfigDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().to_path_buf(),
+        };
+        cd.init().unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        (tmp, cd)
+    }
+
+    fn wallpaper_paths(cd: &ConfigDir) -> Vec<String> {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path FROM wallpapers ORDER BY path")
+            .unwrap();
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn library_replace_batch_atomic_replaces_existing_rows() {
+        let (_tmp, cd) = temp_config_dir();
+        library_insert_batch(
+            &cd,
+            &[
+                ("old-a.jpg", "image", "jpg", "awww", 10, 100, "100x100"),
+                ("old-b.jpg", "image", "jpg", "awww", 20, 200, "100x100"),
+            ],
+        )
+        .unwrap();
+
+        let inserted = library_replace_batch_atomic(
+            &cd,
+            &[("new-a.jpg", "image", "jpg", "awww", 30, 300, "200x200")],
+        )
+        .unwrap();
+
+        assert_eq!(inserted, 1);
+        assert_eq!(wallpaper_paths(&cd), vec!["new-a.jpg"]);
+    }
+
+    #[test]
+    fn library_replace_batch_atomic_empty_batch_commits_empty_library() {
+        let (_tmp, cd) = temp_config_dir();
+        library_insert_batch(
+            &cd,
+            &[("old-a.jpg", "image", "jpg", "awww", 10, 100, "100x100")],
+        )
+        .unwrap();
+
+        let inserted = library_replace_batch_atomic(&cd, &[]).unwrap();
+
+        assert_eq!(inserted, 0);
+        assert!(wallpaper_paths(&cd).is_empty());
+    }
+
+    #[test]
+    fn library_replace_batch_atomic_preserves_old_rows_when_insert_fails() {
+        let (_tmp, cd) = temp_config_dir();
+        library_insert_batch(
+            &cd,
+            &[("old-a.jpg", "image", "jpg", "awww", 10, 100, "100x100")],
+        )
+        .unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_bad_wallpaper
+             BEFORE INSERT ON wallpapers
+             WHEN NEW.path = 'bad.jpg'
+             BEGIN
+               SELECT RAISE(ABORT, 'injected insert failure');
+             END;",
+        )
+        .unwrap();
+
+        let err = library_replace_batch_atomic(
+            &cd,
+            &[
+                ("new-a.jpg", "image", "jpg", "awww", 30, 300, "200x200"),
+                ("bad.jpg", "image", "jpg", "awww", 40, 400, "200x200"),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("injected insert failure"));
+        assert_eq!(wallpaper_paths(&cd), vec!["old-a.jpg"]);
+    }
+
+    #[test]
+    fn library_replace_batch_atomic_auto_creates_db_and_inserts_rows() {
+        let (_tmp, cd) = temp_config_dir();
+        // Delete the DB that temp_config_dir might have created.
+        let _ = std::fs::remove_file(cd.db_path());
+
+        let inserted = library_replace_batch_atomic(
+            &cd,
+            &[("a.jpg", "image", "jpg", "awww", 100, 1000, "800x600")],
+        )
+        .unwrap();
+        assert_eq!(inserted, 1);
+        assert!(cd.db_path().exists());
+        assert_eq!(wallpaper_paths(&cd), vec!["a.jpg"]);
+    }
+
+    #[test]
+    fn sqlite_source_add_auto_creates_db() {
+        let (_tmp, cd) = temp_config_dir();
+        let _ = std::fs::remove_file(cd.db_path());
+
+        let added = sqlite_source_add(&cd, "/test/dir").unwrap();
+        assert!(added);
+        assert!(cd.db_path().exists());
+    }
+
+    #[test]
+    fn library_replace_entries_batch_atomic_preserves_we_metadata() {
+        let (_tmp, cd) = temp_config_dir();
+        let entry = WallpaperEntry {
+            path: Utf8PathBuf::from("/steamapps/workshop/content/431960/3558034522"),
+            file_type: FileType::WeScene,
+            ext: "scene".into(),
+            backend: Backend::LinuxWallpaperEngine,
+            size: 42,
+            mtime: 1234,
+            resolution: "WE".into(),
+            project: Some(WallpaperProject {
+                project_type: "we_scene".into(),
+                preview_path: Some(
+                    "/steamapps/workshop/content/431960/3558034522/preview.gif".into(),
+                ),
+                workshop_id: Some("3558034522".into()),
+                title: Some("Scene title".into()),
+                we_file: Some("scene.json".into()),
+                backend: Some("linux-wallpaperengine".into()),
+                unsupported_reason: None,
+            }),
+        };
+
+        let inserted = library_replace_entries_batch_atomic(&cd, &[entry]).unwrap();
+        assert_eq!(inserted, 1);
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let row: (String, String, String, String, String) = conn
+            .query_row(
+                "SELECT type, project_type, preview_path, workshop_id, title FROM wallpapers",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(row.0, "we_scene");
+        assert_eq!(row.1, "we_scene");
+        assert!(row.2.ends_with("preview.gif"));
+        assert_eq!(row.3, "3558034522");
+        assert_eq!(row.4, "Scene title");
+    }
+}
+
 // ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────
 
-/// Add a source directly to the SQLite sources table.
-/// Fails if wallpapers.db does not exist or the write fails.
-pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+/// Ensure wallpapers.db exists with the full schema.
+/// No-op if the file already exists. Failures are logged and silently ignored
+/// so that callers never get blocked by bootstrap failures.
+pub fn ensure_sqlite_db(cd: &ConfigDir) {
     let db = cd.db_path();
-    if !db.exists() {
-        return Err(WcError::Other(
-            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-        ));
+    if let Ok(conn) = Connection::open(&db) {
+        create_schema(&conn).ok();
     }
+}
+
+/// Add a source directly to the SQLite sources table.
+/// Auto-creates the database if it does not exist.
+pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    ensure_sqlite_db(cd);
+    let db = cd.db_path();
     let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
     let n = conn
         .execute(
@@ -696,19 +1137,92 @@ pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
 }
 
 /// Remove a source directly from the SQLite sources table.
-/// Fails if wallpapers.db does not exist or the write fails.
+/// Auto-creates the database if it does not exist.
 pub fn sqlite_source_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    ensure_sqlite_db(cd);
     let db = cd.db_path();
-    if !db.exists() {
-        return Err(WcError::Other(
-            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-        ));
-    }
     let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
     let n = conn
         .execute("DELETE FROM sources WHERE path = (?1)", params![path])
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(n > 0)
+}
+
+pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+pub fn sqlite_favorite_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let n = conn
+        .execute(
+            "INSERT OR IGNORE INTO favorites (path) VALUES (?1)",
+            params![path],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(n > 0)
+}
+
+pub fn sqlite_favorite_remove(cd: &ConfigDir, path: &str) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute("DELETE FROM favorites WHERE path = ?1", params![path])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+pub fn sqlite_history_add(
+    cd: &ConfigDir,
+    path: &str,
+    backend: &str,
+    max_entries: usize,
+) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute("DELETE FROM history WHERE path = ?1", params![path])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute(
+        "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+        params![path, backend],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute(
+        "DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT ?1)",
+        params![max_entries as i64],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+pub fn sqlite_history_clear(cd: &ConfigDir) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute("DELETE FROM history", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+pub fn sqlite_state_write(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO state (key, value) VALUES (?1, ?2)",
+        params![key, value],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
 }
 
 pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
@@ -767,4 +1281,193 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (y, m, d)
+}
+
+/// Import library.tsv into the wallpapers table of an existing connection.
+/// Parses each line as: type\text\tbackend\tsize\tmtime\tresolution\tpath
+/// Silently skips if the file doesn't exist or contains no valid rows.
+fn import_library_tsv_into(conn: &Connection, cd: &ConfigDir) -> Result<(), WcError> {
+    let tsv_path = cd.library_tsv_path();
+    if !tsv_path.exists() {
+        return Ok(());
+    }
+    let content = std::fs::read_to_string(&tsv_path).map_err(WcError::Io)?;
+    let mut batch: Vec<(&str, &str, &str, &str, u64, u64, &str)> = Vec::new();
+    for line in content.lines() {
+        let parts: Vec<&str> = line.split('\t').collect();
+        if parts.len() < 7 {
+            continue;
+        }
+        let path = parts[6];
+        let ftype = parts[0];
+        let ext = parts[1];
+        let backend = parts[2];
+        let size: u64 = parts[3].parse().unwrap_or(0);
+        let mtime: u64 = parts[4].parse().unwrap_or(0);
+        let resolution = parts[5];
+        batch.push((path, ftype, ext, backend, size, mtime, resolution));
+    }
+    if batch.is_empty() {
+        return Ok(());
+    }
+
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, ftype, ext, backend, size, mtime, resolution) in &batch {
+            stmt.execute(params![
+                path,
+                ftype,
+                ext,
+                backend,
+                *size as i64,
+                *mtime as i64,
+                resolution
+            ])
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+/// Load prior metadata from the SQLite wallpapers table into a HashMap keyed by
+/// canonical path. Returns an empty cache if the database does not exist.
+pub fn prior_metadata_cache_from_sqlite(cd: &ConfigDir) -> HashMap<String, WallpaperEntry> {
+    let mut cache = HashMap::new();
+    let db_path = cd.db_path();
+    if !db_path.exists() {
+        return cache;
+    }
+    let conn = match Connection::open(&db_path) {
+        Ok(c) => c,
+        Err(_) => return cache,
+    };
+    ensure_wallpaper_metadata_columns(&conn).ok();
+    let mut stmt = match conn.prepare(
+        "SELECT path, type, ext, backend, size, mtime, resolution,
+                project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+         FROM wallpapers",
+    ) {
+        Ok(s) => s,
+        Err(_) => return cache,
+    };
+    let rows = match stmt.query_map([], |row| {
+        let path: String = row.get(0)?;
+        let ftype_s: String = row.get(1)?;
+        let ext: String = row.get(2)?;
+        let backend_s: String = row.get(3)?;
+        let size: i64 = row.get(4)?;
+        let mtime: i64 = row.get(5)?;
+        let resolution: String = row.get(6)?;
+        let project_type: String = row.get(7)?;
+        let preview_path: String = row.get(8)?;
+        let workshop_id: String = row.get(9)?;
+        let title: String = row.get(10)?;
+        let we_file: String = row.get(11)?;
+        let unsupported_reason: String = row.get(12)?;
+        Ok((
+            path,
+            ftype_s,
+            ext,
+            backend_s,
+            size,
+            mtime,
+            resolution,
+            project_type,
+            preview_path,
+            workshop_id,
+            title,
+            we_file,
+            unsupported_reason,
+        ))
+    }) {
+        Ok(r) => r,
+        Err(_) => return cache,
+    };
+    for row in rows {
+        let (
+            path,
+            ftype_s,
+            ext,
+            backend_s,
+            size,
+            mtime,
+            resolution,
+            project_type,
+            preview_path,
+            workshop_id,
+            title,
+            we_file,
+            unsupported_reason,
+        ) = match row {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        let canon = std::fs::canonicalize(&path)
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|_| path.clone());
+        let file_type = match ftype_s.as_str() {
+            "gif" => FileType::Gif,
+            "video" => FileType::Video,
+            "we_scene" => FileType::WeScene,
+            "we_web" => FileType::WeWeb,
+            "unsupported" => FileType::WeApplication,
+            _ => FileType::Image,
+        };
+        let backend = match backend_s.as_str() {
+            "mpvpaper" => Backend::Mpvpaper,
+            "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
+            "unsupported" => Backend::Unsupported,
+            _ => Backend::Awww,
+        };
+        let project = if project_type.is_empty()
+            && preview_path.is_empty()
+            && workshop_id.is_empty()
+            && title.is_empty()
+            && we_file.is_empty()
+            && unsupported_reason.is_empty()
+        {
+            None
+        } else {
+            Some(WallpaperProject {
+                project_type,
+                preview_path: non_empty(preview_path),
+                workshop_id: non_empty(workshop_id),
+                title: non_empty(title),
+                we_file: non_empty(we_file),
+                backend: Some(backend.as_str().to_string()),
+                unsupported_reason: non_empty(unsupported_reason),
+            })
+        };
+        cache.insert(
+            canon,
+            WallpaperEntry {
+                path: Utf8PathBuf::from(&path),
+                file_type,
+                ext,
+                backend,
+                size: size as u64,
+                mtime: mtime as u64,
+                resolution,
+                project,
+            },
+        );
+    }
+    cache
+}
+
+fn non_empty(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
