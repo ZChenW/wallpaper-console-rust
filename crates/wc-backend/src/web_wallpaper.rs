@@ -432,10 +432,14 @@ pub fn stop(s: Option<&StorageApi>) {
         }
     }
     // Targeted cleanup: kill any remaining processes with our profile flag.
-    if let Ok(cd) = ConfigDir::new() {
+    // Use the active config dir when available, falling back to default.
+    let config_path = s
+        .map(|storage| storage.cd.path.clone())
+        .or_else(|| ConfigDir::new().ok().map(|cd| cd.path));
+    if let Some(config_path) = config_path {
         let profile_flag = format!(
             "--user-data-dir={}",
-            cd.path.join("web-wallpaper-profile").display()
+            config_path.join("web-wallpaper-profile").display()
         );
         if let Ok(out) = Command::new("pgrep")
             .args(["-f", &profile_flag])
@@ -784,6 +788,33 @@ mod tests {
                 .to_string()
                 .contains("exited with status"),
             "error should mention exit status"
+        );
+    }
+
+    #[test]
+    fn apply_errors_when_profile_dir_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("wc-cfg-profile-file");
+        let profile_dir = cfg_path.join("web-wallpaper-profile");
+        std::fs::create_dir_all(&cfg_path).unwrap();
+        // Create profile_dir as a file, not a directory.
+        std::fs::write(&profile_dir, b"blocked").unwrap();
+
+        let project_dir = dir.path().join("webproj-profile-file");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(project_dir.join("index.html"), b"<html></html>").unwrap();
+
+        let s = make_test_storage(&cfg_path);
+        let preflight = make_test_preflight(
+            "true", // won't be reached
+            &format!("file://{}", project_dir.join("index.html").display()),
+        );
+
+        let result = apply_preflighted(&s, &preflight);
+        assert!(
+            matches!(result, Err(WcError::Io(_))),
+            "profile dir blocked by file should return Io error, got: {:?}",
+            result
         );
     }
 }

@@ -11,7 +11,7 @@ pub mod web_wallpaper;
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let user = whoami();
-    linux_wallpaperengine::stop(None);
+    linux_wallpaperengine::stop(s);
     web_wallpaper::stop(s);
     let _ = Command::new("pkill")
         .args(["-u", &user, "-x", "mpvpaper"])
