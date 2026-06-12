@@ -5,7 +5,6 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 
 use wc_core::config::ConfigDir;
-use wc_core::formats;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
@@ -21,6 +20,9 @@ enum Commands {
     // ── Wallpaper ────────────────────────────────────────────────────
     Apply {
         file: String,
+    },
+    Inspect {
+        path: String,
     },
     Stop,
     Status,
@@ -203,6 +205,11 @@ enum Commands {
     Thumbnail {
         file: String,
     },
+    /// Generate GUI thumbnails for multiple wallpaper files (batch, JSON output).
+    #[command(name = "thumbnail-batch-json", hide = true)]
+    ThumbnailBatch {
+        files: Vec<String>,
+    },
 }
 
 fn main() -> anyhow::Result<()> {
@@ -228,17 +235,23 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     match cmd {
         // ── Wallpaper ────────────────────────────────────────────────
         Commands::Apply { file } => {
-            let p = std::path::Path::new(&file);
-            if !p.is_file() {
-                anyhow::bail!("not a regular file: {}", file);
-            }
-            let ext = formats::get_extension(&file)
-                .ok_or_else(|| anyhow::anyhow!("unsupported file type: {}", file))?;
-            let (ftype, _default_backend) = formats::classify_extension(&ext)
-                .ok_or_else(|| anyhow::anyhow!("unsupported file: {}", file))?;
-            let backend = config_backend_for_type(s, ftype);
-            wc_backend::apply_wallpaper(s, &file, backend)?;
-            println!("Applied: {}", file);
+            let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+                path: s.cd.path.clone(),
+            });
+            let target = service
+                .apply(&file)
+                .map_err(|e| anyhow::anyhow!(e.message))?;
+            println!("Applied: {}", target.resolved_path);
+        }
+
+        Commands::Inspect { path } => {
+            let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+                path: s.cd.path.clone(),
+            });
+            let inspected = service.inspect_path(&path).map_err(|e| {
+                anyhow::anyhow!(serde_json::to_string_pretty(&e).unwrap_or(e.message))
+            })?;
+            println!("{}", serde_json::to_string_pretty(&inspected)?);
         }
 
         Commands::Stop => {
@@ -535,12 +548,19 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::SearchType { query } => {
-            let q = resolve_query(&query, "Type (image/gif/video)")?;
+            let q = resolve_query(&query, "Type (image/gif/video/we_scene/we_web)")?;
             let filter = match q.to_lowercase().as_str() {
                 "image" => Some(wc_core::types::FileType::Image),
                 "gif" => Some(wc_core::types::FileType::Gif),
                 "video" => Some(wc_core::types::FileType::Video),
-                other => anyhow::bail!("unknown type '{}' — use image, gif, or video", other),
+                "we_scene" | "scene" => Some(wc_core::types::FileType::WeScene),
+                "we_web" | "web" => Some(wc_core::types::FileType::WeWeb),
+                other => {
+                    anyhow::bail!(
+                        "unknown type '{}' — use image, gif, video, we_scene, or we_web",
+                        other
+                    )
+                }
             };
             // Live scan (matches Bash: scan_wallpapers_by_type), not library.tsv
             let candidates = scan_paths(s, filter)?;
@@ -595,18 +615,6 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let sources = wc_scan::dedupe_sources(&raw_sources);
             let dup_count = raw_sources.len() - sources.len();
 
-            // Clear wallpapers table if DB exists; log and continue if it doesn't.
-            match wc_storage::sqlite::library_clear(&s.cd) {
-                Ok(()) => {}
-                Err(e) => {
-                    let msg = e.to_string();
-                    if msg.contains("not found") {
-                        // No DB yet — fine, skip.
-                    } else {
-                        anyhow::bail!("failed to clear wallpapers table: {}", msg);
-                    }
-                }
-            }
             let files = wc_scan::scan_wallpapers(&sources);
             let walk_time = t0.elapsed();
 
@@ -630,25 +638,6 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
             let probe_time = t1.elapsed();
 
-            // Batch SQLite insert in a single transaction.
-            let t2 = std::time::Instant::now();
-            let batch: Vec<(&str, &str, &str, &str, u64, u64, &str)> = entries
-                .iter()
-                .map(|e| {
-                    (
-                        e.path.as_str(),
-                        e.file_type.as_str(),
-                        e.ext.as_str(),
-                        e.backend.as_str(),
-                        e.size,
-                        e.mtime,
-                        e.resolution.as_str(),
-                    )
-                })
-                .collect();
-            let sqlite_count = wc_storage::sqlite::library_insert_batch(&s.cd, &batch)?;
-            let sqlite_time = t2.elapsed();
-
             let mut tsv = String::new();
             for e in &entries {
                 tsv.push_str(&format!(
@@ -662,7 +651,23 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                     e.path
                 ));
             }
-            std::fs::write(s.cd.library_tsv_path(), tsv)?;
+            let tsv_path = s.cd.library_tsv_path();
+            let tsv_tmp = tsv_path.with_extension("tsv.tmp");
+            std::fs::write(&tsv_tmp, tsv)?;
+
+            // Atomically replace the SQLite library when a DB exists.
+            let t2 = std::time::Instant::now();
+            let sqlite_count =
+                match wc_storage::sqlite::library_replace_entries_batch_atomic(&s.cd, &entries) {
+                    Ok(count) => count,
+                    Err(err) => {
+                        let _ = std::fs::remove_file(&tsv_tmp);
+                        return Err(err.into());
+                    }
+                };
+            let sqlite_time = t2.elapsed();
+
+            std::fs::rename(&tsv_tmp, &tsv_path)?;
             let dirty = s.cd.path.join("library.dirty");
             if dirty.exists() {
                 std::fs::remove_file(&dirty).ok();
@@ -783,7 +788,21 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::SqliteVerify => match wc_storage::sqlite::verify(&s.cd) {
-            Ok(()) => println!("VERIFY OK"),
+            Ok(wc_storage::sqlite::VerifyResult::Ok) => println!("VERIFY OK"),
+            Ok(wc_storage::sqlite::VerifyResult::OkWithWarnings(warnings)) => {
+                println!("VERIFY OK WITH WARNINGS");
+                for w in &warnings {
+                    println!("  warning: flat compatibility copy differs: {}", w);
+                }
+            }
+            Ok(wc_storage::sqlite::VerifyResult::Failed(errors)) => {
+                eprintln!(
+                    "VERIFY FAILED: {} mismatch(es) found: {}",
+                    errors.len(),
+                    errors.join(", ")
+                );
+                std::process::exit(1);
+            }
             Err(e) => {
                 eprintln!("{}", e);
                 let msg = e.to_string();
@@ -866,6 +885,24 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 std::process::exit(1);
             }
         }
+        Commands::ThumbnailBatch { files } => {
+            let cache_dir = s.cd.gui_thumbnail_cache_dir();
+            let results: Vec<serde_json::Value> = files
+                .into_iter()
+                .map(|path| {
+                    let result = wc_preview::thumbnail_for(&cache_dir, &path);
+                    let mut obj = serde_json::json!({
+                        "path": path,
+                        "cacheHit": result.cache_hit,
+                    });
+                    if let Some(thumb) = result.thumbnail {
+                        obj["thumbnail"] = serde_json::json!(thumb);
+                    }
+                    obj
+                })
+                .collect();
+            println!("{}", serde_json::to_string(&results)?);
+        }
     }
     Ok(())
 }
@@ -874,9 +911,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
 fn sqlite_connection(cd: &ConfigDir) -> anyhow::Result<rusqlite::Connection> {
     let db_path = cd.db_path();
-    if !db_path.exists() {
-        anyhow::bail!("wallpapers.db not found. Run migrate-to-sqlite first.");
-    }
+    wc_storage::sqlite::ensure_sqlite_db(cd);
     rusqlite::Connection::open(&db_path)
         .map_err(|e| anyhow::anyhow!("failed to open wallpapers.db: {}", e))
 }
@@ -930,32 +965,14 @@ fn sqlite_list_table_paths(
     Ok(rows)
 }
 
-fn config_backend_for_type(s: &StorageApi, ftype: wc_core::types::FileType) -> Backend {
-    match ftype {
-        wc_core::types::FileType::Image => match s.config_get("image_backend", "awww").as_str() {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Video => {
-            match s.config_get("video_backend", "mpvpaper").as_str() {
-                "awww" => Backend::Awww,
-                _ => Backend::Mpvpaper,
-            }
-        }
-    }
-}
-
 fn apply_selected(s: &StorageApi, path: &str) -> anyhow::Result<()> {
-    let ext = formats::get_extension(path).unwrap_or_default();
-    let (ftype, _) = formats::classify_extension(&ext)
-        .ok_or_else(|| anyhow::anyhow!("unsupported: {}", path))?;
-    let backend = config_backend_for_type(s, ftype);
-    wc_backend::apply_wallpaper(s, path, backend)?;
-    println!("Applied: {}", path);
+    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+        path: s.cd.path.clone(),
+    });
+    let target = service
+        .apply(path)
+        .map_err(|e| anyhow::anyhow!(e.message))?;
+    println!("Applied: {}", target.resolved_path);
     Ok(())
 }
 
@@ -975,16 +992,23 @@ fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::Wallpap
             file_type: match parts[0] {
                 "gif" => wc_core::types::FileType::Gif,
                 "video" => wc_core::types::FileType::Video,
+                "we_scene" => wc_core::types::FileType::WeScene,
+                "we_web" => wc_core::types::FileType::WeWeb,
+                "unsupported" => wc_core::types::FileType::WeApplication,
                 _ => wc_core::types::FileType::Image,
             },
             ext: parts[1].to_string(),
             backend: match parts[2] {
                 "mpvpaper" => Backend::Mpvpaper,
+                "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
+                "chromium-web" => Backend::ChromiumWeb,
+                "unsupported" => Backend::Unsupported,
                 _ => Backend::Awww,
             },
             size: parts[3].parse().unwrap_or(0),
             mtime: parts[4].parse().unwrap_or(0),
             resolution: parts[5].to_string(),
+            project: None,
         });
     }
     Ok(entries)
@@ -1013,8 +1037,9 @@ fn scan_paths(
         Ok(all
             .into_iter()
             .filter(|p| {
-                let ext = formats::get_extension(p).unwrap_or_default();
-                matches!(formats::classify_extension(&ext), Some((f, _)) if f == ft)
+                wc_scan::make_entry(p)
+                    .map(|entry| entry.file_type == ft)
+                    .unwrap_or(false)
             })
             .collect())
     } else {
@@ -1181,48 +1206,80 @@ fn print_help() {
 
 fn json_library_from_tsv(s: &StorageApi) -> anyhow::Result<()> {
     let entries = library_entries(s)?;
-    let json: Vec<serde_json::Value> = entries
-        .iter()
-        .map(|e| {
-            serde_json::json!({
-                "path": e.path.to_string(),
-                "type": e.file_type.as_str(),
-                "ext": e.ext,
-                "backend": e.backend.as_str(),
-                "size": e.size,
-                "mtime": e.mtime,
-                "resolution": e.resolution,
-            })
-        })
-        .collect();
+    let json: Vec<serde_json::Value> = entries.iter().map(json_from_entry).collect();
     println!("{}", serde_json::to_string_pretty(&json)?);
     Ok(())
+}
+
+fn json_from_entry(entry: &wc_core::types::WallpaperEntry) -> serde_json::Value {
+    serde_json::json!({
+        "path": entry.path.to_string(),
+        "type": entry.file_type.as_str(),
+        "ext": entry.ext,
+        "backend": entry.backend.as_str(),
+        "size": entry.size,
+        "mtime": entry.mtime,
+        "resolution": entry.resolution,
+        "projectType": entry.project.as_ref().map(|p| p.project_type.clone()),
+        "previewPath": entry.project.as_ref().and_then(|p| p.preview_path.clone()),
+        "workshopId": entry.project.as_ref().and_then(|p| p.workshop_id.clone()),
+        "title": entry.project.as_ref().and_then(|p| p.title.clone()),
+        "weFile": entry.project.as_ref().and_then(|p| p.we_file.clone()),
+        "unsupportedReason": entry.project.as_ref().and_then(|p| p.unsupported_reason.clone()),
+    })
+}
+
+fn json_from_sql_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<serde_json::Value> {
+    let project_type: String = row.get(7)?;
+    let preview_path: String = row.get(8)?;
+    let workshop_id: String = row.get(9)?;
+    let title: String = row.get(10)?;
+    let we_file: String = row.get(11)?;
+    let unsupported_reason: String = row.get(12)?;
+    Ok(serde_json::json!({
+        "path": row.get::<_, String>(0)?,
+        "type": row.get::<_, String>(1)?,
+        "ext": row.get::<_, String>(2)?,
+        "backend": row.get::<_, String>(3)?,
+        "size": row.get::<_, i64>(4)?,
+        "mtime": row.get::<_, i64>(5)?,
+        "resolution": row.get::<_, String>(6)?,
+        "projectType": optional_json_string(project_type),
+        "previewPath": optional_json_string(preview_path),
+        "workshopId": optional_json_string(workshop_id),
+        "title": optional_json_string(title),
+        "weFile": optional_json_string(we_file),
+        "unsupportedReason": optional_json_string(unsupported_reason),
+    }))
+}
+
+fn optional_json_string(value: String) -> Option<String> {
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
 }
 
 fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
     use rusqlite::Connection;
     let db = s.cd.db_path();
     if !db.exists() {
-        anyhow::bail!("wallpapers.db not found. Run migrate-to-sqlite and rescan first.");
+        let conn = Connection::open(&db)?;
+        wc_storage::sqlite::create_schema(&conn)?;
+        println!("[]");
+        return Ok(());
     }
     let conn = Connection::open(&db)?;
+    wc_storage::sqlite::ensure_wallpaper_metadata_columns(&conn)?;
     let mut stmt = conn.prepare(
-        "SELECT path, type, ext, backend, size, mtime, resolution FROM wallpapers ORDER BY path",
+        "SELECT path, type, ext, backend, size, mtime, resolution,
+                project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+         FROM wallpapers ORDER BY path",
     )?;
     // Propagate row errors instead of silently ignoring them.
-    let rows: Result<Vec<serde_json::Value>, rusqlite::Error> = stmt
-        .query_map([], |row: &rusqlite::Row<'_>| {
-            Ok(serde_json::json!({
-                "path": row.get::<_, String>(0)?,
-                "type": row.get::<_, String>(1)?,
-                "ext": row.get::<_, String>(2)?,
-                "backend": row.get::<_, String>(3)?,
-                "size": row.get::<_, i64>(4)?,
-                "mtime": row.get::<_, i64>(5)?,
-                "resolution": row.get::<_, String>(6)?,
-            }))
-        })?
-        .collect();
+    let rows: Result<Vec<serde_json::Value>, rusqlite::Error> =
+        stmt.query_map([], json_from_sql_row)?.collect();
     let rows = rows?;
     println!("{}", serde_json::to_string_pretty(&rows)?);
     Ok(())
@@ -1246,7 +1303,7 @@ fn json_library_page(
 
 fn validate_library_filter(filter: &str) -> anyhow::Result<&str> {
     match filter {
-        "all" | "image" | "gif" | "video" => Ok(filter),
+        "all" | "image" | "gif" | "video" | "we_scene" | "we_web" | "unsupported" => Ok(filter),
         other => anyhow::bail!("unknown library filter: {}", other),
     }
 }
@@ -1272,17 +1329,31 @@ fn json_library_page_from_sqlite(
     let sort = validate_library_sort(sort)?;
     let db = s.cd.db_path();
     if !db.exists() {
-        anyhow::bail!("wallpapers.db not found. Run migrate-to-sqlite and rescan first.");
+        let conn = Connection::open(&db)?;
+        wc_storage::sqlite::create_schema(&conn)?;
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "total": 0,
+                "items": []
+            }))?
+        );
+        return Ok(());
     }
     let conn = Connection::open(&db)?;
+    wc_storage::sqlite::ensure_wallpaper_query_indexes(&conn)?;
     let order_by = match sort {
         "newest" => "mtime DESC, path ASC",
         "largest" => "size DESC, path ASC",
         "name" => "path ASC",
         _ => unreachable!(),
     };
-    let where_clause =
-        "WHERE (?1 = 'all' OR type = ?1) AND (?2 = '' OR lower(path) LIKE '%' || lower(?2) || '%')";
+    let where_clause = "WHERE (?1 = 'all' OR type = ?1)
+        AND (?2 = ''
+          OR lower(path) LIKE '%' || lower(?2) || '%'
+          OR lower(title) LIKE '%' || lower(?2) || '%'
+          OR lower(workshop_id) LIKE '%' || lower(?2) || '%'
+          OR lower(project_type) LIKE '%' || lower(?2) || '%')";
 
     let total: i64 = conn.query_row(
         &format!("SELECT COUNT(*) FROM wallpapers {}", where_clause),
@@ -1291,24 +1362,16 @@ fn json_library_page_from_sqlite(
     )?;
 
     let sql = format!(
-        "SELECT path, type, ext, backend, size, mtime, resolution FROM wallpapers {} ORDER BY {} LIMIT ?3 OFFSET ?4",
+        "SELECT path, type, ext, backend, size, mtime, resolution,
+                project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+         FROM wallpapers {} ORDER BY {} LIMIT ?3 OFFSET ?4",
         where_clause, order_by
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows: Result<Vec<serde_json::Value>, rusqlite::Error> = stmt
         .query_map(
             params![filter, search, limit as i64, offset as i64],
-            |row: &rusqlite::Row<'_>| {
-                Ok(serde_json::json!({
-                    "path": row.get::<_, String>(0)?,
-                    "type": row.get::<_, String>(1)?,
-                    "ext": row.get::<_, String>(2)?,
-                    "backend": row.get::<_, String>(3)?,
-                    "size": row.get::<_, i64>(4)?,
-                    "mtime": row.get::<_, i64>(5)?,
-                    "resolution": row.get::<_, String>(6)?,
-                }))
-            },
+            json_from_sql_row,
         )?
         .collect();
     let items = rows?;
@@ -1331,35 +1394,26 @@ fn json_library_page_from_tsv(
     limit: usize,
 ) -> anyhow::Result<()> {
     let filter = validate_library_filter(filter)?;
-    let sort = validate_library_sort(sort)?;
-    let search_lower = search.to_lowercase();
-    let mut entries: Vec<wc_core::types::WallpaperEntry> = library_entries(s)?
+    let _sort = validate_library_sort(sort)?;
+    let (total, rows) = wc_storage::tsv::tsv_bounded_page(
+        &s.cd.library_tsv_path(),
+        filter,
+        sort,
+        search,
+        offset,
+        limit,
+    );
+    let items: Vec<serde_json::Value> = rows
         .into_iter()
-        .filter(|entry| filter == "all" || entry.file_type.as_str() == filter)
-        .filter(|entry| {
-            search.is_empty() || entry.path.as_str().to_lowercase().contains(&search_lower)
-        })
-        .collect();
-    match sort {
-        "newest" => entries.sort_by(|a, b| b.mtime.cmp(&a.mtime).then_with(|| a.path.cmp(&b.path))),
-        "largest" => entries.sort_by(|a, b| b.size.cmp(&a.size).then_with(|| a.path.cmp(&b.path))),
-        "name" => entries.sort_by(|a, b| a.path.cmp(&b.path)),
-        _ => unreachable!(),
-    }
-    let total = entries.len();
-    let items: Vec<serde_json::Value> = entries
-        .iter()
-        .skip(offset)
-        .take(limit)
-        .map(|e| {
+        .map(|r| {
             serde_json::json!({
-                "path": e.path.to_string(),
-                "type": e.file_type.as_str(),
-                "ext": e.ext,
-                "backend": e.backend.as_str(),
-                "size": e.size,
-                "mtime": e.mtime,
-                "resolution": e.resolution,
+                "path": r.path,
+                "type": r.ftype,
+                "ext": r.ext,
+                "backend": r.backend,
+                "size": r.size,
+                "mtime": r.mtime,
+                "resolution": r.resolution,
             })
         })
         .collect();
