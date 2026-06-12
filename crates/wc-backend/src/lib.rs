@@ -230,4 +230,21 @@ mod tests {
             "failed restore should not add history"
         );
     }
+
+    #[test]
+    fn apply_wallpaper_rejects_chromium_web_directly() {
+        let (_tmp, s) = temp_storage();
+
+        let img = _tmp.path().join("test.png");
+        std::fs::write(&img, b"").unwrap();
+
+        let err = apply_wallpaper(&s, &img.to_string_lossy().to_string(), Backend::ChromiumWeb)
+            .unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("demoted") || msg.contains("experimental preview"),
+            "apply_wallpaper should reject ChromiumWeb, got: {}",
+            msg
+        );
+    }
 }
