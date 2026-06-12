@@ -124,6 +124,8 @@ export const api = {
   webWallpaperStatus: (): Promise<WebWallpaperStatusDTO> =>
     invoke<WebWallpaperStatusDTO>('web_wallpaper_status'),
 
+  openWebPreview: (path: string): Promise<CommandResult> => invoke<CommandResult>('open_web_preview', { path }),
+
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),

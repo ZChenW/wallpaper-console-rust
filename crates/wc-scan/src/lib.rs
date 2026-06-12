@@ -251,7 +251,11 @@ pub fn read_we_project_info(project_dir: &Path) -> Option<WeProjectInfo> {
     let workshop_id = workshop_id_from_path(project_dir);
     let (entry_type, backend, unsupported_reason) = match normalized_type.as_str() {
         "scene" => (FileType::WeScene, Backend::LinuxWallpaperEngine, None),
-        "web" => (FileType::WeWeb, Backend::ChromiumWeb, None),
+        "web" => (
+            FileType::WeWeb,
+            Backend::Unsupported,
+            Some("web_renderer_unavailable".to_string()),
+        ),
         "application" => (
             FileType::WeApplication,
             Backend::Unsupported,

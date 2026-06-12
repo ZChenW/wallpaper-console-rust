@@ -233,16 +233,16 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
             <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
               linux-wallpaperengine supports many Wallpaper Engine <strong>scene</strong> wallpapers.
               Some scene wallpapers may use unsupported projection effects and will show
-              a compatibility warning. <strong>Web</strong> wallpapers use the separate Chromium backend.
+              a compatibility warning. <strong>Web</strong> wallpapers use the experimental Chromium preview.
             </div>
           </section>
 
-          <section className="settings-group">
-            <h3>Web Wallpaper Backend</h3>
+           <section className="settings-group">
+            <h3>Chromium Preview (Experimental)</h3>
             <div className="config-row">
               <div className="config-info">
                 <span className="config-label">
-                  {webStatus?.available ? 'Ready' : (webStatus?.message ?? 'Checking web backend...')}
+                  {webStatus?.available ? 'Chromium preview: Available' : (webStatus?.message ?? 'Checking...')}
                 </span>
                 {webStatus?.detail && (
                   <span className="config-desc">{webStatus.detail}</span>
@@ -252,12 +252,13 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
             {WEB_WALLPAPER_CONFIGS.map((c) => (
               <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
             ))}
+            <div className="config-desc" style={{ fontSize: 11, color: '#c96', marginTop: 4 }}>
+              <strong>Experimental only.</strong> Chromium preview opens Web wallpapers in a normal
+              browser window. It is <strong>not a real desktop wallpaper backend</strong> on Niri/Wayland.
+              A native WebKitGTK layer-shell renderer is required for true Web wallpaper support.
+            </div>
             <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
-              <strong>Chromium</strong> is required for WE Web wallpapers. Auto-detects chromium,
-              google-chrome, brave, or vivaldi.<br />
-              The browser window is not a native layer-shell background. Your compositor
-              must be configured to place it behind all other windows and make it cover the
-              desktop area.
+              Auto-detects chromium, google-chrome, brave, or vivaldi.
               {webStatus?.available && webStatus.path && (
                 <><br />Browser: <code>{webStatus.path}</code></>
               )}

@@ -96,9 +96,9 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
       },
     },
     {
-      label: 'Apply Web wallpaper',
+      label: 'Open experimental Chromium preview',
       visible: (path: string) => Boolean(entryByPath.get(path)?.type === 'we_web'),
-      action: (path: string) => { onApply(path); },
+      action: async (path: string) => { await api.openWebPreview(path); },
     },
     {
       label: 'Apply preview GIF',
