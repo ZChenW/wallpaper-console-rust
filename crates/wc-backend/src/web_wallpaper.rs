@@ -817,4 +817,40 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn stop_cleans_profile_process_in_active_config_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg_path = dir.path().join("custom-config");
+        let s = make_test_storage(&cfg_path);
+        let profile_dir = cfg_path.join("web-wallpaper-profile");
+        std::fs::create_dir_all(&profile_dir).unwrap();
+
+        let mut child = std::process::Command::new("python3")
+            .arg("-c")
+            .arg("import time; time.sleep(10)")
+            .arg(format!("--user-data-dir={}", profile_dir.display()))
+            .spawn()
+            .unwrap();
+        let child_pid = child.id();
+
+        // Record the PID so the PID-based kill path also exercises.
+        s.config_set(PID_CONFIG_KEY, &child_pid.to_string())
+            .unwrap();
+
+        stop(Some(&s));
+
+        // Process should be killed by stop().
+        let result = child.wait();
+        assert!(
+            result.is_ok(),
+            "stop should have killed the profile process"
+        );
+
+        // pgrep should no longer find any process with this profile.
+        assert!(
+            find_browser_handoff_pid(&profile_dir).is_none(),
+            "no process should remain with the active profile flag"
+        );
+    }
 }
