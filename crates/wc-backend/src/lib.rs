@@ -169,3 +169,68 @@ fn ensure_awww_daemon() -> Result<(), WcError> {
 fn whoami() -> String {
     std::env::var("USER").unwrap_or_else(|_| "unknown".into())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc_core::config::ConfigDir;
+
+    fn temp_storage() -> (tempfile::TempDir, StorageApi) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let s = StorageApi::new(cd);
+        (tmp, s)
+    }
+
+    #[test]
+    fn restore_we_web_rejects_with_clear_error() {
+        let (tmp, s) = temp_storage();
+
+        let project = tmp
+            .path()
+            .join("steamapps/workshop/content/431960/3650880224");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), b"<html></html>").unwrap();
+        std::fs::write(
+            project.join("project.json"),
+            r#"{"type":"web","file":"index.html","title":"Test Web"}"#,
+        )
+        .unwrap();
+
+        // Simulate a previous session having written a WE Web project as current.
+        s.current_write(&project.to_string_lossy()).unwrap();
+        s.last_backend_write("chromium-web").unwrap();
+        s.history_add(&project.to_string_lossy(), "chromium-web")
+            .unwrap();
+
+        let history_before = s.history_list().unwrap().len();
+
+        let err = restore(&s).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("cannot be restored") || msg.contains("native layer-shell"),
+            "error should explain that Web wallpapers cannot be restored, got: {}",
+            msg
+        );
+
+        // Old state should remain — restore doesn't clear on error.
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(project.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            s.last_backend_read().unwrap().as_deref(),
+            Some("chromium-web")
+        );
+        // No new history entry added by the failed restore.
+        assert_eq!(
+            s.history_list().unwrap().len(),
+            history_before,
+            "failed restore should not add history"
+        );
+    }
+}

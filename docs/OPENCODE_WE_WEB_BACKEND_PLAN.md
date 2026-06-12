@@ -10,9 +10,9 @@
 >
 > See commits for the downgrade implementation and `docs/DEVELOPMENT.md` for current Web wallpaper support status.
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **Original execution instructions below are OBSOLETE and must NOT be followed.**
 
-**Goal (original):** make Wallpaper Engine `type=web` projects run as real Web wallpapers through a dedicated Chromium backend instead of remaining preview-only.
+**Goal (original, now obsolete):** make Wallpaper Engine `type=web` projects run as real Web wallpapers through a dedicated Chromium backend instead of remaining preview-only.
 
 **Architecture (original):** keep `we_scene` on `linux-wallpaperengine`; route `we_web` through a new `chromium-web` backend that launches the project's `index.html` in an isolated Chromium app window. The first version targets Arch/niri/Wayland with documented compositor window rules, not automatic niri config mutation.
 
@@ -41,7 +41,7 @@ Known user target:
 - Do not use shell string concatenation for external process commands; use structured `Command` args.
 - Do not kill all Chromium processes; stop only the PID/process group started by this backend.
 
-## Target Behavior
+## Target Behavior (Obsolete)
 
 - `we_web` Library card shows `WE Web` and `Chromium Web backend`.
 - Context menu for `we_web` shows:
@@ -54,7 +54,7 @@ Known user target:
 - If Chromium is missing or the Web project is invalid, GUI shows a specific user-facing error and keeps preview fallback available.
 - Settings shows Web backend status and a copyable niri rule template/instructions.
 
-## Implementation Tasks
+## Implementation Tasks (Obsolete)
 
 ### Task 1: Add Core Backend Identity And Config Defaults
 
