@@ -52,7 +52,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 - Library: SQLite-backed paging, filter by type, sort, filename/title/Workshop ID search
 - Favorites & History views with apply, random, remove
 - Sources management: grouped (Wallpaper Engine / Other), add/remove/validate/scan
-- Wallpaper Engine scene/web project indexing. Scene wallpapers use `linux-wallpaperengine`; Web wallpapers use the Chromium Web backend.
+- Wallpaper Engine scene/web project indexing. Scene wallpapers use `linux-wallpaperengine`; Web wallpapers are indexed for preview only. Native Web wallpaper support requires a future WebKitGTK layer-shell renderer (Chromium preview is experimental).
 - Settings: all backends (awww/mpvpaper/linux-wallpaperengine), library config, SQLite management, thumbnail cache
 - Smart video thumbnails (multi-point frame sampling, 400px scaled, atomic writes, short-lived failure cache)
 - Async apply/stop/restore with status bar
