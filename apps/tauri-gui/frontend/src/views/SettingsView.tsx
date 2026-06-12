@@ -237,7 +237,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
             </div>
           </section>
 
-           <section className="settings-group">
+          <section className="settings-group">
             <h3>Chromium Preview (Experimental)</h3>
             <div className="config-row">
               <div className="config-info">

@@ -49,14 +49,11 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
         return linux_wallpaperengine::apply(s, project);
     }
     if backend == Backend::ChromiumWeb {
-        let p = web_wallpaper::preflight(path, s)?;
-        stop_all_backends(Some(s))?;
-        web_wallpaper::apply_preflighted(s, &p)?;
-        // Write state after successful backend execution.
-        s.current_write(path)?;
-        s.last_backend_write(backend.as_str())?;
-        s.history_add(path, backend.as_str())?;
-        return Ok(());
+        return Err(WcError::Other(
+            "Chromium Web backend has been demoted to experimental preview. \
+             Use open_web_preview instead of apply."
+                .into(),
+        ));
     }
     if backend == Backend::Unsupported {
         return Err(WcError::UnsupportedFileType(path.to_string()));

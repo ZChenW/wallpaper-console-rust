@@ -231,21 +231,21 @@ pub fn status(config: &WebWallpaperConfig) -> Status {
         return Status {
             available: false,
             path: None,
-            message: "Web wallpaper backend is disabled.".into(),
-            detail: Some("Enable it in Settings → Web Wallpaper Backend.".into()),
+            message: "Chromium preview is disabled.".into(),
+            detail: Some("Enable it in Settings → Chromium Preview (Experimental).".into()),
         };
     }
     match resolve_browser(config) {
         Ok(b) => Status {
             available: true,
             path: Some(b.path),
-            message: "Chromium web backend ready.".into(),
-            detail: Some("Applies WE Web wallpapers in an isolated Chromium app window.".into()),
+            message: "Chromium preview available.".into(),
+            detail: Some("Opens WE Web projects in a normal browser window (experimental, not a real wallpaper backend).".into()),
         },
         Err(e) => Status {
             available: false,
             path: None,
-            message: "Web wallpaper browser not found.".into(),
+            message: "Chromium browser not found.".into(),
             detail: Some(format!("{}", e)),
         },
     }
@@ -264,12 +264,6 @@ pub struct PreflightResult {
 pub fn preflight(project_dir: &str, s: &StorageApi) -> Result<PreflightResult, WcError> {
     let project = project_from_path(project_dir)?;
     let config = WebWallpaperConfig::from_storage(s);
-    if !config.enabled {
-        return Err(WcError::Other(
-            "Web wallpaper backend is disabled. Enable it in Settings → Web Wallpaper Backend."
-                .into(),
-        ));
-    }
     let browser = resolve_browser(&config)?;
 
     let raw_file_path = format!("{}/{}", project.project_path.display(), project.file);
@@ -583,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    fn preflight_rejects_disabled_backend() {
+    fn preflight_works_even_when_disabled() {
         let (_tmp, proj) = temp_project(r#"{"type":"web","file":"index.html"}"#);
         std::fs::write(proj.join("index.html"), b"<html></html>").unwrap();
 
@@ -593,8 +587,13 @@ mod tests {
         let s = wc_storage::StorageApi::new(cd);
         s.config_set("web_wallpaper_enabled", "off").unwrap();
 
-        let err = preflight(&proj.to_string_lossy(), &s).unwrap_err();
-        assert!(err.to_string().contains("disabled"));
+        // Preview should work even when the experimental toggle is off.
+        let result = preflight(&proj.to_string_lossy(), &s);
+        assert!(
+            result.is_ok(),
+            "preflight should succeed for preview even when disabled, got: {:?}",
+            result
+        );
     }
 
     #[test]
