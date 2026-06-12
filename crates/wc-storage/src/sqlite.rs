@@ -1107,6 +1107,121 @@ mod tests {
         assert_eq!(row.3, "3558034522");
         assert_eq!(row.4, "Scene title");
     }
+
+    #[test]
+    fn verify_ok_when_all_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+        flat::favorites_add(&cd, "/walls/a.jpg").unwrap();
+        flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
+        flat::current_write(&cd, "/walls/cur.jpg").unwrap();
+        flat::last_backend_write(&cd, "awww").unwrap();
+
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert_eq!(result, crate::sqlite::VerifyResult::Ok);
+    }
+
+    #[test]
+    fn verify_warning_when_config_drifts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        wc_core::config::write_config_value(&cd.path, "test_key", "new_value").unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::OkWithWarnings(ref w) if w.contains(&"config".to_string())),
+            "expected OkWithWarnings containing 'config', got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_warning_when_sources_drift() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        flat::sources_add(&cd, "/extra-source").unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::OkWithWarnings(ref w) if w.contains(&"sources".to_string())),
+            "expected OkWithWarnings containing 'sources', got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_failed_when_favorites_differ() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        flat::favorites_add(&cd, "/extra-fav.jpg").unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"favorites".to_string())),
+            "expected Failed containing 'favorites', got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_error_when_db_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        let result = crate::sqlite::verify(&cd);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("not found"));
+    }
+
+    #[test]
+    fn verify_ok_with_warnings_does_not_block_failed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // Both config drift (warning) and history drift (error).
+        wc_core::config::write_config_value(&cd.path, "extra_config", "val").unwrap();
+        flat::history_add(&cd, "/walls/extra.jpg", 100).unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::Failed(_)),
+            "errors should take priority over warnings, got: {:?}",
+            result
+        );
+    }
 }
 
 // ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────
