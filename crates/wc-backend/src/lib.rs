@@ -142,7 +142,11 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
             }
         }
         wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb => Backend::ChromiumWeb,
+        wc_core::types::FileType::WeWeb => {
+            return Err(WcError::Other(
+                "Web wallpapers cannot be restored. Web wallpaper support requires a native layer-shell renderer and is not yet available. Use the experimental Chromium preview from the Library context menu instead.".into(),
+            ));
+        }
         wc_core::types::FileType::WeApplication => Backend::Unsupported,
     };
     apply_wallpaper(s, &current, backend)
