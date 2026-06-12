@@ -52,23 +52,16 @@ pub async fn migrate_to_sqlite() -> CommandResult {
 #[tauri::command]
 pub async fn sqlite_verify() -> CommandResult {
     let result = tauri::async_runtime::spawn_blocking(|| {
-        match storage()
-            .and_then(|s| wc_storage::sqlite::verify(&s.cd).map_err(|e| e.to_string()))
-        {
+        match storage().and_then(|s| wc_storage::sqlite::verify(&s.cd).map_err(|e| e.to_string())) {
             Ok(wc_storage::sqlite::VerifyResult::Ok) => ok("VERIFY OK"),
             Ok(wc_storage::sqlite::VerifyResult::OkWithWarnings(warnings)) => {
-                ok(format!(
-                    "VERIFY OK WITH WARNINGS\n{}",
-                    warnings.join("\n")
-                ))
+                ok(format!("VERIFY OK WITH WARNINGS\n{}", warnings.join("\n")))
             }
-            Ok(wc_storage::sqlite::VerifyResult::Failed(errors)) => {
-                fail(format!(
-                    "VERIFY FAILED: {} mismatch(es) found: {}",
-                    errors.len(),
-                    errors.join(", ")
-                ))
-            }
+            Ok(wc_storage::sqlite::VerifyResult::Failed(errors)) => fail(format!(
+                "VERIFY FAILED: {} mismatch(es) found: {}",
+                errors.len(),
+                errors.join(", ")
+            )),
             Err(err) => fail(err),
         }
     })
