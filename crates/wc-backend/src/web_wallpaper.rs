@@ -312,7 +312,13 @@ fn find_browser_handoff_pid(profile_dir: &std::path::Path) -> Option<u32> {
 /// Does NOT write state — the caller handles that.
 pub fn apply_preflighted(s: &StorageApi, p: &PreflightResult) -> Result<(), WcError> {
     let profile_dir = s.cd.path.join("web-wallpaper-profile");
-    let _ = std::fs::create_dir_all(&profile_dir);
+    std::fs::create_dir_all(&profile_dir).map_err(|e| {
+        WcError::Io(std::io::Error::other(format!(
+            "cannot create web wallpaper profile dir {}: {}",
+            profile_dir.display(),
+            e
+        )))
+    })?;
 
     let mut cmd = Command::new("setsid");
     cmd.arg(&p.browser.path)
@@ -358,6 +364,13 @@ pub fn apply_preflighted(s: &StorageApi, p: &PreflightResult) -> Result<(), WcEr
                 let _ = s.config_set(PID_CONFIG_KEY, &actual_pid.to_string());
                 return Ok(());
             }
+            let _ = s.config_set(PID_CONFIG_KEY, "");
+            return Err(WcError::Other(format!(
+                "Web wallpaper browser exited and no process using the profile was found. \
+                 The browser may have failed to load the project. \
+                 Check that the browser can access {}.",
+                p.file_url
+            )));
         }
         let _ = s.config_set(PID_CONFIG_KEY, "");
         return Err(WcError::Other(format!(
@@ -740,8 +753,8 @@ mod tests {
             result
                 .unwrap_err()
                 .to_string()
-                .contains("exited with status"),
-            "error should mention exit status"
+                .contains("no process using the profile"),
+            "error should mention no process using the profile"
         );
     }
 

@@ -9,10 +9,10 @@ pub mod linux_wallpaperengine;
 pub mod web_wallpaper;
 
 /// Stop all wallpaper backends via pkill.
-pub fn stop_all_backends() -> Result<(), WcError> {
+pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let user = whoami();
     linux_wallpaperengine::stop(None);
-    web_wallpaper::stop(None);
+    web_wallpaper::stop(s);
     let _ = Command::new("pkill")
         .args(["-u", &user, "-x", "mpvpaper"])
         .status();
@@ -26,7 +26,7 @@ pub fn stop_all_backends() -> Result<(), WcError> {
 pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Result<(), WcError> {
     let last = s.last_backend_read()?.unwrap_or_default();
     if target_backend == Backend::Mpvpaper || target_backend == Backend::LinuxWallpaperEngine {
-        return stop_all_backends();
+        return stop_all_backends(Some(s));
     }
     if last == "awww" {
         let user = whoami();
@@ -34,7 +34,7 @@ pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Resu
             .args(["-u", &user, "-x", "mpvpaper"])
             .status();
     } else {
-        stop_all_backends()?;
+        stop_all_backends(Some(s))?;
     }
     Ok(())
 }
@@ -50,7 +50,7 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
     }
     if backend == Backend::ChromiumWeb {
         let p = web_wallpaper::preflight(path, s)?;
-        stop_all_backends()?;
+        stop_all_backends(Some(s))?;
         web_wallpaper::apply_preflighted(s, &p)?;
         // Write state after successful backend execution.
         s.current_write(path)?;

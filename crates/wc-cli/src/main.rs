@@ -255,7 +255,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::Stop => {
-            wc_backend::stop_all_backends()?;
+            wc_backend::stop_all_backends(None)?;
             println!("All wallpaper backends stopped.");
         }
 

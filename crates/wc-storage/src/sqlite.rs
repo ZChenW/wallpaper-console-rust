@@ -251,7 +251,7 @@ pub enum VerifyResult {
 pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
-        return Err(WcError::Other(
+        return Err(WcError::Sqlite(
             "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
         ));
     }
@@ -1197,8 +1197,11 @@ mod tests {
         cd.init().unwrap();
 
         let result = crate::sqlite::verify(&cd);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("not found"));
+        assert!(
+            matches!(result, Err(WcError::Sqlite(ref msg)) if msg.contains("not found")),
+            "missing DB should return Err(WcError::Sqlite(...)), got: {:?}",
+            result
+        );
     }
 
     #[test]
@@ -1240,16 +1243,9 @@ mod tests {
 
         let result = crate::sqlite::verify(&cd);
         assert!(
-            result.is_err(),
-            "missing table should return Err, got: {:?}",
+            matches!(result, Err(WcError::Sqlite(_))),
+            "missing table should return Err(WcError::Sqlite(_)), got: {:?}",
             result
-        );
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.to_lowercase().contains("sqlite")
-                || err_msg.to_lowercase().contains("no such table"),
-            "error should indicate SQLite problem, got: {}",
-            err_msg
         );
     }
 }
