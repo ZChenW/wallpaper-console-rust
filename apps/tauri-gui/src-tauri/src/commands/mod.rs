@@ -350,6 +350,14 @@ fn parse_backend(s: &str) -> Backend {
     }
 }
 
+fn applyability_rank(entry: &WallpaperEntry) -> u8 {
+    match entry.file_type {
+        FileType::WeWeb => 1,
+        FileType::WeApplication => 2,
+        _ => 0,
+    }
+}
+
 fn sort_filter_page(
     mut entries: Vec<WallpaperEntry>,
     filter: &str,
@@ -380,9 +388,23 @@ fn sort_filter_page(
         type_ok && search_ok
     });
     match sort {
-        "name" => entries.sort_by(|a, b| a.filename().cmp(b.filename())),
-        "size" => entries.sort_by(|a, b| b.size.cmp(&a.size).then(a.path.cmp(&b.path))),
-        _ => entries.sort_by(|a, b| b.mtime.cmp(&a.mtime).then(a.path.cmp(&b.path))),
+        "name" => entries.sort_by(|a, b| {
+            applyability_rank(a)
+                .cmp(&applyability_rank(b))
+                .then(a.filename().cmp(b.filename()))
+        }),
+        "size" => entries.sort_by(|a, b| {
+            applyability_rank(a)
+                .cmp(&applyability_rank(b))
+                .then(b.size.cmp(&a.size))
+                .then(a.path.cmp(&b.path))
+        }),
+        _ => entries.sort_by(|a, b| {
+            applyability_rank(a)
+                .cmp(&applyability_rank(b))
+                .then(b.mtime.cmp(&a.mtime))
+                .then(a.path.cmp(&b.path))
+        }),
     }
     let total = entries.len();
     let items = entries
@@ -714,10 +736,102 @@ pub async fn thumbnail_cache_cleanup_old(days: u64) -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
+/// Resolve a path for opening: directories are opened directly, files reveal their parent.
+pub(crate) fn open_location_target(path: &str) -> Result<std::path::PathBuf, String> {
+    let p = std::path::Path::new(path);
+    if !p.exists() {
+        return Err(format!("Path does not exist: {}", path));
+    }
+    if p.is_dir() {
+        Ok(p.to_path_buf())
+    } else if p.is_file() {
+        Ok(p.parent().unwrap_or(p).to_path_buf())
+    } else {
+        Err(format!("Not a regular file or directory: {}", path))
+    }
+}
+
+#[tauri::command]
+pub async fn open_project_location(path: String, mode: Option<String>) -> CommandResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = match open_location_target(&path) {
+            Ok(t) => t,
+            Err(e) => return fail(e),
+        };
+        let target_str = target.to_string_lossy().to_string();
+        let mode = mode.unwrap_or_else(|| "files".to_string());
+        if mode == "terminal" {
+            fn terminal_spec(name: &str) -> Option<(&str, &str)> {
+                match name {
+                    "kitty" => Some(("kitty", "--directory")),
+                    "alacritty" => Some(("alacritty", "--working-directory")),
+                    "foot" => Some(("foot", "--working-directory")),
+                    "gnome-terminal" => Some(("gnome-terminal", "--working-directory")),
+                    "konsole" => Some(("konsole", "--workdir")),
+                    n if n.starts_with("wezterm") => Some((n, "start")),
+                    _ => None,
+                }
+            }
+            let term = std::env::var("TERMINAL").unwrap_or_default();
+            // If $TERMINAL contains whitespace (e.g. "kitty --single-instance"),
+            // take only the first word as the executable name.
+            let term_exe = term.split_whitespace().next().unwrap_or("");
+            let candidates: Vec<&str> = if !term_exe.is_empty() {
+                vec![term_exe]
+            } else {
+                vec![
+                    "kitty",
+                    "alacritty",
+                    "foot",
+                    "wezterm",
+                    "gnome-terminal",
+                    "konsole",
+                ]
+            };
+            for c in candidates {
+                if let Some((bin, flag)) = terminal_spec(c) {
+                    let mut cmd = std::process::Command::new(bin);
+                    cmd.arg(flag);
+                    // wezterm start needs --cwd
+                    if flag == "start" {
+                        cmd.arg("--cwd").arg(&target_str);
+                    } else {
+                        cmd.arg(&target_str);
+                    }
+                    if cmd.spawn().is_ok() {
+                        return ok(format!("Opened in terminal: {}", target_str));
+                    }
+                }
+            }
+            fail("No terminal emulator found. Try setting $TERMINAL environment variable.")
+        } else {
+            match std::process::Command::new("xdg-open")
+                .arg(&target_str)
+                .spawn()
+            {
+                Ok(_) => ok(format!("Opened: {}", target_str)),
+                Err(e) => fail(e.to_string()),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|e| fail(e.to_string()))
+}
+
 #[tauri::command]
 pub async fn open_path(path: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || {
-        match std::process::Command::new("xdg-open").arg(&path).spawn() {
+        let p = std::path::Path::new(&path);
+        // If it's a directory, open it directly; otherwise reveal parent.
+        let target = if p.is_dir() {
+            p.to_path_buf()
+        } else {
+            p.parent().unwrap_or(p).to_path_buf()
+        };
+        match std::process::Command::new("xdg-open")
+            .arg(target.to_string_lossy().as_ref())
+            .spawn()
+        {
             Ok(_) => ok("Opened path."),
             Err(e) => fail(e.to_string()),
         }
@@ -728,14 +842,7 @@ pub async fn open_path(path: String) -> CommandResult {
 
 #[tauri::command]
 pub async fn reveal_in_file_manager(path: String) -> CommandResult {
-    open_path(
-        std::path::Path::new(&path)
-            .parent()
-            .unwrap_or_else(|| std::path::Path::new(&path))
-            .to_string_lossy()
-            .to_string(),
-    )
-    .await
+    open_path(path).await
 }
 
 #[tauri::command]
@@ -972,5 +1079,65 @@ mod tests {
         ];
         let page = sort_filter_page(entries, "we", "mtime", "", 0, 10);
         assert_eq!(page.total, 2);
+    }
+
+    #[test]
+    fn applyability_sort_we_web_and_unsupported_after_normal() {
+        use wc_core::types::{Backend, FileType, WallpaperEntry};
+        let make = |path: &str, ft: FileType, mtime: u64| WallpaperEntry {
+            path: path.into(),
+            file_type: ft,
+            ext: "jpg".into(),
+            backend: Backend::Awww,
+            size: 100,
+            mtime,
+            resolution: "1920x1080".into(),
+            project: None,
+        };
+        let entries = vec![
+            make("d.web", FileType::WeWeb, 300),
+            make("a.jpg", FileType::Image, 200),
+            make("e.app", FileType::WeApplication, 400),
+            make("b.gif", FileType::Gif, 100),
+        ];
+        let result = sort_filter_page(entries, "all", "mtime", "", 0, 10);
+        let types: Vec<String> = result.items.iter().map(|i| i.file_type.clone()).collect();
+        let normal_idx: Vec<usize> = types
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| *t == "image" || *t == "gif")
+            .map(|(i, _)| i)
+            .collect();
+        let we_web_idx = types.iter().position(|t| t == "we_web").unwrap();
+        let unsup_idx = types.iter().position(|t| t == "unsupported").unwrap();
+        assert!(
+            normal_idx.iter().all(|&i| i < we_web_idx),
+            "normal before we_web"
+        );
+        assert!(
+            normal_idx.iter().all(|&i| i < unsup_idx),
+            "normal before unsupported"
+        );
+    }
+
+    #[test]
+    fn open_location_target_dir_returns_self() {
+        let tmp = tempfile::tempdir().unwrap();
+        let result = super::open_location_target(&tmp.path().to_string_lossy()).unwrap();
+        assert_eq!(result, tmp.path());
+    }
+
+    #[test]
+    fn open_location_target_file_returns_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let f = tmp.path().join("test.txt");
+        std::fs::write(&f, b"hello").unwrap();
+        let result = super::open_location_target(&f.to_string_lossy()).unwrap();
+        assert_eq!(result, tmp.path());
+    }
+
+    #[test]
+    fn open_location_target_missing_returns_err() {
+        assert!(super::open_location_target("/nonexistent/path/xyz").is_err());
     }
 }

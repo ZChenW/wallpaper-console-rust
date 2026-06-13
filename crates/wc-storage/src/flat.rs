@@ -120,6 +120,19 @@ pub fn sources_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
     Ok(true)
 }
 
+/// Remove all source lines that normalize to the same WE root or canonical path as `target`.
+pub fn sources_remove_canonical(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    let target_norm = wc_scan::normalize_source_path(path);
+    let mut lines = read_lines(&cd.sources_path())?;
+    let before = lines.len();
+    lines.retain(|l| wc_scan::normalize_source_path(l) != target_norm);
+    if lines.len() == before {
+        return Ok(false);
+    }
+    write_lines(&cd.sources_path(), &lines)?;
+    Ok(true)
+}
+
 pub fn favorites_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
     read_lines(&cd.favorites_path())
 }

@@ -311,10 +311,11 @@ fn we_no_project_json_fallback_scan() {
 fn steam_workshop_detects_flatpak_steam_path() {
     let (_d, cd) = temp_config();
     let home = format!("{}/home", cd);
-    let project = format!(
-        "{}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/workshop/content/431960/987",
+    let workshop_root = format!(
+        "{}/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/workshop/content/431960",
         home
     );
+    let project = format!("{}/987", workshop_root);
     std::fs::create_dir_all(&project).unwrap();
 
     let out = rust_with_home(&["steam-workshop"], &cd, &home);
@@ -327,8 +328,8 @@ fn steam_workshop_detects_flatpak_steam_path() {
     let out = rust(&["sources"], &cd);
     let sources = String::from_utf8_lossy(&out.stdout);
     assert!(
-        sources.contains(&project),
-        "Flatpak Steam workshop project should be added: {}",
+        sources.contains(&workshop_root),
+        "Flatpak Steam workshop root should be in sources: {}",
         sources
     );
 }

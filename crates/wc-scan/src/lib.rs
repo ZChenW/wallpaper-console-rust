@@ -10,6 +10,9 @@ use wc_core::formats;
 use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
 const WE_MARKER: &str = "/steamapps/workshop/content/431960";
+/// Flatpak Steam installs workshop content under a different prefix.
+const FLATPAK_WE_MARKER: &str =
+    "/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960";
 
 /// Deduplicate sources by canonical path before scanning.
 pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
@@ -87,23 +90,21 @@ enum WeKind {
 }
 
 fn we_source_kind(path: &str) -> WeKind {
-    if !path.contains(WE_MARKER) {
+    if !path.contains(WE_MARKER) && !path.contains(FLATPAK_WE_MARKER) {
         return WeKind::Normal;
     }
-    // Find the position of the marker in the path.
-    if let Some(pos) = path.find(WE_MARKER) {
-        let after = &path[pos + WE_MARKER.len()..];
-        let after = after.trim_start_matches('/');
-        // If there's a numeric project ID (and possibly trailing slash), it's a project dir.
-        if !after.is_empty() {
-            // Check if it looks like a Steam workshop ID (all digits).
-            let first_seg = after.split('/').next().unwrap_or("");
-            if first_seg.chars().all(|c| c.is_ascii_digit()) {
-                return WeKind::ProjectDir;
+    for marker in [WE_MARKER, FLATPAK_WE_MARKER] {
+        if let Some(pos) = path.find(marker) {
+            let after = &path[pos + marker.len()..];
+            let after = after.trim_start_matches('/');
+            if !after.is_empty() {
+                let first_seg = after.split('/').next().unwrap_or("");
+                if first_seg.chars().all(|c| c.is_ascii_digit()) {
+                    return WeKind::ProjectDir;
+                }
             }
+            return WeKind::WorkshopRoot;
         }
-        // Otherwise it's the workshop root itself.
-        return WeKind::WorkshopRoot;
     }
     WeKind::Normal
 }
@@ -174,11 +175,34 @@ fn scan_dir_recursive(dir: &Path, seen: &mut HashSet<String>, files: &mut Vec<St
 }
 
 fn canonicalize_str(p: &Path) -> String {
-    p.to_string_lossy().to_string()
+    std::fs::canonicalize(p)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| p.to_string_lossy().to_string())
+}
+
+pub fn normalize_source_path(path: &str) -> String {
+    if let Some(we_root) = we_workshop_root(path) {
+        return canonicalize_str(Path::new(&we_root));
+    }
+    canonicalize_str(Path::new(path))
+}
+
+fn we_workshop_root(path: &str) -> Option<String> {
+    for marker in [WE_MARKER, FLATPAK_WE_MARKER] {
+        if let Some(pos) = path.find(marker) {
+            let after = &path[pos + marker.len()..];
+            let after = after.trim_start_matches('/');
+            let first_seg = after.split('/').next().unwrap_or("");
+            if !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit()) {
+                return Some(path[..pos + marker.len()].to_string());
+            }
+        }
+    }
+    None
 }
 
 pub fn is_wallpaper_engine_source(path: &str) -> bool {
-    path.contains(WE_MARKER)
+    path.contains(WE_MARKER) || path.contains(FLATPAK_WE_MARKER)
 }
 
 /// Parsed Wallpaper Engine project.json metadata.
@@ -1025,6 +1049,98 @@ fn cached_entry_reuses_prior_metadata() {
         entry.unwrap().resolution,
         "1920x1080",
         "resolution should come from cache"
+    );
+}
+
+#[test]
+fn normalize_source_path_we_project_collapses_to_root() {
+    let root = tempfile::tempdir().unwrap();
+    let marker = root.path().join("steamapps/workshop/content/431960");
+    std::fs::create_dir_all(&marker).unwrap();
+    let project = marker.join("123456");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let normalized = normalize_source_path(&project.to_string_lossy());
+    assert_eq!(
+        normalized,
+        std::fs::canonicalize(&marker)
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        "project dir should collapse to canonical workshop root"
+    );
+}
+
+#[test]
+fn normalize_source_path_we_root_is_canonicalized() {
+    let root = tempfile::tempdir().unwrap();
+    let steam_we = root.path().join("steamapps/workshop/content/431960");
+    std::fs::create_dir_all(&steam_we).unwrap();
+    let flatpak_we = root
+        .path()
+        .join(".var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960");
+    std::fs::create_dir_all(&flatpak_we).unwrap();
+    let project = steam_we.join("123456");
+    std::fs::create_dir_all(&project).unwrap();
+
+    let steam_proj = project.to_string_lossy();
+    let flatpak_mirror = format!("{}/123456", flatpak_we.display());
+
+    let ns = normalize_source_path(&steam_proj);
+    let nf = normalize_source_path(&flatpak_mirror);
+
+    // Both should collapse to their respective canonical workshop roots
+    assert_eq!(
+        ns,
+        std::fs::canonicalize(&steam_we)
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        "Steam project should collapse to canonical workshop root"
+    );
+    assert_eq!(
+        nf,
+        std::fs::canonicalize(&flatpak_we)
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        "Flatpak project should collapse to canonical workshop root"
+    );
+    // If the projects are the same physical directory (symlink scenario), the
+    // canonicalized roots would be the same
+    assert_ne!(ns, nf, "Steam and Flatpak roots are distinct directories");
+}
+
+#[test]
+fn normalize_source_path_non_we_is_canonicalized() {
+    let root = tempfile::tempdir().unwrap();
+    let real = root.path().join("walls");
+    std::fs::create_dir_all(&real).unwrap();
+    let link = root.path().join("walls-link");
+    std::os::unix::fs::symlink(&real, &link).unwrap();
+
+    let normalized = normalize_source_path(&link.to_string_lossy());
+    assert_eq!(
+        normalized,
+        std::fs::canonicalize(&real)
+            .unwrap()
+            .to_string_lossy()
+            .to_string(),
+        "non-WE path should be canonicalized"
+    );
+}
+
+#[test]
+fn we_workshop_root_returns_none_for_non_we() {
+    assert_eq!(we_workshop_root("/home/user/Pictures"), None);
+}
+
+#[test]
+fn we_workshop_root_returns_none_for_workshop_root() {
+    assert_eq!(we_workshop_root("/steamapps/workshop/content/431960"), None);
+    assert_eq!(
+        we_workshop_root("/steamapps/workshop/content/431960/"),
+        None
     );
 }
 

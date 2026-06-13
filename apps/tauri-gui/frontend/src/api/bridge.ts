@@ -185,6 +185,7 @@ export const api = {
   thumbnailCacheCleanupOld: (days: number): Promise<CommandResult> =>
     invoke<CommandResult>('thumbnail_cache_cleanup_old', { days }),
 
+  openProjectLocation: (path: string, mode?: string): Promise<CommandResult> => invoke<CommandResult>('open_project_location', { path, mode }),
   openPath: (path: string): Promise<CommandResult> => invoke<CommandResult>('open_path', { path }),
   revealInFileManager: (path: string): Promise<CommandResult> => invoke<CommandResult>('reveal_in_file_manager', { path }),
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),

@@ -97,8 +97,12 @@ impl StorageApi {
             }
             _ => flat::sources_list(&self.cd)?,
         };
+        let normalized: Vec<String> = raw
+            .into_iter()
+            .map(|p| wc_scan::normalize_source_path(&p))
+            .collect();
         let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<String> = raw
+        let deduped: Vec<String> = normalized
             .into_iter()
             .filter(|p| seen.insert(flat::try_canonicalize(p)))
             .collect();
@@ -219,19 +223,17 @@ impl StorageApi {
     }
 
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
+        let path = wc_scan::normalize_source_path(path);
         match self.mode {
             StorageBackend::Sqlite => {
-                // SQLite must succeed first — GUI reads from DB in sqlite mode.
-                // Flat-file write follows only as a compatibility copy.
-                let added = sqlite::sqlite_source_add(&self.cd, path)?;
-                // Sync flat as a best-effort compatibility copy.
-                flat::sources_add(&self.cd, path).ok();
+                let added = sqlite::sqlite_source_add(&self.cd, &path)?;
+                flat::sources_add(&self.cd, &path).ok();
                 Ok(added)
             }
             _ => {
-                let added = flat::sources_add(&self.cd, path)?;
+                let added = flat::sources_add(&self.cd, &path)?;
                 if added {
-                    mirror::mirror_source_add(&self.cd, path).ok();
+                    mirror::mirror_source_add(&self.cd, &path).ok();
                 }
                 Ok(added)
             }
@@ -239,18 +241,19 @@ impl StorageApi {
     }
 
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
+        let path = wc_scan::normalize_source_path(path);
         match self.mode {
             StorageBackend::Sqlite => {
-                // SQLite must succeed first.
-                let removed = sqlite::sqlite_source_remove(&self.cd, path)?;
-                // Sync flat as a best-effort compatibility copy.
-                flat::sources_remove(&self.cd, path).ok();
+                let removed = sqlite::sqlite_source_remove_canonical(&self.cd, &path)?;
+                flat::sources_remove_canonical(&self.cd, &path).ok();
                 Ok(removed)
             }
             _ => {
-                let removed = flat::sources_remove(&self.cd, path)?;
+                let removed = flat::sources_remove_canonical(&self.cd, &path)?;
                 if removed {
-                    mirror::mirror_source_remove(&self.cd, path).ok();
+                    mirror::mirror_source_remove(&self.cd, &path).ok();
+                    // Also clean any legacy rows in SQLite that normalise to the same target
+                    sqlite::sqlite_source_remove_canonical(&self.cd, &path).ok();
                 }
                 Ok(removed)
             }
@@ -389,6 +392,202 @@ mod tests {
         assert!(!sqlite_mirror_active(&cd.path));
         sqlite::ensure_sqlite_db(&cd);
         assert!(sqlite_mirror_active(&cd.path));
+    }
+
+    #[test]
+    fn source_normalization_collapses_we_project_to_root() {
+        let root = tempfile::tempdir().unwrap();
+        let marker = root.path().join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&marker).unwrap();
+        let project = marker.join("123456");
+        std::fs::create_dir_all(&project).unwrap();
+
+        let cd = ConfigDir {
+            path: root.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        let storage = StorageApi {
+            cd,
+            mode: StorageBackend::File,
+        };
+        storage.sources_add(&project.to_string_lossy()).unwrap();
+        let list = storage.sources_list().unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(
+            list[0],
+            marker.to_string_lossy().to_string(),
+            "project dir should collapse to workshop root"
+        );
+    }
+
+    #[test]
+    fn source_remove_cleans_raw_sqlite_project_level_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+
+        let root = tmp.path().join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("123456");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("project.json"), b"{}").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let proj_str = project.to_string_lossy().to_string();
+
+        {
+            let db = cd.db_path();
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            crate::sqlite::ensure_sqlite_db(&cd);
+            conn.execute(
+                "INSERT INTO sources (path) VALUES (?1)",
+                rusqlite::params![proj_str],
+            )
+            .unwrap();
+        }
+
+        let s = StorageApi::new(cd);
+        assert!(s.sources_remove(&root_str).unwrap());
+        let remaining = s.sources_list().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "all sources should be gone, got: {:?}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn source_remove_cleans_raw_flat_project_level_entry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "file").unwrap();
+
+        let root = tmp.path().join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("123456");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("project.json"), b"{}").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let proj_str = project.to_string_lossy().to_string();
+
+        flat::write_lines(&cd.sources_path(), &[proj_str.clone()]).unwrap();
+
+        let s = StorageApi::new(cd);
+        assert!(s.sources_remove(&root_str).unwrap());
+        let remaining = s.sources_list().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "all sources should be gone, got: {:?}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn source_remove_cleans_both_root_and_project_level() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+
+        let root = tmp.path().join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("123456");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("project.json"), b"{}").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let proj_str = project.to_string_lossy().to_string();
+
+        let s = StorageApi::new(cd);
+        s.sources_add(&root_str).unwrap();
+        s.sources_add(&proj_str).unwrap();
+
+        let all = s.sources_list().unwrap();
+        assert_eq!(all.len(), 1, "normalized should dedupe to one: {:?}", all);
+
+        {
+            let db = s.cd.db_path();
+            let conn = rusqlite::Connection::open(&db).unwrap();
+            conn.execute(
+                "INSERT INTO sources (path) VALUES (?1)",
+                rusqlite::params![proj_str],
+            )
+            .unwrap();
+        }
+
+        assert!(s.sources_remove(&root_str).unwrap());
+        let remaining = s.sources_list().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "both root and project should be gone, got: {:?}",
+            remaining
+        );
+    }
+
+    #[test]
+    fn source_normalization_dedupes_canonical_duplicates() {
+        let root = tempfile::tempdir().unwrap();
+        let real = root.path().join("walls");
+        std::fs::create_dir_all(&real).unwrap();
+        let link = root.path().join("walls-link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let cd = ConfigDir {
+            path: root.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        let storage = StorageApi {
+            cd,
+            mode: StorageBackend::File,
+        };
+        storage.sources_add(&real.to_string_lossy()).unwrap();
+        storage.sources_add(&link.to_string_lossy()).unwrap();
+        let list = storage.sources_list().unwrap();
+        assert_eq!(list.len(), 1, "canonical duplicates should be deduped");
+    }
+
+    #[test]
+    fn source_remove_canonical_cleans_project_level_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+
+        let root = tmp.path().join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&root).unwrap();
+        let project = root.join("1234567890");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("project.json"), b"{}").unwrap();
+
+        let root_str = root.to_string_lossy().to_string();
+        let proj_str = project.to_string_lossy().to_string();
+
+        // Add both root and project-level to sources
+        let s = StorageApi::new(cd);
+        s.sources_add(&root_str).unwrap();
+        s.sources_add(&proj_str).unwrap();
+
+        // Remove root — should also clean up project-level
+        assert!(s.sources_remove(&root_str).unwrap());
+        let remaining = s.sources_list().unwrap();
+        assert!(
+            remaining.is_empty(),
+            "all sources should be gone, got: {:?}",
+            remaining
+        );
     }
 }
 

@@ -42,6 +42,10 @@ interface ThumbnailCacheDTO {
   dir: string;
   size: string;
   entries: number;
+  oldestMtime?: number;
+  newestMtime?: number;
+  failureEntries: number;
+  cleanupDays: number;
 }
 
 interface ThumbnailDTO {
@@ -165,6 +169,7 @@ const MOCK_HISTORY: string[] = [
 ];
 
 const ok: CommandResult = { success: true, stdout: 'ok', stderr: '', exitCode: 0 };
+const failResult: CommandResult = { success: false, stdout: '', stderr: 'mock failure', exitCode: 1 };
 
 export const api = {
   status: async (): Promise<StatusDTO> => ({
@@ -178,6 +183,14 @@ export const api = {
     available: false,
     message: 'Wallpaper Engine scene wallpapers require linux-wallpaperengine. Install it from AUR: yay -S linux-wallpaperengine-git',
     detail: 'backend not found: linux-wallpaperengine',
+  }),
+
+  weDebugInfo: async () => ({
+    lastCommandLine: '',
+    lastTargetConfig: '',
+    lastStderr: '',
+    lastExitStatus: '',
+    logPath: '/dev/null',
   }),
 
   apply: async (): Promise<CommandResult> => ok,
@@ -243,7 +256,11 @@ export const api = {
       },
     ),
 
-  favoriteAdd: async (): Promise<CommandResult> => ok,
+  favoriteAdd: async (path: string): Promise<CommandResult> => {
+    // Simulate failure for the WE Web mock path so smoke tests can verify error feedback
+    if (path.includes('3650880224')) return failResult;
+    return ok;
+  },
   favoriteRemove: async (): Promise<CommandResult> => ok,
 
   historyList: async (): Promise<WallpaperDTO[]> =>
@@ -275,6 +292,11 @@ export const api = {
       image_backend: 'awww',
       gif_backend: 'awww',
       video_backend: 'mpvpaper',
+      awww_resize: 'crop',
+      awww_transition_type: 'fade',
+      awww_transition_duration: '1',
+      mpvpaper_options: 'no-audio --loop-file=inf',
+      mpvpaper_output: '*',
       linux_wallpaperengine_enabled: 'on',
       linux_wallpaperengine_path: 'auto',
       linux_wallpaperengine_target_mode: 'auto',
@@ -284,6 +306,14 @@ export const api = {
       linux_wallpaperengine_muted: 'off',
       linux_wallpaperengine_volume: '100',
       linux_wallpaperengine_assets_dir: 'auto',
+      min_wallpaper_width: '1280',
+      min_wallpaper_height: '720',
+      gui_thumbnail_mode: 'cache',
+      gui_thumbnail_cleanup_days: '30',
+      gui_thumbnail_failure_ttl_secs: '900',
+      preview_metadata: 'compact',
+      gui_debug_logs: 'off',
+      open_project_location_mode: 'ask',
     };
     return defaults[key] ?? '';
   },
@@ -312,8 +342,12 @@ export const api = {
   thumbnailCacheClear: async (): Promise<CommandResult> => ok,
   thumbnailCacheCleanupOld: async (): Promise<CommandResult> => ok,
 
+  openProjectLocation: async (): Promise<CommandResult> => ok,
   openPath: async (): Promise<CommandResult> => ok,
   revealInFileManager: async (): Promise<CommandResult> => ok,
   browseDirectory: async (): Promise<string> => '/mock/selected/dir',
-  exportDiagnostics: async (): Promise<CommandResult> => ok,
+  exportDiagnostics: async (): Promise<CommandResult> => {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    return ok;
+  },
 };

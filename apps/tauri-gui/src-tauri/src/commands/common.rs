@@ -268,10 +268,21 @@ pub fn format_bytes(bytes: u64) -> String {
 pub fn source_label(path: &str) -> String {
     let p = Path::new(path);
     if wc_scan::is_wallpaper_engine_source(path) {
-        return p
-            .file_name()
-            .map(|s| format!("Wallpaper Engine {}", s.to_string_lossy()))
-            .unwrap_or_else(|| "Wallpaper Engine".into());
+        let has_workshop_id = path
+            .find("/steamapps/workshop/content/431960/")
+            .map(|pos| {
+                let after = &path[pos + "/steamapps/workshop/content/431960/".len()..];
+                let first_seg = after.split('/').next().unwrap_or("");
+                !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit())
+            })
+            .unwrap_or(false);
+        if has_workshop_id {
+            return p
+                .file_name()
+                .map(|s| format!("Wallpaper Engine {}", s.to_string_lossy()))
+                .unwrap_or_else(|| "Wallpaper Engine".into());
+        }
+        return "Wallpaper Engine Workshop".into();
     }
     p.file_name()
         .map(|s| s.to_string_lossy().to_string())

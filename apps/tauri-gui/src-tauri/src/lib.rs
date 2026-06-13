@@ -54,6 +54,7 @@ pub fn run() {
             commands::scan_progress,
             commands::scan_cancel,
             commands::library_source_status,
+            commands::open_project_location,
             commands::open_path,
             commands::reveal_in_file_manager,
             commands::browse_directory,

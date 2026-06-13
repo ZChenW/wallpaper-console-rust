@@ -1,4 +1,4 @@
-import { lazy, startTransition, Suspense, useCallback, useRef, useState } from 'react';
+import { lazy, startTransition, Suspense, useCallback, useEffect, useRef, useState } from 'react';
 import { api, CommandResult } from './api/bridge';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
@@ -39,6 +39,16 @@ function AppShell() {
     setFeedbackWithAutoDismiss,
     clearFeedback,
   } = useAppState();
+
+  // Listen for wc-feedback events from child components
+  useEffect(() => {
+    const handler = (e: Event) => {
+      const detail = (e as CustomEvent).detail;
+      if (detail) setFeedbackWithAutoDismiss(detail);
+    };
+    window.addEventListener('wc-feedback', handler);
+    return () => window.removeEventListener('wc-feedback', handler);
+  }, [setFeedbackWithAutoDismiss]);
 
   const handleApply = useCallback(async (path: string) => {
     if (applyingRef.current) return; // Prevent concurrent applies

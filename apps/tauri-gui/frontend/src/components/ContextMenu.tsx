@@ -5,12 +5,13 @@ interface Props {
   x: number;
   y: number;
   path: string;
+  canApply: boolean;
   onApply: (path: string) => void;
   actions: ContextAction[];
   onClose: () => void;
 }
 
-export default function ContextMenu({ x, y, path, onApply, actions, onClose }: Props) {
+export default function ContextMenu({ x, y, path, canApply, onApply, actions, onClose }: Props) {
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -25,12 +26,27 @@ export default function ContextMenu({ x, y, path, onApply, actions, onClose }: P
 
   return (
     <div className="context-menu" ref={ref} style={{ left: x, top: y }}>
-      <button onClick={() => { onApply(path); onClose(); }}>Apply</button>
+      {canApply && (
+        <button onClick={async () => {
+          try { await onApply(path); } catch (e) { /* apply failures handled in App */ }
+          onClose();
+        }}>Apply</button>
+      )}
       {actions.map((a) => (
         <button
           key={a.label}
           className={a.danger ? 'danger' : ''}
-          onClick={() => { a.action(path); onClose(); }}
+          onClick={async () => {
+            try {
+              await a.action(path);
+            } catch (e) {
+              window.dispatchEvent(new CustomEvent('wc-feedback', {
+                detail: { state: 'error', label: a.label, detail: String(e) },
+              }));
+            } finally {
+              onClose();
+            }
+          }}
         >
           {a.label}
         </button>

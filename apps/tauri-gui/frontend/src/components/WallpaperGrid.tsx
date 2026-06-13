@@ -4,7 +4,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import { WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
-import { calculateColumnCount, COL_MIN_WIDTH, GRID_GAP } from '../utils/layout';
+import { calculateColumnCount, GRID_GAP } from '../utils/layout';
 
 interface Props {
   entries: WallpaperDTO[];
@@ -13,13 +13,15 @@ interface Props {
   emptyText?: string;
   contextActions?: ContextAction[];
   active?: boolean;
+  selectedPaths?: Set<string>;
+  onSelectionChange?: (paths: Set<string>) => void;
 }
 
 export interface ContextAction {
   label: string;
   action: (path: string) => void;
   danger?: boolean;
-  visible?: (path: string) => boolean;
+  visible?: (entry: WallpaperDTO) => boolean;
 }
 
 const CARD_HEIGHT = 188;
@@ -32,10 +34,13 @@ export default function WallpaperGrid({
   emptyText = 'No wallpapers found',
   contextActions = [],
   active = true,
+  selectedPaths,
+  onSelectionChange,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { thumbs: thumbCache, enqueue } = useThumbnailStore();
+  const lastClickedRef = useRef<string | null>(null);
 
   const prevEntriesRef = useRef(entries);
   const [colCount, setColCount] = useState(4);
@@ -99,13 +104,60 @@ export default function WallpaperGrid({
     );
   }, [entries, colCount, virtualizer.range, enqueue, active]);
 
+  // Keyboard: Escape clears selection
+  useEffect(() => {
+    if (!onSelectionChange) return;
+    const handler = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        onSelectionChange(new Set());
+      }
+    };
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [onSelectionChange]);
+
   const handleContextMenu = (e: React.MouseEvent, path: string) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, path });
   };
 
-  const handleDoubleClick = (path: string) => {
-    onApply(path);
+  const handleDoubleClick = (entry: WallpaperDTO) => {
+    if (entry.type === 'we_web' || entry.type === 'unsupported') {
+      window.dispatchEvent(new CustomEvent('wc-feedback', {
+        detail: { state: 'warning', label: 'Cannot apply', detail: 'This item cannot be applied as a live wallpaper.' },
+      }));
+      return;
+    }
+    onApply(entry.path);
+  };
+
+  const canApply = (entry: WallpaperDTO): boolean => {
+    return entry.type !== 'we_web' && entry.type !== 'unsupported';
+  };
+
+  const findEntry = (path: string): WallpaperDTO | undefined => {
+    return entries.find((e) => e.path === path);
+  };
+
+  const handleCardClick = (e: React.MouseEvent, entry: WallpaperDTO) => {
+    if (!onSelectionChange) return;
+    const sel = new Set(selectedPaths ?? []);
+    if (e.ctrlKey || e.metaKey) {
+      if (sel.has(entry.path)) sel.delete(entry.path);
+      else sel.add(entry.path);
+      onSelectionChange(sel);
+      lastClickedRef.current = entry.path;
+    } else if (e.shiftKey && lastClickedRef.current) {
+      const idx = entries.findIndex((x) => x.path === entry.path);
+      const prevIdx = entries.findIndex((x) => x.path === lastClickedRef.current);
+      if (idx >= 0 && prevIdx >= 0) {
+        const [start, end] = prevIdx < idx ? [prevIdx, idx] : [idx, prevIdx];
+        for (let i = start; i <= end; i++) sel.add(entries[i].path);
+        onSelectionChange(sel);
+      }
+    } else {
+      lastClickedRef.current = entry.path;
+    }
   };
 
   const rows = useMemo(() => {
@@ -115,6 +167,8 @@ export default function WallpaperGrid({
     }
     return r;
   }, [entries, colCount]);
+
+  const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
   if (entries.length === 0) {
     return <div className="empty-state">{emptyText}</div>;
@@ -140,44 +194,49 @@ export default function WallpaperGrid({
                 gap: `${GRID_GAP}px`,
               }}
             >
-              {rowEntries.map((e) => (
-                <div
-                  key={e.path}
-                  className={`wallpaper-card ${applying ? 'disabled' : ''}`}
-                  onContextMenu={(ev) => handleContextMenu(ev, e.path)}
-                  onDoubleClick={() => handleDoubleClick(e.path)}
-                  title={e.path}
-                >
-                  <div className="wallpaper-thumb">
-                    {e.previewPath ? (
-                      <img src={safeFileSrc(e.previewPath)} alt="" loading="lazy" />
-                    ) : thumbCache[e.path] ? (
-                      <img src={safeFileSrc(thumbCache[e.path])} alt="" loading="lazy" />
-                    ) : (
-                      <div className="wallpaper-thumb-placeholder">
-                        <span className="wallpaper-type-icon">{typeIcon(e.type)}</span>
-                      </div>
-                    )}
-                    {weBadge(e) && <span className={weBadgeClass(e)}>{weBadge(e)}</span>}
+              {rowEntries.map((e) => {
+                const selected = selectedPaths?.has(e.path) ?? false;
+                return (
+                  <div
+                    key={e.path}
+                    className={`wallpaper-card${applying ? ' disabled' : ''}${selected ? ' selected' : ''}`}
+                    onContextMenu={(ev) => handleContextMenu(ev, e.path)}
+                    onClick={(ev) => handleCardClick(ev, e)}
+                    onDoubleClick={() => handleDoubleClick(e)}
+                    title={e.path}
+                  >
+                    <div className="wallpaper-thumb">
+                      {e.previewPath ? (
+                        <img src={safeFileSrc(e.previewPath)} alt="" loading="lazy" />
+                      ) : thumbCache[e.path] ? (
+                        <img src={safeFileSrc(thumbCache[e.path])} alt="" loading="lazy" />
+                      ) : (
+                        <div className="wallpaper-thumb-placeholder">
+                          <span className="wallpaper-type-icon">{typeIcon(e.type)}</span>
+                        </div>
+                      )}
+                      {weBadge(e) && <span className={weBadgeClass(e)}>{weBadge(e)}</span>}
+                    </div>
+                    <div className="wallpaper-info">
+                      <span className="wallpaper-name">{displayName(e)}</span>
+                      <span className="wallpaper-meta">{metaLine(e)}</span>
+                    </div>
                   </div>
-                  <div className="wallpaper-info">
-                    <span className="wallpaper-name">{displayName(e)}</span>
-                    <span className="wallpaper-meta">{metaLine(e)}</span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           );
         })}
       </div>
 
-      {contextMenu && (
+      {contextMenu && contextEntry && (
         <ContextMenu
           x={contextMenu.x}
           y={contextMenu.y}
           path={contextMenu.path}
+          canApply={canApply(contextEntry)}
           onApply={onApply}
-          actions={contextActions.filter((action) => !action.visible || action.visible(contextMenu.path))}
+          actions={contextActions.filter((action) => !action.visible || action.visible(contextEntry))}
           onClose={() => setContextMenu(null)}
         />
       )}

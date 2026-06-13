@@ -248,6 +248,19 @@ pub enum VerifyResult {
 /// - `Ok(VerifyResult::Failed(e))` — real data mismatch (wallpapers, favorites,
 ///   history, state)
 /// - `Err(WcError::Sqlite(...))` — schema corruption or missing DB
+// Normalise a list of paths into canonical, deduplicated, sorted values
+// so that symlink-equivalent paths compare equal in verify().
+fn canonical_unique_sorted(paths: &[String]) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<String> = paths
+        .iter()
+        .map(|p| flat::try_canonicalize(p))
+        .filter(|c| seen.insert(c.clone()))
+        .collect();
+    out.sort();
+    out
+}
+
 pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
@@ -295,6 +308,9 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     }
 
     // Favorites — data integrity; mismatch is an error.
+    // NOTE: flat::favorites_list() does not canonical-dedup (unlike history_list),
+    // so db_fav likewise does not need canonical dedup here. If favorites_list
+    // ever gains dedup, align db_fav to match.
     {
         let mut flat_fav: Vec<String> = flat::favorites_list(cd)?;
         flat_fav.sort();
@@ -313,18 +329,20 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
 
     // History — data integrity; mismatch is an error.
     {
-        let mut flat_hist: Vec<String> = flat::history_list(cd)?;
-        flat_hist.sort();
+        let flat_hist = flat::history_list(cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM history ORDER BY path")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut db_hist: Vec<String> = stmt
+        let db_hist: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        db_hist.sort();
-        if flat_hist != db_hist {
+        // Normalise both sides to canonical values so that symlink /
+        // dot-path variants compare equal.
+        let flat_norm = canonical_unique_sorted(&flat_hist);
+        let db_norm = canonical_unique_sorted(&db_hist);
+        if flat_norm != db_norm {
             errors.push("history".into());
         }
     }
@@ -603,11 +621,15 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
         let mut stmt = conn
             .prepare("SELECT path FROM history ORDER BY id DESC")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
+        let mut rows: Vec<String> = stmt
             .query_map([], |row| row.get(0))
             .map_err(|e| WcError::Sqlite(e.to_string()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        // Canonical dedup to avoid writing duplicate paths that
+        // would cause verify() false positives after export.
+        let mut seen = std::collections::HashSet::new();
+        rows.retain(|p| seen.insert(flat::try_canonicalize(p)));
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join("history"), content).map_err(WcError::Io)?;
     }
@@ -1248,6 +1270,154 @@ mod tests {
             result
         );
     }
+
+    #[test]
+    fn verify_history_passes_with_duplicate_canonical_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+
+        // Use the same path written twice — both canonicalise identically
+        let path_a = tmp.path().join("a.jpg");
+        std::fs::write(&path_a, b"x").unwrap();
+        let a = path_a.to_string_lossy().to_string();
+
+        // Write the same path twice to flat history
+        flat::write_lines(&cd.history_path(), &[a.clone(), a.clone()]).unwrap();
+        flat::favorites_add(&cd, "/walls/fav.jpg").unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // INSERT the duplicate into SQLite history as well
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
+                rusqlite::params![a],
+            )
+            .unwrap();
+        }
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            !matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
+            "duplicate canonical history should not fail verify, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_history_passes_with_symlink_equivalent_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+
+        let real = tmp.path().join("real.jpg");
+        std::fs::write(&real, b"x").unwrap();
+        let sym = tmp.path().join("link.jpg");
+        std::os::unix::fs::symlink(&real, &sym).unwrap();
+        let real_str = real.to_string_lossy().to_string();
+        let sym_str = sym.to_string_lossy().to_string();
+
+        // Flat history has the symlink path
+        flat::write_lines(&cd.history_path(), &[sym_str.clone()]).unwrap();
+        flat::favorites_add(&cd, "/walls/fav.jpg").unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // SQLite history has the real path (different string, same canonical)
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
+                rusqlite::params![real_str],
+            )
+            .unwrap();
+        }
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            !matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
+            "symlink-equivalent history should pass verify, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_history_fails_with_truly_missing_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        flat::history_add(&cd, "/walls/a.jpg", 100).unwrap();
+        flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // Add a path to SQLite history that is NOT in flat
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
+                rusqlite::params!["/walls/extra.jpg"],
+            )
+            .unwrap();
+        }
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
+            "truly extra history path should fail verify, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn export_flat_dedupes_history_so_verify_passes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+
+        // Migrate with one history entry
+        flat::history_add(&cd, "/walls/a.jpg", 100).unwrap();
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // Insert a duplicate canonical path directly into SQLite history
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
+                rusqlite::params!["/walls/a.jpg"],
+            )
+            .unwrap();
+        }
+
+        // Export to flat — should dedup
+        crate::sqlite::export_flat(&cd).unwrap();
+
+        // After export, flat history should be deduped; verify should pass
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            !matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
+            "export_flat should dedup history so verify passes, got: {:?}",
+            result
+        );
+    }
 }
 
 // ── Direct SQLite source writes (sqlite mode — no mirror-active gate) ─────
@@ -1287,6 +1457,34 @@ pub fn sqlite_source_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError>
         .execute("DELETE FROM sources WHERE path = (?1)", params![path])
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(n > 0)
+}
+
+/// Remove all source rows that normalize to the same WE root or canonical path as `path`.
+pub fn sqlite_source_remove_canonical(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
+    ensure_sqlite_db(cd);
+    let db = cd.db_path();
+    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let mut stmt = conn
+        .prepare("SELECT path FROM sources")
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let rows: Vec<String> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let target_norm = wc_scan::normalize_source_path(path);
+    let to_delete: Vec<String> = rows
+        .into_iter()
+        .filter(|r| wc_scan::normalize_source_path(r) == target_norm)
+        .collect();
+    if to_delete.is_empty() {
+        return Ok(false);
+    }
+    for p in &to_delete {
+        conn.execute("DELETE FROM sources WHERE path = (?1)", params![p])
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    }
+    Ok(true)
 }
 
 pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
