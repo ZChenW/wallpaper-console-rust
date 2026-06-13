@@ -129,7 +129,6 @@ SIZES="1000 10000 50000" ./scripts/benchmark_library.sh
 
 See [docs/TAURI_MANUAL_SMOKE_CHECKLIST.md](docs/TAURI_MANUAL_SMOKE_CHECKLIST.md) for manual GUI verification.
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development setup.
-See [docs/RELEASE.md](docs/RELEASE.md) for release and checksum commands.
 See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable library benchmark commands and current baseline numbers.
 
 ## Prerequisites
@@ -141,7 +140,8 @@ See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable 
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
 - Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
   - Arch/AUR: `yay -S linux-wallpaperengine-git`
-> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired and is not part of the current install/build path. See [docs/HISTORICAL_WAILS_ARCHIVE.md](docs/HISTORICAL_WAILS_ARCHIVE.md) for background.
+
+> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired. See [docs/archive/WAILS_ARCHITECTURE.md](docs/archive/WAILS_ARCHITECTURE.md) for background.
 
 ## Rollback
 
