@@ -122,7 +122,7 @@ export default function WallpaperGrid({
   };
 
   const handleDoubleClick = (entry: WallpaperDTO) => {
-    if (entry.type === 'we_web' || entry.type === 'unsupported') {
+    if (!canApply(entry)) {
       window.dispatchEvent(new CustomEvent('wc-feedback', {
         detail: { state: 'warning', label: 'Cannot apply', detail: 'This item cannot be applied as a live wallpaper.' },
       }));
@@ -132,6 +132,9 @@ export default function WallpaperGrid({
   };
 
   const canApply = (entry: WallpaperDTO): boolean => {
+    if (entry.applyActions) {
+      return entry.applyActions.some((a) => a.kind === 'apply' && a.enabled);
+    }
     return entry.type !== 'we_web' && entry.type !== 'unsupported';
   };
 

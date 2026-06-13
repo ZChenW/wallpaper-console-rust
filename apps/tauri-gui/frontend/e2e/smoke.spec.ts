@@ -16,6 +16,8 @@ test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
   await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Open experimental Chromium preview')).toHaveCount(0);
   await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
 });
 
 test('settings defaults to General with status cards only', async ({ page }) => {
@@ -189,20 +191,35 @@ test('settings advanced shows open location mode without ask option', async ({ p
   await expect(page.getByRole('heading', { name: 'File Manager' })).toBeVisible({ timeout: 5000 });
 });
 
-test('WE Scene context menu uses generic Apply label', async ({ page }) => {
+test('WE Scene context menu shows all actions', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('combobox').first().selectOption('we_scene');
   const card = page.locator('.wallpaper-card').filter({ hasText: 'WE Scene' }).first();
   await card.click({ button: 'right' });
   await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
   await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+  await expect(page.getByText('Apply preview GIF')).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
 });
 
-test('regular wallpaper context menu has open folder', async ({ page }) => {
+test('failed WE Scene context menu shows retry not apply', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('combobox').first().selectOption('we_scene');
+  const card = page.locator('.wallpaper-card').filter({ hasText: 'Incompatible Scene' }).first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Retry backend apply')).toBeVisible();
+  await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Apply preview GIF')).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
+});
+
+test('regular wallpaper context menu has apply and open folder', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('combobox').first().selectOption('image');
   const card = page.locator('.wallpaper-card').first();
   await card.click({ button: 'right' });
-  await expect(page.getByText('Open folder')).toBeVisible();
   await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
 });

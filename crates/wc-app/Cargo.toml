@@ -12,4 +12,5 @@ wc-storage.workspace = true
 wc-backend.workspace = true
 
 [dev-dependencies]
+camino.workspace = true
 tempfile.workspace = true

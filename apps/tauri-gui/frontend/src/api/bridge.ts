@@ -97,6 +97,22 @@ export interface ThumbnailDTO {
   failureReason?: string;
 }
 
+export type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
+
+export type ApplyActionKind =
+  | 'apply'
+  | 'retry_backend_apply'
+  | 'apply_preview'
+  | 'open_folder'
+  | 'copy_workshop_id';
+
+export interface ApplyActionDTO {
+  kind: ApplyActionKind;
+  label: string;
+  enabled: boolean;
+  reason?: string;
+}
+
 export interface WallpaperDTO {
   path: string;
   type: string;
@@ -116,6 +132,10 @@ export interface WallpaperDTO {
   backendErrorMessage?: string;
   backendErrorDetail?: string;
   backendFailedAt?: string;
+  applyAvailability?: ApplyAvailability;
+  applyBackend?: string;
+  applyReason?: string;
+  applyActions?: ApplyActionDTO[];
 }
 
 export const api = {

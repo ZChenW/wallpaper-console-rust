@@ -1,9 +1,13 @@
+pub mod apply_plan;
+
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use wc_core::error::WcError;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 use wc_storage::StorageApi;
+
+pub use apply_plan::{ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {

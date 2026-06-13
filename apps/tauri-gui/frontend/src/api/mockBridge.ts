@@ -54,6 +54,22 @@ interface ThumbnailDTO {
   cacheHit: boolean;
 }
 
+type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
+
+type ApplyActionKind =
+  | 'apply'
+  | 'retry_backend_apply'
+  | 'apply_preview'
+  | 'open_folder'
+  | 'copy_workshop_id';
+
+interface ApplyActionDTO {
+  kind: ApplyActionKind;
+  label: string;
+  enabled: boolean;
+  reason?: string;
+}
+
 interface WallpaperDTO {
   path: string;
   type: string;
@@ -73,6 +89,10 @@ interface WallpaperDTO {
   backendErrorMessage?: string;
   backendErrorDetail?: string;
   backendFailedAt?: string;
+  applyAvailability?: ApplyAvailability;
+  applyBackend?: string;
+  applyReason?: string;
+  applyActions?: ApplyActionDTO[];
 }
 
 const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
@@ -89,6 +109,14 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     workshopId: '3558034522',
     title: 'Scene title',
     weFile: 'scene.json',
+    applyAvailability: 'available',
+    applyBackend: 'linux-wallpaperengine',
+    applyActions: [
+      { kind: 'apply', label: 'Apply', enabled: true },
+      { kind: 'apply_preview', label: 'Apply preview GIF', enabled: true },
+      { kind: 'open_folder', label: 'Open folder', enabled: true },
+      { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
+    ],
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/3589454154',
@@ -106,6 +134,14 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     backendStatus: 'failed',
     backendErrorKind: 'scene_projection_unsupported',
     backendErrorMessage: 'This scene uses projection data that linux-wallpaperengine cannot render.',
+    applyAvailability: 'retryable_failure',
+    applyBackend: 'linux-wallpaperengine',
+    applyActions: [
+      { kind: 'retry_backend_apply', label: 'Retry backend apply', enabled: true },
+      { kind: 'apply_preview', label: 'Apply preview GIF', enabled: true },
+      { kind: 'open_folder', label: 'Open folder', enabled: true },
+      { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
+    ],
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/3650880224',
@@ -121,6 +157,12 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     title: 'Web title',
     weFile: 'index.html',
     unsupportedReason: 'Wallpaper Engine Web projects are indexed for browsing only and cannot be applied by this app.',
+    applyAvailability: 'unsupported',
+    applyReason: 'Wallpaper Engine Web projects are indexed for browsing only.',
+    applyActions: [
+      { kind: 'open_folder', label: 'Open folder', enabled: true },
+      { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
+    ],
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/4444444444',
@@ -135,6 +177,11 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     title: 'Application project',
     weFile: 'app.exe',
     unsupportedReason: 'Wallpaper Engine application projects are not supported.',
+    applyAvailability: 'unsupported',
+    applyActions: [
+      { kind: 'open_folder', label: 'Open folder', enabled: true },
+      { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
+    ],
   },
 ];
 
@@ -146,6 +193,12 @@ const MOCK_REGULAR_WALLPAPERS: WallpaperDTO[] = Array.from({ length: 150 }, (_, 
   size: (i + 1) * 1024 * 100,
   mtime: 1700000000 - i * 3600,
   resolution: i % 3 === 0 ? '1920x1080' : i % 2 === 0 ? '3840x2160' : '2560x1440',
+  applyAvailability: 'available' as ApplyAvailability,
+  applyBackend: i % 5 === 0 ? 'mpvpaper' : 'awww',
+  applyActions: [
+    { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
+    { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
+  ],
 }));
 
 const MOCK_WALLPAPERS: WallpaperDTO[] = [...MOCK_WE_WALLPAPERS, ...MOCK_REGULAR_WALLPAPERS];
@@ -253,6 +306,12 @@ export const api = {
         size: 12345,
         mtime: 1700000000,
         resolution: '1920x1080',
+        applyAvailability: 'available',
+        applyBackend: 'awww',
+        applyActions: [
+          { kind: 'apply', label: 'Apply', enabled: true },
+          { kind: 'open_folder', label: 'Open folder', enabled: true },
+        ],
       },
     ),
 
@@ -273,6 +332,12 @@ export const api = {
         size: 12345,
         mtime: 1700000000,
         resolution: '1920x1080',
+        applyAvailability: 'available',
+        applyBackend: 'awww',
+        applyActions: [
+          { kind: 'apply', label: 'Apply', enabled: true },
+          { kind: 'open_folder', label: 'Open folder', enabled: true },
+        ],
       },
     ),
 

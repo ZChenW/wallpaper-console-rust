@@ -53,6 +53,15 @@ pub struct SourceDto {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ApplyActionDto {
+    pub kind: String,
+    pub label: String,
+    pub enabled: bool,
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct WallpaperDto {
     pub path: String,
     #[serde(rename = "type")]
@@ -73,6 +82,10 @@ pub struct WallpaperDto {
     pub backend_error_message: Option<String>,
     pub backend_error_detail: Option<String>,
     pub backend_failed_at: Option<String>,
+    pub apply_availability: Option<String>,
+    pub apply_backend: Option<String>,
+    pub apply_reason: Option<String>,
+    pub apply_actions: Option<Vec<ApplyActionDto>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -291,6 +304,18 @@ pub fn source_label(path: &str) -> String {
 
 pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
     let project = entry.project.clone();
+
+    let cached_failure = if entry.file_type == FileType::WeScene {
+        wc_storage::we_compat::lookup_failure(entry.path.as_ref())
+            .ok()
+            .flatten()
+    } else {
+        None
+    };
+
+    let backend_failed = cached_failure.is_some();
+    let plan = wc_app::apply_plan::plan_for_entry(&entry, backend_failed);
+
     let mut dto = WallpaperDto {
         path: entry.path.to_string(),
         file_type: entry.file_type.as_str().to_string(),
@@ -310,15 +335,27 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
         backend_error_message: None,
         backend_error_detail: None,
         backend_failed_at: None,
+        apply_availability: Some(plan.availability.as_str().to_string()),
+        apply_backend: plan.backend.map(|b| b.as_str().to_string()),
+        apply_reason: plan.reason.clone(),
+        apply_actions: Some(
+            plan.actions
+                .into_iter()
+                .map(|a| ApplyActionDto {
+                    kind: a.kind.as_str().to_string(),
+                    label: a.label,
+                    enabled: a.enabled,
+                    reason: a.reason,
+                })
+                .collect(),
+        ),
     };
-    if entry.file_type == FileType::WeScene {
-        if let Ok(Some(cached)) = wc_storage::we_compat::lookup_failure(entry.path.as_ref()) {
-            dto.backend_status = Some(cached.backend_status);
-            dto.backend_error_kind = Some(cached.error_kind);
-            dto.backend_error_message = Some(cached.error_message);
-            dto.backend_error_detail = cached.error_detail;
-            dto.backend_failed_at = Some(cached.failed_at);
-        }
+    if let Some(cached) = cached_failure {
+        dto.backend_status = Some(cached.backend_status);
+        dto.backend_error_kind = Some(cached.error_kind);
+        dto.backend_error_message = Some(cached.error_message);
+        dto.backend_error_detail = cached.error_detail;
+        dto.backend_failed_at = Some(cached.failed_at);
     }
     dto
 }

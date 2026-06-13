@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Search, Filter, X } from 'lucide-react';
-import { api, WallpaperDTO, CommandResult } from '../api/bridge';
+import { api, WallpaperDTO, ApplyActionKind } from '../api/bridge';
 import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
 import OpenLocationDialog from '../components/OpenLocationDialog';
@@ -117,10 +117,14 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     }
   }, [selectedPaths]);
 
+  const hasAction = useCallback((entry: WallpaperDTO, kind: ApplyActionKind): boolean => {
+    return Boolean(entry.applyActions?.some((a) => a.kind === kind && a.enabled));
+  }, []);
+
   const contextActions: ContextAction[] = useMemo(() => [
     {
       label: 'Retry backend apply',
-      visible: (entry: WallpaperDTO) => isFailedScene(entry),
+      visible: (entry: WallpaperDTO) => hasAction(entry, 'retry_backend_apply') || isFailedScene(entry),
       action: async (path: string) => {
         try { await api.weClearBackendError(path); } catch { /* */ }
         onApply(path);
@@ -129,7 +133,7 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     },
     {
       label: 'Apply preview GIF',
-      visible: (entry: WallpaperDTO) => Boolean(entry.previewPath) && entry.type !== 'we_web' && entry.type !== 'unsupported',
+      visible: (entry: WallpaperDTO) => hasAction(entry, 'apply_preview') || (Boolean(entry.previewPath) && entry.type !== 'we_web' && entry.type !== 'unsupported'),
       action: (path: string) => {
         const entry = entryByPath.get(path);
         const previewPath = entry?.previewPath;
@@ -146,19 +150,19 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     },
     {
       label: 'Open folder',
-      visible: (_entry: WallpaperDTO) => true,
+      visible: (entry: WallpaperDTO) => hasAction(entry, 'open_folder') || Boolean(entry.path),
       action: handleOpenProjectFolder,
     },
     {
       label: 'Copy Workshop ID',
-      visible: (entry: WallpaperDTO) => Boolean(entry.workshopId),
+      visible: (entry: WallpaperDTO) => hasAction(entry, 'copy_workshop_id') || Boolean(entry.workshopId),
       action: async (path: string) => {
         const entry = entryByPath.get(path);
         const workshopId = entry?.workshopId;
         if (workshopId) await navigator.clipboard?.writeText(workshopId);
       },
     },
-  ], [onApply, invalidateLibrary, entryByPath, isFailedScene, handleOpenProjectFolder]);
+  ], [onApply, invalidateLibrary, entryByPath, isFailedScene, hasAction, handleOpenProjectFolder]);
 
   return (
     <div className="view library-view">
