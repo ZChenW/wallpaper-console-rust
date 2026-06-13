@@ -55,7 +55,7 @@ pub fn default_backend_for(ft: FileType) -> Backend {
         FileType::Gif => Backend::Awww,
         FileType::Video => Backend::Mpvpaper,
         FileType::WeScene => Backend::LinuxWallpaperEngine,
-        FileType::WeWeb => Backend::Unsupported,
+        FileType::WeWeb => Backend::WebKitLayerShell,
         FileType::WeApplication => Backend::Unsupported,
     }
 }
@@ -113,8 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn default_backend_we_web_is_unsupported() {
-        assert_eq!(default_backend_for(FileType::WeWeb), Backend::Unsupported);
+    fn default_backend_we_web_is_webkit_layer_shell() {
+        assert_eq!(
+            default_backend_for(FileType::WeWeb),
+            Backend::WebKitLayerShell
+        );
     }
 
     #[test]

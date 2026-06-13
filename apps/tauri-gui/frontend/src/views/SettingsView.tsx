@@ -5,6 +5,7 @@ import {
   LibrarySourceStatusDTO,
   LinuxWallpaperEngineStatusDTO,
   ThumbnailCacheDTO,
+  WebRendererStatusDTO,
   WebWallpaperStatusDTO,
 } from '../api/bridge';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from '../api/feedback';
@@ -57,6 +58,16 @@ const WEB_WALLPAPER_CONFIGS: ConfigGroup[] = [
   { key: 'web_wallpaper_extra_args', label: 'Extra browser args', type: 'text', placeholder: '' },
 ];
 
+const WEB_RENDERER_CONFIGS: ConfigGroup[] = [
+  { key: 'web_renderer_enabled', label: 'Enable native Web renderer', type: 'select', options: ['on', 'off'] },
+  { key: 'web_renderer_path', label: 'Renderer binary path', type: 'text', placeholder: 'auto' },
+  { key: 'web_renderer_audio', label: 'Audio', type: 'select', options: ['on', 'off'] },
+  { key: 'web_renderer_width', label: 'Fallback width', type: 'number', placeholder: '1920' },
+  { key: 'web_renderer_height', label: 'Fallback height', type: 'number', placeholder: '1080' },
+  { key: 'web_renderer_output', label: 'Output name', type: 'text', placeholder: 'eDP-1 or empty for compositor default' },
+  { key: 'web_renderer_debug', label: 'Debug logging', type: 'select', options: ['off', 'on'] },
+];
+
 const LIBRARY_CONFIGS: ConfigGroup[] = [
   { key: 'min_wallpaper_width', label: 'Min width', type: 'number', placeholder: '1280' },
   { key: 'min_wallpaper_height', label: 'Min height', type: 'number', placeholder: '720' },
@@ -81,11 +92,12 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
   const [libraryStatus, setLibraryStatus] = useState<LibrarySourceStatusDTO | null>(null);
   const [weStatus, setWeStatus] = useState<LinuxWallpaperEngineStatusDTO | null>(null);
   const [webStatus, setWebStatus] = useState<WebWallpaperStatusDTO | null>(null);
+  const [webRendererStatus, setWebRendererStatus] = useState<WebRendererStatusDTO | null>(null);
   const restoreInputRef = useRef<HTMLInputElement>(null);
 
   const loadConfigs = useCallback(async () => {
     setLoading(true);
-    const allKeys = [...BACKEND_CONFIGS, ...WE_BACKEND_CONFIGS, ...WEB_WALLPAPER_CONFIGS, ...LIBRARY_CONFIGS].map((c) => c.key);
+    const allKeys = [...BACKEND_CONFIGS, ...WE_BACKEND_CONFIGS, ...WEB_RENDERER_CONFIGS, ...WEB_WALLPAPER_CONFIGS, ...LIBRARY_CONFIGS].map((c) => c.key);
     const map: Record<string, string> = {};
     for (const key of allKeys) {
       try { map[key] = await api.configGet(key); } catch { map[key] = ''; }
@@ -106,13 +118,18 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
     try { setWebStatus(await api.webWallpaperStatus()); } catch { /* */ }
   }, []);
 
+  const loadWebRendererStatus = useCallback(async () => {
+    try { setWebRendererStatus(await api.webRendererStatus()); } catch { /* */ }
+  }, []);
+
   useEffect(() => {
     loadConfigs();
     loadThumbCache();
     loadWeStatus();
+    loadWebRendererStatus();
     loadWebStatus();
     void api.librarySourceStatus().then(setLibraryStatus);
-  }, [loadConfigs, loadThumbCache, loadWeStatus, loadWebStatus]);
+  }, [loadConfigs, loadThumbCache, loadWeStatus, loadWebRendererStatus, loadWebStatus]);
 
   const handleSet = async (key: string, value: string): Promise<boolean> => {
     const normalized = normalizeConfigValue(key, value);
@@ -127,6 +144,9 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
         }
         if (key.startsWith('web_wallpaper_')) {
           void loadWebStatus();
+        }
+        if (key.startsWith('web_renderer_')) {
+          void loadWebRendererStatus();
         }
         onFeedback({ state: 'success', label: 'Setting saved', detail: key });
         return true;
@@ -234,6 +254,30 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
               linux-wallpaperengine supports many Wallpaper Engine <strong>scene</strong> wallpapers.
               Some scene wallpapers may use unsupported projection effects and will show
               a compatibility warning. <strong>Web</strong> wallpapers use the experimental Chromium preview.
+            </div>
+          </section>
+
+          <section className="settings-group">
+            <h3>Web Wallpaper Renderer</h3>
+            <div className="config-row">
+              <div className="config-info">
+                <span className="config-label">
+                  {webRendererStatus?.available ? 'Native Web renderer: Ready' : (webRendererStatus?.message ?? 'Checking...')}
+                </span>
+                {webRendererStatus?.detail && (
+                  <span className="config-desc">{webRendererStatus.detail}</span>
+                )}
+              </div>
+            </div>
+            {WEB_RENDERER_CONFIGS.map((c) => (
+              <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
+            ))}
+            <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
+              Web Wallpaper Engine projects use a native WebKitGTK layer-shell renderer for real
+              desktop backgrounds. Chromium preview remains available only as a debugging fallback.
+              {webRendererStatus?.available && webRendererStatus.path && (
+                <><br />Renderer: <code>{webRendererStatus.path}</code></>
+              )}
             </div>
           </section>
 
@@ -496,6 +540,18 @@ function normalizeConfigValue(key: string, value: string): string {
   }
   if (key === 'linux_wallpaperengine_target') {
     return value.trim();
+  }
+  if (key === 'web_renderer_path') {
+    return value.trim() || 'auto';
+  }
+  if (key === 'web_renderer_output') {
+    return value.trim();
+  }
+  if (key === 'web_renderer_width') {
+    return clampIntString(value, 320, 16384, 1920);
+  }
+  if (key === 'web_renderer_height') {
+    return clampIntString(value, 240, 16384, 1080);
   }
   return value;
 }

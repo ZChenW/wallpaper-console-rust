@@ -255,7 +255,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::Stop => {
-            wc_backend::stop_all_backends(None)?;
+            wc_backend::stop_all_backends(Some(s))?;
             println!("All wallpaper backends stopped.");
         }
 
@@ -1002,6 +1002,7 @@ fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::Wallpap
                 "mpvpaper" => Backend::Mpvpaper,
                 "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
                 "chromium-web" => Backend::ChromiumWeb,
+                "webkit-layer-shell" => Backend::WebKitLayerShell,
                 "unsupported" => Backend::Unsupported,
                 _ => Backend::Awww,
             },

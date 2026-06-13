@@ -45,6 +45,8 @@ interface WebWallpaperStatusDTO {
   detail?: string;
 }
 
+type WebRendererStatusDTO = WebWallpaperStatusDTO;
+
 interface ThumbnailCacheDTO {
   dir: string;
   size: string;
@@ -114,7 +116,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     path: '/mock/Steam/steamapps/workshop/content/431960/3650880224',
     type: 'we_web',
     ext: 'web',
-    backend: 'unsupported',
+    backend: 'webkit-layer-shell',
     size: 8192,
     mtime: 1700090000,
     resolution: 'WE',
@@ -123,7 +125,6 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     workshopId: '3650880224',
     title: 'Web title',
     weFile: 'index.html',
-    unsupportedReason: 'web_renderer_unavailable',
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/4444444444',
@@ -191,6 +192,13 @@ export const api = {
     available: false,
     message: 'Web wallpaper backend requires a Chromium-based browser.',
     detail: 'no supported web browser found',
+  }),
+
+  webRendererStatus: async (): Promise<WebRendererStatusDTO> => ({
+    available: true,
+    path: '/mock/bin/wallpaper-console-web-renderer',
+    message: 'Native Web renderer ready.',
+    detail: 'Uses WebKitGTK + Wayland layer-shell for real Web wallpaper backgrounds.',
   }),
 
   openWebPreview: async (_path: string): Promise<CommandResult> => ({

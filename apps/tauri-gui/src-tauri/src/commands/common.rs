@@ -1,0 +1,277 @@
+use serde::Serialize;
+use std::path::Path;
+
+use wc_core::types::{FileType, WallpaperEntry};
+use wc_storage::StorageApi;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandErrorDto {
+    pub kind: String,
+    pub message: String,
+    pub detail: Option<String>,
+    pub recoverable: bool,
+    pub suggestion: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommandResultDto {
+    pub success: bool,
+    pub stdout: String,
+    pub stderr: String,
+    pub exit_code: i32,
+    pub error: Option<CommandErrorDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StatusDto {
+    pub config_dir: String,
+    pub current: String,
+    pub last_backend: String,
+    pub source_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendStatusDto {
+    pub available: bool,
+    pub path: Option<String>,
+    pub message: String,
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceDto {
+    pub path: String,
+    pub exists: bool,
+    pub is_we: bool,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WallpaperDto {
+    pub path: String,
+    #[serde(rename = "type")]
+    pub file_type: String,
+    pub ext: String,
+    pub backend: String,
+    pub size: u64,
+    pub mtime: u64,
+    pub resolution: String,
+    pub project_type: Option<String>,
+    pub preview_path: Option<String>,
+    pub workshop_id: Option<String>,
+    pub title: Option<String>,
+    pub we_file: Option<String>,
+    pub unsupported_reason: Option<String>,
+    pub backend_status: Option<String>,
+    pub backend_error_kind: Option<String>,
+    pub backend_error_message: Option<String>,
+    pub backend_error_detail: Option<String>,
+    pub backend_failed_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryCountDto {
+    pub total: usize,
+    pub images: usize,
+    pub gifs: usize,
+    pub videos: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryPageDto {
+    pub total: usize,
+    pub items: Vec<WallpaperDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailDto {
+    pub path: String,
+    pub thumbnail: Option<String>,
+    pub cache_hit: bool,
+    pub failure_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailCacheDto {
+    pub dir: String,
+    pub size: String,
+    pub entries: usize,
+    pub oldest_mtime: Option<u64>,
+    pub newest_mtime: Option<u64>,
+    pub failure_entries: usize,
+    pub cleanup_days: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanProgressDto {
+    pub running: bool,
+    pub stage: String,
+    pub scanned: usize,
+    pub total_hint: Option<usize>,
+    pub reused_metadata: usize,
+    pub probed_metadata: usize,
+    pub inserted_sqlite: usize,
+    pub current_path: Option<String>,
+    pub cancel_requested: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibrarySourceStatusDto {
+    pub configured: String,
+    pub effective: String,
+    pub sqlite_ready: bool,
+    pub sqlite_rows: usize,
+    pub tsv_rows: usize,
+    pub stale: bool,
+    pub message: String,
+}
+
+pub type CommandResult = CommandResultDto;
+
+pub fn storage() -> Result<StorageApi, String> {
+    let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
+    cd.init().map_err(|e| e.to_string())?;
+    Ok(StorageApi::new(cd))
+}
+
+pub fn ok(stdout: impl Into<String>) -> CommandResultDto {
+    CommandResultDto {
+        success: true,
+        stdout: stdout.into(),
+        stderr: String::new(),
+        exit_code: 0,
+        error: None,
+    }
+}
+
+pub fn fail(err: impl Into<String>) -> CommandResultDto {
+    let msg = err.into();
+    CommandResultDto {
+        success: false,
+        stdout: String::new(),
+        stderr: msg.clone(),
+        exit_code: 1,
+        error: Some(error_dto(&msg)),
+    }
+}
+
+pub fn error_dto(msg: &str) -> CommandErrorDto {
+    let lower = msg.to_lowercase();
+    if lower.contains("web renderer")
+        || lower.contains("wallpaper-console-web-renderer")
+        || lower.contains("webkit")
+    {
+        return CommandErrorDto {
+            kind: "web_renderer_failed".into(),
+            message: "The native Web wallpaper renderer is not ready.".into(),
+            detail: Some(msg.to_string()),
+            recoverable: true,
+            suggestion: Some(
+                "Build/install wallpaper-console-web-renderer or set web_renderer_path in Settings."
+                    .into(),
+            ),
+        };
+    }
+    if lower.contains("linux-wallpaperengine") || lower.contains("projection must have a width") {
+        return CommandErrorDto {
+            kind: if lower.contains("projection must have a width") {
+                "scene_projection_unsupported".into()
+            } else {
+                "linux_wallpaperengine_failed".into()
+            },
+            message: if lower.contains("projection must have a width") {
+                "This Wallpaper Engine scene is not compatible with linux-wallpaperengine.".into()
+            } else {
+                "Wallpaper Engine scene support is not ready.".into()
+            },
+            detail: Some(msg.to_string()),
+            recoverable: true,
+            suggestion: Some(
+                "Use the preview GIF or choose another Wallpaper Engine scene.".into(),
+            ),
+        };
+    }
+    CommandErrorDto {
+        kind: "command_failed".into(),
+        message: msg.to_string(),
+        detail: None,
+        recoverable: true,
+        suggestion: None,
+    }
+}
+
+pub fn format_bytes(bytes: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * 1024.0;
+    const GB: f64 = 1024.0 * 1024.0 * 1024.0;
+    let b = bytes as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{} B", bytes)
+    }
+}
+
+pub fn source_label(path: &str) -> String {
+    let p = Path::new(path);
+    if wc_scan::is_wallpaper_engine_source(path) {
+        return p
+            .file_name()
+            .map(|s| format!("Wallpaper Engine {}", s.to_string_lossy()))
+            .unwrap_or_else(|| "Wallpaper Engine".into());
+    }
+    p.file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.to_string())
+}
+
+pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
+    let project = entry.project.clone();
+    let mut dto = WallpaperDto {
+        path: entry.path.to_string(),
+        file_type: entry.file_type.as_str().to_string(),
+        ext: entry.ext,
+        backend: entry.backend.as_str().to_string(),
+        size: entry.size,
+        mtime: entry.mtime,
+        resolution: entry.resolution,
+        project_type: project.as_ref().map(|p| p.project_type.clone()),
+        preview_path: project.as_ref().and_then(|p| p.preview_path.clone()),
+        workshop_id: project.as_ref().and_then(|p| p.workshop_id.clone()),
+        title: project.as_ref().and_then(|p| p.title.clone()),
+        we_file: project.as_ref().and_then(|p| p.we_file.clone()),
+        unsupported_reason: project.as_ref().and_then(|p| p.unsupported_reason.clone()),
+        backend_status: None,
+        backend_error_kind: None,
+        backend_error_message: None,
+        backend_error_detail: None,
+        backend_failed_at: None,
+    };
+    if entry.file_type == FileType::WeScene {
+        if let Ok(Some(cached)) = wc_storage::we_compat::lookup_failure(entry.path.as_ref()) {
+            dto.backend_status = Some(cached.backend_status);
+            dto.backend_error_kind = Some(cached.error_kind);
+            dto.backend_error_message = Some(cached.error_message);
+            dto.backend_error_detail = cached.error_detail;
+            dto.backend_failed_at = Some(cached.failed_at);
+        }
+    }
+    dto
+}

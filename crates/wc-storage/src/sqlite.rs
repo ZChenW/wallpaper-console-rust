@@ -1566,6 +1566,7 @@ pub fn prior_metadata_cache_from_sqlite(cd: &ConfigDir) -> HashMap<String, Wallp
         let backend = match backend_s.as_str() {
             "mpvpaper" => Backend::Mpvpaper,
             "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
+            "webkit-layer-shell" => Backend::WebKitLayerShell,
             "unsupported" => Backend::Unsupported,
             _ => Backend::Awww,
         };

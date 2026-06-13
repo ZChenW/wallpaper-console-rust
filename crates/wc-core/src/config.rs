@@ -41,6 +41,13 @@ pub fn default_config() -> HashMap<String, String> {
     defaults.insert("web_wallpaper_extra_args".into(), "".into());
     defaults.insert("web_wallpaper_window_width".into(), "1920".into());
     defaults.insert("web_wallpaper_window_height".into(), "1080".into());
+    defaults.insert("web_renderer_enabled".into(), "on".into());
+    defaults.insert("web_renderer_path".into(), "auto".into());
+    defaults.insert("web_renderer_audio".into(), "on".into());
+    defaults.insert("web_renderer_width".into(), "1920".into());
+    defaults.insert("web_renderer_height".into(), "1080".into());
+    defaults.insert("web_renderer_output".into(), "".into());
+    defaults.insert("web_renderer_debug".into(), "off".into());
     defaults.insert("min_wallpaper_width".into(), "1280".into());
     defaults.insert("min_wallpaper_height".into(), "720".into());
     defaults.insert("preview_metadata".into(), "compact".into());

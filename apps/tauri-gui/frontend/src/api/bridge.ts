@@ -79,6 +79,8 @@ export interface WebWallpaperStatusDTO {
   detail?: string;
 }
 
+export type WebRendererStatusDTO = WebWallpaperStatusDTO;
+
 export interface ThumbnailCacheDTO {
   dir: string;
   size: string;
@@ -123,6 +125,8 @@ export const api = {
     invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
   webWallpaperStatus: (): Promise<WebWallpaperStatusDTO> =>
     invoke<WebWallpaperStatusDTO>('web_wallpaper_status'),
+  webRendererStatus: (): Promise<WebRendererStatusDTO> =>
+    invoke<WebRendererStatusDTO>('web_renderer_status'),
 
   openWebPreview: (path: string): Promise<CommandResult> => invoke<CommandResult>('open_web_preview', { path }),
 

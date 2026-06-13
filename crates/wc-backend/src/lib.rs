@@ -6,12 +6,14 @@ use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod linux_wallpaperengine;
+pub mod web_renderer;
 pub mod web_wallpaper;
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let user = whoami();
     linux_wallpaperengine::stop(s);
+    web_renderer::stop(s);
     web_wallpaper::stop(s);
     let _ = Command::new("pkill")
         .args(["-u", &user, "-x", "mpvpaper"])
@@ -25,7 +27,10 @@ pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
 /// Smart-stop: kill only what's needed for the target backend.
 pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Result<(), WcError> {
     let last = s.last_backend_read()?.unwrap_or_default();
-    if target_backend == Backend::Mpvpaper || target_backend == Backend::LinuxWallpaperEngine {
+    if target_backend == Backend::Mpvpaper
+        || target_backend == Backend::LinuxWallpaperEngine
+        || target_backend == Backend::WebKitLayerShell
+    {
         return stop_all_backends(Some(s));
     }
     if last == "awww" {
@@ -54,6 +59,9 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
              Use open_web_preview instead of apply."
                 .into(),
         ));
+    }
+    if backend == Backend::WebKitLayerShell {
+        return web_renderer::apply(s, path);
     }
     if backend == Backend::Unsupported {
         return Err(WcError::UnsupportedFileType(path.to_string()));
@@ -98,9 +106,10 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
                 return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
             }
         }
-        Backend::LinuxWallpaperEngine | Backend::Unsupported | Backend::ChromiumWeb => {
-            unreachable!()
-        }
+        Backend::LinuxWallpaperEngine
+        | Backend::Unsupported
+        | Backend::ChromiumWeb
+        | Backend::WebKitLayerShell => unreachable!(),
     }
 
     // Write state only after successful apply
@@ -139,11 +148,7 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
             }
         }
         wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb => {
-            return Err(WcError::Other(
-                "Web wallpapers cannot be restored. Web wallpaper support requires a native layer-shell renderer and is not yet available. Use the experimental Chromium preview from the Library context menu instead.".into(),
-            ));
-        }
+        wc_core::types::FileType::WeWeb => Backend::WebKitLayerShell,
         wc_core::types::FileType::WeApplication => Backend::Unsupported,
     };
     apply_wallpaper(s, &current, backend)
@@ -184,7 +189,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_we_web_rejects_with_clear_error() {
+    fn restore_we_web_rejects_when_renderer_missing() {
         let (tmp, s) = temp_storage();
 
         let project = tmp
@@ -209,8 +214,8 @@ mod tests {
         let err = restore(&s).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("cannot be restored") || msg.contains("native layer-shell"),
-            "error should explain that Web wallpapers cannot be restored, got: {}",
+            msg.contains("web renderer") || msg.contains("wallpaper-console-web-renderer"),
+            "error should explain that the native Web renderer is missing, got: {}",
             msg
         );
 
@@ -229,6 +234,46 @@ mod tests {
             history_before,
             "failed restore should not add history"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn restore_we_web_uses_webkit_layer_shell_when_renderer_is_configured() {
+        use std::os::unix::fs::PermissionsExt;
+        let (tmp, s) = temp_storage();
+
+        let bin = tmp.path().join("wallpaper-console-web-renderer");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("web_renderer_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let project = tmp
+            .path()
+            .join("steamapps/workshop/content/431960/3650880224");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("index.html"), b"<html></html>").unwrap();
+        std::fs::write(
+            project.join("project.json"),
+            r#"{"type":"web","file":"index.html","title":"Test Web"}"#,
+        )
+        .unwrap();
+
+        s.current_write(&project.to_string_lossy()).unwrap();
+        s.last_backend_write("webkit-layer-shell").unwrap();
+
+        restore(&s).unwrap();
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(project.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            s.last_backend_read().unwrap().as_deref(),
+            Some("webkit-layer-shell")
+        );
+        stop_all_backends(Some(&s)).unwrap();
     }
 
     #[test]

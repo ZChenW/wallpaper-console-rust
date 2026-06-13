@@ -5,6 +5,7 @@ members = [
     "crates/wc-storage",
     "crates/wc-scan",
     "crates/wc-backend",
+    "crates/wc-web-renderer",
     "crates/wc-app",
     "crates/wc-cli",
     "crates/wc-preview",

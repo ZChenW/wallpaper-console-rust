@@ -1,0 +1,15 @@
+[package]
+name = "wc-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde.workspace = true
+wc-core.workspace = true
+wc-scan.workspace = true
+wc-storage.workspace = true
+wc-backend.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

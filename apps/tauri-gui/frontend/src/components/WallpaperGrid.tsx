@@ -213,7 +213,9 @@ function weBadge(e: WallpaperDTO): string | null {
     if (e.backendStatus === 'failed') return 'Scene incompatible';
     return 'WE Scene';
   }
-  if (e.type === 'we_web') return 'WE Web · Preview only';
+  if (e.type === 'we_web') {
+    return e.backend === 'webkit-layer-shell' ? 'WE Web' : 'WE Web · Preview only';
+  }
   if (e.type === 'unsupported') return 'Unsupported';
   return null;
 }
@@ -229,7 +231,10 @@ function metaLine(e: WallpaperDTO): string {
       return e.unsupportedReason;
     }
     if (e.type === 'we_web') {
-      return ['Web wallpaper — preview only', e.workshopId].filter(Boolean).join(' · ');
+      const mode = e.backend === 'webkit-layer-shell'
+        ? 'Web wallpaper — native renderer'
+        : 'Web wallpaper — preview only';
+      return [mode, e.workshopId].filter(Boolean).join(' · ');
     }
     if (e.type === 'we_scene' && e.backendStatus === 'failed') {
       return e.backendErrorMessage || 'This scene is not compatible with linux-wallpaperengine.';

@@ -17,6 +17,7 @@ pub fn run() {
             commands::status,
             commands::linux_wallpaperengine_status,
             commands::web_wallpaper_status,
+            commands::web_renderer_status,
             commands::open_web_preview,
             commands::apply,
             commands::stop,
