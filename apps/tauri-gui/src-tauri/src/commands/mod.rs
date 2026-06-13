@@ -62,50 +62,26 @@ pub async fn status() -> Result<StatusDto, String> {
 pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let st = wc_backend::linux_wallpaperengine::status(
-            &wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(&s),
-        );
+        let config =
+            wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(&s);
+        let st = wc_backend::linux_wallpaperengine::status(&config);
+        let mut detail = st.detail;
+        if config.target_mode == "auto" {
+            let wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
+                || std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false);
+            if wayland {
+                let warning = "⚠ Wayland detected: recommend setting target_mode=screen-root and target=<your output name> for stable scene rendering.";
+                detail = Some(match detail {
+                    Some(d) => format!("{}\n{}", d, warning),
+                    None => warning.to_string(),
+                });
+            }
+        }
         Ok(BackendStatusDto {
             available: st.available,
             path: st.path,
             message: st.message,
-            detail: st.detail,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn web_wallpaper_status() -> Result<BackendStatusDto, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let s = storage()?;
-        let st = wc_backend::web_wallpaper::status(
-            &wc_backend::web_wallpaper::WebWallpaperConfig::from_storage(&s),
-        );
-        Ok(BackendStatusDto {
-            available: st.available,
-            path: st.path,
-            message: st.message,
-            detail: st.detail,
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn web_renderer_status() -> Result<BackendStatusDto, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let s = storage()?;
-        let st = wc_backend::web_renderer::status(
-            &wc_backend::web_renderer::WebRendererConfig::from_storage(&s),
-        );
-        Ok(BackendStatusDto {
-            available: st.available,
-            path: st.path,
-            message: st.message,
-            detail: st.detail,
+            detail,
         })
     })
     .await
@@ -148,22 +124,6 @@ pub async fn apply(path: String) -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn open_web_preview(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match wc_backend::web_wallpaper::preflight(&path, &s) {
-            Ok(p) => match wc_backend::web_wallpaper::apply_preflighted(&s, &p) {
-                Ok(()) => ok("Opened Web wallpaper preview."),
-                Err(e) => fail(e.to_string()),
-            },
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
-}
-
-#[tauri::command]
 pub async fn stop() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
         Ok(s) => match wc_backend::stop_all_backends(Some(&s)) {
@@ -199,6 +159,23 @@ pub async fn we_clear_backend_error(path: String) -> CommandResult {
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn we_debug_info() -> Result<WeDebugInfoDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let s = storage()?;
+        let log_path = s.cd.path.join("linux-wallpaperengine-last.log");
+        Ok(WeDebugInfoDto {
+            last_command_line: s.config_get("lwe_last_command_line", ""),
+            last_target_config: s.config_get("lwe_last_target_config", ""),
+            last_stderr: s.config_get("lwe_last_stderr", ""),
+            last_exit_status: s.config_get("lwe_last_exit_status", ""),
+            log_path: log_path.to_string_lossy().to_string(),
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -369,8 +346,6 @@ fn parse_backend(s: &str) -> Backend {
         "awww" => Backend::Awww,
         "mpvpaper" => Backend::Mpvpaper,
         "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
-        "chromium-web" => Backend::ChromiumWeb,
-        "webkit-layer-shell" => Backend::WebKitLayerShell,
         _ => Backend::Unsupported,
     }
 }
@@ -390,6 +365,9 @@ fn sort_filter_page(
             "gifs" | "gif" => e.file_type == FileType::Gif,
             "videos" | "video" => e.file_type == FileType::Video,
             "we" => matches!(e.file_type, FileType::WeScene | FileType::WeWeb),
+            "we_scene" => e.file_type == FileType::WeScene,
+            "we_web" => e.file_type == FileType::WeWeb,
+            "unsupported" => e.file_type == FileType::WeApplication,
             _ => true,
         };
         let search_ok = query.is_empty()
@@ -912,4 +890,87 @@ pub async fn export_diagnostics() -> CommandResult {
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+
+    fn entry_stub(path: &str, ft: FileType) -> WallpaperEntry {
+        WallpaperEntry {
+            path: Utf8PathBuf::from(path),
+            file_type: ft,
+            ext: "html".to_string(),
+            backend: match ft {
+                FileType::WeScene => Backend::LinuxWallpaperEngine,
+                FileType::Image => Backend::Awww,
+                FileType::Gif => Backend::Awww,
+                FileType::Video => Backend::Mpvpaper,
+                FileType::WeWeb | FileType::WeApplication => Backend::Unsupported,
+            },
+            size: 1024,
+            mtime: 1000,
+            resolution: String::new(),
+            project: None,
+        }
+    }
+
+    #[test]
+    fn filter_we_scene_shows_only_scene() {
+        let entries = vec![
+            entry_stub("/a/scene", FileType::WeScene),
+            entry_stub("/b/web", FileType::WeWeb),
+            entry_stub("/c/img.png", FileType::Image),
+        ];
+        let page = sort_filter_page(entries, "we_scene", "mtime", "", 0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].path, "/a/scene");
+    }
+
+    #[test]
+    fn filter_we_web_shows_only_web() {
+        let entries = vec![
+            entry_stub("/a/scene", FileType::WeScene),
+            entry_stub("/b/web", FileType::WeWeb),
+            entry_stub("/c/img.png", FileType::Image),
+        ];
+        let page = sort_filter_page(entries, "we_web", "mtime", "", 0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].path, "/b/web");
+    }
+
+    #[test]
+    fn filter_unsupported_shows_only_app() {
+        let entries = vec![
+            entry_stub("/a/app", FileType::WeApplication),
+            entry_stub("/b/scene", FileType::WeScene),
+            entry_stub("/c/img.png", FileType::Image),
+        ];
+        let page = sort_filter_page(entries, "unsupported", "mtime", "", 0, 10);
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].path, "/a/app");
+    }
+
+    #[test]
+    fn filter_all_shows_everything() {
+        let entries = vec![
+            entry_stub("/a/scene", FileType::WeScene),
+            entry_stub("/b/web", FileType::WeWeb),
+            entry_stub("/c/img.png", FileType::Image),
+        ];
+        let page = sort_filter_page(entries, "all", "mtime", "", 0, 10);
+        assert_eq!(page.total, 3);
+    }
+
+    #[test]
+    fn filter_we_backward_compat_matches_scene_and_web() {
+        let entries = vec![
+            entry_stub("/a/scene", FileType::WeScene),
+            entry_stub("/b/web", FileType::WeWeb),
+            entry_stub("/c/img.png", FileType::Image),
+        ];
+        let page = sort_filter_page(entries, "we", "mtime", "", 0, 10);
+        assert_eq!(page.total, 2);
+    }
 }

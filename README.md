@@ -52,7 +52,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 - Library: SQLite-backed paging, filter by type, sort, filename/title/Workshop ID search
 - Favorites & History views with apply, random, remove
 - Sources management: grouped (Wallpaper Engine / Other), add/remove/validate/scan
-- Wallpaper Engine scene/web project indexing. Scene wallpapers use `linux-wallpaperengine`; Web wallpapers use the native `wallpaper-console-web-renderer` WebKitGTK layer-shell backend when installed. Chromium preview remains experimental and opens a normal window only.
+- Wallpaper Engine project indexing. Scene wallpapers use optional `linux-wallpaperengine`; Web wallpapers are indexed for browsing/preview only and are not live-apply supported.
 - Settings: all backends (awww/mpvpaper/linux-wallpaperengine), library config, SQLite management, thumbnail cache
 - Smart video thumbnails (multi-point frame sampling, 400px scaled, atomic writes, short-lived failure cache)
 - Async apply/stop/restore with status bar
@@ -141,9 +141,6 @@ See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable 
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
 - Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
   - Arch/AUR: `yay -S linux-wallpaperengine-git`
-- Optional: Chromium-based browser for Wallpaper Engine web wallpapers
-  - `chromium`, `google-chrome-stable`, `google-chrome`, `brave`, or `vivaldi`
-
 > **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired and is not part of the current install/build path. See [docs/HISTORICAL_WAILS_ARCHIVE.md](docs/HISTORICAL_WAILS_ARCHIVE.md) for background.
 
 ## Rollback

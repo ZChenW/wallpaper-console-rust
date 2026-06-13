@@ -131,15 +131,27 @@ Not all scenes are compatible; projection-incompatible scenes show a "Scene inco
 
 ### Web wallpapers (we_web)
 
-Web projects are indexed and displayed in the Library with preview GIF support, but **cannot be applied as desktop wallpapers**. The Chromium-based preview opens a normal browser window — it is not a real background layer on Niri/Wayland.
+Web projects are indexed and displayed in the Library with preview GIF support, but they are not live-apply supported. The previous Chromium/WebKit renderer experiments were removed because they behaved inconsistently on Niri/Wayland and added maintenance cost without reliable wallpaper behavior.
 
 From the Library, Web projects offer:
-- **Open experimental Chromium preview** — opens the project in a Chromium browser window (for testing)
 - **Apply preview GIF** — apply the static preview image as wallpaper
 - **Open project folder** — open the Workshop item directory
 - **Copy Workshop ID**
 
-True Web wallpaper support requires a native WebKitGTK layer-shell renderer (planned for a future release).
+Double-clicking or applying a WE Web project returns a structured unsupported error. Use a WE Scene/image/video wallpaper for live apply.
+
+### Residual backend cleanup
+
+If old backend processes survive after stop or apply (e.g. because `setsid` forked and the recorded PID is the parent rather than the actual renderer), you can manually clear all backend processes:
+
+```bash
+# In the GUI or CLI, run "Stop" first. If processes are still visible:
+pgrep -af 'linux-wallpaperengine'
+# If any remain, kill them:
+pkill -u "$USER" -f '(^|/)linux-wallpaperengine\b'
+```
+
+The `apply` and `stop` commands should normally handle this automatically. The fallback above is only for manual diagnosis when a stale process is suspected.
 
 Both scene and web projects retain the preview GIF fallback. Current wallpaper state records the WE project path, never the preview path unless explicitly applied.
 

@@ -72,14 +72,13 @@ export interface LinuxWallpaperEngineStatusDTO {
   detail?: string;
 }
 
-export interface WebWallpaperStatusDTO {
-  available: boolean;
-  path?: string;
-  message: string;
-  detail?: string;
+export interface WeDebugInfoDTO {
+  lastCommandLine: string;
+  lastTargetConfig: string;
+  lastStderr: string;
+  lastExitStatus: string;
+  logPath: string;
 }
-
-export type WebRendererStatusDTO = WebWallpaperStatusDTO;
 
 export interface ThumbnailCacheDTO {
   dir: string;
@@ -123,16 +122,11 @@ export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
   linuxWallpaperEngineStatus: (): Promise<LinuxWallpaperEngineStatusDTO> =>
     invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
-  webWallpaperStatus: (): Promise<WebWallpaperStatusDTO> =>
-    invoke<WebWallpaperStatusDTO>('web_wallpaper_status'),
-  webRendererStatus: (): Promise<WebRendererStatusDTO> =>
-    invoke<WebRendererStatusDTO>('web_renderer_status'),
-
-  openWebPreview: (path: string): Promise<CommandResult> => invoke<CommandResult>('open_web_preview', { path }),
 
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
+  weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
 
   libraryList: (source: string): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('library_list', { source }),

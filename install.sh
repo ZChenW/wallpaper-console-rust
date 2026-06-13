@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — build and install wallpaper-console-rust (CLI + Tauri GUI + Web renderer)
+# install.sh — build and install wallpaper-console-rust (CLI + Tauri GUI)
 # side-by-side with existing Bash/Python versions.
 #
 # Usage:
@@ -11,7 +11,6 @@
 # Installs:
 #   $PREFIX/bin/wallpaper-console-rust      Rust CLI
 #   $PREFIX/bin/wallpaper-console-gui-rust  Tauri GUI
-#   $PREFIX/bin/wallpaper-console-web-renderer  Native WE Web renderer
 #
 # Does NOT touch or replace:
 #   wallpaper-console        (Bash)
@@ -64,7 +63,6 @@ if $UNINSTALL; then
   info "Uninstalling from $PREFIX..."
   rm -f "$BIN_DIR/wallpaper-console-rust"
   rm -f "$BIN_DIR/wallpaper-console-gui-rust"
-  rm -f "$BIN_DIR/wallpaper-console-web-renderer"
   rm -f "$DESKTOP_FILE"
   rm -f "$ICON_FILE"
   info "Removed Rust CLI/GUI launchers, desktop entry, and icon installed by this script."
@@ -85,13 +83,6 @@ cd "$SCRIPT_DIR"
 cargo build -p wc-cli --release
 RUST_CLI="$(realpath target/release/wallpaper-console-rust)"
 info "Rust CLI built: $RUST_CLI"
-
-# ── Build native Web renderer ──────────────────────────────────────────────
-info "Building native Web renderer (release)..."
-cd "$SCRIPT_DIR"
-cargo build -p wc-web-renderer --release
-WEB_RENDERER="$(realpath target/release/wallpaper-console-web-renderer)"
-info "Native Web renderer built: $WEB_RENDERER"
 
 # ── Build Tauri GUI ────────────────────────────────────────────────────────
 info "Building Tauri GUI..."
@@ -116,10 +107,6 @@ trap - EXIT
 if [[ ! -x "$TAURI_BIN" ]]; then
   err "Tauri GUI binary not found or not executable: $TAURI_BIN"
 fi
-if [[ ! -x "$WEB_RENDERER" ]]; then
-  err "Native Web renderer binary not found or not executable: $WEB_RENDERER"
-fi
-
 info "Binaries verified."
 
 # ── Install ────────────────────────────────────────────────────────────────
@@ -129,7 +116,6 @@ if $BUILD_ONLY; then
   info "Built artifacts:"
   info "  Rust CLI:      $RUST_CLI"
   info "  Tauri GUI:     $TAURI_BIN"
-  info "  Web renderer:  $WEB_RENDERER"
   exit 0
 fi
 
@@ -145,11 +131,6 @@ info "  Installed: $BIN_DIR/wallpaper-console-rust"
 cp "$TAURI_BIN" "$BIN_DIR/wallpaper-console-gui-rust"
 chmod +x "$BIN_DIR/wallpaper-console-gui-rust"
 info "  Installed: $BIN_DIR/wallpaper-console-gui-rust"
-
-# Install native Web renderer
-cp "$WEB_RENDERER" "$BIN_DIR/wallpaper-console-web-renderer"
-chmod +x "$BIN_DIR/wallpaper-console-web-renderer"
-info "  Installed: $BIN_DIR/wallpaper-console-web-renderer"
 
 # Install desktop launcher and icon for Linux desktop environments.
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
@@ -177,7 +158,6 @@ info ""
 info "Installed commands:"
 info "  wallpaper-console-rust          Rust CLI"
 info "  wallpaper-console-gui-rust      Tauri GUI"
-info "  wallpaper-console-web-renderer  Native WE Web renderer"
 info ""
 info "The original commands are untouched:"
 info "  wallpaper-console            (Bash)"
@@ -204,6 +184,5 @@ info "  # Your original wallpaper-console and wallpaper-console-gui are untouche
 info "  # Simply remove the -rust variants if you no longer want them:"
 info "  rm $BIN_DIR/wallpaper-console-rust"
 info "  rm $BIN_DIR/wallpaper-console-gui-rust"
-info "  rm $BIN_DIR/wallpaper-console-web-renderer"
 info "  # Or uninstall everything created by this script:"
 info "  ./install.sh --prefix \"$PREFIX\" --uninstall"

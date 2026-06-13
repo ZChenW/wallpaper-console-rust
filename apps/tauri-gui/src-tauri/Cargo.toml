@@ -26,6 +26,7 @@ rusqlite.workspace = true
 wc-core.workspace = true
 wc-storage.workspace = true
 wc-scan.workspace = true
+camino.workspace = true
 wc-backend.workspace = true
 wc-app.workspace = true
 wc-preview.workspace = true

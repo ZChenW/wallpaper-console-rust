@@ -4,11 +4,11 @@
 >
 > This plan described the original Chromium-based Web wallpaper backend. Real-world Niri/Wayland testing proved that Chromium app windows **cannot** serve as true desktop wallpapers — they are normal tiled windows, not layer-shell background layers.
 >
-> **The Chromium backend has been demoted to experimental preview.** `we_web` entries are now indexed as preview-only. Formal apply returns `web_renderer_unavailable`. A Chromium preview can still be launched from the Library context menu ("Open experimental Chromium preview") but it does NOT write wallpaper state.
+> **Current decision:** WE Web is unsupported for live apply. Chromium preview and native WebKit renderer experiments have been removed from the active project.
 >
-> **The permanent solution** requires a native WebKitGTK layer-shell renderer (planned for a future release).
+> **Current implementation:** `we_web` is still indexed as one project-level Library card with preview metadata, but its backend is `unsupported`. Use preview GIF fallback, open the project folder, or copy the Workshop ID. This archived plan remains only as history for the rejected Web-renderer direction.
 >
-> See commits for the downgrade implementation and `docs/DEVELOPMENT.md` for current Web wallpaper support status.
+> See `docs/DEVELOPMENT.md` for current Web wallpaper support status.
 
 > **Original execution instructions below are OBSOLETE and must NOT be followed.**
 
@@ -330,4 +330,3 @@ The final report must include:
 - Five review loops with findings/fixes/verification.
 - Manual GUI acceptance result or explicit environment limitation.
 - Remaining risks limited to real non-blocking risks.
-

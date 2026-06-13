@@ -34,10 +34,6 @@ pub enum Backend {
     Mpvpaper,
     #[serde(rename = "linux-wallpaperengine")]
     LinuxWallpaperEngine,
-    #[serde(rename = "chromium-web")]
-    ChromiumWeb,
-    #[serde(rename = "webkit-layer-shell")]
-    WebKitLayerShell,
     Unsupported,
 }
 
@@ -47,8 +43,6 @@ impl Backend {
             Backend::Awww => "awww",
             Backend::Mpvpaper => "mpvpaper",
             Backend::LinuxWallpaperEngine => "linux-wallpaperengine",
-            Backend::ChromiumWeb => "chromium-web",
-            Backend::WebKitLayerShell => "webkit-layer-shell",
             Backend::Unsupported => "unsupported",
         }
     }

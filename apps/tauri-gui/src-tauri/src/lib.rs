@@ -16,12 +16,10 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             commands::status,
             commands::linux_wallpaperengine_status,
-            commands::web_wallpaper_status,
-            commands::web_renderer_status,
-            commands::open_web_preview,
             commands::apply,
             commands::stop,
             commands::we_clear_backend_error,
+            commands::we_debug_info,
             commands::restore,
             commands::config_get,
             commands::config_set,

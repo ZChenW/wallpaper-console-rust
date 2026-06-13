@@ -6,8 +6,8 @@
   "build": {
     "frontendDist": "../frontend/dist",
     "devUrl": "http://localhost:5174",
-    "beforeDevCommand": "if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run dev -- --host 127.0.0.1 --port 5174",
-    "beforeBuildCommand": "if [ -d frontend ]; then cd frontend; else cd ../frontend; fi && npm run build"
+    "beforeDevCommand": "while [ ! -d apps/tauri-gui/frontend ] && [ \"$PWD\" != / ]; do cd ..; done; cd apps/tauri-gui/frontend && npm run dev -- --host 127.0.0.1 --port 5174",
+    "beforeBuildCommand": "while [ ! -d apps/tauri-gui/frontend ] && [ \"$PWD\" != / ]; do cd ..; done; cd apps/tauri-gui/frontend && npm run build"
   },
   "app": {
     "windows": [

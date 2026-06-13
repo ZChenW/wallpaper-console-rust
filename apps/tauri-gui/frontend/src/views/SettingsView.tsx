@@ -5,78 +5,28 @@ import {
   LibrarySourceStatusDTO,
   LinuxWallpaperEngineStatusDTO,
   ThumbnailCacheDTO,
-  WebRendererStatusDTO,
-  WebWallpaperStatusDTO,
+  WeDebugInfoDTO,
 } from '../api/bridge';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from '../api/feedback';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useAppState } from '../state/AppStateContext';
 import { Loader } from 'lucide-react';
+import {
+  BACKEND_CONFIGS,
+  BACKEND_ADVANCED_CONFIGS,
+  ConfigGroup,
+  LIBRARY_ADVANCED_CONFIGS,
+  LIBRARY_CONFIGS,
+  normalizeConfigValue,
+  cleanupDays,
+  WE_BACKEND_ADVANCED_CONFIGS,
+  WE_BACKEND_CONFIGS,
+} from '../settings/configSchema';
 
 interface Props {
   onRefresh: () => void;
   onFeedback: (fb: CommandFeedback) => void;
 }
-
-interface ConfigGroup {
-  key: string;
-  label: string;
-  type: 'select' | 'text' | 'number';
-  options?: string[];
-  placeholder?: string;
-}
-
-const BACKEND_CONFIGS: ConfigGroup[] = [
-  { key: 'image_backend', label: 'Image backend', type: 'select', options: ['awww', 'mpvpaper'] },
-  { key: 'gif_backend', label: 'GIF backend', type: 'select', options: ['awww', 'mpvpaper'] },
-  { key: 'video_backend', label: 'Video backend', type: 'select', options: ['mpvpaper', 'awww'] },
-  { key: 'mpvpaper_options', label: 'mpvpaper options', type: 'text', placeholder: 'no-audio --loop-file=inf' },
-  { key: 'mpvpaper_output', label: 'mpvpaper output', type: 'text', placeholder: '*' },
-  { key: 'awww_transition_type', label: 'awww transition', type: 'select', options: ['fade', 'slide', 'wipe'] },
-  { key: 'awww_transition_duration', label: 'awww duration (s)', type: 'text', placeholder: '1' },
-  { key: 'awww_resize', label: 'awww resize', type: 'select', options: ['crop', 'fit', 'stretch'] },
-];
-
-const WE_BACKEND_CONFIGS: ConfigGroup[] = [
-  { key: 'linux_wallpaperengine_enabled', label: 'Enable scene backend', type: 'select', options: ['on', 'off'] },
-  { key: 'linux_wallpaperengine_path', label: 'linux-wallpaperengine path', type: 'text', placeholder: 'auto' },
-  { key: 'linux_wallpaperengine_target_mode', label: 'Target mode', type: 'select', options: ['auto', 'screen-root', 'screen-span', 'window'] },
-  { key: 'linux_wallpaperengine_target', label: 'Output/window target', type: 'text', placeholder: 'eDP-1 or HDMI-A-1' },
-  { key: 'linux_wallpaperengine_scaling', label: 'Scaling', type: 'select', options: ['default', 'fill', 'fit', 'stretch'] },
-  { key: 'linux_wallpaperengine_fps', label: 'FPS', type: 'select', options: ['30', '60'] },
-  { key: 'linux_wallpaperengine_muted', label: 'Muted', type: 'select', options: ['off', 'on'] },
-  { key: 'linux_wallpaperengine_volume', label: 'Volume', type: 'number', placeholder: '100' },
-  { key: 'linux_wallpaperengine_assets_dir', label: 'Assets dir', type: 'text', placeholder: 'auto' },
-];
-
-const WEB_WALLPAPER_CONFIGS: ConfigGroup[] = [
-  { key: 'web_wallpaper_enabled', label: 'Enable web wallpaper backend', type: 'select', options: ['on', 'off'] },
-  { key: 'web_wallpaper_browser', label: 'Web browser path', type: 'text', placeholder: 'auto' },
-  { key: 'web_wallpaper_audio', label: 'Audio', type: 'select', options: ['on', 'off'] },
-  { key: 'web_wallpaper_window_width', label: 'Window width', type: 'number', placeholder: '1920' },
-  { key: 'web_wallpaper_window_height', label: 'Window height', type: 'number', placeholder: '1080' },
-  { key: 'web_wallpaper_extra_args', label: 'Extra browser args', type: 'text', placeholder: '' },
-];
-
-const WEB_RENDERER_CONFIGS: ConfigGroup[] = [
-  { key: 'web_renderer_enabled', label: 'Enable native Web renderer', type: 'select', options: ['on', 'off'] },
-  { key: 'web_renderer_path', label: 'Renderer binary path', type: 'text', placeholder: 'auto' },
-  { key: 'web_renderer_audio', label: 'Audio', type: 'select', options: ['on', 'off'] },
-  { key: 'web_renderer_width', label: 'Fallback width', type: 'number', placeholder: '1920' },
-  { key: 'web_renderer_height', label: 'Fallback height', type: 'number', placeholder: '1080' },
-  { key: 'web_renderer_output', label: 'Output name', type: 'text', placeholder: 'eDP-1 or empty for compositor default' },
-  { key: 'web_renderer_debug', label: 'Debug logging', type: 'select', options: ['off', 'on'] },
-];
-
-const LIBRARY_CONFIGS: ConfigGroup[] = [
-  { key: 'min_wallpaper_width', label: 'Min width', type: 'number', placeholder: '1280' },
-  { key: 'min_wallpaper_height', label: 'Min height', type: 'number', placeholder: '720' },
-  { key: 'gui_thumbnail_mode', label: 'Thumbnail mode', type: 'select', options: ['cache', 'original', 'icon'] },
-  { key: 'gui_thumbnail_cleanup_days', label: 'Clear thumbnail cache after days', type: 'number', placeholder: '30' },
-  { key: 'gui_thumbnail_failure_ttl_secs', label: 'Retry failed thumbnails after seconds', type: 'number', placeholder: '900' },
-  { key: 'gui_debug_logs', label: 'Debug logs', type: 'select', options: ['off', 'on'] },
-  { key: 'preview_metadata', label: 'fzf preview', type: 'select', options: ['compact', 'visual', 'full'] },
-];
 
 type DbAction = 'verify' | 'rebuild' | 'backup' | 'export' | 'restore';
 
@@ -91,13 +41,19 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
   const [dbAction, setDbAction] = useState<DbAction | null>(null);
   const [libraryStatus, setLibraryStatus] = useState<LibrarySourceStatusDTO | null>(null);
   const [weStatus, setWeStatus] = useState<LinuxWallpaperEngineStatusDTO | null>(null);
-  const [webStatus, setWebStatus] = useState<WebWallpaperStatusDTO | null>(null);
-  const [webRendererStatus, setWebRendererStatus] = useState<WebRendererStatusDTO | null>(null);
+  const [weDebugInfo, setWeDebugInfo] = useState<WeDebugInfoDTO | null>(null);
   const restoreInputRef = useRef<HTMLInputElement>(null);
 
   const loadConfigs = useCallback(async () => {
     setLoading(true);
-    const allKeys = [...BACKEND_CONFIGS, ...WE_BACKEND_CONFIGS, ...WEB_RENDERER_CONFIGS, ...WEB_WALLPAPER_CONFIGS, ...LIBRARY_CONFIGS].map((c) => c.key);
+    const allKeys = [
+      ...BACKEND_CONFIGS,
+      ...BACKEND_ADVANCED_CONFIGS,
+      ...WE_BACKEND_CONFIGS,
+      ...WE_BACKEND_ADVANCED_CONFIGS,
+      ...LIBRARY_CONFIGS,
+      ...LIBRARY_ADVANCED_CONFIGS,
+    ].map((c) => c.key);
     const map: Record<string, string> = {};
     for (const key of allKeys) {
       try { map[key] = await api.configGet(key); } catch { map[key] = ''; }
@@ -114,22 +70,17 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
     try { setWeStatus(await api.linuxWallpaperEngineStatus()); } catch { /* */ }
   }, []);
 
-  const loadWebStatus = useCallback(async () => {
-    try { setWebStatus(await api.webWallpaperStatus()); } catch { /* */ }
-  }, []);
-
-  const loadWebRendererStatus = useCallback(async () => {
-    try { setWebRendererStatus(await api.webRendererStatus()); } catch { /* */ }
+  const loadWeDebugInfo = useCallback(async () => {
+    try { setWeDebugInfo(await api.weDebugInfo()); } catch { /* */ }
   }, []);
 
   useEffect(() => {
     loadConfigs();
     loadThumbCache();
     loadWeStatus();
-    loadWebRendererStatus();
-    loadWebStatus();
+    loadWeDebugInfo();
     void api.librarySourceStatus().then(setLibraryStatus);
-  }, [loadConfigs, loadThumbCache, loadWeStatus, loadWebRendererStatus, loadWebStatus]);
+  }, [loadConfigs, loadThumbCache, loadWeStatus, loadWeDebugInfo]);
 
   const handleSet = async (key: string, value: string): Promise<boolean> => {
     const normalized = normalizeConfigValue(key, value);
@@ -141,12 +92,6 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
         window.dispatchEvent(new CustomEvent('wc-config-changed', { detail: { key, value: normalized } }));
         if (key.startsWith('linux_wallpaperengine_')) {
           void loadWeStatus();
-        }
-        if (key.startsWith('web_wallpaper_')) {
-          void loadWebStatus();
-        }
-        if (key.startsWith('web_renderer_')) {
-          void loadWebRendererStatus();
         }
         onFeedback({ state: 'success', label: 'Setting saved', detail: key });
         return true;
@@ -228,6 +173,12 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
             {BACKEND_CONFIGS.map((c) => (
               <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
             ))}
+            <details className="settings-advanced">
+              <summary>Advanced backend tuning</summary>
+              {BACKEND_ADVANCED_CONFIGS.map((c) => (
+                <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
+              ))}
+            </details>
           </section>
 
           <section className="settings-group">
@@ -250,84 +201,26 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
             {WE_BACKEND_CONFIGS.map((c) => (
               <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
             ))}
+            <details className="settings-advanced">
+              <summary>Advanced scene backend tuning</summary>
+              {WE_BACKEND_ADVANCED_CONFIGS.map((c) => (
+                <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
+              ))}
+            </details>
             <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
               linux-wallpaperengine supports many Wallpaper Engine <strong>scene</strong> wallpapers.
               Some scene wallpapers may use unsupported projection effects and will show
-              a compatibility warning. <strong>Web</strong> wallpapers use the experimental Chromium preview.
+              a compatibility warning. Wallpaper Engine <strong>Web</strong> projects are indexed for browsing only.
             </div>
           </section>
 
           <section className="settings-group">
-            <h3>Web Wallpaper Renderer</h3>
-            <div className="config-row">
-              <div className="config-info">
-                <span className="config-label">
-                  {webRendererStatus?.available ? 'Native Web renderer: Ready' : (webRendererStatus?.message ?? 'Checking...')}
-                </span>
-                {webRendererStatus?.detail && (
-                  <span className="config-desc">{webRendererStatus.detail}</span>
-                )}
-              </div>
-            </div>
-            {WEB_RENDERER_CONFIGS.map((c) => (
-              <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
-            ))}
-            <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
-              Web Wallpaper Engine projects use a native WebKitGTK layer-shell renderer for real
-              desktop backgrounds. Chromium preview remains available only as a debugging fallback.
-              {webRendererStatus?.available && webRendererStatus.path && (
-                <><br />Renderer: <code>{webRendererStatus.path}</code></>
-              )}
-            </div>
-          </section>
-
-          <section className="settings-group">
-            <h3>Chromium Preview (Experimental)</h3>
-            <div className="config-row">
-              <div className="config-info">
-                <span className="config-label">
-                  {webStatus?.available ? 'Chromium preview: Available' : (webStatus?.message ?? 'Checking...')}
-                </span>
-                {webStatus?.detail && (
-                  <span className="config-desc">{webStatus.detail}</span>
-                )}
-              </div>
-            </div>
-            {WEB_WALLPAPER_CONFIGS.map((c) => (
-              <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
-            ))}
-            <div className="config-desc" style={{ fontSize: 11, color: '#c96', marginTop: 4 }}>
-              <strong>Experimental only.</strong> Chromium preview opens Web wallpapers in a normal
-              browser window. It is <strong>not a real desktop wallpaper backend</strong> on Niri/Wayland.
-              A native WebKitGTK layer-shell renderer is required for true Web wallpaper support.
-            </div>
-            <div className="config-desc" style={{ fontSize: 11, color: '#666', marginTop: 4 }}>
-              Auto-detects chromium, google-chrome, brave, or vivaldi.
-              {webStatus?.available && webStatus.path && (
-                <><br />Browser: <code>{webStatus.path}</code></>
-              )}
-            </div>
-            <details style={{ marginTop: 4 }}>
-              <summary>niri compositor rule example</summary>
-              <pre style={{
-                fontSize: 11,
-                background: '#1a1a1a',
-                padding: '8px 12px',
-                borderRadius: 4,
-                overflowX: 'auto',
-                marginTop: 4,
-              }}>
-{`// Add to ~/.config/niri/config.kdl:
-window-rule {
-    match app-id="^web-wallpaper-console$"
-    default-column-width {}
-    open-floating false
-    open-maximized true
-    block-out-from "screenshot"
-    block-out-from "screen-capture"
-}`}
-              </pre>
-            </details>
+            <h3>Wallpaper Engine Web Projects</h3>
+            <p className="config-desc">
+              WE Web projects are unsupported as live wallpapers in this app. They still appear
+              in the Library as project cards so you can inspect metadata, open the project folder,
+              copy the Workshop ID, and apply a preview GIF when available.
+            </p>
           </section>
 
           <section className="settings-group">
@@ -335,6 +228,12 @@ window-rule {
             {LIBRARY_CONFIGS.map((c) => (
               <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
             ))}
+            <details className="settings-advanced">
+              <summary>Advanced library tuning</summary>
+              {LIBRARY_ADVANCED_CONFIGS.map((c) => (
+                <ConfigRow key={c.key} config={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => handleSet(c.key, v)} />
+              ))}
+            </details>
             <div className="config-row">
               <div className="config-info">
                 <span className="config-label">Thumbnail cache</span>
@@ -505,6 +404,47 @@ window-rule {
               Export diagnostics
             </button>
           </section>
+
+          {weDebugInfo && (weDebugInfo.lastStderr || weDebugInfo.lastExitStatus) && (
+            <section className="settings-group">
+              <h3>WE Backend Debug Info</h3>
+              <p className="debug-privacy-note" style={{ fontSize: '0.8em', color: 'var(--muted)', marginBottom: 8 }}>
+                Shows local paths and command lines. For diagnostics only.
+              </p>
+              <div className="debug-block">
+                {weDebugInfo.lastCommandLine && (
+                  <div className="debug-row">
+                    <span className="debug-label">Last command:</span>
+                    <code className="debug-value">{weDebugInfo.lastCommandLine}</code>
+                  </div>
+                )}
+                {weDebugInfo.lastTargetConfig && (
+                  <div className="debug-row">
+                    <span className="debug-label">Target config:</span>
+                    <code className="debug-value">{weDebugInfo.lastTargetConfig}</code>
+                  </div>
+                )}
+                {weDebugInfo.lastExitStatus && (
+                  <div className="debug-row">
+                    <span className="debug-label">Exit status:</span>
+                    <code className="debug-value">{weDebugInfo.lastExitStatus}</code>
+                  </div>
+                )}
+                {weDebugInfo.lastStderr && (
+                  <details className="debug-row">
+                    <summary className="debug-label" style={{ cursor: 'pointer' }}>
+                      Last stderr (click to expand)
+                    </summary>
+                    <pre className="debug-value debug-pre">{weDebugInfo.lastStderr}</pre>
+                  </details>
+                )}
+                <div className="debug-row">
+                  <span className="debug-label">Log file:</span>
+                  <code className="debug-value">{weDebugInfo.logPath}</code>
+                </div>
+              </div>
+            </section>
+          )}
         </div>
       )}
 
@@ -520,52 +460,6 @@ window-rule {
       )}
     </div>
   );
-}
-
-function normalizeConfigValue(key: string, value: string): string {
-  if (key === 'gui_thumbnail_cleanup_days') {
-    return clampIntString(value, 1, 3650, 30);
-  }
-  if (key === 'gui_thumbnail_failure_ttl_secs') {
-    return clampIntString(value, 60, 86_400, 900);
-  }
-  if (key === 'linux_wallpaperengine_fps') {
-    return clampIntString(value, 1, 240, 60);
-  }
-  if (key === 'linux_wallpaperengine_volume') {
-    return clampIntString(value, 0, 100, 100);
-  }
-  if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
-    return value.trim() || 'auto';
-  }
-  if (key === 'linux_wallpaperengine_target') {
-    return value.trim();
-  }
-  if (key === 'web_renderer_path') {
-    return value.trim() || 'auto';
-  }
-  if (key === 'web_renderer_output') {
-    return value.trim();
-  }
-  if (key === 'web_renderer_width') {
-    return clampIntString(value, 320, 16384, 1920);
-  }
-  if (key === 'web_renderer_height') {
-    return clampIntString(value, 240, 16384, 1080);
-  }
-  return value;
-}
-
-function clampIntString(value: string, min: number, max: number, fallback: number): string {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) return String(fallback);
-  return String(Math.min(max, Math.max(min, parsed)));
-}
-
-function cleanupDays(configs: Record<string, string>, cache: ThumbnailCacheDTO | null): number {
-  const configured = Number.parseInt(configs['gui_thumbnail_cleanup_days'] ?? '', 10);
-  if (Number.isFinite(configured)) return Math.min(3650, Math.max(1, configured));
-  return cache?.cleanupDays ?? 30;
 }
 
 function ConfigRow({

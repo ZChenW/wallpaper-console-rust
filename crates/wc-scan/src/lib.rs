@@ -251,7 +251,11 @@ pub fn read_we_project_info(project_dir: &Path) -> Option<WeProjectInfo> {
     let workshop_id = workshop_id_from_path(project_dir);
     let (entry_type, backend, unsupported_reason) = match normalized_type.as_str() {
         "scene" => (FileType::WeScene, Backend::LinuxWallpaperEngine, None),
-        "web" => (FileType::WeWeb, Backend::WebKitLayerShell, None),
+        "web" => (
+            FileType::WeWeb,
+            Backend::Unsupported,
+            Some("Wallpaper Engine Web projects are indexed for browsing only and cannot be applied by this app.".to_string()),
+        ),
         "application" => (
             FileType::WeApplication,
             Backend::Unsupported,
@@ -763,6 +767,37 @@ mod tests {
         });
         std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
         assert_eq!(read_we_project_json(dir.path()), None);
+    }
+
+    #[test]
+    fn we_project_info_web_is_unsupported_case_insensitive() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("index.html"), "<html></html>").unwrap();
+        let proj = serde_json::json!({
+            "type": "Web",
+            "file": "index.html",
+            "preview": "preview.gif",
+            "title": "Web Project"
+        });
+        std::fs::write(dir.path().join("preview.gif"), b"gif").unwrap();
+        std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
+
+        let info = read_we_project_info(dir.path()).expect("web project should parse");
+        assert_eq!(info.entry_type, FileType::WeWeb);
+        assert_eq!(info.backend, Backend::Unsupported);
+        assert!(info
+            .unsupported_reason
+            .as_deref()
+            .unwrap_or("")
+            .contains("browsing only"));
+
+        let entry = make_entry(&dir.path().to_string_lossy()).expect("web project should index");
+        assert_eq!(entry.file_type, FileType::WeWeb);
+        assert_eq!(entry.backend, Backend::Unsupported);
+        assert_eq!(
+            entry.project.and_then(|p| p.title),
+            Some("Web Project".to_string())
+        );
     }
 
     #[test]

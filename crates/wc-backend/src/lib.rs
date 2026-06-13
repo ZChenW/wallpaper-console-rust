@@ -1,42 +1,61 @@
 //! wc-backend — wallpaper backend process management.
 
-use std::process::Command;
+use std::process::{Command, Stdio};
 use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod linux_wallpaperengine;
-pub mod web_renderer;
-pub mod web_wallpaper;
+pub mod process_control;
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let user = whoami();
     linux_wallpaperengine::stop(s);
-    web_renderer::stop(s);
-    web_wallpaper::stop(s);
     let _ = Command::new("pkill")
-        .args(["-u", &user, "-x", "mpvpaper"])
+        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
         .status();
     let _ = Command::new("pkill")
-        .args(["-u", &user, "-x", "awww"])
+        .args(["-u", &user, "-f", r"(^|/)awww\b"])
+        .status();
+    // Fallback cleanup: kill residual scene renderer processes that may not have been
+    // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
+    // left the process behind).
+    let _ = Command::new("pkill")
+        .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])
         .status();
     Ok(())
+}
+
+/// Backend name constant used for LWE state tracking.
+pub const LWE_BACKEND_NAME: &str = "linux-wallpaperengine";
+
+/// Stop only non-LWE wallpaper backends (mpvpaper, awww).
+/// Used during scene-to-scene handoff to avoid exposing the static background.
+pub fn stop_non_lwe_backends(_s: &StorageApi) {
+    let user = whoami();
+    let _ = Command::new("pkill")
+        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    let _ = Command::new("pkill")
+        .args(["-u", &user, "-f", r"(^|/)awww\b"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 /// Smart-stop: kill only what's needed for the target backend.
 pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Result<(), WcError> {
     let last = s.last_backend_read()?.unwrap_or_default();
-    if target_backend == Backend::Mpvpaper
-        || target_backend == Backend::LinuxWallpaperEngine
-        || target_backend == Backend::WebKitLayerShell
-    {
+    if target_backend == Backend::Mpvpaper || target_backend == Backend::LinuxWallpaperEngine {
         return stop_all_backends(Some(s));
     }
     if last == "awww" {
         let user = whoami();
         let _ = Command::new("pkill")
-            .args(["-u", &user, "-x", "mpvpaper"])
+            .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
             .status();
     } else {
         stop_all_backends(Some(s))?;
@@ -52,16 +71,6 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
     if backend == Backend::LinuxWallpaperEngine {
         let project = linux_wallpaperengine::project_from_path(path)?;
         return linux_wallpaperengine::apply(s, project);
-    }
-    if backend == Backend::ChromiumWeb {
-        return Err(WcError::Other(
-            "Chromium Web backend has been demoted to experimental preview. \
-             Use open_web_preview instead of apply."
-                .into(),
-        ));
-    }
-    if backend == Backend::WebKitLayerShell {
-        return web_renderer::apply(s, path);
     }
     if backend == Backend::Unsupported {
         return Err(WcError::UnsupportedFileType(path.to_string()));
@@ -106,10 +115,7 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
                 return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
             }
         }
-        Backend::LinuxWallpaperEngine
-        | Backend::Unsupported
-        | Backend::ChromiumWeb
-        | Backend::WebKitLayerShell => unreachable!(),
+        Backend::LinuxWallpaperEngine | Backend::Unsupported => unreachable!(),
     }
 
     // Write state only after successful apply
@@ -148,7 +154,7 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
             }
         }
         wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb => Backend::WebKitLayerShell,
+        wc_core::types::FileType::WeWeb => Backend::Unsupported,
         wc_core::types::FileType::WeApplication => Backend::Unsupported,
     };
     apply_wallpaper(s, &current, backend)
@@ -189,7 +195,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_we_web_rejects_when_renderer_missing() {
+    fn restore_we_web_rejects_as_unsupported() {
         let (tmp, s) = temp_storage();
 
         let project = tmp
@@ -205,8 +211,8 @@ mod tests {
 
         // Simulate a previous session having written a WE Web project as current.
         s.current_write(&project.to_string_lossy()).unwrap();
-        s.last_backend_write("chromium-web").unwrap();
-        s.history_add(&project.to_string_lossy(), "chromium-web")
+        s.last_backend_write("unsupported").unwrap();
+        s.history_add(&project.to_string_lossy(), "unsupported")
             .unwrap();
 
         let history_before = s.history_list().unwrap().len();
@@ -214,8 +220,8 @@ mod tests {
         let err = restore(&s).unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("web renderer") || msg.contains("wallpaper-console-web-renderer"),
-            "error should explain that the native Web renderer is missing, got: {}",
+            msg.contains("unsupported") || msg.contains("Unsupported"),
+            "error should explain that WE Web restore is unsupported, got: {}",
             msg
         );
 
@@ -226,7 +232,7 @@ mod tests {
         );
         assert_eq!(
             s.last_backend_read().unwrap().as_deref(),
-            Some("chromium-web")
+            Some("unsupported")
         );
         // No new history entry added by the failed restore.
         assert_eq!(
@@ -236,59 +242,19 @@ mod tests {
         );
     }
 
-    #[cfg(unix)]
     #[test]
-    fn restore_we_web_uses_webkit_layer_shell_when_renderer_is_configured() {
-        use std::os::unix::fs::PermissionsExt;
-        let (tmp, s) = temp_storage();
-
-        let bin = tmp.path().join("wallpaper-console-web-renderer");
-        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
-        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin, perms).unwrap();
-        s.config_set("web_renderer_path", &bin.to_string_lossy())
-            .unwrap();
-
-        let project = tmp
-            .path()
-            .join("steamapps/workshop/content/431960/3650880224");
-        std::fs::create_dir_all(&project).unwrap();
-        std::fs::write(project.join("index.html"), b"<html></html>").unwrap();
-        std::fs::write(
-            project.join("project.json"),
-            r#"{"type":"web","file":"index.html","title":"Test Web"}"#,
-        )
-        .unwrap();
-
-        s.current_write(&project.to_string_lossy()).unwrap();
-        s.last_backend_write("webkit-layer-shell").unwrap();
-
-        restore(&s).unwrap();
-        assert_eq!(
-            s.current_read().unwrap().as_deref(),
-            Some(project.to_string_lossy().as_ref())
-        );
-        assert_eq!(
-            s.last_backend_read().unwrap().as_deref(),
-            Some("webkit-layer-shell")
-        );
-        stop_all_backends(Some(&s)).unwrap();
-    }
-
-    #[test]
-    fn apply_wallpaper_rejects_chromium_web_directly() {
+    fn apply_wallpaper_rejects_unsupported_backend() {
         let (_tmp, s) = temp_storage();
 
         let img = _tmp.path().join("test.png");
         std::fs::write(&img, b"").unwrap();
 
-        let err = apply_wallpaper(&s, &img.to_string_lossy().to_string(), Backend::ChromiumWeb)
+        let err = apply_wallpaper(&s, &img.to_string_lossy().to_string(), Backend::Unsupported)
             .unwrap_err();
         let msg = err.to_string();
         assert!(
-            msg.contains("demoted") || msg.contains("experimental preview"),
-            "apply_wallpaper should reject ChromiumWeb, got: {}",
+            msg.contains("unsupported") || msg.contains("Unsupported"),
+            "apply_wallpaper should reject Unsupported backend, got: {}",
             msg
         );
     }

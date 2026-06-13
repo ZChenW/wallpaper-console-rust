@@ -38,15 +38,6 @@ interface LinuxWallpaperEngineStatusDTO {
   detail?: string;
 }
 
-interface WebWallpaperStatusDTO {
-  available: boolean;
-  path?: string;
-  message: string;
-  detail?: string;
-}
-
-type WebRendererStatusDTO = WebWallpaperStatusDTO;
-
 interface ThumbnailCacheDTO {
   dir: string;
   size: string;
@@ -116,7 +107,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     path: '/mock/Steam/steamapps/workshop/content/431960/3650880224',
     type: 'we_web',
     ext: 'web',
-    backend: 'webkit-layer-shell',
+    backend: 'unsupported',
     size: 8192,
     mtime: 1700090000,
     resolution: 'WE',
@@ -125,6 +116,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     workshopId: '3650880224',
     title: 'Web title',
     weFile: 'index.html',
+    unsupportedReason: 'Wallpaper Engine Web projects are indexed for browsing only and cannot be applied by this app.',
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/4444444444',
@@ -186,24 +178,6 @@ export const api = {
     available: false,
     message: 'Wallpaper Engine scene wallpapers require linux-wallpaperengine. Install it from AUR: yay -S linux-wallpaperengine-git',
     detail: 'backend not found: linux-wallpaperengine',
-  }),
-
-  webWallpaperStatus: async (): Promise<WebWallpaperStatusDTO> => ({
-    available: false,
-    message: 'Web wallpaper backend requires a Chromium-based browser.',
-    detail: 'no supported web browser found',
-  }),
-
-  webRendererStatus: async (): Promise<WebRendererStatusDTO> => ({
-    available: true,
-    path: '/mock/bin/wallpaper-console-web-renderer',
-    message: 'Native Web renderer ready.',
-    detail: 'Uses WebKitGTK + Wayland layer-shell for real Web wallpaper backgrounds.',
-  }),
-
-  openWebPreview: async (_path: string): Promise<CommandResult> => ({
-    ...ok,
-    stdout: 'Chromium preview launched.',
   }),
 
   apply: async (): Promise<CommandResult> => ok,

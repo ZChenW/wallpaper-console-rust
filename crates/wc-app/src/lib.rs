@@ -89,14 +89,6 @@ impl AppService {
 
     fn backend_for_entry(&self, entry: &WallpaperEntry) -> Result<Backend, AppError> {
         match entry.backend {
-            Backend::ChromiumWeb => Err(AppError::web_renderer_unavailable()),
-            Backend::WebKitLayerShell => {
-                if wc_backend::web_renderer::is_available(&self.storage) {
-                    Ok(Backend::WebKitLayerShell)
-                } else {
-                    Err(AppError::web_renderer_unavailable())
-                }
-            }
             Backend::Unsupported => Err(AppError::unsupported_backend(
                 entry.file_type,
                 entry.path.as_str(),
@@ -134,22 +126,6 @@ pub fn resolve_wallpaper_path(path: &str) -> Result<String, WcError> {
 impl AppError {
     pub fn from_wc_error(err: WcError) -> Self {
         let text = err.to_string();
-        let lower = text.to_lowercase();
-        if lower.contains("web renderer")
-            || lower.contains("wallpaper-console-web-renderer")
-            || lower.contains("webkit")
-        {
-            return AppError {
-                code: "web_renderer_failed".into(),
-                message: "The native Web wallpaper renderer failed.".into(),
-                detail: Some(text),
-                recoverable: true,
-                suggestion: Some(
-                    "Check that wallpaper-console-web-renderer is installed and your Wayland compositor supports layer-shell."
-                        .into(),
-                ),
-            };
-        }
         AppError {
             code: "command_failed".into(),
             message: text,
@@ -173,7 +149,7 @@ impl AppError {
 
     fn unsupported_backend(file_type: FileType, path: &str) -> Self {
         if file_type == FileType::WeWeb {
-            return AppError::web_renderer_unavailable();
+            return AppError::we_web_unsupported();
         }
         AppError {
             code: "unsupported_backend".into(),
@@ -184,18 +160,14 @@ impl AppError {
         }
     }
 
-    fn web_renderer_unavailable() -> Self {
+    fn we_web_unsupported() -> Self {
         AppError {
-            code: "web_renderer_unavailable".into(),
-            message: "Web wallpapers require the native Web renderer.".into(),
-            detail: Some(
-                "Chromium preview opens a normal window; real Web wallpaper backgrounds require wallpaper-console-web-renderer."
-                    .into(),
-            ),
+            code: "we_web_unsupported".into(),
+            message: "Wallpaper Engine Web wallpapers are unsupported.".into(),
+            detail: Some("WE Web projects are kept in the library for browsing, preview thumbnails, project-folder access, and workshop ID lookup only.".into()),
             recoverable: true,
             suggestion: Some(
-                "Build and install wallpaper-console-web-renderer, or use Apply preview GIF / Open experimental Chromium preview."
-                    .into(),
+                "Use Apply preview GIF if the project has one, or choose a WE Scene/image/video wallpaper.".into(),
             ),
         }
     }
@@ -229,41 +201,12 @@ mod tests {
     }
 
     #[test]
-    fn we_web_apply_returns_renderer_unavailable_when_renderer_missing() {
+    fn we_web_apply_returns_unsupported() {
         let (tmp, service) = temp_service();
         let project = web_project(tmp.path());
         let err = service
             .resolve_apply_target(&project.to_string_lossy())
             .unwrap_err();
-        assert_eq!(err.code, "web_renderer_unavailable");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn we_web_resolves_to_webkit_layer_shell_when_renderer_is_configured() {
-        use std::os::unix::fs::PermissionsExt;
-        let tmp = tempfile::tempdir().unwrap();
-        let cd = ConfigDir {
-            path: tmp.path().join("config"),
-        };
-        cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
-        let storage = StorageApi::new(ConfigDir {
-            path: cd.path.clone(),
-        });
-        let bin = tmp.path().join("renderer");
-        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
-        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
-        perms.set_mode(0o755);
-        std::fs::set_permissions(&bin, perms).unwrap();
-        storage
-            .config_set("web_renderer_path", &bin.to_string_lossy())
-            .unwrap();
-        let service = AppService::from_config_dir(ConfigDir { path: cd.path });
-        let project = web_project(tmp.path());
-        let target = service
-            .resolve_apply_target(&project.to_string_lossy())
-            .unwrap();
-        assert_eq!(target.backend, Backend::WebKitLayerShell);
+        assert_eq!(err.code, "we_web_unsupported");
     }
 }

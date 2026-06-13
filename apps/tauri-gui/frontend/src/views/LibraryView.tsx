@@ -70,11 +70,6 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     return entry?.type === 'we_scene';
   }, [entryByPath]);
 
-  const isWeWeb = useCallback((path: string) => {
-    const entry = entryByPath.get(path);
-    return entry?.type === 'we_web' && entry?.backend === 'webkit-layer-shell';
-  }, [entryByPath]);
-
   const isFailedScene = useCallback((path: string) => {
     const entry = entryByPath.get(path);
     return entry?.type === 'we_scene' && entry?.backendStatus === 'failed';
@@ -94,16 +89,6 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
         onApply(path);
         setTimeout(() => invalidateLibrary(), 500);
       },
-    },
-    {
-      label: 'Apply Web wallpaper',
-      visible: isWeWeb,
-      action: (path: string) => { onApply(path); },
-    },
-    {
-      label: 'Open experimental Chromium preview',
-      visible: (path: string) => Boolean(entryByPath.get(path)?.type === 'we_web'),
-      action: async (path: string) => { await api.openWebPreview(path); },
     },
     {
       label: 'Apply preview GIF',

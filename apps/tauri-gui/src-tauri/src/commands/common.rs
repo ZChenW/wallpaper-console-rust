@@ -139,6 +139,16 @@ pub struct LibrarySourceStatusDto {
     pub message: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WeDebugInfoDto {
+    pub last_command_line: String,
+    pub last_target_config: String,
+    pub last_stderr: String,
+    pub last_exit_status: String,
+    pub log_path: String,
+}
+
 pub type CommandResult = CommandResultDto;
 
 pub fn storage() -> Result<StorageApi, String> {
@@ -168,19 +178,39 @@ pub fn fail(err: impl Into<String>) -> CommandResultDto {
     }
 }
 
+/// Classify backend errors from their text message into structured error codes.
+///
+/// **Order matters**: more-specific checks (e.g. WE Web unsupported or scene
+/// projection errors) must precede generic command-failure checks.
+/// Reordering these blocks may cause misclassification.
 pub fn error_dto(msg: &str) -> CommandErrorDto {
     let lower = msg.to_lowercase();
-    if lower.contains("web renderer")
-        || lower.contains("wallpaper-console-web-renderer")
-        || lower.contains("webkit")
+    if lower.contains("web wallpapers are unsupported")
+        || lower.contains("wallpaper engine web wallpapers are unsupported")
+        || lower.contains("we web")
     {
         return CommandErrorDto {
-            kind: "web_renderer_failed".into(),
-            message: "The native Web wallpaper renderer is not ready.".into(),
+            kind: "we_web_unsupported".into(),
+            message: "Wallpaper Engine Web wallpapers are unsupported.".into(),
             detail: Some(msg.to_string()),
             recoverable: true,
             suggestion: Some(
-                "Build/install wallpaper-console-web-renderer or set web_renderer_path in Settings."
+                "Use Apply preview GIF if available, or choose a WE Scene/image/video wallpaper."
+                    .into(),
+            ),
+        };
+    }
+    if lower.contains("could not create a window")
+        || lower.contains("no suitable output")
+        || lower.contains("no display")
+    {
+        return CommandErrorDto {
+            kind: "target_config_error".into(),
+            message: "linux-wallpaperengine could not find the correct display output.".into(),
+            detail: Some(msg.to_string()),
+            recoverable: true,
+            suggestion: Some(
+                "Set target_mode=screen-root and target=<output name> in Settings (e.g. eDP-1)."
                     .into(),
             ),
         };
@@ -189,19 +219,25 @@ pub fn error_dto(msg: &str) -> CommandErrorDto {
         return CommandErrorDto {
             kind: if lower.contains("projection must have a width") {
                 "scene_projection_unsupported".into()
+            } else if lower.contains("cannot find workshop") {
+                "workshop_directory_missing".into()
             } else {
                 "linux_wallpaperengine_failed".into()
             },
             message: if lower.contains("projection must have a width") {
                 "This Wallpaper Engine scene is not compatible with linux-wallpaperengine.".into()
+            } else if lower.contains("cannot find workshop") {
+                "Wallpaper Engine workshop directory not found.".into()
             } else {
                 "Wallpaper Engine scene support is not ready.".into()
             },
             detail: Some(msg.to_string()),
             recoverable: true,
-            suggestion: Some(
-                "Use the preview GIF or choose another Wallpaper Engine scene.".into(),
-            ),
+            suggestion: Some(if lower.contains("cannot find workshop") {
+                "Check the workshop content path in your Wallpaper Engine sources.".to_string()
+            } else {
+                "Use the preview GIF or choose another Wallpaper Engine scene.".to_string()
+            }),
         };
     }
     CommandErrorDto {

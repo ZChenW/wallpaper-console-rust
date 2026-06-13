@@ -1,11 +1,10 @@
-import { startTransition, useEffect, useState, useCallback } from 'react';
+import { lazy, startTransition, Suspense, useCallback, useRef, useState } from 'react';
 import { api, CommandResult } from './api/bridge';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
 import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
 import HistoryView, { invalidateHistoryCache } from './views/HistoryView';
 import SourcesView from './views/SourcesView';
-import SettingsView from './views/SettingsView';
 import StatusBar from './components/StatusBar';
 import Toolbar from './components/Toolbar';
 import Sidebar from './components/Sidebar';
@@ -15,6 +14,8 @@ import { AppStateProvider, useAppState } from './state/AppStateContext';
 import { ThumbnailStoreProvider } from './state/ThumbnailStoreContext';
 
 type View = 'library' | 'favorites' | 'history' | 'sources' | 'settings';
+
+const SettingsView = lazy(() => import('./views/SettingsView'));
 
 export default function App() {
   return (
@@ -30,6 +31,7 @@ function AppShell() {
   const [view, setView] = useState<View>('library');
   const [visitedViews, setVisitedViews] = useState<Set<View>>(new Set(['library']));
   const [applying, setApplying] = useState(false);
+  const applyingRef = useRef(false);
   const {
     status,
     feedback,
@@ -39,6 +41,8 @@ function AppShell() {
   } = useAppState();
 
   const handleApply = useCallback(async (path: string) => {
+    if (applyingRef.current) return; // Prevent concurrent applies
+    applyingRef.current = true;
     setApplying(true);
     setFeedbackWithAutoDismiss({ state: 'running', label: 'Applying wallpaper' });
     try {
@@ -54,6 +58,7 @@ function AppShell() {
       setFeedbackWithAutoDismiss({ state: 'error', label: 'Apply failed', detail: String(e) });
     } finally {
       setApplying(false);
+      applyingRef.current = false;
     }
   }, [refreshStatus, setFeedbackWithAutoDismiss]);
 
@@ -108,7 +113,11 @@ function AppShell() {
           {(view === 'sources' || view === 'settings') && (
             <div className="view-shell">
               {view === 'sources' && <SourcesView onRefresh={refreshStatus} onFeedback={handleFeedback} />}
-              {view === 'settings' && <SettingsView onRefresh={refreshStatus} onFeedback={handleFeedback} />}
+              {view === 'settings' && (
+                <Suspense fallback={<div className="loading">Loading settings...</div>}>
+                  <SettingsView onRefresh={refreshStatus} onFeedback={handleFeedback} />
+                </Suspense>
+              )}
             </div>
           )}
         </main>

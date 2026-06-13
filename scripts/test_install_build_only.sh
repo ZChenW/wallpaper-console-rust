@@ -8,6 +8,5 @@ cd "$ROOT"
 
 test -x target/release/wallpaper-console-rust
 test -x target/release/wallpaper-console-tauri
-test -x target/release/wallpaper-console-web-renderer
 
 echo "PASS: install build-only artifacts exist"

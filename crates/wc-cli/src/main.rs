@@ -1001,9 +1001,7 @@ fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::Wallpap
             backend: match parts[2] {
                 "mpvpaper" => Backend::Mpvpaper,
                 "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
-                "chromium-web" => Backend::ChromiumWeb,
-                "webkit-layer-shell" => Backend::WebKitLayerShell,
-                "unsupported" => Backend::Unsupported,
+                "chromium-web" | "webkit-layer-shell" | "unsupported" => Backend::Unsupported,
                 _ => Backend::Awww,
             },
             size: parts[3].parse().unwrap_or(0),
