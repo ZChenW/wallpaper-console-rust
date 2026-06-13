@@ -110,9 +110,6 @@ export default function SourcesView({ onRefresh, onFeedback }: Props) {
     }
   };
 
-  const weSources = sources.filter((s) => s.isWE);
-  const otherSources = sources.filter((s) => !s.isWE);
-
   return (
     <div className="view sources-view">
       <div className="view-header">
@@ -136,26 +133,9 @@ export default function SourcesView({ onRefresh, onFeedback }: Props) {
         <div className="empty-state">No sources configured — add a directory to start</div>
       ) : (
         <div className="sources-list">
-          {weSources.length > 0 && (
-            <details className="source-group" open>
-              <summary className="source-group-header">
-                Wallpaper Engine ({weSources.length})
-              </summary>
-              {weSources.map((s) => (
-                <SourceItem key={s.path} source={s} onRemove={handleRemove} />
-              ))}
-            </details>
-          )}
-          {otherSources.length > 0 && (
-            <details className="source-group" open>
-              <summary className="source-group-header">
-                Other Sources ({otherSources.length})
-              </summary>
-              {otherSources.map((s) => (
-                <SourceItem key={s.path} source={s} onRemove={handleRemove} />
-              ))}
-            </details>
-          )}
+          {sources.map((s) => (
+            <SourceItem key={s.path} source={s} onRemove={handleRemove} />
+          ))}
         </div>
       )}
     </div>

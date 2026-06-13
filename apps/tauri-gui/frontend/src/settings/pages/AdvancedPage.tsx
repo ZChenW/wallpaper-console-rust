@@ -1,3 +1,4 @@
+import React from 'react';
 import { getSettingsByCategoryAndLevel } from '../configSchema';
 import type { AdvancedPageProps } from '../types';
 import PageSection from '../components/PageSection';
@@ -17,13 +18,81 @@ export default function AdvancedPage({
 }: AdvancedPageProps) {
   const advanced = getSettingsByCategoryAndLevel('advanced', false);
 
+  // Show sub-selectors when a mode is explicitly chosen
+  const mode = configs['open_project_location_mode'] || 'file_manager';
+  const showFileMgr = mode === 'file_manager';
+  const showTerminalMgr = mode === 'terminal';
+  const isAskMode = configs['open_project_location_mode'] === 'ask';
+  const displayOpenMode = mode === 'terminal' ? 'terminal' : 'file_manager';
+
+  // Hide identity rows: don't show the sub-selector as a regular config row
+  const identityKeys = new Set(['gui_file_manager', 'gui_file_manager_custom', 'gui_terminal_file_manager', 'gui_terminal_file_manager_custom']);
+  const filteredAdvanced = advanced.filter((c) => !identityKeys.has(c.key));
+
   return (
     <div className="settings-page">
       <PageSection title="Development">
-        {advanced.map((c) => (
-          <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
-        ))}
+        {filteredAdvanced.map((c) => {
+          if (c.key === 'open_project_location_mode') {
+            return (
+              <React.Fragment key={c.key}>
+                <ConfigRow
+                  setting={c}
+                  value={displayOpenMode}
+                  saving={saving === c.key}
+                  onSet={(v) => onSet(c.key, v)}
+                />
+                {isAskMode && (
+                  <div className="settings-callout">
+                    Current behavior: ask on first use. The next time you open a project folder, you will be prompted to choose between File Manager and Terminal File Manager. Your choice will be saved.
+                  </div>
+                )}
+              </React.Fragment>
+            );
+          }
+          return (
+            <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
+          );
+        })}
       </PageSection>
+
+      {showFileMgr && (
+        <PageSection title="File Manager">
+          <ConfigRow
+            setting={advanced.find((c) => c.key === 'gui_file_manager')!}
+            value={configs['gui_file_manager'] ?? 'auto'}
+            saving={saving === 'gui_file_manager'}
+            onSet={(v) => onSet('gui_file_manager', v)}
+          />
+          {configs['gui_file_manager'] === 'custom' && (
+            <ConfigRow
+              setting={advanced.find((c) => c.key === 'gui_file_manager_custom')!}
+              value={configs['gui_file_manager_custom'] ?? ''}
+              saving={saving === 'gui_file_manager_custom'}
+              onSet={(v) => onSet('gui_file_manager_custom', v)}
+            />
+          )}
+        </PageSection>
+      )}
+
+      {showTerminalMgr && (
+        <PageSection title="Terminal File Manager">
+          <ConfigRow
+            setting={advanced.find((c) => c.key === 'gui_terminal_file_manager')!}
+            value={configs['gui_terminal_file_manager'] ?? 'yazi'}
+            saving={saving === 'gui_terminal_file_manager'}
+            onSet={(v) => onSet('gui_terminal_file_manager', v)}
+          />
+          {configs['gui_terminal_file_manager'] === 'custom' && (
+            <ConfigRow
+              setting={advanced.find((c) => c.key === 'gui_terminal_file_manager_custom')!}
+              value={configs['gui_terminal_file_manager_custom'] ?? ''}
+              saving={saving === 'gui_terminal_file_manager_custom'}
+              onSet={(v) => onSet('gui_terminal_file_manager_custom', v)}
+            />
+          )}
+        </PageSection>
+      )}
 
       <PageSection title="Known Settings">
         <p className="config-desc" style={{ marginBottom: 8 }}>

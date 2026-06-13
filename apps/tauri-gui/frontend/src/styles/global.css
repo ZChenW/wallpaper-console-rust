@@ -375,6 +375,14 @@ select:focus, input:focus { border-color: #555; }
 .dialog-actions button:hover { background: #3a3a3a; }
 .dialog-actions button.primary { background: #2a4a6a; border-color: #3a6a9a; }
 .dialog-actions button.danger { background: #4a2020; border-color: #6a3030; color: #f87171; }
+.dialog-actions .choice-btn {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+}
+.dialog-actions .choice-btn:hover {
+  border-color: var(--primary);
+}
 
 /* ── Sources & Settings scrollport ──────────────────────────────────── */
 .sources-view {
@@ -389,15 +397,9 @@ select:focus, input:focus { border-color: #555; }
 }
 .sources-list {
   padding-bottom: 24px;
-}
-
-/* ── Sources ───────────────────────────────────────────────────────── */
-.sources-list { display: flex; flex-direction: column; gap: 4px; }
-.source-group { margin-bottom: 8px; }
-.source-group-header {
-  font-size: 13px; font-weight: 600; color: #aaa;
-  padding: 6px 8px; cursor: pointer; user-select: none;
-  background: #1a1a1a; border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
 }
 .source-item {
   display: flex; align-items: center; gap: 8px;
@@ -771,14 +773,8 @@ input:focus {
 }
 
 .dialog-message,
-.source-group-header,
 .settings-group h3 {
   color: var(--text-muted);
-}
-
-.source-group-header {
-  background: var(--panel);
-  border: 1px solid var(--border);
 }
 
 .source-remove:hover { color: var(--danger); }

@@ -122,3 +122,13 @@ pub struct LibraryCounts {
     pub gifs: usize,
     pub videos: usize,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn awww_as_str() {
+        assert_eq!(Backend::Awww.as_str(), "awww");
+    }
+}

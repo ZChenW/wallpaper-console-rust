@@ -28,7 +28,7 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
   const { libraryVersion, invalidateLibrary } = useAppState();
   const requestSeq = useRef(0);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
-  const [openLocDialog, setOpenLocDialog] = useState<{ path: string; dir: string } | null>(null);
+  const [openLocDialog, setOpenLocDialog] = useState<{ path: string } | null>(null);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 200);
@@ -65,28 +65,34 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
 
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
-  const isWeEntry = useCallback((entry: WallpaperDTO) => entry.type === 'we_scene', []);
   const isFailedScene = useCallback((entry: WallpaperDTO) => entry.type === 'we_scene' && entry.backendStatus === 'failed', []);
-  const hasProjectFolder = useCallback((entry: WallpaperDTO) => {
-    return entry.type === 'we_scene' || entry.type === 'we_web' || entry.type === 'unsupported' || Boolean(entry.workshopId);
-  }, []);
 
   const handleOpenProjectFolder = useCallback(async (entryPath: string) => {
     const entry = entryByPath.get(entryPath);
     if (!entry) return;
     const mode = await api.configGet('open_project_location_mode');
     if (!mode || mode === 'ask') {
-      setOpenLocDialog({ path: entryPath, dir: entryPath });
+      setOpenLocDialog({ path: entryPath });
     } else {
-      await api.openProjectLocation(entryPath, mode);
+      const r = await api.openProjectLocation(entryPath, mode);
+      if (!r.success) {
+        window.dispatchEvent(new CustomEvent('wc-feedback', {
+          detail: { state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' },
+        }));
+      }
     }
   }, [entryByPath]);
 
-  const handleOpenLocSelect = useCallback(async (mode: 'files' | 'terminal') => {
+  const handleOpenLocSelect = useCallback(async (mode: 'file_manager' | 'terminal') => {
     if (!openLocDialog) return;
     await api.configSet('open_project_location_mode', mode);
-    await api.openProjectLocation(openLocDialog.dir, mode);
+    const r = await api.openProjectLocation(openLocDialog.path, mode);
     setOpenLocDialog(null);
+    if (!r.success) {
+      window.dispatchEvent(new CustomEvent('wc-feedback', {
+        detail: { state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' },
+      }));
+    }
   }, [openLocDialog]);
 
   const handleBatchAddFavorites = useCallback(async () => {
@@ -112,11 +118,6 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
   }, [selectedPaths]);
 
   const contextActions: ContextAction[] = useMemo(() => [
-    {
-      label: 'Apply with linux-wallpaperengine',
-      visible: (entry: WallpaperDTO) => isWeEntry(entry) && !isFailedScene(entry),
-      action: (path: string) => { onApply(path); },
-    },
     {
       label: 'Retry backend apply',
       visible: (entry: WallpaperDTO) => isFailedScene(entry),
@@ -144,8 +145,8 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
       },
     },
     {
-      label: 'Open Project Folder',
-      visible: (entry: WallpaperDTO) => hasProjectFolder(entry),
+      label: 'Open folder',
+      visible: (_entry: WallpaperDTO) => true,
       action: handleOpenProjectFolder,
     },
     {
@@ -157,7 +158,7 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
         if (workshopId) await navigator.clipboard?.writeText(workshopId);
       },
     },
-  ], [onApply, invalidateLibrary, entryByPath, isWeEntry, isFailedScene, hasProjectFolder, handleOpenProjectFolder]);
+  ], [onApply, invalidateLibrary, entryByPath, isFailedScene, handleOpenProjectFolder]);
 
   return (
     <div className="view library-view">

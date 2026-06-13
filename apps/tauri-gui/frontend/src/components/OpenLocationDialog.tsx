@@ -2,7 +2,7 @@ import { useEffect, useRef } from 'react';
 
 interface Props {
   path: string;
-  onSelect: (mode: 'files' | 'terminal') => void;
+  onSelect: (mode: 'file_manager' | 'terminal') => void;
   onClose: () => void;
 }
 
@@ -29,8 +29,8 @@ export default function OpenLocationDialog({ path, onSelect, onClose }: Props) {
         <h3 className="dialog-title">Open Project Folder</h3>
         <p className="dialog-message">{path}</p>
         <div className="dialog-actions">
-          <button className="primary" onClick={() => onSelect('files')}>Open in Files</button>
-          <button onClick={() => onSelect('terminal')}>Open in Terminal</button>
+          <button className="choice-btn" onClick={() => onSelect('file_manager')}>File Manager</button>
+          <button className="choice-btn" onClick={() => onSelect('terminal')}>Terminal File Manager</button>
         </div>
       </div>
     </div>

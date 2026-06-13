@@ -4,7 +4,6 @@ use crate::types::{Backend, FileType};
 /// Returns None for unsupported extensions.
 pub fn classify_extension(ext: &str) -> Option<(FileType, Backend)> {
     match ext.to_lowercase().as_str() {
-        // Images → awww
         "png" | "jpg" | "jpeg" | "webp" | "bmp" => Some((FileType::Image, Backend::Awww)),
         // GIF → configurable backend (default awww)
         "gif" => Some((FileType::Gif, Backend::Awww)),

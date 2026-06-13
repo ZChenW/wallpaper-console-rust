@@ -11,6 +11,7 @@ import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from '.
 import ConfirmDialog from '../components/ConfirmDialog';
 import { useAppState } from '../state/AppStateContext';
 import SettingsSidebar from '../settings/SettingsSidebar';
+import { resolveImageBackendDisplay } from '../settings/imageBackendDisplay';
 import {
   ALL_SETTINGS,
   SettingsCategory,
@@ -53,10 +54,18 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
     const allKeys = ALL_SETTINGS.map((c) => c.key);
     const results = await Promise.allSettled(allKeys.map((key) => api.configGet(key)));
     const map: Record<string, string> = {};
+    const ibIdx = allKeys.indexOf('image_backend');
     allKeys.forEach((key, i) => {
       const r = results[i];
       map[key] = r.status === 'fulfilled' ? r.value : '';
     });
+    const imageBackendResult = results[ibIdx];
+    const raw = imageBackendResult?.status === 'fulfilled' ? imageBackendResult.value : null;
+    const resolved = resolveImageBackendDisplay(raw, imageBackendResult?.status === 'fulfilled');
+    map['image_backend'] = resolved.display;
+    if (resolved.shouldMigrate) {
+      void api.configSet('image_backend', 'awww').catch(() => {});
+    }
     setConfigs(map);
     setLoading(false);
   }, []);
@@ -234,11 +243,6 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
         libraryStatus={libraryStatus}
         weStatus={weStatus}
         thumbCache={thumbCache}
-        configs={configs}
-        dbAction={dbAction}
-        operationLock={operationLock}
-        runDbAction={runDbAction}
-        handleCleanupThumbnails={handleCleanupThumbnails}
       />
     ),
     wallpaper: () => (

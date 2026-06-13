@@ -1000,6 +1000,7 @@ fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::Wallpap
             ext: parts[1].to_string(),
             backend: match parts[2] {
                 "mpvpaper" => Backend::Mpvpaper,
+                "swww" => Backend::Awww,
                 "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
                 "chromium-web" | "webkit-layer-shell" | "unsupported" => Backend::Unsupported,
                 _ => Backend::Awww,

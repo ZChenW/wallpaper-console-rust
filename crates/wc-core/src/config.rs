@@ -26,6 +26,7 @@ pub fn default_config() -> HashMap<String, String> {
     defaults.insert("awww_transition_type".into(), "fade".into());
     defaults.insert("awww_transition_duration".into(), "1".into());
     defaults.insert("awww_resize".into(), "crop".into());
+    defaults.insert("wallpaper_transition_fps".into(), "60".into());
     defaults.insert("linux_wallpaperengine_enabled".into(), "on".into());
     defaults.insert("linux_wallpaperengine_path".into(), "auto".into());
     defaults.insert("linux_wallpaperengine_scaling".into(), "default".into());
@@ -43,6 +44,11 @@ pub fn default_config() -> HashMap<String, String> {
     defaults.insert("gui_thumbnail_failure_ttl_secs".into(), "900".into());
     defaults.insert("gui_debug_logs".into(), "off".into());
     defaults.insert("storage_backend".into(), "sqlite".into());
+    defaults.insert("open_project_location_mode".into(), "ask".into());
+    defaults.insert("gui_file_manager".into(), "auto".into());
+    defaults.insert("gui_file_manager_custom".into(), "".into());
+    defaults.insert("gui_terminal_file_manager".into(), "yazi".into());
+    defaults.insert("gui_terminal_file_manager_custom".into(), "".into());
     defaults
 }
 
@@ -159,9 +165,41 @@ pub fn read_config_value(config_dir: &Path, key: &str, default: &str) -> String 
     }
 }
 
+/// Pure normalization: map any image_backend value to a valid backend name.
+/// "mpvpaper" => "mpvpaper", "awww" | "swww" => "awww", anything else => "awww".
+pub fn normalize_image_backend(raw: &str) -> &'static str {
+    match raw {
+        "mpvpaper" => "mpvpaper",
+        _ => "awww",
+    }
+}
+
 /// A handle for the wallpaper-console config directory.
 pub struct ConfigDir {
     pub path: PathBuf,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_image_backend_known() {
+        assert_eq!(normalize_image_backend("awww"), "awww");
+        assert_eq!(normalize_image_backend("mpvpaper"), "mpvpaper");
+    }
+
+    #[test]
+    fn normalize_image_backend_legacy_swww() {
+        assert_eq!(normalize_image_backend("swww"), "awww");
+    }
+
+    #[test]
+    fn normalize_image_backend_unknown_fallback() {
+        assert_eq!(normalize_image_backend("bad"), "awww");
+        assert_eq!(normalize_image_backend(""), "awww");
+        assert_eq!(normalize_image_backend("unknown"), "awww");
+    }
 }
 
 impl ConfigDir {

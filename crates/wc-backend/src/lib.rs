@@ -52,7 +52,14 @@ pub fn stop_backends_for_target(s: &StorageApi, target_backend: Backend) -> Resu
     if target_backend == Backend::Mpvpaper || target_backend == Backend::LinuxWallpaperEngine {
         return stop_all_backends(Some(s));
     }
-    if last == "awww" {
+    if target_backend == Backend::Awww {
+        let user = whoami();
+        let _ = Command::new("pkill")
+            .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
+            .status();
+        return Ok(());
+    }
+    if last == "awww" || last == "swww" {
         let user = whoami();
         let _ = Command::new("pkill")
             .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
@@ -84,24 +91,30 @@ pub fn apply_wallpaper(s: &StorageApi, path: &str, backend: Backend) -> Result<(
     match backend {
         Backend::Awww => {
             ensure_awww_daemon()?;
-            let transition = s.config_get("awww_transition_type", "fade");
+            let resize_raw = s.config_get("awww_resize", "crop");
+            let resize = normalize_awww_resize(&resize_raw);
+            let transition_type = s.config_get("awww_transition_type", "fade");
             let duration = s.config_get("awww_transition_duration", "1");
-            let resize = s.config_get("awww_resize", "crop");
-            let status = Command::new("awww")
-                .arg("img")
-                .arg("--transition-type")
-                .arg(&transition)
-                .arg("--transition-duration")
-                .arg(&duration)
-                .arg("--resize")
-                .arg(&resize)
-                .arg("--filter")
-                .arg("Lanczos3")
-                .arg(path)
-                .status()
+            let fps = s.config_get("wallpaper_transition_fps", "60");
+            let mut cmd = build_awww_img_command(path, resize, &transition_type, &duration, &fps);
+            cmd.arg("--filter").arg("Lanczos3");
+            let output = cmd
+                .output()
                 .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-            if !status.success() {
-                return Err(WcError::Other("awww failed to apply wallpaper".into()));
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    "no renderer output".into()
+                };
+                return Err(WcError::Other(format!(
+                    "awww apply failed with status {}: {}",
+                    output.status, detail
+                )));
             }
         }
         Backend::Mpvpaper => {
@@ -137,9 +150,9 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
     }
     let entry = wc_scan::make_entry(&current)
         .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    // Route through config
+    let raw = s.config_get("image_backend", "awww");
     let backend = match entry.file_type {
-        wc_core::types::FileType::Image => match s.config_get("image_backend", "awww").as_str() {
+        wc_core::types::FileType::Image => match wc_core::config::normalize_image_backend(&raw) {
             "mpvpaper" => Backend::Mpvpaper,
             _ => Backend::Awww,
         },
@@ -162,20 +175,93 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
 
 fn ensure_awww_daemon() -> Result<(), WcError> {
     let user = whoami();
-    let pgrep = Command::new("pgrep")
-        .args(["-u", &user, "-x", "awww-daemon"])
-        .status()
-        .unwrap_or_else(|_| std::process::ExitStatus::default());
-    if pgrep.success() {
+    if is_awww_daemon_running(&user) {
         return Ok(());
     }
-    let _ = Command::new("setsid").args(["-f", "awww-daemon"]).status();
-    std::thread::sleep(std::time::Duration::from_millis(200));
+    start_awww_daemon_detached()?;
+    for _ in 0..30 {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        if is_awww_daemon_running(&user) {
+            return Ok(());
+        }
+    }
+    Err(WcError::Other(
+        "awww-daemon failed to start. Check 'awww-daemon' is installed and your compositor supports wlr-layer-shell."
+            .into(),
+    ))
+}
+
+fn is_awww_daemon_running(user: &str) -> bool {
+    if user.is_empty() {
+        return false;
+    }
+    matches!(
+        std::process::Command::new("pgrep")
+            .arg("-u")
+            .arg(user)
+            .arg("-x")
+            .arg("awww-daemon")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status(),
+        Ok(s) if s.success()
+    )
+}
+
+fn start_awww_daemon_detached() -> Result<(), WcError> {
+    let status = std::process::Command::new("setsid")
+        .args(["-f", "awww-daemon"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map_err(|_| {
+            WcError::Other(
+                "setsid not available — cannot launch awww-daemon. \
+                 setsid is part of util-linux; install it with your package manager."
+                    .into(),
+            )
+        })?;
+    if !status.success() {
+        return Err(WcError::Other(
+            "awww-daemon not found. Install awww (pip install awww or AUR).".into(),
+        ));
+    }
     Ok(())
 }
 
+fn normalize_awww_resize(raw: &str) -> &'static str {
+    match raw {
+        "crop" => "crop",
+        "fit" => "fit",
+        "stretch" => "stretch",
+        _ => "crop",
+    }
+}
+
+fn build_awww_img_command(
+    path: &str,
+    resize: &str,
+    transition_type: &str,
+    duration: &str,
+    fps: &str,
+) -> std::process::Command {
+    let mut cmd = std::process::Command::new("awww");
+    cmd.arg("img")
+        .arg(path)
+        .arg("--resize")
+        .arg(resize)
+        .arg("--transition-type")
+        .arg(transition_type)
+        .arg("--transition-duration")
+        .arg(duration)
+        .arg("--transition-fps")
+        .arg(fps);
+    cmd
+}
+
 fn whoami() -> String {
-    std::env::var("USER").unwrap_or_else(|_| "unknown".into())
+    std::env::var("USER").unwrap_or_default()
 }
 
 #[cfg(test)]
@@ -257,5 +343,46 @@ mod tests {
             "apply_wallpaper should reject Unsupported backend, got: {}",
             msg
         );
+    }
+
+    #[test]
+    fn awww_command_includes_transition_fps() {
+        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", "1", "60");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--resize".to_string()));
+        assert!(args.contains(&"crop".to_string()));
+        assert!(args.contains(&"--transition-type".to_string()));
+        assert!(args.contains(&"fade".to_string()));
+        assert!(args.contains(&"--transition-fps".to_string()));
+        assert!(args.contains(&"60".to_string()));
+    }
+
+    #[test]
+    fn normalize_awww_resize_known_values() {
+        assert_eq!(normalize_awww_resize("crop"), "crop");
+        assert_eq!(normalize_awww_resize("fit"), "fit");
+        assert_eq!(normalize_awww_resize("stretch"), "stretch");
+    }
+
+    #[test]
+    fn normalize_awww_resize_unknown_fallback() {
+        assert_eq!(normalize_awww_resize("unknown"), "crop");
+        assert_eq!(normalize_awww_resize(""), "crop");
+        assert_eq!(normalize_awww_resize("center"), "crop");
+    }
+
+    #[test]
+    fn awww_resize_unknown_fallback_to_crop() {
+        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", "1", "60");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(args.contains(&"--resize".to_string()));
+        assert!(args.contains(&"crop".to_string()));
+        assert!(!args.contains(&"unknown".to_string()));
     }
 }

@@ -8,11 +8,6 @@ export interface GeneralPageProps {
   libraryStatus: LibrarySourceStatusDTO | null;
   weStatus: LinuxWallpaperEngineStatusDTO | null;
   thumbCache: ThumbnailCacheDTO | null;
-  configs: Record<string, string>;
-  dbAction: DbAction | null;
-  operationLock: boolean;
-  runDbAction: (action: DbAction, label: string, fn: () => Promise<CommandResult>) => Promise<void>;
-  handleCleanupThumbnails: () => Promise<void>;
 }
 
 export interface WallpaperPageProps {

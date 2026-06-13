@@ -16,7 +16,7 @@ export const ALL_SETTINGS: SettingEntry[] = [
   {
     key: 'image_backend', label: 'Image backend', type: 'select',
     options: ['awww', 'mpvpaper'], category: 'wallpaper',
-    description: 'Recommended: awww for static images',
+    description: 'Recommended: awww for smooth static image transitions',
   },
   {
     key: 'gif_backend', label: 'GIF backend', type: 'select',
@@ -33,12 +33,17 @@ export const ALL_SETTINGS: SettingEntry[] = [
     options: ['crop', 'fit', 'stretch'], category: 'wallpaper',
   },
   {
-    key: 'awww_transition_type', label: 'awww transition', type: 'select',
+    key: 'awww_transition_type', label: 'Transition', type: 'select',
     options: ['fade', 'slide', 'wipe'], category: 'wallpaper',
   },
   {
-    key: 'awww_transition_duration', label: 'awww duration (s)', type: 'text',
+    key: 'awww_transition_duration', label: 'Transition duration (s)', type: 'text',
     placeholder: '1', category: 'wallpaper',
+  },
+  {
+    key: 'wallpaper_transition_fps', label: 'Transition FPS', type: 'number',
+    placeholder: '60', category: 'wallpaper', advanced: true,
+    description: 'Used by awww transitions',
   },
   {
     key: 'mpvpaper_options', label: 'mpvpaper options', type: 'text',
@@ -120,8 +125,24 @@ export const ALL_SETTINGS: SettingEntry[] = [
   },
   {
     key: 'open_project_location_mode', label: 'Open project folders with', type: 'select',
-    options: ['ask', 'files', 'terminal'], category: 'advanced',
-    description: 'Choose whether to open project locations in file manager or terminal',
+    options: ['file_manager', 'terminal'], category: 'advanced',
+    description: 'Choose your default after first use. The first time you will be asked to pick.',
+  },
+  {
+    key: 'gui_file_manager', label: 'File Manager', type: 'select',
+    options: ['auto', 'nautilus', 'dolphin', 'thunar', 'nemo', 'pcmanfm', 'custom'], category: 'advanced',
+  },
+  {
+    key: 'gui_file_manager_custom', label: 'Custom file manager command', type: 'text',
+    placeholder: 'thunar', category: 'advanced',
+  },
+  {
+    key: 'gui_terminal_file_manager', label: 'Terminal File Manager', type: 'select',
+    options: ['yazi', 'custom'], category: 'advanced',
+  },
+  {
+    key: 'gui_terminal_file_manager_custom', label: 'Custom terminal file manager command', type: 'text',
+    placeholder: 'yazi', category: 'advanced',
   },
 ];
 
@@ -148,6 +169,10 @@ export function getSettingsByCategoryAndLevel(
 }
 
 export function normalizeConfigValue(key: string, value: string): string {
+  if (key === 'image_backend') {
+    if (value === 'mpvpaper') return 'mpvpaper';
+    return 'awww'; // Legacy swww / unknown values fallback to awww
+  }
   if (key === 'gui_thumbnail_cleanup_days') {
     return clampIntString(value, 1, 3650, 30);
   }
@@ -160,11 +185,26 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'linux_wallpaperengine_volume') {
     return clampIntString(value, 0, 100, 100);
   }
+  if (key === 'wallpaper_transition_fps') {
+    return clampIntString(value, 1, 240, 60);
+  }
   if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
     return value.trim() || 'auto';
   }
   if (key === 'linux_wallpaperengine_target') {
     return value.trim();
+  }
+  if (key === 'open_project_location_mode') {
+    if (value === 'terminal') return 'terminal';
+    if (value === 'files') return 'file_manager'; // Legacy "files" → "file_manager"
+    return 'file_manager';
+  }
+  if (key === 'gui_file_manager') {
+    const valid = ['auto', 'nautilus', 'dolphin', 'thunar', 'nemo', 'pcmanfm', 'custom'];
+    return valid.includes(value) ? value : 'auto';
+  }
+  if (key === 'gui_terminal_file_manager') {
+    return value === 'custom' ? 'custom' : 'yazi';
   }
   return value;
 }

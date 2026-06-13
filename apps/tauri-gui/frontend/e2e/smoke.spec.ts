@@ -13,22 +13,21 @@ test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
   await expect(card.getByText('WE Web · Unsupported')).toBeVisible();
   await expect(card.getByText(/Web wallpaper — unsupported/)).toBeVisible();
   await card.click({ button: 'right' });
-  await expect(page.getByText('Apply Web wallpaper')).toHaveCount(0);
+  await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
   await expect(page.getByText('Open experimental Chromium preview')).toHaveCount(0);
   await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
 });
 
-test('settings defaults to General with status cards and WE Web note', async ({ page }) => {
+test('settings defaults to General with status cards only', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByText('Wallpaper Engine Web projects are indexed but unsupported')).toBeVisible();
   await expect(page.locator('.status-card')).toHaveCount(3);
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Backup Database' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Status' })).toBeVisible();
+  // Quick Actions should no longer appear on General page
+  await expect(page.getByRole('heading', { name: 'Quick Actions' })).toHaveCount(0);
+  // Web Wallpaper Renderer should not appear
   await expect(page.getByText('Web Wallpaper Renderer')).toHaveCount(0);
   await expect(page.getByText('Chromium Preview (Experimental)')).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Status' })).toBeVisible();
-  await expect(page.getByRole('heading', { name: 'Quick Actions' })).toBeVisible();
 });
 
 test('settings can navigate to all categories', async ({ page }) => {
@@ -143,4 +142,67 @@ test('context menu action shows error feedback on failure', async ({ page }) => 
   await page.getByText('Add to Favorites').click();
   // Error toast should appear
   await expect(page.locator('.toast')).toBeVisible({ timeout: 5000 });
+});
+
+test('sources page renders flat list without group headers', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Sources' }).click();
+  await expect(page.locator('.source-item').first()).toBeVisible();
+  await expect(page.getByText('Other Sources')).toHaveCount(0);
+  await expect(page.locator('.source-group-header')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Scan Wallpaper Engine' })).toBeVisible();
+});
+
+test('settings wallpaper page shows awww image backend', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
+  await expect(page.getByText(/awww for smooth/)).toBeVisible({ timeout: 3000 });
+  // Expand advanced section for FPS
+  await page.locator('.settings-advanced summary').click();
+  await expect(page.getByText('Transition FPS')).toBeVisible({ timeout: 3000 });
+});
+
+test('wallpaper engine page shows WE Web unsupported notice', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Wallpaper Engine', exact: true }).click();
+  await expect(page.getByText('Wallpaper Engine Web projects appear in Library for metadata and preview only')).toBeVisible();
+});
+
+test('settings advanced shows open location mode without ask option', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Advanced', exact: true }).click();
+  const select = page.locator('.config-row').filter({ hasText: 'Open project folders with' }).locator('select');
+  const options = await select.locator('option').allTextContents();
+  expect(options).not.toContain('ask');
+  expect(options).toContain('file_manager');
+  // Ask-on-first-use callout should be visible by default
+  await expect(page.getByText(/ask on first use/)).toBeVisible();
+  await select.selectOption({ value: 'terminal' });
+  await expect(page.getByRole('heading', { name: 'Terminal File Manager' })).toBeVisible({ timeout: 5000 });
+  await select.selectOption({ value: 'file_manager' });
+  await expect(page.getByRole('heading', { name: 'File Manager' })).toBeVisible({ timeout: 5000 });
+});
+
+test('WE Scene context menu uses generic Apply label', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('combobox').first().selectOption('we_scene');
+  const card = page.locator('.wallpaper-card').filter({ hasText: 'WE Scene' }).first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
+  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+});
+
+test('regular wallpaper context menu has open folder', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('combobox').first().selectOption('image');
+  const card = page.locator('.wallpaper-card').first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
 });

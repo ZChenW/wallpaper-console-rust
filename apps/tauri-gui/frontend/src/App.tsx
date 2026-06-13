@@ -50,26 +50,43 @@ function AppShell() {
     return () => window.removeEventListener('wc-feedback', handler);
   }, [setFeedbackWithAutoDismiss]);
 
+  const pendingApplyRef = useRef<string | null>(null);
+
   const handleApply = useCallback(async (path: string) => {
-    if (applyingRef.current) return; // Prevent concurrent applies
+    if (applyingRef.current) {
+      pendingApplyRef.current = path;
+      return;
+    }
     applyingRef.current = true;
     setApplying(true);
-    setFeedbackWithAutoDismiss({ state: 'running', label: 'Applying wallpaper' });
-    try {
-      const r = await api.apply(path);
-      if (r.success) {
-        invalidateHistoryCache();
-        setFeedbackWithAutoDismiss({ state: 'success', label: 'Applied', detail: path.split('/').pop() });
-      } else {
-        setFeedbackWithAutoDismiss(commandErrorFeedback('Apply', r));
+
+    let currentPath: string | null = path;
+    while (currentPath !== null) {
+      const p: string = currentPath;
+      currentPath = null; // Clear for this iteration
+      setFeedbackWithAutoDismiss({ state: 'running', label: 'Applying wallpaper' });
+      try {
+        const r = await api.apply(p);
+        if (r.success) {
+          invalidateHistoryCache();
+          setFeedbackWithAutoDismiss({ state: 'success', label: 'Applied', detail: p.split('/').pop() });
+        } else {
+          setFeedbackWithAutoDismiss(commandErrorFeedback('Apply', r));
+        }
+        await refreshStatus();
+      } catch (e) {
+        setFeedbackWithAutoDismiss({ state: 'error', label: 'Apply failed', detail: String(e) });
       }
-      await refreshStatus();
-    } catch (e) {
-      setFeedbackWithAutoDismiss({ state: 'error', label: 'Apply failed', detail: String(e) });
-    } finally {
-      setApplying(false);
-      applyingRef.current = false;
+      // Drain next pending intent
+      const next = pendingApplyRef.current;
+      pendingApplyRef.current = null;
+      if (next && next !== p) {
+        currentPath = next;
+      }
     }
+
+    setApplying(false);
+    applyingRef.current = false;
   }, [refreshStatus, setFeedbackWithAutoDismiss]);
 
   const handleToolbarAction = useCallback(async (

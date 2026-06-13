@@ -295,6 +295,7 @@ export const api = {
       awww_resize: 'crop',
       awww_transition_type: 'fade',
       awww_transition_duration: '1',
+      wallpaper_transition_fps: '60',
       mpvpaper_options: 'no-audio --loop-file=inf',
       mpvpaper_output: '*',
       linux_wallpaperengine_enabled: 'on',
@@ -314,6 +315,10 @@ export const api = {
       preview_metadata: 'compact',
       gui_debug_logs: 'off',
       open_project_location_mode: 'ask',
+      gui_file_manager: 'auto',
+      gui_file_manager_custom: '',
+      gui_terminal_file_manager: 'yazi',
+      gui_terminal_file_manager_custom: '',
     };
     return defaults[key] ?? '';
   },
