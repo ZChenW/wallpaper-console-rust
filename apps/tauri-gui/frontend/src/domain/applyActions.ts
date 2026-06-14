@@ -17,7 +17,7 @@ const VALID_KINDS: ApplyActionKind[] = [
 
 function isValidAction(a: ApplyActionDTO): a is ApplyActionDTO & { kind: ApplyActionKind; label: string; enabled: boolean } {
   if (!a || !a.kind || !a.label) return false;
-  if (typeof a.enabled !== 'boolean' || !a.enabled) return false;
+  if (typeof a.enabled !== 'boolean') return false;
   if (!VALID_KINDS.includes(a.kind)) return false;
   return true;
 }

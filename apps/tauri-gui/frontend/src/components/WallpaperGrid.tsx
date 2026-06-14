@@ -235,8 +235,6 @@ export default function WallpaperGrid({
           x={contextMenu.x}
           y={contextMenu.y}
           path={contextMenu.path}
-          canApply={canApply(contextEntry)}
-          onApply={onApply}
           actions={buildContextActions
             ? buildContextActions(contextEntry)
             : contextActions.filter((action) => !action.visible || action.visible(contextEntry))}

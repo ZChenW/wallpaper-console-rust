@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { api, WallpaperDTO } from '../api/bridge';
+import { isApplyAvailable } from '../domain/applyActions';
 import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
 import { Shuffle } from 'lucide-react';
 
@@ -52,6 +53,11 @@ export default function FavoritesView({ onApply, applying, active = true }: Prop
   }, [load]);
 
   const contextActions: ContextAction[] = [
+    {
+      label: 'Apply',
+      visible: (entry: WallpaperDTO) => isApplyAvailable(entry),
+      action: (path: string) => { onApply(path); },
+    },
     {
       label: 'Remove from Favorites',
       action: async (path: string) => {

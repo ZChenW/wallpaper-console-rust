@@ -141,7 +141,7 @@ describe('normalizeApplyActions with applyActions present', () => {
     assert(a[0].kind === 'open_folder');
   });
 
-  it('malformed: enabled=false filtered', () => {
+  it('malformed: enabled=false is retained (render layer filters)', () => {
     const entry: WallpaperDTO = {
       path: '/test/x', type: 'image', ext: 'jpg', backend: 'awww',
       size: 1, mtime: 1, resolution: '1x1',
@@ -151,8 +151,12 @@ describe('normalizeApplyActions with applyActions present', () => {
       ],
     };
     const a = normalizeApplyActions(entry);
-    assert(a.length === 1);
-    assert(a[0].kind === 'open_folder');
+    assert(a.length === 2);
+    assert(a.find(x => x.kind === 'apply')!.enabled === false);
+    assert(a.find(x => x.kind === 'open_folder')!.enabled === true);
+    const enabled = a.filter(x => x.enabled);
+    assert(enabled.length === 1);
+    assert(enabled[0].kind === 'open_folder');
   });
 
   it('malformed: missing kind filtered', () => {
@@ -177,6 +181,26 @@ describe('normalizeApplyActions with applyActions present', () => {
       ],
     };
     assert.equal(getActionReason(entry, 'apply'), 'test reason');
+  });
+
+  it('getActionReason returns reason for disabled action', () => {
+    const entry: WallpaperDTO = {
+      ...IMAGE,
+      applyActions: [
+        { kind: 'apply', label: 'Apply', enabled: false, reason: 'backend unavailable' },
+      ],
+    };
+    assert.equal(getActionReason(entry, 'apply'), 'backend unavailable');
+  });
+
+  it('hasEnabledAction false for disabled action', () => {
+    const entry: WallpaperDTO = {
+      ...IMAGE,
+      applyActions: [
+        { kind: 'apply', label: 'Apply', enabled: false },
+      ],
+    };
+    assert(!hasEnabledAction(entry, 'apply'));
   });
 
   it('preserves DTO order', () => {

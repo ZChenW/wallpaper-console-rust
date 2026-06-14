@@ -122,16 +122,27 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     const normalized = normalizeApplyActions(entry);
     for (const a of normalized) {
       if (!a.enabled) continue;
-      if (a.kind === 'apply') continue;
 
       switch (a.kind) {
+        case 'apply':
+          actions.push({
+            label: a.label,
+            action: (path: string) => { onApply(path); },
+          });
+          break;
         case 'retry_backend_apply':
           actions.push({
             label: a.label,
             action: async (path: string) => {
-              try { await api.weClearBackendError(path); } catch { /* */ }
+              let clearOk = true;
+              try { await api.weClearBackendError(path); } catch {
+                clearOk = false;
+                window.dispatchEvent(new CustomEvent('wc-feedback', {
+                  detail: { state: 'error', label: 'Clear backend error', detail: 'Failed to clear backend error before retry.' },
+                }));
+              }
               onApply(path);
-              setTimeout(() => invalidateLibrary(), 500);
+              if (clearOk) setTimeout(() => invalidateLibrary(), 500);
             },
           });
           break;
