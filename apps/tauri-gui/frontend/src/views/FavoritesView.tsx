@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api, WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
-import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
+import WallpaperGrid from '../components/WallpaperGrid';
 import { Shuffle } from 'lucide-react';
+import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
 
 interface Props {
   onApply: (path: string) => void;
@@ -52,29 +53,38 @@ export default function FavoritesView({ onApply, applying, active = true }: Prop
     return () => window.removeEventListener('favorites-cache-invalidated', handler);
   }, [load]);
 
-  const contextActions: ContextAction[] = [
-    {
-      label: 'Apply',
-      visible: (entry: WallpaperDTO) => isApplyAvailable(entry),
-      action: (path: string) => { onApply(path); },
-    },
-    {
+  const entryByPath = useMemo(() => new Map(entries.map((e) => [e.path, e])), [entries]);
+
+  const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
+    onApply,
+    invalidate: () => load(),
+    openFolder: async (path: string) => { await api.revealInFileManager(path); },
+    findEntry: (path) => entryByPath.get(path),
+  });
+
+  const buildContextActions = useCallback((entry: WallpaperDTO) => {
+    const actions = buildBaseActions(entry);
+    actions.push({
       label: 'Remove from Favorites',
       action: async (path: string) => {
         await api.favoriteRemove(path);
         load();
       },
       danger: true,
-    },
-    {
-      label: 'Open Containing Folder',
-      action: async (path: string) => { await api.revealInFileManager(path); },
-    },
-  ];
+    });
+    return actions;
+  }, [buildBaseActions, load]);
 
-  const handleRandom = async () => {
+  const handleRandom = () => {
     if (entries.length === 0) return;
-    const pick = entries[Math.floor(Math.random() * entries.length)];
+    const applicable = entries.filter(e => isApplyAvailable(e));
+    if (applicable.length === 0) {
+      window.dispatchEvent(new CustomEvent('wc-feedback', {
+        detail: { state: 'warning', label: 'No applicable', detail: 'No items in favorites can be applied as a live wallpaper.' },
+      }));
+      return;
+    }
+    const pick = applicable[Math.floor(Math.random() * applicable.length)];
     onApply(pick.path);
   };
 
@@ -96,7 +106,7 @@ export default function FavoritesView({ onApply, applying, active = true }: Prop
           onApply={onApply}
           applying={applying}
           emptyText="No favorites yet — right-click a wallpaper in Library to add"
-          contextActions={contextActions}
+          buildContextActions={buildContextActions}
           active={active}
         />
       )}

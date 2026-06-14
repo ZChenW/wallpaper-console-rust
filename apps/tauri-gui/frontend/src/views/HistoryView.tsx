@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { api, WallpaperDTO } from '../api/bridge';
+import { isApplyAvailable } from '../domain/applyActions';
 import WallpaperGrid from '../components/WallpaperGrid';
 import ConfirmDialog from '../components/ConfirmDialog';
 import { Shuffle, Trash2 } from 'lucide-react';
+import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
 
 interface Props {
   onApply: (path: string) => void;
@@ -61,9 +63,24 @@ export default function HistoryView({ onApply, applying, active = true }: Props)
     setShowClear(false);
   };
 
+  const entryByPath = useMemo(() => new Map(entries.map((e) => [e.path, e])), [entries]);
+
+  const { buildContextActions } = useLibraryEntryActions({
+    onApply,
+    openFolder: async (path: string) => { await api.revealInFileManager(path); },
+    findEntry: (path) => entryByPath.get(path),
+  });
+
   const handleRandom = () => {
     if (entries.length === 0) return;
-    const pick = entries[Math.floor(Math.random() * entries.length)];
+    const applicable = entries.filter(e => isApplyAvailable(e));
+    if (applicable.length === 0) {
+      window.dispatchEvent(new CustomEvent('wc-feedback', {
+        detail: { state: 'warning', label: 'No applicable', detail: 'No items in history can be applied as a live wallpaper.' },
+      }));
+      return;
+    }
+    const pick = applicable[Math.floor(Math.random() * applicable.length)];
     onApply(pick.path);
   };
 
@@ -88,6 +105,7 @@ export default function HistoryView({ onApply, applying, active = true }: Props)
           onApply={onApply}
           applying={applying}
           emptyText="No history yet — apply a wallpaper to start"
+          buildContextActions={buildContextActions}
           active={active}
         />
       )}

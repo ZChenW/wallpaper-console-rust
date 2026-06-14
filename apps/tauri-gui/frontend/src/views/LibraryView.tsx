@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Search, Filter, X } from 'lucide-react';
 import { api, WallpaperDTO } from '../api/bridge';
-import { normalizeApplyActions } from '../domain/applyActions';
 import { measureAsync, recordMetric } from '../perf/metrics';
-import WallpaperGrid, { ContextAction } from '../components/WallpaperGrid';
+import WallpaperGrid from '../components/WallpaperGrid';
 import OpenLocationDialog from '../components/OpenLocationDialog';
+import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
 import { useAppState } from '../state/AppStateContext';
 import { invalidateFavoritesCache } from './FavoritesView';
 
@@ -116,75 +116,15 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
     }
   }, [selectedPaths]);
 
-  const buildContextActions = useCallback((entry: WallpaperDTO): ContextAction[] => {
-    const actions: ContextAction[] = [];
+  const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
+    onApply,
+    invalidate: () => invalidateLibrary(),
+    openFolder: handleOpenProjectFolder,
+    findEntry: (path) => entryByPath.get(path),
+  });
 
-    const normalized = normalizeApplyActions(entry);
-    for (const a of normalized) {
-      if (!a.enabled) continue;
-
-      switch (a.kind) {
-        case 'apply':
-          actions.push({
-            label: a.label,
-            action: (path: string) => { onApply(path); },
-          });
-          break;
-        case 'retry_backend_apply':
-          actions.push({
-            label: a.label,
-            action: async (path: string) => {
-              let clearOk = true;
-              try { await api.weClearBackendError(path); } catch {
-                clearOk = false;
-                window.dispatchEvent(new CustomEvent('wc-feedback', {
-                  detail: { state: 'error', label: 'Clear backend error', detail: 'Failed to clear backend error before retry.' },
-                }));
-              }
-              onApply(path);
-              if (clearOk) setTimeout(() => invalidateLibrary(), 500);
-            },
-          });
-          break;
-        case 'apply_preview':
-          if (entry.previewPath) {
-            actions.push({
-              label: a.label,
-              action: (path: string) => {
-                const e = entryByPath.get(path);
-                if (e?.previewPath) onApply(e.previewPath);
-              },
-            });
-          }
-          break;
-        case 'open_folder':
-          actions.push({
-            label: a.label,
-            action: handleOpenProjectFolder,
-          });
-          break;
-        case 'copy_workshop_id':
-          if (entry.workshopId) {
-            actions.push({
-              label: a.label,
-              action: async (path: string) => {
-                const e = entryByPath.get(path);
-                if (e?.workshopId) {
-                  try {
-                    await navigator.clipboard?.writeText(e.workshopId);
-                  } catch {
-                    window.dispatchEvent(new CustomEvent('wc-feedback', {
-                      detail: { state: 'error', label: 'Copy Workshop ID', detail: 'Clipboard write failed' },
-                    }));
-                  }
-                }
-              },
-            });
-          }
-          break;
-      }
-    }
-
+  const buildContextActions = useCallback((entry: WallpaperDTO) => {
+    const actions = buildBaseActions(entry);
     actions.push({
       label: 'Add to Favorites',
       action: async (path: string) => {
@@ -193,9 +133,8 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
         invalidateFavoritesCache();
       },
     });
-
     return actions;
-  }, [onApply, invalidateLibrary, entryByPath, handleOpenProjectFolder]);
+  }, [buildBaseActions]);
 
   return (
     <div className="view library-view">
