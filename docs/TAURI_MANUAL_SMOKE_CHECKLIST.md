@@ -47,12 +47,12 @@ Use the checklist below from an interactive desktop session.
 - [ ] Confirm WE scene project `3558034522` appears as a single `WE Scene` card, not as `assets/*.png` fragments.
 - [ ] Confirm WE web project `3650880224` appears as a single `WE Web` card, not as `index.html` or `assets/*.png` fragments.
 - [ ] Confirm WE scene/web cards use `preview.gif` when present.
-- [ ] Right-click a WE Scene card. Confirm `Apply with linux-wallpaperengine`, `Apply preview GIF`, and `Copy Workshop ID` are visible.
-- [ ] Right-click a WE Web card. Confirm `Apply preview GIF`, `Open Project Folder`, and `Copy Workshop ID` are visible. `Apply with linux-wallpaperengine`, `Apply Web wallpaper`, and `Open experimental Chromium preview` must NOT appear.
+- [ ] Right-click a WE Scene card. Confirm the generic `Apply`, `Apply preview GIF`, and `Copy Workshop ID` are visible. `Apply with linux-wallpaperengine` must NOT appear.
+- [ ] Right-click a WE Web card. Confirm only browsing actions such as `Open folder` and `Copy Workshop ID` are visible. `Apply`, `Apply preview GIF`, `Apply with linux-wallpaperengine`, `Apply Web wallpaper`, and `Open experimental Chromium preview` must NOT appear.
 - [ ] Double-click a WE Web card. Confirm it reports a clear unsupported error and does not change current wallpaper state.
 - [ ] If `linux-wallpaperengine` is not installed, applying a WE scene card shows the install suggestion.
 - [ ] If `linux-wallpaperengine` is installed, apply a WE scene card and confirm current state points at the project folder, not `preview.gif`.
-- [ ] Right-click a WE Web card and choose `Apply preview GIF`. Confirm the GIF is set as wallpaper and current state points at the GIF path.
+- [ ] Confirm WE Web preview media is used only as the card thumbnail; it is not offered as a live wallpaper action.
 - [ ] Open Settings and run SQLite Verify.
 - [ ] Open Settings and confirm Wallpaper Engine Backend shows Ready/Missing with the detected binary path or install hint.
 - [ ] Open Settings and run Thumbnail Cache Status / Clear.

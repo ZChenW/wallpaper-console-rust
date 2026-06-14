@@ -1,4 +1,9 @@
 use super::common::{fail, ok, source_label, storage, CommandResult, SourceDto};
+use super::scan::{
+    finish_scan_error, finish_scan_success, index_current_sources, mark_scan_started,
+    update_scan_stage,
+};
+use std::path::Path;
 
 #[tauri::command]
 pub async fn sources_list() -> Result<Vec<SourceDto>, String> {
@@ -95,5 +100,52 @@ pub async fn remove_missing_sources() -> CommandResult {
 
 #[tauri::command]
 pub async fn scan_steam_workshop() -> CommandResult {
-    super::rescan().await
+    tauri::async_runtime::spawn_blocking(|| {
+        if let Err(err) = mark_scan_started("discovering Wallpaper Engine") {
+            return fail(err);
+        }
+
+        let result: Result<String, String> = (|| {
+            let s = storage()?;
+            let home = std::env::var("HOME").map_err(|_| "HOME is not set.".to_string())?;
+            let roots = wc_scan::discover_steam_workshop_roots(Path::new(&home));
+            if roots.is_empty() {
+                return Ok(
+                    "No Wallpaper Engine workshop directory found. Install or download Wallpaper Engine workshop content in Steam, then scan again."
+                        .to_string(),
+                );
+            }
+
+            let mut added = 0usize;
+            update_scan_stage("adding Wallpaper Engine sources");
+            for root in &roots {
+                if s.sources_add(&root.to_string_lossy())
+                    .map_err(|e| e.to_string())?
+                {
+                    added += 1;
+                }
+            }
+
+            let inserted = index_current_sources(&s)?;
+            Ok(format!(
+                "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s), {} wallpaper(s) indexed.",
+                roots.len(),
+                added,
+                inserted
+            ))
+        })();
+
+        match result {
+            Ok(msg) => {
+                finish_scan_success();
+                ok(msg)
+            }
+            Err(err) => {
+                finish_scan_error(&err);
+                fail(err)
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|e| fail(e.to_string()))
 }

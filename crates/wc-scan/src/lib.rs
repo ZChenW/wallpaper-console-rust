@@ -2,7 +2,7 @@
 
 use std::collections::HashSet;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use camino::Utf8PathBuf;
 use walkdir::WalkDir;
@@ -13,6 +13,37 @@ const WE_MARKER: &str = "/steamapps/workshop/content/431960";
 /// Flatpak Steam installs workshop content under a different prefix.
 const FLATPAK_WE_MARKER: &str =
     "/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960";
+
+/// Candidate Wallpaper Engine workshop roots for common native and Flatpak
+/// Steam installs under `home`.
+pub fn steam_workshop_root_candidates(home: &Path) -> Vec<PathBuf> {
+    [
+        ".local/share/Steam",
+        ".steam/steam",
+        ".steam/root",
+        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
+        ".var/app/com.valvesoftware.Steam/.steam/steam",
+        ".var/app/com.valvesoftware.Steam/data/Steam",
+    ]
+    .into_iter()
+    .map(|base| home.join(base).join("steamapps/workshop/content/431960"))
+    .collect()
+}
+
+/// Discover existing Wallpaper Engine workshop roots, canonicalized and
+/// deduplicated. This is shared by CLI and GUI so both ingest paths behave the
+/// same way.
+pub fn discover_steam_workshop_roots(home: &Path) -> Vec<PathBuf> {
+    let mut seen = HashSet::new();
+    let mut roots = Vec::new();
+    for candidate in steam_workshop_root_candidates(home) {
+        let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
+        if canonical.is_dir() && seen.insert(canonical.clone()) {
+            roots.push(canonical);
+        }
+    }
+    roots
+}
 
 /// Deduplicate sources by canonical path before scanning.
 pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
@@ -717,6 +748,54 @@ mod tests {
     #[test]
     fn we_source_kind_normal() {
         assert_eq!(we_source_kind("/home/user/Pictures"), WeKind::Normal);
+    }
+
+    #[test]
+    fn steam_workshop_root_candidates_cover_native_and_flatpak_paths() {
+        let home = Path::new("/home/user");
+        let candidates = steam_workshop_root_candidates(home);
+        let as_text: Vec<String> = candidates
+            .iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect();
+        assert!(as_text
+            .iter()
+            .any(|p| p.ends_with(".local/share/Steam/steamapps/workshop/content/431960")));
+        assert!(as_text
+            .iter()
+            .any(|p| p.ends_with(".steam/steam/steamapps/workshop/content/431960")));
+        assert!(as_text
+            .iter()
+            .any(|p| p.ends_with(".steam/root/steamapps/workshop/content/431960")));
+        assert!(as_text.iter().any(|p| p.ends_with(
+            ".var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960"
+        )));
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_deduplicates_symlinked_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let native = home
+            .join(".local/share/Steam")
+            .join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&native).unwrap();
+
+        let alias_parent = home.join(".steam");
+        std::fs::create_dir_all(&alias_parent).unwrap();
+        std::os::unix::fs::symlink(home.join(".local/share/Steam"), alias_parent.join("steam"))
+            .unwrap();
+
+        let roots = discover_steam_workshop_roots(home);
+        assert_eq!(roots.len(), 1);
+        assert_eq!(roots[0], std::fs::canonicalize(native).unwrap());
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_empty_when_no_known_dir_exists() {
+        let tmp = tempfile::tempdir().unwrap();
+        let roots = discover_steam_workshop_roots(tmp.path());
+        assert!(roots.is_empty());
     }
 
     #[test]

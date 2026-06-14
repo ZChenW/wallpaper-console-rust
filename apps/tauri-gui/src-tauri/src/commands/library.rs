@@ -1,43 +1,10 @@
-use std::sync::Mutex;
-use std::sync::OnceLock;
-
 use rusqlite::Connection;
 use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
 use super::common::{
     dto_from_entry, fail, ok, storage, CommandResult, LibraryCountDto, LibraryPageDto,
-    LibrarySourceStatusDto, ScanProgressDto, WallpaperDto,
+    LibrarySourceStatusDto, WallpaperDto,
 };
-
-static SCAN_STATE: OnceLock<Mutex<ScanProgressDto>> = OnceLock::new();
-
-fn scan_state() -> &'static Mutex<ScanProgressDto> {
-    SCAN_STATE.get_or_init(|| {
-        Mutex::new(ScanProgressDto {
-            running: false,
-            stage: "idle".into(),
-            scanned: 0,
-            total_hint: None,
-            reused_metadata: 0,
-            probed_metadata: 0,
-            inserted_sqlite: 0,
-            current_path: None,
-            cancel_requested: false,
-            error: None,
-        })
-    })
-}
-
-fn set_scan(stage: &str, running: bool) {
-    if let Ok(mut state) = scan_state().lock() {
-        state.stage = stage.into();
-        state.running = running;
-        if running {
-            state.error = None;
-            state.cancel_requested = false;
-        }
-    }
-}
 
 fn read_sqlite_entries(s: &wc_storage::StorageApi) -> Result<Vec<WallpaperEntry>, String> {
     wc_storage::sqlite::ensure_sqlite_db(&s.cd);
@@ -340,69 +307,6 @@ pub async fn history_clear() -> CommandResult {
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
-}
-
-#[tauri::command]
-pub async fn rescan() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| {
-        set_scan("scanning", true);
-        let result = (|| {
-            let s = storage()?;
-            let sources = s.sources_list().map_err(|e| e.to_string())?;
-            let paths = wc_scan::scan_wallpapers(&sources);
-            if let Ok(mut state) = scan_state().lock() {
-                state.total_hint = Some(paths.len());
-            }
-            let mut entries = Vec::new();
-            for (idx, path) in paths.iter().enumerate() {
-                if let Ok(mut state) = scan_state().lock() {
-                    if state.cancel_requested {
-                        return Err("scan cancelled".to_string());
-                    }
-                    state.scanned = idx + 1;
-                    state.current_path = Some(path.clone());
-                }
-                if let Some(entry) = wc_scan::make_entry(path) {
-                    entries.push(entry);
-                }
-            }
-            let inserted =
-                wc_storage::sqlite::library_replace_entries_batch_atomic(&s.cd, &entries)
-                    .map_err(|e| e.to_string())?;
-            if let Ok(mut state) = scan_state().lock() {
-                state.inserted_sqlite = inserted;
-            }
-            Ok(format!("Scan complete. {} wallpaper(s) indexed.", inserted))
-        })();
-        match result {
-            Ok(msg) => {
-                set_scan("idle", false);
-                ok(msg)
-            }
-            Err(err) => {
-                if let Ok(mut state) = scan_state().lock() {
-                    state.running = false;
-                    state.error = Some(err.clone());
-                }
-                fail(err)
-            }
-        }
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
-}
-
-#[tauri::command]
-pub async fn scan_progress() -> Result<ScanProgressDto, String> {
-    Ok(scan_state().lock().map_err(|e| e.to_string())?.clone())
-}
-
-#[tauri::command]
-pub async fn scan_cancel() -> CommandResult {
-    if let Ok(mut state) = scan_state().lock() {
-        state.cancel_requested = true;
-    }
-    ok("Cancel requested.")
 }
 
 #[tauri::command]

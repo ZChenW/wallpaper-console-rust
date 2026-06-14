@@ -154,19 +154,23 @@ If `npm run smoke` fails with `listen EPERM`, rerun in an environment that permi
 - Create: `apps/tauri-gui/src-tauri/src/commands/common.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/wallpaper.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/library.rs`
+- Create: `apps/tauri-gui/src-tauri/src/commands/scan.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/sources.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/settings.rs`
+- Create: `apps/tauri-gui/src-tauri/src/commands/database.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/thumbnails.rs`
 - Create: `apps/tauri-gui/src-tauri/src/commands/files.rs`
 - Modify: `apps/tauri-gui/src-tauri/src/lib.rs`
 
 **Target module boundaries:**
 
-- `common.rs`: DTOs, `ok`, `fail`, `storage`, `format_bytes`, `try_canonicalize`.
+- `common.rs`: DTOs, `ok`, `fail`, `storage`, `format_bytes`, source labels, entry-to-DTO hydration.
 - `wallpaper.rs`: `status`, `apply`, `stop`, `restore`, backend selection.
-- `library.rs`: `library_count`, `library_list`, `library_page`, `rescan`, TSV/SQLite helpers, hydration helpers.
+- `library.rs`: `library_count`, `library_list`, `library_page`, SQLite read/filter/page helpers, hydration helpers.
+- `scan.rs`: `rescan`, `scan_progress`, `scan_cancel`, scan state guard, shared SQLite indexing path.
 - `sources.rs`: `sources_list`, `source_add`, `source_remove`, `validate_sources`, `remove_missing_sources`, `scan_steam_workshop`.
-- `settings.rs`: `config_get`, `config_set`, SQLite migrate/verify/resync/backup/restore/export.
+- `settings.rs`: `config_get`, `config_set`, diagnostics export.
+- `database.rs`: SQLite migrate/verify/resync/backup/restore/export.
 - `thumbnails.rs`: `thumbnail_for`, `thumbnail_cache_status`, `thumbnail_cache_clear`.
 - `files.rs`: `open_path`, `reveal_in_file_manager`, `browse_directory`, external command runner.
 

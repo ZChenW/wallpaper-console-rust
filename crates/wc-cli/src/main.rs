@@ -376,36 +376,10 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         Commands::SteamWorkshop => {
             let home = std::env::var("HOME").unwrap_or_default();
-            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-            for base in &[
-                format!("{}/.local/share/Steam", home),
-                format!("{}/.steam/steam", home),
-                format!(
-                    "{}/.var/app/com.valvesoftware.Steam/.local/share/Steam",
-                    home
-                ),
-                format!("{}/.var/app/com.valvesoftware.Steam/.steam/steam", home),
-            ] {
-                let ws_rel = std::path::Path::new(base).join("steamapps/workshop/content/431960");
-                let ws = std::fs::canonicalize(&ws_rel).unwrap_or(ws_rel);
-                if ws.is_dir() {
-                    // Skip if this canonical workshop root was already processed.
-                    let ws_canon = ws.to_string_lossy().to_string();
-                    if !seen.insert(ws_canon) {
-                        continue;
-                    }
-                    for entry in std::fs::read_dir(&ws)? {
-                        let entry = entry?;
-                        if entry.file_type()?.is_dir() {
-                            let canonical = std::fs::canonicalize(entry.path())
-                                .map(|p| p.to_string_lossy().to_string())
-                                .unwrap_or_else(|_| entry.path().to_string_lossy().to_string());
-                            if seen.insert(canonical.clone()) {
-                                s.sources_add(&canonical)?;
-                                println!("Added: {}", canonical);
-                            }
-                        }
-                    }
+            for root in wc_scan::discover_steam_workshop_roots(std::path::Path::new(&home)) {
+                let canonical = root.to_string_lossy().to_string();
+                if s.sources_add(&canonical)? {
+                    println!("Added: {}", canonical);
                 }
             }
             println!("Steam Workshop scan complete.");

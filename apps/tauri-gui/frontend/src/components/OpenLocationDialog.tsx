@@ -26,7 +26,7 @@ export default function OpenLocationDialog({ path, onSelect, onClose }: Props) {
   return (
     <div className="dialog-overlay">
       <div className="dialog" ref={ref}>
-        <h3 className="dialog-title">Open Project Folder</h3>
+        <h3 className="dialog-title">Open folder</h3>
         <p className="dialog-message">{path}</p>
         <div className="dialog-actions">
           <button className="choice-btn" onClick={() => onSelect('file_manager')}>File Manager</button>

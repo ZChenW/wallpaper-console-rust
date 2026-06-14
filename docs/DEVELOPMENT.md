@@ -131,11 +131,10 @@ Not all scenes are compatible; projection-incompatible scenes show a "Scene inco
 
 ### Web wallpapers (we_web)
 
-Web projects are indexed and displayed in the Library with preview GIF support, but they are not live-apply supported. The previous Chromium/WebKit renderer experiments were removed because they behaved inconsistently on Niri/Wayland and added maintenance cost without reliable wallpaper behavior.
+Web projects are indexed and displayed in the Library with preview GIF thumbnails, but they are not live-apply supported. The previous Chromium/WebKit renderer experiments were removed because they behaved inconsistently on Niri/Wayland and added maintenance cost without reliable wallpaper behavior.
 
 From the Library, Web projects offer:
-- **Apply preview GIF** — apply the static preview image as wallpaper
-- **Open project folder** — open the Workshop item directory
+- **Open folder** — open the Workshop item directory
 - **Copy Workshop ID**
 
 Double-clicking or applying a WE Web project returns a structured unsupported error. Use a WE Scene/image/video wallpaper for live apply.

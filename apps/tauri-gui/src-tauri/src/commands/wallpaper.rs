@@ -36,7 +36,7 @@ pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> 
             let wayland = std::env::var("WAYLAND_DISPLAY").is_ok()
                 || std::env::var("XDG_SESSION_TYPE").map(|v| v == "wayland").unwrap_or(false);
             if wayland {
-                let warning = "⚠ Wayland detected: recommend setting target_mode=screen-root and target=<your output name> for stable scene rendering.";
+                let warning = "Warning: Wayland detected. Recommend setting target_mode=screen-root and target=<your output name> for stable scene rendering.";
                 detail = Some(match detail {
                     Some(d) => format!("{}\n{}", d, warning),
                     None => warning.to_string(),
