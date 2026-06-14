@@ -2,6 +2,7 @@ import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { WallpaperDTO } from '../api/bridge';
+import { isApplyAvailable } from '../domain/applyActions';
 import ContextMenu from './ContextMenu';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { calculateColumnCount, GRID_GAP } from '../utils/layout';
@@ -12,6 +13,7 @@ interface Props {
   applying: boolean;
   emptyText?: string;
   contextActions?: ContextAction[];
+  buildContextActions?: (entry: WallpaperDTO) => ContextAction[];
   active?: boolean;
   selectedPaths?: Set<string>;
   onSelectionChange?: (paths: Set<string>) => void;
@@ -33,6 +35,7 @@ export default function WallpaperGrid({
   applying,
   emptyText = 'No wallpapers found',
   contextActions = [],
+  buildContextActions,
   active = true,
   selectedPaths,
   onSelectionChange,
@@ -131,12 +134,7 @@ export default function WallpaperGrid({
     onApply(entry.path);
   };
 
-  const canApply = (entry: WallpaperDTO): boolean => {
-    if (entry.applyActions) {
-      return entry.applyActions.some((a) => a.kind === 'apply' && a.enabled);
-    }
-    return entry.type !== 'we_web' && entry.type !== 'unsupported';
-  };
+  const canApply = (entry: WallpaperDTO): boolean => isApplyAvailable(entry);
 
   const findEntry = (path: string): WallpaperDTO | undefined => {
     return entries.find((e) => e.path === path);
@@ -239,7 +237,9 @@ export default function WallpaperGrid({
           path={contextMenu.path}
           canApply={canApply(contextEntry)}
           onApply={onApply}
-          actions={contextActions.filter((action) => !action.visible || action.visible(contextEntry))}
+          actions={buildContextActions
+            ? buildContextActions(contextEntry)
+            : contextActions.filter((action) => !action.visible || action.visible(contextEntry))}
           onClose={() => setContextMenu(null)}
         />
       )}

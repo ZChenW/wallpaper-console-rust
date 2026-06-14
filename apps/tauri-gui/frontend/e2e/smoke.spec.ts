@@ -14,6 +14,7 @@ test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
   await expect(card.getByText(/Web wallpaper — unsupported/)).toBeVisible();
   await card.click({ button: 'right' });
   await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
+  await expect(page.getByText('Apply preview GIF')).toHaveCount(0);
   await expect(page.getByText('Open experimental Chromium preview')).toHaveCount(0);
   await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
   await expect(page.getByText('Open folder')).toBeVisible();

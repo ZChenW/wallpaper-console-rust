@@ -47,8 +47,8 @@ Use the checklist below from an interactive desktop session.
 - [ ] Confirm WE scene project `3558034522` appears as a single `WE Scene` card, not as `assets/*.png` fragments.
 - [ ] Confirm WE web project `3650880224` appears as a single `WE Web` card, not as `index.html` or `assets/*.png` fragments.
 - [ ] Confirm WE scene/web cards use `preview.gif` when present.
-- [ ] Right-click a WE Scene card. Confirm the generic `Apply`, `Apply preview GIF`, and `Copy Workshop ID` are visible. `Apply with linux-wallpaperengine` must NOT appear.
-- [ ] Right-click a WE Web card. Confirm only browsing actions such as `Open folder` and `Copy Workshop ID` are visible. `Apply`, `Apply preview GIF`, `Apply with linux-wallpaperengine`, `Apply Web wallpaper`, and `Open experimental Chromium preview` must NOT appear.
+- [ ] Right-click a WE Scene card. Confirm `Apply`, `Apply preview GIF`, `Open folder`, and `Copy Workshop ID` are visible. `Apply with linux-wallpaperengine` must NOT appear.
+- [ ] Right-click a WE Web card. Confirm only `Open folder` and `Copy Workshop ID` are visible. `Apply`, `Apply preview GIF`, `Apply with linux-wallpaperengine`, `Apply Web wallpaper`, and `Open experimental Chromium preview` must NOT appear.
 - [ ] Double-click a WE Web card. Confirm it reports a clear unsupported error and does not change current wallpaper state.
 - [ ] If `linux-wallpaperengine` is not installed, applying a WE scene card shows the install suggestion.
 - [ ] If `linux-wallpaperengine` is installed, apply a WE scene card and confirm current state points at the project folder, not `preview.gif`.

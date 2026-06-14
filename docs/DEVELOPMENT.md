@@ -30,6 +30,19 @@ The Tauri `apply` command and CLI `apply`/`inspect` commands should call `wc-app
 instead of duplicating backend selection. This keeps GUI and CLI behavior aligned
 while preserving the existing public command names.
 
+## Frontend Apply Action Domain
+
+Frontend action availability is driven by the backend `ApplyPlan::plan_for_entry()` through `WallpaperDTO.applyActions`. All UI action decisions (Apply, Retry, Preview, Open folder, Copy Workshop ID) use `domain/applyActions.ts` to normalize DTO actions into enabled/disabled render decisions:
+
+```ts
+import { normalizeApplyActions, isApplyAvailable, hasEnabledAction } from './domain/applyActions';
+
+const actions = normalizeApplyActions(entry);
+if (isApplyAvailable(entry)) { /* show Apply button */ }
+```
+
+A legacy fallback exists for old DTOs without `applyActions` (centralized in one file). New backends MUST provide `applyActions`. Frontend components should NOT infer action availability from `entry.type` or `entry.backendStatus`.
+
 ## Tauri Frontend
 
 ```bash
