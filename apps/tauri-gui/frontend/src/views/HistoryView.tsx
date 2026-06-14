@@ -67,6 +67,7 @@ export default function HistoryView({ onApply, applying, active = true }: Props)
 
   const { buildContextActions } = useLibraryEntryActions({
     onApply,
+    invalidate: () => load(),
     openFolder: async (path: string) => { await api.revealInFileManager(path); },
     findEntry: (path) => entryByPath.get(path),
   });

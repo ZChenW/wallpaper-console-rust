@@ -224,3 +224,40 @@ test('regular wallpaper context menu has apply and open folder', async ({ page }
   await expect(page.getByText('Apply', { exact: true })).toBeVisible();
   await expect(page.getByText('Open folder')).toBeVisible();
 });
+
+test('favorites context menu shows apply and open folder', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Favorites' }).click();
+  await expect(page.locator('h2').filter({ hasText: 'Favorites' })).toBeVisible({ timeout: 5000 });
+  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
+  const card = page.locator('.wallpaper-card').first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Remove from Favorites')).toBeVisible();
+});
+
+test('favorites context menu shows WE Scene actions', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Favorites' }).click();
+  await expect(page.locator('h2').filter({ hasText: 'Favorites' })).toBeVisible({ timeout: 5000 });
+  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
+  const card = page.locator('.wallpaper-card').filter({ hasText: 'Scene title' }).first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+  await expect(page.getByText('Apply preview GIF')).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
+  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
+  await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
+});
+
+test('history context menu shows apply and open folder', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'History' }).click();
+  await expect(page.locator('h2').filter({ hasText: 'History' })).toBeVisible({ timeout: 5000 });
+  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
+  const card = page.locator('.wallpaper-card').first();
+  await card.click({ button: 'right' });
+  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
+  await expect(page.getByText('Open folder')).toBeVisible();
+});

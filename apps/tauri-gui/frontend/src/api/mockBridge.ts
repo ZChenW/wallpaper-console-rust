@@ -213,6 +213,7 @@ const MOCK_FAVORITES: string[] = [
   '/mock/path/wallpaper-001.jpg',
   '/mock/path/wallpaper-010.gif',
   '/mock/path/wallpaper-050.mp4',
+  '/mock/Steam/steamapps/workshop/content/431960/3558034522',
 ];
 
 const MOCK_HISTORY: string[] = [
@@ -306,14 +307,35 @@ export const api = {
         size: 12345,
         mtime: 1700000000,
         resolution: '1920x1080',
-        applyAvailability: 'available',
+        applyAvailability: 'available' as ApplyAvailability,
         applyBackend: 'awww',
         applyActions: [
-          { kind: 'apply', label: 'Apply', enabled: true },
-          { kind: 'open_folder', label: 'Open folder', enabled: true },
+          { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
+          { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
         ],
       },
     ),
+
+  favoritesPage: async (offset: number, limit: number): Promise<LibraryPageDTO> => {
+    const items = MOCK_FAVORITES.map((path) =>
+      MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
+        path,
+        type: 'image',
+        ext: 'jpg',
+        backend: 'awww',
+        size: 12345,
+        mtime: 1700000000,
+        resolution: '1920x1080',
+        applyAvailability: 'available' as ApplyAvailability,
+        applyBackend: 'awww',
+        applyActions: [
+          { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
+          { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
+        ],
+      },
+    );
+    return { total: items.length, items: items.slice(offset, offset + limit) };
+  },
 
   favoriteAdd: async (path: string): Promise<CommandResult> => {
     // Simulate failure for the WE Web mock path so smoke tests can verify error feedback
@@ -332,14 +354,35 @@ export const api = {
         size: 12345,
         mtime: 1700000000,
         resolution: '1920x1080',
-        applyAvailability: 'available',
+        applyAvailability: 'available' as ApplyAvailability,
         applyBackend: 'awww',
         applyActions: [
-          { kind: 'apply', label: 'Apply', enabled: true },
-          { kind: 'open_folder', label: 'Open folder', enabled: true },
+          { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
+          { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
         ],
       },
     ),
+
+  historyPage: async (offset: number, limit: number): Promise<LibraryPageDTO> => {
+    const items = MOCK_HISTORY.map((path) =>
+      MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
+        path,
+        type: 'image',
+        ext: 'jpg',
+        backend: 'awww',
+        size: 12345,
+        mtime: 1700000000,
+        resolution: '1920x1080',
+        applyAvailability: 'available' as ApplyAvailability,
+        applyBackend: 'awww',
+        applyActions: [
+          { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
+          { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
+        ],
+      },
+    );
+    return { total: items.length, items: items.slice(offset, offset + limit) };
+  },
 
   historyClear: async (): Promise<CommandResult> => ok,
 
