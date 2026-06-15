@@ -2,6 +2,7 @@ import { Loader } from 'lucide-react';
 import { api } from '../../api/bridge';
 import { commandErrorFeedback, commandSuccessFeedback } from '../../api/feedback';
 import type { DatabasePageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 
@@ -22,7 +23,10 @@ export default function DatabasePage({
   const busy = dbAction !== null || operationLock;
 
   return (
-    <div className="settings-page">
+    <SettingsPageShell
+      title="Database"
+      description="Verify, back up, rebuild, and export the library database."
+    >
       <PageSection title="Status">
         <StatusCard
           label="SQLite active"
@@ -30,7 +34,7 @@ export default function DatabasePage({
         />
       </PageSection>
 
-      <PageSection title="Maintenance">
+      <PageSection title="Maintenance" variant="plain">
         <div className="db-actions">
           <button
             className={`btn small ${dbAction === 'verify' ? 'running' : ''}`}
@@ -87,7 +91,7 @@ export default function DatabasePage({
         </div>
       </PageSection>
 
-      <PageSection title="Compatibility / Export">
+      <PageSection title="Compatibility / Export" variant="plain">
         <div className="db-actions">
           <button
             className={`btn small ${dbAction === 'export' ? 'running' : ''}`}
@@ -121,6 +125,6 @@ export default function DatabasePage({
           </button>
         </div>
       </PageSection>
-    </div>
+    </SettingsPageShell>
   );
 }

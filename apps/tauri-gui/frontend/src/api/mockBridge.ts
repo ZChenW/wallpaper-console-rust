@@ -5,6 +5,14 @@ interface CommandResult {
   exitCode: number;
 }
 
+interface ApplyRequestDTO {
+  kind: string;
+  path: string;
+  requestId?: string;
+}
+
+let lastApplyActionRequest: ApplyRequestDTO | null = null;
+
 interface LibraryCountDTO {
   total: number;
   images: number;
@@ -248,6 +256,20 @@ export const api = {
   }),
 
   apply: async (): Promise<CommandResult> => ok,
+  applyAction: async (request: ApplyRequestDTO): Promise<CommandResult> => {
+    lastApplyActionRequest = request;
+    return {
+      ...ok,
+      stdout: JSON.stringify({
+        requestId: request.requestId,
+        appliedPath: request.path,
+        statePath: request.path,
+        backend: request.kind === 'apply_preview' ? 'awww' : 'awww',
+        fileType: request.kind === 'apply_preview' ? 'gif' : 'image',
+        preview: request.kind === 'apply_preview',
+      }),
+    };
+  },
   stop: async (): Promise<CommandResult> => ok,
   weClearBackendError: async (): Promise<CommandResult> => ok,
   restore: async (): Promise<CommandResult> => ok,
@@ -404,7 +426,7 @@ export const api = {
       awww_transition_type: 'fade',
       awww_transition_duration: '1',
       wallpaper_transition_fps: '60',
-      mpvpaper_options: 'no-audio --loop-file=inf',
+      mpvpaper_options: '--loop-file=inf --panscan=1.0',
       mpvpaper_output: '*',
       linux_wallpaperengine_enabled: 'on',
       linux_wallpaperengine_path: 'auto',

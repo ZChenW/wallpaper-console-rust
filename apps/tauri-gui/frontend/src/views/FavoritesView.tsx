@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { api, WallpaperDTO } from '../api/bridge';
+import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import WallpaperGrid from '../components/WallpaperGrid';
 import { Shuffle } from 'lucide-react';
@@ -7,6 +7,7 @@ import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
 
 interface Props {
   onApply: (path: string) => void;
+  onApplyAction: (request: ApplyRequestDTO) => void;
   applying: boolean;
   active?: boolean;
 }
@@ -17,7 +18,7 @@ export function invalidateFavoritesCache() {
   window.dispatchEvent(new CustomEvent('favorites-cache-invalidated'));
 }
 
-export default function FavoritesView({ onApply, applying, active = true }: Props) {
+export default function FavoritesView({ onApply, onApplyAction, applying, active = true }: Props) {
   const [entries, setEntries] = useState<WallpaperDTO[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -56,7 +57,7 @@ export default function FavoritesView({ onApply, applying, active = true }: Prop
   const entryByPath = useMemo(() => new Map(entries.map((e) => [e.path, e])), [entries]);
 
   const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
-    onApply,
+    onApplyAction,
     invalidate: () => load(),
     openFolder: async (path: string) => { await api.revealInFileManager(path); },
     findEntry: (path) => entryByPath.get(path),

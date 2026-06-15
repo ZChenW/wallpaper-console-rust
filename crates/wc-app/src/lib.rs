@@ -1,3 +1,4 @@
+pub mod apply_execution;
 pub mod apply_plan;
 
 use std::path::{Path, PathBuf};
@@ -7,6 +8,7 @@ use wc_core::error::WcError;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 use wc_storage::StorageApi;
 
+pub use apply_execution::{ApplyExecutionResult, ApplyRequest, ApplyRequestKind};
 pub use apply_plan::{ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -40,6 +42,11 @@ pub struct AppService {
 }
 
 impl AppService {
+    #[cfg(test)]
+    pub(crate) fn storage_for_tests(&self) -> &StorageApi {
+        &self.storage
+    }
+
     pub fn from_config_dir(cd: wc_core::ConfigDir) -> Self {
         AppService {
             storage: StorageApi::new(cd),
@@ -47,10 +54,40 @@ impl AppService {
     }
 
     pub fn apply(&self, path: &str) -> Result<ApplyTarget, AppError> {
-        let target = self.resolve_apply_target(path)?;
-        wc_backend::apply_wallpaper(&self.storage, &target.resolved_path, target.backend)
-            .map_err(AppError::from_wc_error)?;
-        Ok(target)
+        let result = self.execute_apply_request(ApplyRequest {
+            kind: ApplyRequestKind::Apply,
+            path: path.to_string(),
+            request_id: None,
+        })?;
+
+        Ok(ApplyTarget {
+            input_path: path.to_string(),
+            resolved_path: result.applied_path,
+            file_type: result.file_type,
+            backend: result.backend,
+        })
+    }
+
+    pub fn execute_apply_request(
+        &self,
+        request: ApplyRequest,
+    ) -> Result<ApplyExecutionResult, AppError> {
+        let target = self.resolve_apply_request_target(&request)?;
+        wc_backend::apply_wallpaper(
+            &self.storage,
+            &target.resolved_path,
+            target.backend,
+            target.fallback_path.as_deref(),
+        )
+        .map_err(AppError::from_wc_error)?;
+        Ok(ApplyExecutionResult {
+            request_id: request.request_id,
+            applied_path: target.resolved_path,
+            state_path: target.state_path,
+            backend: target.backend,
+            file_type: target.file_type,
+            preview: target.preview,
+        })
     }
 
     pub fn inspect_path(&self, path: &str) -> Result<InspectResult, AppError> {
@@ -91,6 +128,49 @@ impl AppService {
         })
     }
 
+    pub fn resolve_apply_request_target(
+        &self,
+        request: &ApplyRequest,
+    ) -> Result<apply_execution::ApplyExecutionTarget, AppError> {
+        match request.kind {
+            ApplyRequestKind::Apply | ApplyRequestKind::RetryBackendApply => {
+                let target = self.resolve_apply_target(&request.path)?;
+                let fallback_path = resolve_fallback(&target);
+                Ok(apply_execution::ApplyExecutionTarget {
+                    input_path: request.path.clone(),
+                    resolved_path: target.resolved_path.clone(),
+                    state_path: target.resolved_path,
+                    file_type: target.file_type,
+                    backend: target.backend,
+                    preview: false,
+                    fallback_path,
+                })
+            }
+            ApplyRequestKind::ApplyPreview => {
+                let project_path =
+                    resolve_wallpaper_path(&request.path).map_err(AppError::from_wc_error)?;
+                let project = std::path::Path::new(&project_path);
+                let info = wc_scan::read_we_project_info(project)
+                    .ok_or_else(|| AppError::preview_missing(&request.path))?;
+                let preview = info
+                    .preview_path
+                    .ok_or_else(|| AppError::preview_missing(&request.path))?;
+                let preview_entry = wc_scan::make_entry(&preview)
+                    .ok_or_else(|| AppError::unsupported_path(&preview))?;
+                let backend = self.backend_for_entry(&preview_entry)?;
+                Ok(apply_execution::ApplyExecutionTarget {
+                    input_path: request.path.clone(),
+                    resolved_path: preview.to_string(),
+                    state_path: preview.to_string(),
+                    file_type: preview_entry.file_type,
+                    backend,
+                    preview: true,
+                    fallback_path: Some(preview.to_string()),
+                })
+            }
+        }
+    }
+
     fn backend_for_entry(&self, entry: &WallpaperEntry) -> Result<Backend, AppError> {
         match entry.backend {
             Backend::Unsupported => Err(AppError::unsupported_backend(
@@ -99,6 +179,22 @@ impl AppService {
             )),
             Backend::Awww | Backend::Mpvpaper | Backend::LinuxWallpaperEngine => Ok(entry.backend),
         }
+    }
+}
+
+fn resolve_fallback(target: &ApplyTarget) -> Option<String> {
+    let path = std::path::Path::new(&target.resolved_path);
+    match target.file_type {
+        FileType::Image | FileType::Gif => Some(target.resolved_path.clone()),
+        FileType::Video => None,
+        FileType::WeScene => {
+            if let Some(info) = wc_scan::read_we_project_info(path) {
+                info.preview_path
+            } else {
+                None
+            }
+        }
+        FileType::WeWeb | FileType::WeApplication => None,
     }
 }
 
@@ -173,6 +269,16 @@ impl AppError {
             suggestion: Some(
                 "Use Apply preview GIF if the project has one, or choose a WE Scene/image/video wallpaper.".into(),
             ),
+        }
+    }
+
+    fn preview_missing(path: &str) -> Self {
+        AppError {
+            code: "preview_missing".into(),
+            message: "This wallpaper has no preview file to apply.".into(),
+            detail: Some(format!("project={}", path)),
+            recoverable: true,
+            suggestion: Some("Open the project folder or choose another wallpaper.".into()),
         }
     }
 }

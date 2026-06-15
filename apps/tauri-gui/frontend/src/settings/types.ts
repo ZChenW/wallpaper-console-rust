@@ -70,4 +70,5 @@ export interface StatusCardProps {
   label: string;
   value: string;
   detail?: string;
+  tone?: 'neutral' | 'success' | 'warning' | 'danger';
 }

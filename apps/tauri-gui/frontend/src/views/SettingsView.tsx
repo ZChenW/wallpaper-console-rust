@@ -29,9 +29,10 @@ import type { DbAction } from '../settings/types';
 interface Props {
   onRefresh: () => void;
   onFeedback: (fb: CommandFeedback) => void;
+  onClose: () => void;
 }
 
-export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Props) {
+export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClose }: Props) {
   const { invalidateLibrary } = useAppState();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
   const [configs, setConfigs] = useState<Record<string, string>>({});
@@ -48,6 +49,8 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [operationLock, setOperationLock] = useState(false);
   const restoreInputRef = useRef<HTMLInputElement>(null);
+  const confirmActionRef = useRef(confirmAction);
+  confirmActionRef.current = confirmAction;
 
   const loadConfigs = useCallback(async () => {
     setLoading(true);
@@ -89,6 +92,18 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
     loadWeDebugInfo();
     void api.librarySourceStatus().then(setLibraryStatus);
   }, [loadConfigs, loadThumbCache, loadWeStatus, loadWeDebugInfo]);
+
+  // Esc key handler — respect confirmAction to avoid closing Settings behind ConfirmDialog
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (confirmActionRef.current) return;
+        onClose();
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    return () => window.removeEventListener('keydown', onKeyDown);
+  }, [onClose]);
 
   const handleSet = async (key: string, value: string): Promise<boolean> => {
     const normalized = normalizeConfigValue(key, value);
@@ -294,33 +309,55 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback }: Prop
 
   if (loading) {
     return (
-      <div className="view settings-view">
-        <h2>Settings</h2>
-        <div className="loading">Loading...</div>
+      <div className="settings-modal-overlay" onMouseDown={onClose}>
+        <section className="settings-modal" role="dialog" aria-modal="true" aria-label="Settings" onMouseDown={(e) => e.stopPropagation()}>
+          <div className="loading">Loading...</div>
+        </section>
       </div>
     );
   }
 
   return (
-    <div className="view settings-view">
-      <h2>Settings</h2>
-      <div className="settings-layout">
-        <SettingsSidebar active={activeCategory} onChange={setActiveCategory} />
+    <div className="settings-modal-overlay" onMouseDown={onClose}>
+      <section
+        className="settings-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="settings-title"
+        onMouseDown={(e) => e.stopPropagation()}
+      >
+        <header className="settings-modal-header">
+          <div>
+            <h2 id="settings-title">Settings</h2>
+            <p>Configure Wallpaper Console behavior.</p>
+          </div>
+          <button className="icon-btn" aria-label="Close settings" onClick={onClose}>
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
+              <path d="M4 4l10 10M14 4l-10 10" />
+            </svg>
+          </button>
+        </header>
 
-        <div className="settings-content">
-          {PAGE_MAP[activeCategory]?.()}
+        <div className="settings-layout">
+          <SettingsSidebar active={activeCategory} onChange={setActiveCategory} />
+
+          <div className="settings-content">
+            {PAGE_MAP[activeCategory]?.()}
+          </div>
         </div>
-      </div>
+      </section>
 
       {confirmAction && (
-        <ConfirmDialog
-          title={confirmAction.title}
-          message={confirmAction.msg}
-          onConfirm={confirmAction.fn}
-          onCancel={() => { setConfirmAction(null); setConfirming(false); }}
-          danger={confirmAction.title.includes('Clear') || confirmAction.title.includes('Export') || confirmAction.title.includes('Restore') || confirmAction.title.includes('Rebuild') || confirmAction.title.includes('Stop')}
-          confirming={confirming}
-        />
+        <div onMouseDown={(e) => e.stopPropagation()}>
+          <ConfirmDialog
+            title={confirmAction.title}
+            message={confirmAction.msg}
+            onConfirm={confirmAction.fn}
+            onCancel={() => { setConfirmAction(null); setConfirming(false); }}
+            danger={confirmAction.title.includes('Clear') || confirmAction.title.includes('Export') || confirmAction.title.includes('Restore') || confirmAction.title.includes('Rebuild') || confirmAction.title.includes('Stop')}
+            confirming={confirming}
+          />
+        </div>
       )}
     </div>
   );

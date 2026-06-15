@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { Search, Filter, X } from 'lucide-react';
-import { api, WallpaperDTO } from '../api/bridge';
+import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid from '../components/WallpaperGrid';
 import OpenLocationDialog from '../components/OpenLocationDialog';
@@ -10,6 +10,7 @@ import { invalidateFavoritesCache } from './FavoritesView';
 
 interface Props {
   onApply: (path: string) => void;
+  onApplyAction: (request: ApplyRequestDTO) => void;
   applying: boolean;
   active?: boolean;
 }
@@ -18,7 +19,7 @@ type FilterType = 'all' | 'image' | 'gif' | 'video' | 'we_scene' | 'we_web' | 'u
 type SortMode = 'name' | 'newest' | 'largest';
 const PAGE_SIZE = 120;
 
-export default function LibraryView({ onApply, applying, active = true }: Props) {
+export default function LibraryView({ onApply, onApplyAction, applying, active = true }: Props) {
   const [entries, setEntries] = useState<WallpaperDTO[]>([]);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -117,7 +118,7 @@ export default function LibraryView({ onApply, applying, active = true }: Props)
   }, [selectedPaths]);
 
   const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
-    onApply,
+    onApplyAction,
     invalidate: () => invalidateLibrary(),
     openFolder: handleOpenProjectFolder,
     findEntry: (path) => entryByPath.get(path),

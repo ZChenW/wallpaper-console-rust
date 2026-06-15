@@ -1,5 +1,5 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useRef, useState } from 'react';
-import { api, CommandResult } from './api/bridge';
+import { api, CommandResult, ApplyRequestDTO, ApplyResultDTO } from './api/bridge';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
 import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
@@ -13,7 +13,7 @@ import PerformanceOverlay from './components/PerformanceOverlay';
 import { AppStateProvider, useAppState } from './state/AppStateContext';
 import { ThumbnailStoreProvider } from './state/ThumbnailStoreContext';
 
-type View = 'library' | 'favorites' | 'history' | 'sources' | 'settings';
+type View = 'library' | 'favorites' | 'history' | 'sources';
 
 const SettingsView = lazy(() => import('./views/SettingsView'));
 
@@ -30,6 +30,7 @@ export default function App() {
 function AppShell() {
   const [view, setView] = useState<View>('library');
   const [visitedViews, setVisitedViews] = useState<Set<View>>(new Set(['library']));
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [applying, setApplying] = useState(false);
   const applyingRef = useRef(false);
   const {
@@ -50,44 +51,61 @@ function AppShell() {
     return () => window.removeEventListener('wc-feedback', handler);
   }, [setFeedbackWithAutoDismiss]);
 
-  const pendingApplyRef = useRef<string | null>(null);
+  const pendingApplyActionRef = useRef<ApplyRequestDTO | null>(null);
 
-  const handleApply = useCallback(async (path: string) => {
+  const handleApplyAction = useCallback(async (request: ApplyRequestDTO) => {
     if (applyingRef.current) {
-      pendingApplyRef.current = path;
+      pendingApplyActionRef.current = request;
       return;
     }
     applyingRef.current = true;
     setApplying(true);
 
-    let currentPath: string | null = path;
-    while (currentPath !== null) {
-      const p: string = currentPath;
-      currentPath = null; // Clear for this iteration
+    let currentRequest: ApplyRequestDTO | null = request;
+    while (currentRequest !== null) {
+      const req = currentRequest;
+      currentRequest = null;
       setFeedbackWithAutoDismiss({ state: 'running', label: 'Applying wallpaper' });
       try {
-        const r = await api.apply(p);
+        const r = await api.applyAction(req);
         if (r.success) {
           invalidateHistoryCache();
-          setFeedbackWithAutoDismiss({ state: 'success', label: 'Applied', detail: p.split('/').pop() });
+          let detail: ApplyResultDTO | undefined;
+          try {
+            detail = r.stdout ? JSON.parse(r.stdout) as ApplyResultDTO : undefined;
+          } catch {
+            detail = undefined;
+          }
+          setFeedbackWithAutoDismiss({
+            state: 'success',
+            label: 'Applied',
+            detail: detail?.preview ? 'Preview wallpaper applied.' : detail?.appliedPath?.split('/').pop(),
+          });
         } else {
           setFeedbackWithAutoDismiss(commandErrorFeedback('Apply', r));
         }
         await refreshStatus();
       } catch (e) {
-        setFeedbackWithAutoDismiss({ state: 'error', label: 'Apply failed', detail: String(e) });
+        setFeedbackWithAutoDismiss(commandErrorFeedback('Apply', e));
       }
-      // Drain next pending intent
-      const next = pendingApplyRef.current;
-      pendingApplyRef.current = null;
-      if (next && next !== p) {
-        currentPath = next;
+      const next = pendingApplyActionRef.current;
+      pendingApplyActionRef.current = null;
+      if (next && next.requestId !== req.requestId) {
+        currentRequest = next;
       }
     }
 
     setApplying(false);
     applyingRef.current = false;
   }, [refreshStatus, setFeedbackWithAutoDismiss]);
+
+  const handleApply = useCallback((path: string) => {
+    handleApplyAction({
+      kind: 'apply',
+      path,
+      requestId: `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    });
+  }, [handleApplyAction]);
 
   const handleToolbarAction = useCallback(async (
     action: () => Promise<CommandResult | void>,
@@ -128,27 +146,31 @@ function AppShell() {
         applying={applying}
       />
       <div className="app-body">
-        <Sidebar view={view} onNavigate={handleNavigate} />
+        <Sidebar view={view} settingsOpen={settingsOpen} onNavigate={handleNavigate} onOpenSettings={() => setSettingsOpen(true)} />
         <main className="main-content">
           {persistentViews.map(v => visitedViews.has(v) && (
             <div key={v} className="view-shell" style={{ display: view === v ? 'flex' : 'none' }}>
-              {v === 'library' && <LibraryView onApply={handleApply} applying={applying} active={view === v} />}
-              {v === 'favorites' && <FavoritesView onApply={handleApply} applying={applying} active={view === v} />}
-              {v === 'history' && <HistoryView onApply={handleApply} applying={applying} active={view === v} />}
+              {v === 'library' && <LibraryView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
+              {v === 'favorites' && <FavoritesView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
+              {v === 'history' && <HistoryView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
             </div>
           ))}
-          {(view === 'sources' || view === 'settings') && (
+          {view === 'sources' && (
             <div className="view-shell">
-              {view === 'sources' && <SourcesView onRefresh={refreshStatus} onFeedback={handleFeedback} />}
-              {view === 'settings' && (
-                <Suspense fallback={<div className="loading">Loading settings...</div>}>
-                  <SettingsView onRefresh={refreshStatus} onFeedback={handleFeedback} />
-                </Suspense>
-              )}
+              <SourcesView onRefresh={refreshStatus} onFeedback={handleFeedback} />
             </div>
           )}
         </main>
       </div>
+      {settingsOpen && (
+        <Suspense fallback={<div className="settings-modal-overlay"><div className="settings-modal">Loading settings...</div></div>}>
+          <SettingsView
+            onRefresh={refreshStatus}
+            onFeedback={handleFeedback}
+            onClose={() => setSettingsOpen(false)}
+          />
+        </Suspense>
+      )}
       <StatusBar status={status} applying={applying} feedback={feedback} />
       <Toast feedback={feedback} onDismiss={clearFeedback} />
       <PerformanceOverlay />

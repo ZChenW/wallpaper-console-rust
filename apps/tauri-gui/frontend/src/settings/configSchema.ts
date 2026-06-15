@@ -29,29 +29,34 @@ export const ALL_SETTINGS: SettingEntry[] = [
     description: 'Recommended: mpvpaper for videos',
   },
   {
-    key: 'awww_resize', label: 'awww resize', type: 'select',
+    key: 'awww_resize', label: 'Image fit mode', type: 'select',
     options: ['crop', 'fit', 'stretch'], category: 'wallpaper',
+    description: 'Controls how static images are scaled by awww.',
   },
   {
     key: 'awww_transition_type', label: 'Transition', type: 'select',
     options: ['fade', 'slide', 'wipe'], category: 'wallpaper',
+    description: 'Animation used when switching static images.',
   },
   {
     key: 'awww_transition_duration', label: 'Transition duration (s)', type: 'text',
     placeholder: '1', category: 'wallpaper',
+    description: 'Duration of awww image transitions.',
   },
   {
-    key: 'wallpaper_transition_fps', label: 'Transition FPS', type: 'number',
+    key: 'wallpaper_transition_fps', label: 'Transition frame rate', type: 'number',
     placeholder: '60', category: 'wallpaper', advanced: true,
-    description: 'Used by awww transitions',
+    description: 'Higher values look smoother but use more GPU.',
   },
   {
-    key: 'mpvpaper_options', label: 'mpvpaper options', type: 'text',
-    placeholder: 'no-audio --loop-file=inf', category: 'wallpaper', advanced: true,
+    key: 'mpvpaper_options', label: 'mpvpaper arguments', type: 'text',
+    placeholder: '--loop-file=inf --panscan=1.0', category: 'wallpaper', advanced: true,
+    description: 'Advanced mpvpaper/mpv arguments. Default keeps audio, loops playback, and crops video to fill the screen.',
   },
   {
-    key: 'mpvpaper_output', label: 'mpvpaper output', type: 'text',
+    key: 'mpvpaper_output', label: 'Video output target', type: 'text',
     placeholder: '*', category: 'wallpaper', advanced: true,
+    description: 'mpvpaper output selector. Keep "*" unless you need a specific monitor.',
   },
 
   // ── Wallpaper Engine Scene ──
@@ -60,16 +65,19 @@ export const ALL_SETTINGS: SettingEntry[] = [
     options: ['on', 'off'], category: 'we',
   },
   {
-    key: 'linux_wallpaperengine_path', label: 'linux-wallpaperengine path', type: 'text',
+    key: 'linux_wallpaperengine_path', label: 'Wallpaper Engine executable', type: 'text',
     placeholder: 'auto', category: 'we',
+    description: 'Use "auto" to find linux-wallpaperengine from PATH.',
   },
   {
-    key: 'linux_wallpaperengine_target_mode', label: 'Target mode', type: 'select',
+    key: 'linux_wallpaperengine_target_mode', label: 'Target type', type: 'select',
     options: ['auto', 'screen-root', 'screen-span', 'window'], category: 'we',
+    description: 'screen-root is recommended on Niri/Wayland.',
   },
   {
-    key: 'linux_wallpaperengine_target', label: 'Output/window target', type: 'text',
-    placeholder: 'eDP-1 or HDMI-A-1', category: 'we',
+    key: 'linux_wallpaperengine_target', label: 'Display target', type: 'text',
+    placeholder: 'e.g. eDP-1 or HDMI-A-1', category: 'we',
+    description: 'Example: eDP-1 or HDMI-A-1.',
   },
   {
     key: 'linux_wallpaperengine_scaling', label: 'Scaling', type: 'select',
@@ -88,8 +96,9 @@ export const ALL_SETTINGS: SettingEntry[] = [
     placeholder: '100', category: 'we', advanced: true,
   },
   {
-    key: 'linux_wallpaperengine_assets_dir', label: 'Assets dir', type: 'text',
+    key: 'linux_wallpaperengine_assets_dir', label: 'Project assets folder', type: 'text',
     placeholder: 'auto', category: 'we', advanced: true,
+    description: 'Use "auto" unless a scene needs a custom assets directory.',
   },
 
   // ── Library ──

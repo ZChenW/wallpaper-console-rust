@@ -1,6 +1,7 @@
 import React from 'react';
 import { getSettingsByCategoryAndLevel } from '../configSchema';
 import type { AdvancedPageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import ConfigRow from '../components/ConfigRow';
 
@@ -30,7 +31,10 @@ export default function AdvancedPage({
   const filteredAdvanced = advanced.filter((c) => !identityKeys.has(c.key));
 
   return (
-    <div className="settings-page">
+    <SettingsPageShell
+      title="Advanced"
+      description="Developer-oriented settings and external tool preferences."
+    >
       <PageSection title="Development">
         {filteredAdvanced.map((c) => {
           if (c.key === 'open_project_location_mode') {
@@ -95,30 +99,32 @@ export default function AdvancedPage({
       )}
 
       <PageSection title="Known Settings">
-        <p className="config-desc" style={{ marginBottom: 8 }}>
-          Read-only view of recognised configuration key/value pairs.
-        </p>
-        <label className="settings-toggle">
-          <input
-            type="checkbox"
-            checked={showRawConfig}
-            onChange={(e) => setShowRawConfig(e.target.checked)}
-          />
-          <span>Show known config keys</span>
-        </label>
-        {showRawConfig && (
-          <div className="settings-raw-config">
-            {Object.entries(configs)
-              .filter(([, v]) => v !== '')
-              .sort(([a], [b]) => a.localeCompare(b))
-              .map(([key, value]) => (
-                <div key={key} className="raw-row">
-                  <code className="raw-key">{key}</code>
-                  <code className="raw-value">{maskHome(value)}</code>
-                </div>
-              ))}
-          </div>
-        )}
+        <div className="known-settings-card-body">
+          <p className="known-settings-description">
+            Read-only view of recognized configuration key/value pairs.
+          </p>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={showRawConfig}
+              onChange={(e) => setShowRawConfig(e.target.checked)}
+            />
+            <span>Show known config keys</span>
+          </label>
+          {showRawConfig && (
+            <div className="settings-raw-config">
+              {Object.entries(configs)
+                .filter(([, v]) => v !== '')
+                .sort(([a], [b]) => a.localeCompare(b))
+                .map(([key, value]) => (
+                  <div key={key} className="raw-row">
+                    <code className="raw-key">{key}</code>
+                    <code className="raw-value">{maskHome(value)}</code>
+                  </div>
+                ))}
+            </div>
+          )}
+        </div>
       </PageSection>
 
       {weDebugInfo && (weDebugInfo.lastStderr || weDebugInfo.lastExitStatus) && (
@@ -160,6 +166,6 @@ export default function AdvancedPage({
           </div>
         </PageSection>
       )}
-    </div>
+    </SettingsPageShell>
   );
 }

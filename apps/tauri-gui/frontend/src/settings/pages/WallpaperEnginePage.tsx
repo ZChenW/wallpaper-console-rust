@@ -1,5 +1,6 @@
 import { getSettingsByCategoryAndLevel } from '../configSchema';
 import type { WallpaperEnginePageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import InfoCallout from '../components/InfoCallout';
 import StatusCard from '../components/StatusCard';
@@ -10,12 +11,16 @@ export default function WallpaperEnginePage({ weStatus, configs, saving, onSet }
   const advanced = getSettingsByCategoryAndLevel('we', true);
 
   return (
-    <div className="settings-page">
+    <SettingsPageShell
+      title="Wallpaper Engine"
+      description="Configure Wallpaper Engine scene support."
+    >
       <PageSection title="Scene Backend">
         <StatusCard
           label="Status"
           value={weStatus?.available ? 'Ready' : 'Missing'}
           detail={weStatus?.message ?? 'Checking...'}
+          tone={weStatus?.available ? 'success' : 'warning'}
         />
         {regular.map((c) => (
           <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
@@ -31,9 +36,9 @@ export default function WallpaperEnginePage({ weStatus, configs, saving, onSet }
         </details>
       )}
 
-      <InfoCallout>
-        Wallpaper Engine <strong>Web</strong> projects appear in Library for metadata and preview only. They are not supported as live wallpapers.
+      <InfoCallout tone="warning">
+        Wallpaper Engine <strong>Web</strong> projects are indexed for metadata only and cannot be applied as live wallpapers.
       </InfoCallout>
-    </div>
+    </SettingsPageShell>
   );
 }

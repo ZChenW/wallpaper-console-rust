@@ -1,35 +1,44 @@
 import { LayoutGrid, Star, Clock, FolderCog, Settings } from 'lucide-react';
 
-type View = 'library' | 'favorites' | 'history' | 'sources' | 'settings';
+type View = 'library' | 'favorites' | 'history' | 'sources';
 
 interface Props {
   view: View;
+  settingsOpen: boolean;
   onNavigate: (v: View) => void;
+  onOpenSettings: () => void;
 }
 
-const items: { id: View; label: string; Icon: typeof LayoutGrid }[] = [
-  { id: 'library', label: 'Library', Icon: LayoutGrid },
-  { id: 'favorites', label: 'Favorites', Icon: Star },
-  { id: 'history', label: 'History', Icon: Clock },
-  { id: 'sources', label: 'Sources', Icon: FolderCog },
-  { id: 'settings', label: 'Settings', Icon: Settings },
+type SidebarItem =
+  | { id: View; label: string; Icon: typeof LayoutGrid; kind: 'view' }
+  | { id: 'settings'; label: string; Icon: typeof LayoutGrid; kind: 'settings' };
+
+const items: SidebarItem[] = [
+  { id: 'library', label: 'Library', Icon: LayoutGrid, kind: 'view' },
+  { id: 'favorites', label: 'Favorites', Icon: Star, kind: 'view' },
+  { id: 'history', label: 'History', Icon: Clock, kind: 'view' },
+  { id: 'sources', label: 'Sources', Icon: FolderCog, kind: 'view' },
+  { id: 'settings', label: 'Settings', Icon: Settings, kind: 'settings' },
 ];
 
-export default function Sidebar({ view, onNavigate }: Props) {
+export default function Sidebar({ view, settingsOpen, onNavigate, onOpenSettings }: Props) {
   return (
     <nav className="sidebar">
-      {items.map(({ id, label, Icon }) => (
-        <button
-          key={id}
-          className={`sidebar-btn ${view === id ? 'active' : ''}`}
-          onClick={() => onNavigate(id)}
-          title={label}
-          aria-current={view === id ? 'page' : undefined}
-        >
-          <Icon size={20} />
-          <span className="sidebar-label">{label}</span>
-        </button>
-      ))}
+      {items.map((item) => {
+        const active = item.kind === 'settings' ? settingsOpen : view === item.id;
+        return (
+          <button
+            key={item.id}
+            className={`sidebar-btn ${active ? 'active' : ''}`}
+            onClick={() => item.kind === 'settings' ? onOpenSettings() : onNavigate(item.id)}
+            title={item.label}
+            aria-current={active ? 'page' : undefined}
+          >
+            <item.Icon size={20} />
+            <span className="sidebar-label">{item.label}</span>
+          </button>
+        );
+      })}
     </nav>
   );
 }

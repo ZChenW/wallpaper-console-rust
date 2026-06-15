@@ -1,5 +1,6 @@
 import { getSettingsByCategoryAndLevel } from '../configSchema';
 import type { WallpaperPageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import ConfigRow from '../components/ConfigRow';
 
@@ -8,9 +9,14 @@ export default function WallpaperPage({ configs, saving, onSet }: WallpaperPageP
   const advanced = getSettingsByCategoryAndLevel('wallpaper', true);
 
   return (
-    <div className="settings-page">
-      <PageSection title="Backends">
-        <p className="config-desc">Images and GIFs are recommended with <strong>awww</strong>; videos with <strong>mpvpaper</strong>.</p>
+    <SettingsPageShell
+      title="Wallpaper"
+      description="Configure image, GIF, and video wallpaper backends."
+    >
+      <PageSection
+        title="Backends"
+        description="Images and GIFs use awww for smooth transitions. Videos use mpvpaper with audio enabled and crop-fill by default."
+      >
         {regular.map((c) => (
           <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
         ))}
@@ -24,6 +30,6 @@ export default function WallpaperPage({ configs, saving, onSet }: WallpaperPageP
           ))}
         </details>
       )}
-    </div>
+    </SettingsPageShell>
   );
 }

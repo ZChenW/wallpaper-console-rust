@@ -106,6 +106,23 @@ export type ApplyActionKind =
   | 'open_folder'
   | 'copy_workshop_id';
 
+export type ApplyRequestKind = 'apply' | 'retry_backend_apply' | 'apply_preview';
+
+export interface ApplyRequestDTO {
+  kind: ApplyRequestKind;
+  path: string;
+  requestId?: string;
+}
+
+export interface ApplyResultDTO {
+  requestId?: string;
+  appliedPath: string;
+  statePath: string;
+  backend: string;
+  fileType: string;
+  preview: boolean;
+}
+
 export interface ApplyActionDTO {
   kind: ApplyActionKind;
   label: string;
@@ -144,6 +161,8 @@ export const api = {
     invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
 
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
+  applyAction: (request: ApplyRequestDTO): Promise<CommandResult> =>
+    invoke<CommandResult>('apply_action', { request }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
   weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),

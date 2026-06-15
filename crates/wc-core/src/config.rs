@@ -21,7 +21,10 @@ pub fn default_config() -> HashMap<String, String> {
     defaults.insert("gif_backend".into(), "awww".into());
     defaults.insert("image_backend".into(), "awww".into());
     defaults.insert("video_backend".into(), "mpvpaper".into());
-    defaults.insert("mpvpaper_options".into(), "no-audio --loop-file=inf".into());
+    defaults.insert(
+        "mpvpaper_options".into(),
+        "--loop-file=inf --panscan=1.0".into(),
+    );
     defaults.insert("mpvpaper_output".into(), "*".into());
     defaults.insert("awww_transition_type".into(), "fade".into());
     defaults.insert("awww_transition_duration".into(), "1".into());
@@ -199,6 +202,15 @@ mod tests {
         assert_eq!(normalize_image_backend("bad"), "awww");
         assert_eq!(normalize_image_backend(""), "awww");
         assert_eq!(normalize_image_backend("unknown"), "awww");
+    }
+
+    #[test]
+    fn default_mpvpaper_options_includes_panscan() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("mpvpaper_options").unwrap(),
+            "--loop-file=inf --panscan=1.0"
+        );
     }
 }
 

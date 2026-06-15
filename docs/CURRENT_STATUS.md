@@ -35,6 +35,8 @@ This section is the current status source for the maturity work. The original ph
 | Wallpaper Engine scene/Web model | Completed | Scene (`we_scene`): optional external `linux-wallpaperengine` with compat cache for incompatibility detection. Web (`we_web`): indexed for browsing/preview metadata only and intentionally routed to `unsupported`; previous Web renderer/Chromium backend experiments are removed from the active code path. |
 | Settings/startup cleanup | Completed | Settings schema extracted from the view, low-frequency controls folded under advanced sections, and Settings is lazy-loaded so the Library first paint does not pull the Settings chunk. |
 | Frontend apply action model consolidation | Completed | domain/applyActions.ts normalizes backend applyActions DTO; LibraryView builds context menu from normalized actions; WallpaperGrid uses isApplyAvailable(); legacy DTO fallback centralized; 28 unit tests; smoke tests pass |
+| Apply execution pipeline | Completed | `apply_action` Tauri command, `ApplyRequest`/`ApplyExecutionResult` Rust types, `buildApplyRequest` frontend, latest-intent frontend queue, stale request guard (AtomicU64), preview resolves from project metadata, state/history write boundaries, 48 smoke tests, Rust: 15 wc-app + 32 wallpaper-console-tauri + 22 wc-backend tests |
+| Backend apply lifecycle | Completed | Backend apply lifecycle is centralized in `wc-backend::lifecycle`; `apply_wallpaper()` is the single state/history write boundary after successful backend confirmation. |
 
 Important verification boundary: automated build/test/smoke/package checks were run locally. Manual GUI acceptance remains open until an interactive desktop session can complete `docs/TAURI_MANUAL_SMOKE_CHECKLIST.md`.
 

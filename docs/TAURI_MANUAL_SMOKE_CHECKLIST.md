@@ -53,6 +53,15 @@ Use the checklist below from an interactive desktop session.
 - [ ] If `linux-wallpaperengine` is not installed, applying a WE scene card shows the install suggestion.
 - [ ] If `linux-wallpaperengine` is installed, apply a WE scene card and confirm current state points at the project folder, not `preview.gif`.
 - [ ] Confirm WE Web preview media is used only as the card thumbnail; it is not offered as a live wallpaper action.
+
+### Apply execution
+
+- [ ] Right-click a WE Scene and Apply: current state records the project path.
+- [ ] Right-click the same WE Scene and Apply preview GIF: current state records the preview file path.
+- [ ] WE Web does not show Apply and double-click shows a warning.
+- [ ] Failed WE Scene shows Retry backend apply; after retry, the card refreshes.
+- [ ] Rapidly click two different wallpapers; final status should match the last clicked item.
+
 - [ ] Open Settings and run SQLite Verify.
 - [ ] Open Settings and confirm Wallpaper Engine Backend shows Ready/Missing with the detected binary path or install hint.
 - [ ] Open Settings and run Thumbnail Cache Status / Clear.
@@ -63,3 +72,12 @@ Use the checklist below from an interactive desktop session.
 - [ ] Run Stop and Restore.
 - [ ] On niri, confirm app-id/window rules still match the Tauri app.
 - [ ] Note WebKitGTK 4.1 rendering or animation issues.
+
+### Backend switching
+
+- Image -> image: should transition normally.
+- Image -> video: should not briefly show an older unrelated image.
+- Video -> image: should not flash the previous image before the requested image.
+- Video -> scene: brief wait is acceptable; long black screen is not.
+- Scene -> image/video: old scene should disappear only after target backend has started.
+- Failed scene apply: current state should remain the previous wallpaper.

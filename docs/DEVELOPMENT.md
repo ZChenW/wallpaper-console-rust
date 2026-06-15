@@ -167,6 +167,30 @@ The `apply` and `stop` commands should normally handle this automatically. The f
 
 Both scene and web projects retain the preview GIF fallback. Current wallpaper state records the WE project path, never the preview path unless explicitly applied.
 
+### Apply execution pipeline
+
+The GUI receives `applyActions` from Rust DTOs and sends explicit `ApplyRequestDTO`
+objects to Tauri through `apply_action`.
+
+- `apply`: apply the real wallpaper path/project.
+- `retry_backend_apply`: clear compatibility failure first, then apply the real project.
+- `apply_preview`: apply the project's preview media as a normal image/GIF; the frontend sends
+  the project path and the backend resolves the preview path.
+
+The older `apply(path)` command remains for compatibility but should not be used by new GUI actions.
+
+Key execution guarantees:
+- Failed backend apply does not write current/history state.
+- Unsupported WE Web apply returns a structured error without stopping the current wallpaper.
+- Stale apply requests (superseded by a newer request) return `stale_apply_request` error.
+- Frontend latest-intent queue prevents overlapping applies; only the most recent intent succeeds.
+
+Rust implementation: `crates/wc-app/src/apply_execution.rs` — `ApplyRequest`, `ApplyRequestKind`, `ApplyExecutionTarget`, `ApplyExecutionResult`.
+Tauri command: `apps/tauri-gui/src-tauri/src/commands/wallpaper.rs` — `apply_action`.
+Frontend: `apps/tauri-gui/frontend/src/domain/applyRequests.ts` — `buildApplyRequest`.
+Tests: `cargo test -p wc-app` (execution+preview), `cargo test -p wc-backend` (state preservation), `cargo test -p wallpaper-console-tauri` (stale guard).
+Smoke: `apps/tauri-gui/frontend/e2e/smoke.spec.ts` (preview apply, WE Web double-click guard).
+
 ## Tab Persistence
 
 Library, Favorites, and History tabs stay mounted after first visit. Switching between them uses `display: none/flex` CSS toggling instead of unmounting, preserving scroll position, thumbnail state, and loaded data. Thumbnails are shared across all views via a global thumbnail store (concurrency 4). Hidden views skip thumbnail enqueue and reset operations via the `active` prop.
@@ -205,6 +229,17 @@ See [TAURI_MANUAL_SMOKE_CHECKLIST.md](TAURI_MANUAL_SMOKE_CHECKLIST.md).
 ## Architecture
 
 See [TAURI_ARCHITECTURE.md](TAURI_ARCHITECTURE.md).
+
+### Backend apply lifecycle
+
+`wc-backend::lifecycle` owns the pure transition plan for wallpaper switching. Backend modules start/stop real processes, but `wc-backend::apply_wallpaper()` is the only successful apply path that writes current wallpaper, last backend, and history.
+
+When changing apply behavior:
+
+1. Add or update lifecycle tests first.
+2. Keep Wallpaper Engine Web unsupported.
+3. Do not stop the previous visible backend until the new backend is confirmed unless the same backend requires a pre-stop.
+4. Failed applies must preserve current wallpaper state and must not add history.
 
 ## Historical Wails
 

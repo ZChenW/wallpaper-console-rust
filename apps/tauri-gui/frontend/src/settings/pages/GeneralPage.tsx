@@ -1,4 +1,5 @@
 import type { GeneralPageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 
@@ -8,7 +9,10 @@ export default function GeneralPage({
   thumbCache,
 }: GeneralPageProps) {
   return (
-    <div className="settings-page">
+    <SettingsPageShell
+      title="General"
+      description="Review app status and core runtime health."
+    >
       <PageSection title="Status">
         <StatusCard
           label="Database"
@@ -18,6 +22,7 @@ export default function GeneralPage({
           label="Wallpaper Engine Scene"
           value={weStatus?.available ? `Ready — ${weStatus.path}` : 'Missing'}
           detail={!weStatus?.available ? (weStatus?.message ?? 'Checking...') : undefined}
+          tone={weStatus?.available ? 'success' : 'warning'}
         />
         <StatusCard
           label="Thumbnail Cache"
@@ -26,6 +31,6 @@ export default function GeneralPage({
             : '...'}
         />
       </PageSection>
-    </div>
+    </SettingsPageShell>
   );
 }

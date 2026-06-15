@@ -2,6 +2,7 @@ import { api } from '../../api/bridge';
 import { commandErrorFeedback, commandSuccessFeedback } from '../../api/feedback';
 import { getSettingsByCategoryAndLevel, cleanupDays } from '../configSchema';
 import type { LibraryPageProps } from '../types';
+import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 import ConfigRow from '../components/ConfigRow';
@@ -21,14 +22,23 @@ export default function LibraryPage({
   const advanced = getSettingsByCategoryAndLevel('library', true);
 
   return (
-    <div className="settings-page">
-      <PageSection title="Scan Filters">
+    <SettingsPageShell
+      title="Library"
+      description="Control scan filters, thumbnails, and cache cleanup."
+    >
+      <PageSection
+        title="Scan Filters"
+        description="These filters apply during library scan and database rebuild."
+      >
         {regular.map((c) => (
           <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
         ))}
       </PageSection>
 
-      <PageSection title="Thumbnail Cache">
+      <PageSection
+        title="Thumbnail Cache"
+        description="Cached thumbnails make large libraries faster to browse."
+      >
         <StatusCard
           label="Status"
           value={thumbCache
@@ -83,6 +93,6 @@ export default function LibraryPage({
           ))}
         </details>
       )}
-    </div>
+    </SettingsPageShell>
   );
 }

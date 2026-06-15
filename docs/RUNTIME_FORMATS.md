@@ -33,7 +33,7 @@ TYPE\tEXT\tBACKEND\tSIZE\tMTIME\tRESOLUTION\tPATH\n
 gif_backend=awww
 image_backend=awww
 video_backend=mpvpaper
-mpvpaper_options=no-audio --loop-file=inf
+mpvpaper_options=--loop-file=inf --panscan=1.0
 mpvpaper_output=*
 awww_transition_type=fade
 awww_transition_duration=1

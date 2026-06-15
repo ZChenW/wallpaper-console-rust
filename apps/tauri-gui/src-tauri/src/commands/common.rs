@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::path::Path;
 
 use wc_core::types::{FileType, WallpaperEntry};
@@ -86,6 +86,25 @@ pub struct WallpaperDto {
     pub apply_backend: Option<String>,
     pub apply_reason: Option<String>,
     pub apply_actions: Option<Vec<ApplyActionDto>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyRequestDto {
+    pub kind: String,
+    pub path: String,
+    pub request_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ApplyResultDto {
+    pub request_id: Option<String>,
+    pub applied_path: String,
+    pub state_path: String,
+    pub backend: String,
+    pub file_type: String,
+    pub preview: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

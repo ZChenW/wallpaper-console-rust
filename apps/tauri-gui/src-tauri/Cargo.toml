@@ -30,6 +30,7 @@ camino.workspace = true
 wc-backend.workspace = true
 wc-app.workspace = true
 wc-preview.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

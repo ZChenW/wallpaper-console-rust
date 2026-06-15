@@ -154,15 +154,6 @@ pub fn apply(s: &StorageApi, project: LinuxWallpaperEngineProject) -> Result<(),
     let old_pid_str = s.config_get(PID_CONFIG_KEY, "");
     let old_pid: Option<i32> = old_pid_str.parse().ok().filter(|&p| p > 0);
 
-    // Only stop non-LWE backends first. We keep old LWE alive until new one is confirmed.
-    // This avoids the "expose static background" flash during scene-to-scene switches.
-    let last_backend = s.last_backend_read()?.unwrap_or_default();
-    if last_backend != crate::LWE_BACKEND_NAME {
-        crate::stop_all_backends(Some(s))?;
-    } else {
-        crate::stop_non_lwe_backends(s);
-    }
-
     // Write stdout/stderr to a log file instead of Stdio::piped() which
     // can deadlock if nobody drains the pipe on a long-running process.
     let log_path = s.cd.path.join("linux-wallpaperengine-last.log");
@@ -255,9 +246,6 @@ pub fn apply(s: &StorageApi, project: LinuxWallpaperEngineProject) -> Result<(),
     let _ = s.config_set("lwe_last_exit_status", "");
 
     s.config_set(PID_CONFIG_KEY, &child.id().to_string())?;
-    s.current_write(&project.project_path)?;
-    s.last_backend_write(crate::LWE_BACKEND_NAME)?;
-    s.history_add(&project.project_path, crate::LWE_BACKEND_NAME)?;
     Ok(())
 }
 
@@ -544,7 +532,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn cross_backend_switch_stops_non_lwe_first() {
+    fn cross_backend_switch_cleans_non_lwe_after_success() {
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
@@ -580,9 +568,15 @@ mod tests {
         // Should succeed — cross-backend switch from mpvpaper to LWE.
         assert!(result.is_ok());
 
-        // After successful apply, backend should be LWE.
+        // After successful apply, backend state should still be mpvpaper
+        // because linux_wallpaperengine::apply only starts the renderer;
+        // unified apply_wallpaper writes backend state.
         let backend = s.last_backend_read().unwrap().unwrap_or_default();
-        assert_eq!(backend, crate::LWE_BACKEND_NAME);
+        assert_eq!(
+            backend,
+            "mpvpaper",
+            "linux_wallpaperengine::apply only starts the renderer; unified apply_wallpaper writes backend state"
+        );
 
         // Cleanup.
         let pid = s.config_get(PID_CONFIG_KEY, "");
