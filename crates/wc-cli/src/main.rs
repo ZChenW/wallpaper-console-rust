@@ -1275,6 +1275,33 @@ fn json_library_page(
     }
 }
 
+fn json_library_page_from_sqlite(
+    s: &StorageApi,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    let query = wc_storage::sqlite::LibraryPageQuery {
+        filter: wc_storage::sqlite::LibraryFilter::parse(filter)?,
+        sort: wc_storage::sqlite::LibrarySort::parse(sort)?,
+        search: search.to_string(),
+        offset,
+        limit,
+    };
+    let page = wc_storage::sqlite::library_page_sqlite(&s.cd, &query)?;
+    let items: Vec<serde_json::Value> = page.items.iter().map(json_from_entry).collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total": page.total,
+            "items": items,
+        }))?
+    );
+    Ok(())
+}
+
 fn validate_library_filter(filter: &str) -> anyhow::Result<&str> {
     match filter {
         "all" | "image" | "gif" | "video" | "we_scene" | "we_web" | "unsupported" => Ok(filter),
@@ -1287,76 +1314,6 @@ fn validate_library_sort(sort: &str) -> anyhow::Result<&str> {
         "newest" | "largest" | "name" => Ok(sort),
         other => anyhow::bail!("unknown library sort: {}", other),
     }
-}
-
-fn json_library_page_from_sqlite(
-    s: &StorageApi,
-    filter: &str,
-    sort: &str,
-    search: &str,
-    offset: usize,
-    limit: usize,
-) -> anyhow::Result<()> {
-    use rusqlite::{params, Connection};
-
-    let filter = validate_library_filter(filter)?;
-    let sort = validate_library_sort(sort)?;
-    let db = s.cd.db_path();
-    if !db.exists() {
-        let conn = Connection::open(&db)?;
-        wc_storage::sqlite::create_schema(&conn)?;
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "total": 0,
-                "items": []
-            }))?
-        );
-        return Ok(());
-    }
-    let conn = Connection::open(&db)?;
-    wc_storage::sqlite::ensure_wallpaper_query_indexes(&conn)?;
-    let order_by = match sort {
-        "newest" => "mtime DESC, path ASC",
-        "largest" => "size DESC, path ASC",
-        "name" => "path ASC",
-        _ => unreachable!(),
-    };
-    let where_clause = "WHERE (?1 = 'all' OR type = ?1)
-        AND (?2 = ''
-          OR lower(path) LIKE '%' || lower(?2) || '%'
-          OR lower(title) LIKE '%' || lower(?2) || '%'
-          OR lower(workshop_id) LIKE '%' || lower(?2) || '%'
-          OR lower(project_type) LIKE '%' || lower(?2) || '%')";
-
-    let total: i64 = conn.query_row(
-        &format!("SELECT COUNT(*) FROM wallpapers {}", where_clause),
-        params![filter, search],
-        |row| row.get(0),
-    )?;
-
-    let sql = format!(
-        "SELECT path, type, ext, backend, size, mtime, resolution,
-                project_type, preview_path, workshop_id, title, we_file, unsupported_reason
-         FROM wallpapers {} ORDER BY {} LIMIT ?3 OFFSET ?4",
-        where_clause, order_by
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows: Result<Vec<serde_json::Value>, rusqlite::Error> = stmt
-        .query_map(
-            params![filter, search, limit as i64, offset as i64],
-            json_from_sql_row,
-        )?
-        .collect();
-    let items = rows?;
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&serde_json::json!({
-            "total": total,
-            "items": items,
-        }))?
-    );
-    Ok(())
 }
 
 fn json_library_page_from_tsv(
