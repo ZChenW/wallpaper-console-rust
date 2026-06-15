@@ -64,49 +64,50 @@ pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
     result
 }
 
-/// Scan all sources for wallpaper files.
-///
-/// Sources are deduplicated by canonical path first.
-///
-/// Wallpaper Engine source detection:
-///   - Workshop root (.../431960) → iterate one level of project subdirs,
-///     read each project.json, skip scene/web/application.
-///   - Single project dir (.../431960/<id> with project.json) → read its
-///     project.json directly.
-///   - Other dirs → recursive walkdir scan.
-pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScanEvent {
+    SourceStarted { source: String },
+    CandidateFound { path: String, count: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanControl {
+    Continue,
+    Cancel,
+}
+
+/// Scan all sources for wallpaper files with a callback for progress/cancellation.
+pub fn scan_wallpapers_with_callback<F>(sources: &[String], mut on_event: F) -> Vec<String>
+where
+    F: FnMut(ScanEvent) -> ScanControl,
+{
     let deduped = dedupe_sources(sources);
     let mut seen: HashSet<String> = HashSet::new();
     let mut files: Vec<String> = Vec::new();
 
     for source in &deduped {
+        if matches!(on_event(ScanEvent::SourceStarted { source: source.clone() }), ScanControl::Cancel) {
+            break;
+        }
         let src_path = Path::new(source);
         if !src_path.is_dir() {
             continue;
         }
-
-        match we_source_kind(source) {
-            WeKind::WorkshopRoot => {
-                scan_we_workshop_root(src_path, &mut seen, &mut files);
-            }
-            WeKind::ProjectDir => {
-                // Single WE project — read its project.json directly.
-                if let Some(wp) = indexed_we_project_path(src_path) {
-                    let p = Path::new(&wp);
-                    let c = canonicalize_str(
-                        &std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
-                    );
-                    if seen.insert(c.clone()) {
-                        files.push(c);
-                    }
-                }
-            }
-            WeKind::Normal => {
-                scan_dir_recursive(src_path, &mut seen, &mut files);
-            }
+        let cancelled = match we_source_kind(source) {
+            WeKind::WorkshopRoot => scan_we_workshop_root_with_callback(src_path, &mut seen, &mut files, &mut on_event),
+            WeKind::ProjectDir => scan_we_project_dir_with_callback(src_path, &mut seen, &mut files, &mut on_event),
+            WeKind::Normal => scan_dir_recursive_with_callback(src_path, &mut seen, &mut files, &mut on_event),
+        };
+        if cancelled {
+            break;
         }
     }
     files
+}
+
+/// Legacy compatibility wrapper — scans without cancellation support.
+pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
+    scan_wallpapers_with_callback(sources, |_| ScanControl::Continue)
 }
 
 /// Classify a WE source path.
@@ -140,12 +141,19 @@ fn we_source_kind(path: &str) -> WeKind {
     WeKind::Normal
 }
 
-/// Scan a Wallpaper Engine workshop root: iterate one level of project
-/// directories, read each project.json, and decide what to include.
-fn scan_we_workshop_root(root: &Path, seen: &mut HashSet<String>, files: &mut Vec<String>) {
+/// Scan a Wallpaper Engine workshop root with cancellation support.
+fn scan_we_workshop_root_with_callback<F>(
+    root: &Path,
+    seen: &mut HashSet<String>,
+    files: &mut Vec<String>,
+    on_event: &mut F,
+) -> bool
+where
+    F: FnMut(ScanEvent) -> ScanControl,
+{
     let entries = match fs::read_dir(root) {
         Ok(e) => e,
-        Err(_) => return,
+        Err(_) => return false,
     };
 
     for entry in entries.filter_map(|e| e.ok()) {
@@ -162,23 +170,67 @@ fn scan_we_workshop_root(root: &Path, seen: &mut HashSet<String>, files: &mut Ve
             let p = Path::new(wp);
             let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
             if seen.insert(c.clone()) {
-                files.push(c);
+                files.push(c.clone());
+                if matches!(
+                    on_event(ScanEvent::CandidateFound { path: c, count: files.len() }),
+                    ScanControl::Cancel
+                ) {
+                    return true;
+                }
             }
             continue;
         }
 
         if has_proj {
-            // project.json exists but unreadable or unsupported type → skip.
             continue;
         }
 
-        // No project.json — fall back to recursive scan.
-        scan_dir_recursive(&project_dir, seen, files);
+        let cancelled = scan_dir_recursive_with_callback(&project_dir, seen, files, on_event);
+        if cancelled {
+            return true;
+        }
     }
+    false
 }
 
-/// Recursively scan a directory for supported wallpaper files.
-fn scan_dir_recursive(dir: &Path, seen: &mut HashSet<String>, files: &mut Vec<String>) {
+/// Scan a single WE project directory with cancellation support.
+fn scan_we_project_dir_with_callback<F>(
+    project_dir: &Path,
+    seen: &mut HashSet<String>,
+    files: &mut Vec<String>,
+    on_event: &mut F,
+) -> bool
+where
+    F: FnMut(ScanEvent) -> ScanControl,
+{
+    if let Some(wp) = indexed_we_project_path(project_dir) {
+        let p = Path::new(&wp);
+        let c = canonicalize_str(
+            &std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
+        );
+        if seen.insert(c.clone()) {
+            files.push(c.clone());
+            if matches!(
+                on_event(ScanEvent::CandidateFound { path: c, count: files.len() }),
+                ScanControl::Cancel
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Recursively scan a directory for supported wallpaper files with cancellation support.
+fn scan_dir_recursive_with_callback<F>(
+    dir: &Path,
+    seen: &mut HashSet<String>,
+    files: &mut Vec<String>,
+    on_event: &mut F,
+) -> bool
+where
+    F: FnMut(ScanEvent) -> ScanControl,
+{
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
@@ -198,11 +250,18 @@ fn scan_dir_recursive(dir: &Path, seen: &mut HashSet<String>, files: &mut Vec<St
                     &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
                 );
                 if seen.insert(canonical.clone()) {
-                    files.push(canonical);
+                    files.push(canonical.clone());
+                    if matches!(
+                        on_event(ScanEvent::CandidateFound { path: canonical, count: files.len() }),
+                        ScanControl::Cancel
+                    ) {
+                        return true;
+                    }
                 }
             }
         }
     }
+    false
 }
 
 fn canonicalize_str(p: &Path) -> String {
@@ -918,8 +977,30 @@ mod tests {
         assert_eq!(result.unwrap(), img.to_string_lossy().to_string());
     }
 
-    #[test]
-    fn we_workshop_root_scans_subdirs() {
+#[test]
+fn scan_wallpapers_with_callback_can_cancel_after_first_candidate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("walls");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("a.jpg"), b"a").unwrap();
+    std::fs::write(dir.join("b.jpg"), b"b").unwrap();
+    let source = dir.to_string_lossy().to_string();
+    let mut seen_candidates = 0usize;
+
+    let files = scan_wallpapers_with_callback(&[source], |event| {
+        if matches!(event, ScanEvent::CandidateFound { .. }) {
+            seen_candidates += 1;
+            return ScanControl::Cancel;
+        }
+        ScanControl::Continue
+    });
+
+    assert_eq!(seen_candidates, 1);
+    assert_eq!(files.len(), 1);
+}
+
+#[test]
+fn we_workshop_root_scans_subdirs() {
         let root = tempfile::tempdir().unwrap();
         let root_path = format!(
             "{}/steamapps/workshop/content/431960",

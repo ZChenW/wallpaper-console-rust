@@ -82,12 +82,37 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
     }
 
     update_scan_stage("walking files");
-    let paths = wc_scan::scan_wallpapers(&sources);
+    let paths = wc_scan::scan_wallpapers_with_callback(&sources, |event| {
+        match scan_state().lock() {
+            Ok(mut state) => {
+                if state.cancel_requested {
+                    return wc_scan::ScanControl::Cancel;
+                }
+                match event {
+                    wc_scan::ScanEvent::SourceStarted { source } => {
+                        state.stage = "walking files".into();
+                        state.current_path = Some(source);
+                    }
+                    wc_scan::ScanEvent::CandidateFound { path, count } => {
+                        state.stage = "walking files".into();
+                        state.total_hint = Some(count);
+                        state.current_path = Some(path);
+                    }
+                }
+                wc_scan::ScanControl::Continue
+            }
+            Err(_) => wc_scan::ScanControl::Cancel,
+        }
+    });
+    if scan_cancelled()? {
+        return Err("scan cancelled".to_string());
+    }
     if let Ok(mut state) = scan_state().lock() {
         state.total_hint = Some(paths.len());
     }
 
     update_scan_stage("reading metadata");
+    let prior_cache = wc_storage::sqlite::prior_metadata_cache_from_sqlite(&s.cd);
     let mut entries: Vec<WallpaperEntry> = Vec::with_capacity(paths.len());
     for (idx, path) in paths.iter().enumerate() {
         if let Ok(mut state) = scan_state().lock() {
@@ -97,7 +122,15 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
             state.scanned = idx + 1;
             state.current_path = Some(path.clone());
         }
-        if let Some(entry) = wc_scan::make_entry(path) {
+        let (entry, was_reused) = wc_scan::make_entry_cached(path, &prior_cache);
+        if let Ok(mut state) = scan_state().lock() {
+            if was_reused {
+                state.reused_metadata += 1;
+            } else {
+                state.probed_metadata += 1;
+            }
+        }
+        if let Some(entry) = entry {
             entries.push(entry);
         }
     }
@@ -206,5 +239,18 @@ mod tests {
         let state = scan_state().lock().unwrap().clone();
         assert!(!state.running);
         assert_eq!(state.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn scan_cancel_sets_cancel_requested_when_running() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        mark_scan_started("walking files").unwrap();
+        {
+            let mut state = scan_state().lock().unwrap();
+            state.cancel_requested = true;
+        }
+        assert!(scan_cancelled().unwrap());
+        finish_scan_error("scan cancelled");
     }
 }
