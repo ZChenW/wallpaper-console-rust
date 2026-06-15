@@ -2,6 +2,23 @@
 
 Run after `./install.sh` or after installing a `.deb` / `.rpm` bundle.
 
+## Evidence Capture
+
+Build the GUI first:
+
+```bash
+cargo tauri build --manifest-path apps/tauri-gui/src-tauri/Cargo.toml --bundles deb,rpm
+```
+
+Capture a profiling and desktop evidence bundle:
+
+```bash
+WALLPAPER_CONSOLE_GUI_RUST=target/release/wallpaper-console-tauri \
+  ./scripts/manual_tauri_acceptance.sh 45
+```
+
+The script prints a `report=...` path. Attach that report path and screenshot path to the final acceptance note. Automated Playwright smoke tests do not replace this checklist because they run against a mock frontend environment.
+
 ## 2026-06-12 SQLite-Only + WE One-Click Scan Note
 
 Key behavioral changes:
