@@ -3,7 +3,7 @@ use super::common::{
     LibrarySourceStatusDto, WallpaperDto,
 };
 
-const UNBOUNDED_PAGE_LIMIT: usize = i64::MAX as usize;
+const LEGACY_LIST_LIMIT: usize = 1_000;
 
 #[tauri::command]
 pub async fn library_count() -> Result<LibraryCountDto, String> {
@@ -32,7 +32,7 @@ pub async fn library_list(_source: String) -> Result<Vec<WallpaperDto>, String> 
                 sort: wc_storage::sqlite::LibrarySort::Newest,
                 search: String::new(),
                 offset: 0,
-                limit: UNBOUNDED_PAGE_LIMIT,
+                limit: LEGACY_LIST_LIMIT,
             },
         )
         .map_err(|e| e.to_string())?;
@@ -85,7 +85,7 @@ pub async fn library_page_gui(
 
 #[tauri::command]
 pub async fn favorites_list() -> Result<Vec<WallpaperDto>, String> {
-    favorites_page(0, UNBOUNDED_PAGE_LIMIT)
+    favorites_page(0, LEGACY_LIST_LIMIT)
         .await
         .map(|p| p.items)
 }
@@ -133,7 +133,7 @@ pub async fn favorite_remove(path: String) -> CommandResult {
 
 #[tauri::command]
 pub async fn history_list() -> Result<Vec<WallpaperDto>, String> {
-    history_page(0, UNBOUNDED_PAGE_LIMIT).await.map(|p| p.items)
+    history_page(0, LEGACY_LIST_LIMIT).await.map(|p| p.items)
 }
 
 #[tauri::command]
@@ -189,6 +189,11 @@ pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
 #[cfg(test)]
 mod tests {
     use wc_core::types::FileType;
+
+    #[test]
+    fn legacy_list_limit_is_bounded() {
+        assert_eq!(super::LEGACY_LIST_LIMIT, 1_000);
+    }
 
     #[test]
     fn library_count_dto_requires_no_full_table_load() {

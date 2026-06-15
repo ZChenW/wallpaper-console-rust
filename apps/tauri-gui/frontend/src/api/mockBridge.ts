@@ -274,6 +274,7 @@ export const api = {
   weClearBackendError: async (): Promise<CommandResult> => ok,
   restore: async (): Promise<CommandResult> => ok,
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   libraryList: async (): Promise<WallpaperDTO[]> => MOCK_WALLPAPERS,
 
   libraryCount: async (): Promise<LibraryCountDTO> => ({ total: 150, images: 90, gifs: 30, videos: 30 }),
@@ -319,6 +320,7 @@ export const api = {
     message: 'SQLite active (150 entries)',
   }),
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   favoritesList: async (): Promise<WallpaperDTO[]> =>
     MOCK_FAVORITES.map((path) =>
       MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
@@ -366,6 +368,7 @@ export const api = {
   },
   favoriteRemove: async (): Promise<CommandResult> => ok,
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   historyList: async (): Promise<WallpaperDTO[]> =>
     MOCK_HISTORY.map((path) =>
       MOCK_WALLPAPERS.find((w) => w.path === path) ?? {

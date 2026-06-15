@@ -168,6 +168,7 @@ export const api = {
   weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   libraryList: (source: string): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('library_list', { source }),
 
   libraryCount: (): Promise<LibraryCountDTO> =>
@@ -188,12 +189,14 @@ export const api = {
   librarySourceStatus: (): Promise<LibrarySourceStatusDTO> =>
     invoke<LibrarySourceStatusDTO>('library_source_status'),
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   favoritesList: (): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('favorites_list'),
   favoritesPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
     invoke<LibraryPageDTO>('favorites_page', { offset, limit }),
   favoriteAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_add', { path }),
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
 
+  // Compatibility API only. New views must use libraryPage/favoritesPage/historyPage.
   historyList: (): Promise<WallpaperDTO[]> => invoke<WallpaperDTO[]>('history_list'),
   historyPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
     invoke<LibraryPageDTO>('history_page', { offset, limit }),
