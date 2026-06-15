@@ -4,6 +4,40 @@ use std::path::{Path, PathBuf};
 
 use crate::error::WcError;
 
+const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
+    ("gif_backend", "awww"),
+    ("image_backend", "awww"),
+    ("video_backend", "mpvpaper"),
+    ("mpvpaper_options", "--loop-file=inf --panscan=1.0"),
+    ("mpvpaper_output", "*"),
+    ("awww_transition_type", "fade"),
+    ("awww_transition_duration", "1"),
+    ("awww_resize", "crop"),
+    ("wallpaper_transition_fps", "60"),
+    ("linux_wallpaperengine_enabled", "on"),
+    ("linux_wallpaperengine_path", "auto"),
+    ("linux_wallpaperengine_scaling", "default"),
+    ("linux_wallpaperengine_fps", "60"),
+    ("linux_wallpaperengine_muted", "off"),
+    ("linux_wallpaperengine_volume", "100"),
+    ("linux_wallpaperengine_assets_dir", "auto"),
+    ("linux_wallpaperengine_target_mode", "auto"),
+    ("linux_wallpaperengine_target", ""),
+    ("min_wallpaper_width", "1280"),
+    ("min_wallpaper_height", "720"),
+    ("preview_metadata", "compact"),
+    ("gui_thumbnail_mode", "cache"),
+    ("gui_thumbnail_cleanup_days", "30"),
+    ("gui_thumbnail_failure_ttl_secs", "900"),
+    ("gui_debug_logs", "off"),
+    ("storage_backend", "sqlite"),
+    ("open_project_location_mode", "ask"),
+    ("gui_file_manager", "auto"),
+    ("gui_file_manager_custom", ""),
+    ("gui_terminal_file_manager", "yazi"),
+    ("gui_terminal_file_manager_custom", ""),
+];
+
 /// Resolve the wallpaper-console config directory.
 pub fn resolve_config_dir() -> Result<PathBuf, WcError> {
     if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
@@ -17,42 +51,15 @@ pub fn resolve_config_dir() -> Result<PathBuf, WcError> {
 
 /// Default config key-value pairs (populated on first run).
 pub fn default_config() -> HashMap<String, String> {
-    let mut defaults = HashMap::new();
-    defaults.insert("gif_backend".into(), "awww".into());
-    defaults.insert("image_backend".into(), "awww".into());
-    defaults.insert("video_backend".into(), "mpvpaper".into());
-    defaults.insert(
-        "mpvpaper_options".into(),
-        "--loop-file=inf --panscan=1.0".into(),
-    );
-    defaults.insert("mpvpaper_output".into(), "*".into());
-    defaults.insert("awww_transition_type".into(), "fade".into());
-    defaults.insert("awww_transition_duration".into(), "1".into());
-    defaults.insert("awww_resize".into(), "crop".into());
-    defaults.insert("wallpaper_transition_fps".into(), "60".into());
-    defaults.insert("linux_wallpaperengine_enabled".into(), "on".into());
-    defaults.insert("linux_wallpaperengine_path".into(), "auto".into());
-    defaults.insert("linux_wallpaperengine_scaling".into(), "default".into());
-    defaults.insert("linux_wallpaperengine_fps".into(), "60".into());
-    defaults.insert("linux_wallpaperengine_muted".into(), "off".into());
-    defaults.insert("linux_wallpaperengine_volume".into(), "100".into());
-    defaults.insert("linux_wallpaperengine_assets_dir".into(), "auto".into());
-    defaults.insert("linux_wallpaperengine_target_mode".into(), "auto".into());
-    defaults.insert("linux_wallpaperengine_target".into(), "".into());
-    defaults.insert("min_wallpaper_width".into(), "1280".into());
-    defaults.insert("min_wallpaper_height".into(), "720".into());
-    defaults.insert("preview_metadata".into(), "compact".into());
-    defaults.insert("gui_thumbnail_mode".into(), "cache".into());
-    defaults.insert("gui_thumbnail_cleanup_days".into(), "30".into());
-    defaults.insert("gui_thumbnail_failure_ttl_secs".into(), "900".into());
-    defaults.insert("gui_debug_logs".into(), "off".into());
-    defaults.insert("storage_backend".into(), "sqlite".into());
-    defaults.insert("open_project_location_mode".into(), "ask".into());
-    defaults.insert("gui_file_manager".into(), "auto".into());
-    defaults.insert("gui_file_manager_custom".into(), "".into());
-    defaults.insert("gui_terminal_file_manager".into(), "yazi".into());
-    defaults.insert("gui_terminal_file_manager_custom".into(), "".into());
-    defaults
+    DEFAULT_CONFIG_PAIRS
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), (*value).to_string()))
+        .collect()
+}
+
+/// Default config keys in the order used when writing flat config files.
+pub fn default_config_keys() -> Vec<&'static str> {
+    DEFAULT_CONFIG_PAIRS.iter().map(|(key, _)| *key).collect()
 }
 
 /// Runtime files that must exist.
@@ -87,10 +94,9 @@ pub fn init_config_dir(config_dir: &Path) -> Result<(), WcError> {
     // Populate defaults for missing config keys
     let config_path = config_dir.join("config");
     let existing = parse_config_file(&config_path)?;
-    let defaults = default_config();
     let mut to_add = Vec::new();
-    for (key, val) in &defaults {
-        if !existing.contains_key(key.as_str()) {
+    for (key, val) in DEFAULT_CONFIG_PAIRS {
+        if !existing.contains_key(*key) {
             to_add.push(format!("{}={}", key, val));
         }
     }
@@ -139,15 +145,40 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
     };
     map.insert(key.to_string(), value.to_string());
 
-    let mut content = String::new();
-    for (k, v) in &map {
-        content.push_str(&format!("{}={}\n", k, v));
-    }
+    let content = serialize_config_map(&map);
     // Atomic: write to temp, then rename
     let tmp = config_path.with_extension("tmp");
     fs::write(&tmp, content).map_err(WcError::Io)?;
     fs::rename(&tmp, &config_path).map_err(WcError::Io)?;
     Ok(())
+}
+
+fn serialize_config_map(map: &HashMap<String, String>) -> String {
+    let mut content = String::new();
+    let mut emitted = std::collections::HashSet::new();
+
+    for key in default_config_keys() {
+        if let Some(value) = map.get(key) {
+            content.push_str(key);
+            content.push('=');
+            content.push_str(value);
+            content.push('\n');
+            emitted.insert(key.to_string());
+        }
+    }
+
+    let mut unknown: Vec<&String> = map.keys().filter(|key| !emitted.contains(*key)).collect();
+    unknown.sort();
+    for key in unknown {
+        if let Some(value) = map.get(key) {
+            content.push_str(key);
+            content.push('=');
+            content.push_str(value);
+            content.push('\n');
+        }
+    }
+
+    content
 }
 
 /// Read a single config value. Returns `default` if key not found.
@@ -210,6 +241,54 @@ mod tests {
         assert_eq!(
             defaults.get("mpvpaper_options").unwrap(),
             "--loop-file=inf --panscan=1.0"
+        );
+    }
+
+    #[test]
+    fn default_config_keys_are_unique() {
+        let keys = default_config_keys();
+        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(keys.len(), unique.len());
+        assert_eq!(keys.first().copied(), Some("gif_backend"));
+        assert_eq!(
+            keys.last().copied(),
+            Some("gui_terminal_file_manager_custom")
+        );
+    }
+
+    #[test]
+    fn write_config_value_is_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg = tmp.path().join("config");
+        fs::write(
+            &cfg,
+            "z_custom=last\nimage_backend=awww\ngif_backend=awww\n",
+        )
+        .unwrap();
+
+        write_config_value(tmp.path(), "mpvpaper_output", "DP-1").unwrap();
+        let first = fs::read_to_string(&cfg).unwrap();
+        write_config_value(tmp.path(), "mpvpaper_output", "DP-1").unwrap();
+        let second = fs::read_to_string(&cfg).unwrap();
+
+        assert_eq!(first, second);
+        assert!(first.contains("gif_backend=awww\nimage_backend=awww\n"));
+        assert!(first.ends_with("z_custom=last\n"));
+    }
+
+    #[test]
+    fn init_config_dir_appends_missing_defaults_in_registry_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+        let content = fs::read_to_string(tmp.path().join("config")).unwrap();
+        let first_three: Vec<&str> = content.lines().take(3).collect();
+        assert_eq!(
+            first_three,
+            vec![
+                "gif_backend=awww",
+                "image_backend=awww",
+                "video_backend=mpvpaper"
+            ]
         );
     }
 }

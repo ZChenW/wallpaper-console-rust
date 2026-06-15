@@ -4,6 +4,7 @@ import type { ApplyRequestDTO } from '../api/bridge';
 import { normalizeApplyActions } from '../domain/applyActions';
 import { buildApplyRequest } from '../domain/applyRequests';
 import type { ContextAction } from '../components/WallpaperGrid';
+import { emitFeedback } from '../events/appEvents';
 
 interface UseLibraryEntryActionsCallbacks {
   onApplyAction: (request: ApplyRequestDTO) => void;
@@ -41,30 +42,22 @@ export function useLibraryEntryActions(callbacks: UseLibraryEntryActionsCallback
                   const result = await api.weClearBackendError(entry.path);
                   if (!result.success) {
                     clearOk = false;
-                    window.dispatchEvent(
-                      new CustomEvent('wc-feedback', {
-                        detail: {
-                          state: 'error',
-                          label: 'Clear backend error',
-                          detail:
-                            result.error?.message ||
-                            result.stderr ||
-                            'Failed to clear backend error before retry.',
-                        },
-                      }),
-                    );
+                    emitFeedback({
+                      state: 'error',
+                      label: 'Clear backend error',
+                      detail:
+                        result.error?.message ||
+                        result.stderr ||
+                        'Failed to clear backend error before retry.',
+                    });
                   }
                 } catch {
                   clearOk = false;
-                  window.dispatchEvent(
-                    new CustomEvent('wc-feedback', {
-                      detail: {
-                        state: 'error',
-                        label: 'Clear backend error',
-                        detail: 'Failed to clear backend error before retry.',
-                      },
-                    }),
-                  );
+                  emitFeedback({
+                    state: 'error',
+                    label: 'Clear backend error',
+                    detail: 'Failed to clear backend error before retry.',
+                  });
                 }
                 onApplyAction(
                   buildApplyRequest(entry, 'retry_backend_apply'),
@@ -98,15 +91,11 @@ export function useLibraryEntryActions(callbacks: UseLibraryEntryActionsCallback
                   try {
                     await navigator.clipboard?.writeText(entry.workshopId!);
                   } catch {
-                    window.dispatchEvent(
-                      new CustomEvent('wc-feedback', {
-                        detail: {
-                          state: 'error',
-                          label: 'Copy Workshop ID',
-                          detail: 'Clipboard write failed',
-                        },
-                      }),
-                    );
+                    emitFeedback({
+                      state: 'error',
+                      label: 'Copy Workshop ID',
+                      detail: 'Clipboard write failed',
+                    });
                   }
                 },
               });

@@ -91,9 +91,9 @@ Three modes: `file` (flat files only), `hybrid` (flat + SQLite mirror), `sqlite`
 
 - **Incremental rescan**: unchanged files reuse cached metadata (no identify/ffprobe)
 - **Source deduplication**: canonical paths eliminate symlink duplicates
-- **SQLite batch writes**: single transaction per rescan
+- **Streaming rescan writes**: CLI rescan scans, probes metadata, writes TSV, and stages SQLite rows in bounded batches
 - **Atomic SQLite library replacement**: scan writes either fully commit or preserve the old library
-- **SQLite query indexes**: indexed type/sort paths used by GUI and CLI paged loading
+- **SQLite query indexes + FTS5 search**: indexed type/sort paths and FTS-backed path/title/workshop search used by GUI and CLI paged loading
 - **Virtualized grid**: only visible rows rendered
 - **Thumbnail queue**: bounded concurrency, visible-item priority, stale-request cancellation, batched UI updates
 - **Tauri heavy commands**: scanning and thumbnail generation run on blocking worker threads
@@ -101,6 +101,9 @@ Three modes: `file` (flat files only), `hybrid` (flat + SQLite mirror), `sqlite`
 ## Build & Verify
 
 ```bash
+# Full local verification runner
+cargo run -p xtask -- verify all
+
 # Rust
 cargo build --workspace
 cargo test --workspace

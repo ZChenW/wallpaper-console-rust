@@ -3,6 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use wc_core::types::WallpaperEntry;
 
 use super::common::{fail, ok, storage, CommandResult, ScanProgressDto};
+use wc_storage::sqlite::library_session;
 
 static SCAN_STATE: OnceLock<Mutex<ScanProgressDto>> = OnceLock::new();
 
@@ -81,9 +82,20 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
         return Err("scan cancelled".to_string());
     }
 
+    update_scan_stage("loading prior metadata");
+    let prior_cache = wc_storage::sqlite::prior_metadata_cache_from_sqlite(&s.cd);
+
     update_scan_stage("walking files");
-    let paths =
-        wc_scan::scan_wallpapers_with_callback(&sources, |event| match scan_state().lock() {
+    let mut session = library_session::library_replace_session_start(&s.cd)
+        .map_err(|e: wc_core::error::WcError| e.to_string())?;
+
+    let mut batch: Vec<WallpaperEntry> = Vec::with_capacity(250);
+    let mut scanned: usize = 0;
+    let mut cancelled = false;
+
+    wc_scan::visit_wallpapers_with_callback(
+        &sources,
+        |event| match scan_state().lock() {
             Ok(mut state) => {
                 if state.cancel_requested {
                     return wc_scan::ScanControl::Cancel;
@@ -103,45 +115,57 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
                 wc_scan::ScanControl::Continue
             }
             Err(_) => wc_scan::ScanControl::Cancel,
-        });
-    if scan_cancelled()? {
-        return Err("scan cancelled".to_string());
-    }
-    if let Ok(mut state) = scan_state().lock() {
-        state.total_hint = Some(paths.len());
-    }
-
-    update_scan_stage("reading metadata");
-    let prior_cache = wc_storage::sqlite::prior_metadata_cache_from_sqlite(&s.cd);
-    let mut entries: Vec<WallpaperEntry> = Vec::with_capacity(paths.len());
-    for (idx, path) in paths.iter().enumerate() {
-        if let Ok(mut state) = scan_state().lock() {
-            if state.cancel_requested {
-                return Err("scan cancelled".to_string());
+        },
+        |path| {
+            if scan_cancelled().unwrap_or(true) {
+                cancelled = true;
+                return wc_scan::ScanVisitControl::Cancel;
             }
-            state.scanned = idx + 1;
-            state.current_path = Some(path.clone());
-        }
-        let (entry, was_reused) = wc_scan::make_entry_cached(path, &prior_cache);
-        if let Ok(mut state) = scan_state().lock() {
-            if was_reused {
-                state.reused_metadata += 1;
-            } else {
-                state.probed_metadata += 1;
+            scanned += 1;
+            if let Ok(mut state) = scan_state().lock() {
+                state.scanned = scanned;
+                state.stage = "reading metadata".into();
+                state.current_path = Some(path.clone());
             }
-        }
-        if let Some(entry) = entry {
-            entries.push(entry);
-        }
-    }
+            let (entry, was_reused) = wc_scan::make_entry_cached(&path, &prior_cache);
+            if let Ok(mut state) = scan_state().lock() {
+                if was_reused {
+                    state.reused_metadata += 1;
+                } else {
+                    state.probed_metadata += 1;
+                }
+            }
+            if let Some(entry) = entry {
+                batch.push(entry);
+                if batch.len() >= 250 {
+                    update_scan_stage("writing SQLite");
+                    if library_session::library_replace_session_push(&mut session, &batch).is_err()
+                    {
+                        cancelled = true;
+                        return wc_scan::ScanVisitControl::Cancel;
+                    }
+                    if let Ok(mut state) = scan_state().lock() {
+                        state.inserted_sqlite = scanned;
+                    }
+                    batch.clear();
+                }
+            }
+            wc_scan::ScanVisitControl::Continue
+        },
+    );
 
-    if scan_cancelled()? {
+    if cancelled || scan_cancelled().unwrap_or(true) {
+        library_session::library_replace_session_abort(session).ok();
         return Err("scan cancelled".to_string());
     }
 
     update_scan_stage("writing SQLite");
-    let inserted = wc_storage::sqlite::library_replace_entries_batch_atomic(&s.cd, &entries)
-        .map_err(|e| e.to_string())?;
+    if !batch.is_empty() {
+        library_session::library_replace_session_push(&mut session, &batch)
+            .map_err(|e: wc_core::error::WcError| e.to_string())?;
+    }
+    let inserted = library_session::library_replace_session_commit(session)
+        .map_err(|e: wc_core::error::WcError| e.to_string())?;
     if let Ok(mut state) = scan_state().lock() {
         state.inserted_sqlite = inserted;
     }

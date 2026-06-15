@@ -1,7 +1,9 @@
 use super::common::{
     fail, ok, storage, BackendStatusDto, CommandErrorDto, CommandResult, StatusDto, WeDebugInfoDto,
 };
+use tauri::Emitter;
 use wc_core::types::FileType;
+use wc_storage::StorageApi;
 
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
@@ -59,9 +61,21 @@ pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> 
     .map_err(|e| e.to_string())?
 }
 
+fn emit_apply_feedback(app: &tauri::AppHandle, label: &str, detail: &str) {
+    let _ = app.emit(
+        "wc-feedback",
+        serde_json::json!({
+            "state": "running",
+            "label": label,
+            "detail": detail,
+        }),
+    );
+}
+
 #[tauri::command]
-pub async fn apply(path: String) -> CommandResult {
+pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    emit_apply_feedback(&app, "Preparing wallpaper", "Resolving apply target.");
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -72,6 +86,11 @@ pub async fn apply(path: String) -> CommandResult {
                 path: path.clone(),
                 request_id: None,
             };
+            emit_apply_feedback(
+                &app,
+                "Starting backend",
+                "Starting renderer. Scene wallpapers may take several seconds.",
+            );
             execute_and_format_result(&service, request, seq)
         }
         Err(e) => fail(e),
@@ -81,8 +100,12 @@ pub async fn apply(path: String) -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn apply_action(request: super::common::ApplyRequestDto) -> CommandResult {
+pub async fn apply_action(
+    app: tauri::AppHandle,
+    request: super::common::ApplyRequestDto,
+) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    emit_apply_feedback(&app, "Preparing wallpaper", "Resolving apply target.");
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -92,6 +115,11 @@ pub async fn apply_action(request: super::common::ApplyRequestDto) -> CommandRes
                 Ok(r) => r,
                 Err(err) => return command_error_from_app_error(err),
             };
+            emit_apply_feedback(
+                &app,
+                "Starting backend",
+                "Starting renderer. Scene wallpapers may take several seconds.",
+            );
             execute_and_format_result(&service, request, seq)
         }
         Err(e) => fail(e),
@@ -210,13 +238,20 @@ fn command_error_from_app_error(err: wc_app::AppError) -> CommandResult {
     }
 }
 
-#[tauri::command]
-pub async fn stop() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_backend::stop_all_backends(Some(&s)) {
+fn stop_with_storage(s: &StorageApi) -> CommandResult {
+    match wc_backend::stop_all_backends(Some(s)) {
+        Ok(()) => match s.runtime_state_clear() {
             Ok(()) => ok("Stopped wallpaper backends."),
             Err(e) => fail(e.to_string()),
         },
+        Err(e) => fail(e.to_string()),
+    }
+}
+
+#[tauri::command]
+pub async fn stop() -> CommandResult {
+    tauri::async_runtime::spawn_blocking(|| match storage() {
+        Ok(s) => stop_with_storage(&s),
         Err(e) => fail(e),
     })
     .await
@@ -312,5 +347,29 @@ mod tests {
 
         assert!(is_stale_apply(9));
         assert!(!is_stale_apply(10));
+    }
+
+    #[test]
+    fn stop_with_storage_clears_runtime_state_and_preserves_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage.history_add("/walls/current.jpg", "awww").unwrap();
+
+        let result = stop_with_storage(&storage);
+
+        assert!(result.success, "stop failed: {}", result.stderr);
+        assert_eq!(storage.current_read().unwrap(), None);
+        assert_eq!(storage.last_backend_read().unwrap(), None);
+        assert_eq!(
+            storage.history_list().unwrap(),
+            vec!["/walls/current.jpg".to_string()]
+        );
     }
 }

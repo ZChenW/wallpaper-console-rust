@@ -1,9 +1,11 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { useCallback } from 'react';
 import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import WallpaperGrid from '../components/WallpaperGrid';
 import { Shuffle } from 'lucide-react';
 import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
+import { usePagedWallpapers } from '../hooks/usePagedWallpapers';
+import { APP_EVENTS, emitFavoritesInvalidated, emitFeedback } from '../events/appEvents';
 
 interface Props {
   onApply: (path: string) => void;
@@ -15,50 +17,30 @@ interface Props {
 const PAGE_SIZE = 120;
 
 export function invalidateFavoritesCache() {
-  window.dispatchEvent(new CustomEvent('favorites-cache-invalidated'));
+  emitFavoritesInvalidated();
 }
 
 export default function FavoritesView({ onApply, onApplyAction, applying, active = true }: Props) {
-  const [entries, setEntries] = useState<WallpaperDTO[]>([]);
-  const [total, setTotal] = useState(0);
-  const [loading, setLoading] = useState(true);
-  const requestSeq = useRef(0);
-
-  const load = useCallback(async (offset = 0, append = false) => {
-    const seq = ++requestSeq.current;
-    setLoading(true);
-    try {
-      const page = await api.favoritesPage(offset, PAGE_SIZE);
-      if (requestSeq.current !== seq) return;
-      setTotal(page.total);
-      if (append) {
-        setEntries(prev => [...prev, ...(page.items ?? [])]);
-      } else {
-        setEntries(page.items ?? []);
-      }
-    } catch {
-      if (requestSeq.current !== seq) return;
-      if (!append) {
-        setEntries([]);
-        setTotal(0);
-      }
-    }
-    setLoading(false);
+  const loadPage = useCallback((offset: number, limit: number) => {
+    return api.favoritesPage(offset, limit);
   }, []);
 
-  useEffect(() => { load(); }, [load]);
-
-  useEffect(() => {
-    const handler = () => { load(); };
-    window.addEventListener('favorites-cache-invalidated', handler);
-    return () => window.removeEventListener('favorites-cache-invalidated', handler);
-  }, [load]);
-
-  const entryByPath = useMemo(() => new Map(entries.map((e) => [e.path, e])), [entries]);
+  const {
+    entries,
+    total,
+    loading,
+    reload,
+    loadMore,
+    entryByPath,
+  } = usePagedWallpapers({
+    pageSize: PAGE_SIZE,
+    loadPage,
+    refreshEvent: APP_EVENTS.favoritesInvalidated,
+  });
 
   const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
     onApplyAction,
-    invalidate: () => load(),
+    invalidate: () => { void reload(); },
     openFolder: async (path: string) => { await api.revealInFileManager(path); },
     findEntry: (path) => entryByPath.get(path),
   });
@@ -69,20 +51,18 @@ export default function FavoritesView({ onApply, onApplyAction, applying, active
       label: 'Remove from Favorites',
       action: async (path: string) => {
         await api.favoriteRemove(path);
-        load();
+        await reload();
       },
       danger: true,
     });
     return actions;
-  }, [buildBaseActions, load]);
+  }, [buildBaseActions, reload]);
 
   const handleRandom = () => {
     if (entries.length === 0) return;
     const applicable = entries.filter(e => isApplyAvailable(e));
     if (applicable.length === 0) {
-      window.dispatchEvent(new CustomEvent('wc-feedback', {
-        detail: { state: 'warning', label: 'No applicable', detail: 'No items in favorites can be applied as a live wallpaper.' },
-      }));
+      emitFeedback({ state: 'warning', label: 'No applicable', detail: 'No items in favorites can be applied as a live wallpaper.' });
       return;
     }
     const pick = applicable[Math.floor(Math.random() * applicable.length)];
@@ -113,7 +93,7 @@ export default function FavoritesView({ onApply, onApplyAction, applying, active
       )}
       {!loading && entries.length < total && (
         <div className="load-more">
-          <button onClick={() => load(entries.length, true)}>
+          <button onClick={() => void loadMore()}>
             Load more ({total - entries.length} remaining)
           </button>
         </div>

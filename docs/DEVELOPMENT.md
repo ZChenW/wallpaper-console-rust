@@ -21,6 +21,8 @@ For production-hardening work that touches Tauri commands, scan performance, thu
 ## Rust Verification
 
 ```bash
+cargo run -p xtask -- verify rust
+
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace -- -D warnings
@@ -62,6 +64,12 @@ npm run test:unit
 npm run typecheck
 npm run build
 npm run smoke          # Playwright smoke tests (requires chromium)
+```
+
+From the repository root, the same frontend matrix is available as:
+
+```bash
+cargo run -p xtask -- verify frontend
 ```
 
 ## Tauri Bundle
@@ -224,20 +232,13 @@ The repository includes `.github/workflows/ci.yml`.
 The Rust job runs:
 
 ```bash
-cargo fmt --all -- --check
-cargo check --workspace
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
+cargo run -p xtask -- verify rust
 ```
 
-The frontend job runs from `apps/tauri-gui/frontend`:
+The frontend job installs npm dependencies and Playwright Chromium, then runs:
 
 ```bash
-npm ci
-npm run typecheck
-npm run test:unit
-npm run build
-npm run smoke
+cargo run -p xtask -- verify frontend
 ```
 
 The workflow does not publish releases. Release publishing remains a manual owner action.

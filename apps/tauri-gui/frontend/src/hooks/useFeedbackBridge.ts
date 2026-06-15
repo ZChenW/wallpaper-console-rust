@@ -1,13 +1,20 @@
 import { useEffect } from 'react';
+import { listen } from '@tauri-apps/api/event';
 import type { CommandFeedback } from '../api/feedback';
+import { APP_EVENTS, onFeedback } from '../events/appEvents';
 
 export function useFeedbackBridge(setFeedback: (feedback: CommandFeedback) => void): void {
   useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<CommandFeedback>).detail;
-      if (detail) setFeedback(detail);
+    const offFeedback = onFeedback(setFeedback);
+
+    let unlisten: (() => void) | undefined;
+    listen<CommandFeedback>(APP_EVENTS.feedback, (event) => {
+      if (event.payload) setFeedback(event.payload);
+    }).then((u) => { unlisten = u; });
+
+    return () => {
+      offFeedback();
+      unlisten?.();
     };
-    window.addEventListener('wc-feedback', handler);
-    return () => window.removeEventListener('wc-feedback', handler);
   }, [setFeedback]);
 }

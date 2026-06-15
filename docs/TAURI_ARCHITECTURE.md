@@ -121,15 +121,12 @@ thumbnail, scan, backend-probing, and process work does not block the WebView.
 | `validate_sources()` | calls local `sources_list()`, formats OK/MISSING per-line | CommandResult |
 | `remove_missing_sources()` | `StorageApi::sources_list` + `sources_remove` loop over missing dirs | CommandResult |
 | `scan_steam_workshop()` | local Steam path enumeration (native + Flatpak) → add sources → full rescan/index | CommandResult |
-| `favorites_list()` | `StorageApi::favorites_list` + SQLite/TSV hydration | Vec<WallpaperDTO> |
 | `favorite_add(path)` | `StorageApi::favorites_add` | CommandResult |
 | `favorite_remove(path)` | `StorageApi::favorites_remove` | CommandResult |
-| `history_list()` | `StorageApi::history_list` + SQLite/TSV hydration | Vec<WallpaperDTO> |
 | `history_clear()` | `StorageApi::history_clear` | CommandResult |
 | `library_count()` | SQLite count grouped by type, including WE image/video/gif media projects | LibraryCountDTO |
-| `library_list(source)` | delegates to local `library_page()` with limit=MAX | Vec<WallpaperDTO> |
 | `library_page_gui(...)` | SQLite-only GUI paging with title/Workshop/project search | LibraryPageDTO |
-| `library_page(...)` | compatibility command for explicit `sqlite`/`tsv` source | LibraryPageDTO |
+| `library_page(...)` | paging command for explicit `sqlite`/`tsv` source | LibraryPageDTO |
 | `rescan()` | `wc_scan::scan_wallpapers` + atomic SQLite replacement + best-effort legacy TSV export | CommandResult |
 | `migrate_to_sqlite()` | `wc_storage::sqlite::migrate_to_sqlite` | CommandResult |
 | `sqlite_verify()` | `wc_storage::sqlite::verify` | CommandResult |

@@ -13,6 +13,7 @@ pub trait BackendRuntime {
     fn stop_mpvpaper(&mut self);
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
     fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError>;
+    fn clear_awww_state_hint(&mut self);
 }
 
 pub struct SystemBackendRuntime;
@@ -77,5 +78,14 @@ impl BackendRuntime for SystemBackendRuntime {
             "awww-daemon failed to start. Check 'awww-daemon' is installed and your compositor supports wlr-layer-shell."
                 .into(),
         ))
+    }
+
+    fn clear_awww_state_hint(&mut self) {
+        let mut cmd = Command::new("awww");
+        cmd.arg("clear")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let _ = self.command_status(&mut cmd);
     }
 }

@@ -2,7 +2,7 @@ import type { CommandResult } from './bridge';
 
 export type CommandFeedback =
   | { state: 'idle' }
-  | { state: 'running'; label: string }
+  | { state: 'running'; label: string; detail?: string }
   | { state: 'success'; label: string; detail?: string }
   | { state: 'warning'; label: string; detail: string }
   | { state: 'error'; label: string; detail: string };
