@@ -330,6 +330,22 @@ impl StorageApi {
         }
         Ok(())
     }
+
+    pub fn runtime_state_clear(&self) -> Result<(), WcError> {
+        match self.mode {
+            StorageBackend::Sqlite => {
+                sqlite::sqlite_state_delete(&self.cd, "current")?;
+                sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
+                flat::current_clear(&self.cd).ok();
+                flat::last_backend_clear(&self.cd).ok();
+            }
+            _ => {
+                flat::current_clear(&self.cd)?;
+                flat::last_backend_clear(&self.cd)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -491,7 +507,31 @@ mod tests {
     }
 
     #[test]
-    fn source_remove_cleans_both_root_and_project_level() {
+    fn runtime_state_clear_removes_current_and_last_backend_but_preserves_history() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = StorageApi::new(cd);
+
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage.history_add("/walls/current.jpg", "awww").unwrap();
+
+        storage.runtime_state_clear().unwrap();
+
+        assert_eq!(storage.current_read().unwrap(), None);
+        assert_eq!(storage.last_backend_read().unwrap(), None);
+        assert_eq!(
+            storage.history_list().unwrap(),
+            vec!["/walls/current.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn source_remove_canonical_cleans_both_root_and_project_level() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),

@@ -191,82 +191,80 @@ fn apply_wallpaper_with_runtime(
         }
     }
 
-    // If TargetImageInstant already succeeded, skip normal awww img —
-    // the target image is already visible via instant awww.
-    let target_already_shown = fallback_ok
-        && matches!(
-            visual.fallback_stage,
-            visual_handoff::FallbackStage::TargetImageInstant
-        );
-
-    if !target_already_shown {
-        let target_result = match backend {
-            Backend::Awww => (|| -> Result<(), WcError> {
-                runtime.ensure_awww_daemon_running()?;
-                let resize_raw = s.config_get("awww_resize", "crop");
-                let resize = normalize_awww_resize(&resize_raw);
-                let transition_type = s.config_get("awww_transition_type", "fade");
-                let duration = s.config_get("awww_transition_duration", "1");
-                let fps = s.config_get("wallpaper_transition_fps", "60");
-                let mut cmd =
-                    build_awww_img_command(path, resize, &transition_type, &duration, &fps);
-                cmd.arg("--filter").arg("Lanczos3");
-                let output = runtime
-                    .command_output(&mut cmd)
-                    .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let detail = if !stderr.is_empty() {
-                        stderr
-                    } else if !stdout.is_empty() {
-                        stdout
-                    } else {
-                        "no renderer output".into()
-                    };
-                    return Err(WcError::Other(format!(
-                        "awww apply failed with status {}: {}",
-                        output.status, detail
-                    )));
-                }
-                Ok(())
-            })(),
-            Backend::Mpvpaper => {
-                let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
-                let opts = normalize_mpvpaper_options(&opts_raw);
-                let output = s.config_get("mpvpaper_output", "*");
-                let mut cmd = Command::new("setsid");
-                cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
-                let status = runtime
-                    .command_status(&mut cmd)
-                    .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
-                if !status.success() {
-                    return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
-                }
-                Ok(())
-            }
-            Backend::LinuxWallpaperEngine => {
-                let project = linux_wallpaperengine::project_from_path(path)?;
-                match linux_wallpaperengine::apply(s, project) {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(e),
-                }
-            }
-            Backend::Unsupported => unreachable!(),
-        };
-
-        if let Err(e) = target_result {
-            let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
-                s,
+    let target_result = match backend {
+        Backend::Awww => (|| -> Result<(), WcError> {
+            runtime.ensure_awww_daemon_running()?;
+            if matches!(
                 lifecycle.previous,
-                fallback_ok,
-                runtime,
-            );
-            if let Some(msg) = rollback_msg {
-                write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
+                lifecycle::RunningBackend::None
+                    | lifecycle::RunningBackend::Mpvpaper
+                    | lifecycle::RunningBackend::LinuxWallpaperEngine
+                    | lifecycle::RunningBackend::Unknown
+            ) {
+                runtime.clear_awww_state_hint();
             }
-            return Err(e);
+            let resize_raw = s.config_get("awww_resize", "crop");
+            let resize = normalize_awww_resize(&resize_raw);
+            let transition_type = s.config_get("awww_transition_type", "fade");
+            let duration = s.config_get("awww_transition_duration", "1");
+            let fps = s.config_get("wallpaper_transition_fps", "60");
+            let mut cmd = build_awww_img_command(path, resize, &transition_type, &duration, &fps);
+            cmd.arg("--filter").arg("Lanczos3");
+            let output = runtime
+                .command_output(&mut cmd)
+                .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                let detail = if !stderr.is_empty() {
+                    stderr
+                } else if !stdout.is_empty() {
+                    stdout
+                } else {
+                    "no renderer output".into()
+                };
+                return Err(WcError::Other(format!(
+                    "awww apply failed with status {}: {}",
+                    output.status, detail
+                )));
+            }
+            Ok(())
+        })(),
+        Backend::Mpvpaper => {
+            let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
+            let opts = normalize_mpvpaper_options(&opts_raw);
+            let output = s.config_get("mpvpaper_output", "*");
+            let mut cmd = Command::new("setsid");
+            cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
+            let status = runtime
+                .command_status(&mut cmd)
+                .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
+            if !status.success() {
+                return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
+            }
+            Ok(())
         }
+        Backend::LinuxWallpaperEngine => {
+            let project = linux_wallpaperengine::project_from_path(path)?;
+            match linux_wallpaperengine::apply(s, project) {
+                Ok(()) => Ok(()),
+                Err(e) => Err(e),
+            }
+        }
+        Backend::Unsupported => unreachable!(),
+    };
+
+    if let Err(e) = target_result {
+        let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
+            s,
+            lifecycle.previous,
+            fallback_ok,
+            runtime,
+        );
+        if let Some(msg) = rollback_msg {
+            write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
+        }
+        return Err(e);
     }
 
     if visual.target_startup_settle_ms > 0 {
@@ -1133,22 +1131,46 @@ mod tests {
     }
 
     #[test]
-    fn cross_backend_image_skips_normal_awww_when_fallback_ok() {
-        // When TargetImageInstant fallback succeeds (instant awww placed the image),
-        // the normal awww img call with user transition must be skipped.
-        // This is tested at the plan level: TargetImageInstant sets target_startup_settle=0
-        // and in apply_wallpaper the `target_already_shown` flag gates the match block.
-        let plan = visual_handoff::plan_visual_handoff(
-            lifecycle::RunningBackend::Mpvpaper,
+    fn cross_backend_image_runs_instant_fallback_and_normal_awww_target() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("target.jpg");
+        std::fs::write(&img, b"jpg").unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+
+        let mut rt = FakeRuntime::default();
+        apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
             Backend::Awww,
-            Some("/tmp/img.jpg"),
-        );
+            Some(&img.to_string_lossy()),
+            &mut rt,
+        )
+        .unwrap();
+
         assert_eq!(
-            plan.fallback_stage,
-            visual_handoff::FallbackStage::TargetImageInstant
+            rt.command_output_count, 2,
+            "instant fallback plus normal awww target"
         );
-        // TargetImageInstant means the normal awww apply is skipped in apply_wallpaper
-        // when fallback_ok is true.
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+    }
+
+    #[test]
+    fn awww_from_none_clears_awww_state_hint_before_apply() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("target.jpg");
+        std::fs::write(&img, b"jpg").unwrap();
+
+        let mut rt = FakeRuntime::default();
+        apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(rt.clear_awww_state_hint_count, 1);
     }
 
     // -----------------------------------------------------------------
@@ -1162,6 +1184,7 @@ mod tests {
         stop_lwe_count: usize,
         command_output_count: usize,
         command_status_count: usize,
+        clear_awww_state_hint_count: usize,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
@@ -1199,6 +1222,10 @@ mod tests {
 
         fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
             Ok(())
+        }
+
+        fn clear_awww_state_hint(&mut self) {
+            self.clear_awww_state_hint_count += 1;
         }
     }
 

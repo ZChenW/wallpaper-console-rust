@@ -41,7 +41,12 @@ export class ApplyQueueController {
     while (current !== null) {
       const req = current;
       current = null;
-      this.deps.setFeedback({ state: 'running', label: 'Applying wallpaper' });
+      const isBackendApply = req.kind === 'apply' || req.kind === 'retry_backend_apply';
+      this.deps.setFeedback({
+        state: 'running',
+        label: 'Applying wallpaper',
+        detail: isBackendApply ? 'Starting renderer. Scene wallpapers may take several seconds.' : undefined,
+      });
       try {
         const result = await this.deps.applyAction(req);
         if (result.success) {

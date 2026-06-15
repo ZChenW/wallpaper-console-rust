@@ -135,3 +135,11 @@ pub fn sqlite_state_write(cd: &ConfigDir, key: &str, value: &str) -> Result<(), 
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
 }
+
+pub fn sqlite_state_delete(cd: &ConfigDir, key: &str) -> Result<(), WcError> {
+    ensure_sqlite_db(cd);
+    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute("DELETE FROM state WHERE key = ?1", params![key])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}

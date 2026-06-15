@@ -2,19 +2,22 @@
 
 Run after `./install.sh` or after installing a `.deb` / `.rpm` bundle.
 
+Do not use `cargo build --release -p wallpaper-console-tauri` as the release GUI acceptance build.
+That command builds only the Rust side. Use `./install.sh --build-only` or `cargo tauri build`
+so Tauri runs the frontend build and release asset packaging path.
+
 ## Evidence Capture
 
 Build the GUI first:
 
 ```bash
-cargo tauri build --manifest-path apps/tauri-gui/src-tauri/Cargo.toml --bundles deb,rpm
+./install.sh --build-only
 ```
 
 Capture a profiling and desktop evidence bundle:
 
 ```bash
-WALLPAPER_CONSOLE_GUI_RUST=target/release/wallpaper-console-tauri \
-  ./scripts/manual_tauri_acceptance.sh 45
+WALLPAPER_CONSOLE_GUI_RUST=target/release/wallpaper-console-tauri ./scripts/manual_tauri_acceptance.sh 45
 ```
 
 The script prints a `report=...` path. Attach that report path and screenshot path to the final acceptance note. Automated Playwright smoke tests do not replace this checklist because they run against a mock frontend environment.

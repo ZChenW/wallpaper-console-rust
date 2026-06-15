@@ -62,10 +62,7 @@ Tauri command latency is not identical to CLI process latency. For GUI-specific 
 ## Manual GUI Profiling
 
 ```bash
-cargo build --release -p wc-cli
-cd apps/tauri-gui/src-tauri
-cargo tauri build --bundles deb,rpm
-cd ../../..
+./install.sh --build-only
 WALLPAPER_CONSOLE_GUI_RUST=target/release/wallpaper-console-tauri ./scripts/profile_gui.sh 45 \
   | tee /tmp/wallpaper-console-gui-baseline.csv
 ```

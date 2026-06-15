@@ -188,10 +188,28 @@ pub fn current_write(cd: &ConfigDir, path: &str) -> Result<(), WcError> {
     write_single_line(&cd.current_path(), path)
 }
 
+pub fn current_clear(cd: &ConfigDir) -> Result<(), WcError> {
+    let path = cd.current_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(WcError::Io(e)),
+    }
+}
+
 pub fn last_backend_read(cd: &ConfigDir) -> Result<Option<String>, WcError> {
     read_single_line(&cd.last_backend_path())
 }
 
 pub fn last_backend_write(cd: &ConfigDir, backend: &str) -> Result<(), WcError> {
     write_single_line(&cd.last_backend_path(), backend)
+}
+
+pub fn last_backend_clear(cd: &ConfigDir) -> Result<(), WcError> {
+    let path = cd.last_backend_path();
+    match std::fs::remove_file(&path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(WcError::Io(e)),
+    }
 }

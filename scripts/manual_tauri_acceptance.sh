@@ -27,6 +27,13 @@ if [[ ! -x "$bin" ]]; then
   exit 1
 fi
 
+frontend_dist="$SCRIPT_DIR/../apps/tauri-gui/frontend/dist/index.html"
+if [[ ! -f "$frontend_dist" ]]; then
+  echo "frontend_dist_missing=$frontend_dist" | tee -a "$report"
+  echo "hint=run ./install.sh --build-only or cd apps/tauri-gui/src-tauri && cargo tauri build --bundles deb,rpm" | tee -a "$report"
+  exit 1
+fi
+
 echo "starting_profile=1" | tee -a "$report"
 set +o pipefail
 WALLPAPER_CONSOLE_GUI_RUST="$bin" "$SCRIPT_DIR/profile_gui.sh" "$duration" | tee "$csv"
