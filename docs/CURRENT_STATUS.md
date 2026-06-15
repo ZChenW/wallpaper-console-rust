@@ -25,7 +25,7 @@ This section is the current status source for the maturity work. The original ph
 | Test matrix expansion | Completed | Rust, frontend, smoke, install, storage, thumbnail, scan tests |
 | Documentation slimming/archive cleanup | Completed | README + DEVELOPMENT are Tauri-current; Wails docs are historical only |
 | Performance baseline | Completed | 1k/10k/50k TSV vs SQLite benchmark recorded in `docs/PERFORMANCE_BASELINE.md` |
-| CI/release automation | Completed locally | `.github/workflows/ci.yml` added; workflow not executed on GitHub runner in this local session |
+| CI automation | Workflow added | `.github/workflows/ci.yml` runs Rust fmt/check/clippy/tests and frontend typecheck/unit/build/smoke on push, PR, and manual dispatch; first GitHub-hosted run remains to be observed after push |
 | Real desktop GUI visual acceptance | Environment-limited | Attempted on Arch/niri/Wayland; no stable Tauri window appeared in `niri msg windows`; do not mark as manually accepted |
 | Persistent tab shell | Completed | Library/History/Favorites stay mounted across switches; scroll preserved; `active` prop gates thumbnail enqueue/resize; colCount re-measured on activation; smoke test for tab persistence |
 | History/Favorites pagination | Completed | `history_page`/`favorites_page` Rust commands with SQLite/flat fallback (empty-SQLite-table fallback too); "Load more" button; 2 Rust fallback tests (`history_page_sqlite_empty_falls_back_to_flat`, `favorites_page_sqlite_empty_falls_back_to_flat`) |
