@@ -153,6 +153,44 @@ fn rescan_writes_sqlite_wallpapers() {
 }
 
 #[test]
+fn rescan_writes_large_library_to_tsv_and_sqlite() {
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    for i in 0..300 {
+        std::fs::write(format!("{}/img_{i:03}.jpg", walls), b"jpg").unwrap();
+    }
+
+    rust(&["add", &walls], &cd);
+    let out = rust(&["rescan"], &cd);
+    assert!(
+        out.status.success(),
+        "rescan failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("walked: 300 files"), "{stdout}");
+    assert!(stdout.contains("entries: 300"), "{stdout}");
+    assert!(stdout.contains("sqlite: 300"), "{stdout}");
+
+    let tsv_path = format!("{}/wallpaper-console/library.tsv", cd);
+    let tsv = std::fs::read_to_string(tsv_path).unwrap();
+    assert_eq!(tsv.lines().count(), 300);
+
+    let page = rust(
+        &["library-page-json", "--source", "sqlite", "--limit", "1"],
+        &cd,
+    );
+    assert!(
+        page.status.success(),
+        "sqlite page failed: {}",
+        String::from_utf8_lossy(&page.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&page.stdout);
+    assert!(stdout.contains("\"total\": 300"), "{stdout}");
+}
+
+#[test]
 fn history_clear() {
     let (_d, cd) = temp_config();
     assert!(rust(&["history-clear"], &cd).status.success());

@@ -10,6 +10,7 @@ mod source_config_state;
 
 pub use backup::*;
 pub use library_page::*;
+pub use library_session::*;
 pub use metadata_cache::*;
 pub use row_map::wallpaper_entry_from_row;
 pub use schema::*;

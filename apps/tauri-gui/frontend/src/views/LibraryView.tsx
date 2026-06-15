@@ -1,12 +1,14 @@
-import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { Search, Filter, X } from 'lucide-react';
 import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid from '../components/WallpaperGrid';
 import OpenLocationDialog from '../components/OpenLocationDialog';
 import { useLibraryEntryActions } from '../hooks/useLibraryEntryActions';
+import { usePagedWallpapers, type WallpaperPageDTO } from '../hooks/usePagedWallpapers';
 import { useAppState } from '../state/AppStateContext';
 import { invalidateFavoritesCache } from './FavoritesView';
+import { emitFeedback } from '../events/appEvents';
 
 interface Props {
   onApply: (path: string) => void;
@@ -20,15 +22,11 @@ type SortMode = 'name' | 'newest' | 'largest';
 const PAGE_SIZE = 120;
 
 export default function LibraryView({ onApply, onApplyAction, applying, active = true }: Props) {
-  const [entries, setEntries] = useState<WallpaperDTO[]>([]);
-  const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [sort, setSort] = useState<SortMode>('newest');
-  const [total, setTotal] = useState(0);
   const { libraryVersion, invalidateLibrary } = useAppState();
-  const requestSeq = useRef(0);
   const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [openLocDialog, setOpenLocDialog] = useState<{ path: string } | null>(null);
 
@@ -37,35 +35,27 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     return () => window.clearTimeout(timer);
   }, [search]);
 
-  const load = useCallback(async (append = false, offset = 0) => {
-    const requestId = requestSeq.current + 1;
-    requestSeq.current = requestId;
-    const isCurrent = () => requestSeq.current === requestId;
-    setLoading(true);
-
-    try {
-      const page = await measureAsync('library.page.ms', () =>
-        api.libraryPage(filter, sort, debouncedSearch, offset, PAGE_SIZE)
-      );
-      if (!isCurrent()) return;
-      recordMetric('library.page.total', page.total);
-      setTotal(page.total);
-      setEntries((prev) => append ? [...prev, ...(page.items ?? [])] : (page.items ?? []));
-    } catch {
-      if (!isCurrent()) return;
-      setEntries([]);
-      setTotal(0);
-    } finally {
-      if (isCurrent()) {
-        setLoading(false);
-      }
-    }
+  const loadPage = useCallback((offset: number, limit: number) => {
+    return measureAsync('library.page.ms', () =>
+      api.libraryPage(filter, sort, debouncedSearch, offset, limit)
+    );
   }, [debouncedSearch, filter, sort, libraryVersion]);
 
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => () => { requestSeq.current += 1; }, []);
+  const handlePage = useCallback((page: WallpaperPageDTO) => {
+    recordMetric('library.page.total', page.total);
+  }, []);
 
-  const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
+  const {
+    entries,
+    total,
+    loading,
+    loadMore,
+    entryByPath,
+  } = usePagedWallpapers({
+    pageSize: PAGE_SIZE,
+    loadPage,
+    onPage: handlePage,
+  });
 
   const handleOpenProjectFolder = useCallback(async (entryPath: string) => {
     const entry = entryByPath.get(entryPath);
@@ -76,9 +66,7 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     } else {
       const r = await api.openProjectLocation(entryPath, mode);
       if (!r.success) {
-        window.dispatchEvent(new CustomEvent('wc-feedback', {
-          detail: { state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' },
-        }));
+        emitFeedback({ state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' });
       }
     }
   }, [entryByPath]);
@@ -89,9 +77,7 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     const r = await api.openProjectLocation(openLocDialog.path, mode);
     setOpenLocDialog(null);
     if (!r.success) {
-      window.dispatchEvent(new CustomEvent('wc-feedback', {
-        detail: { state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' },
-      }));
+      emitFeedback({ state: 'error', label: 'Open location', detail: r.stderr || r.error?.message || 'Open location failed' });
     }
   }, [openLocDialog]);
 
@@ -111,9 +97,9 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     invalidateFavoritesCache();
     setSelectedPaths(new Set());
     if (fail === 0) {
-      window.dispatchEvent(new CustomEvent('wc-feedback', { detail: { state: 'success', label: 'Batch add', detail: `Added ${success} to favorites.` } }));
+      emitFeedback({ state: 'success', label: 'Batch add', detail: `Added ${success} to favorites.` });
     } else {
-      window.dispatchEvent(new CustomEvent('wc-feedback', { detail: { state: 'warning', label: 'Batch add', detail: `Added ${success} to favorites. ${fail} failed.` } }));
+      emitFeedback({ state: 'warning', label: 'Batch add', detail: `Added ${success} to favorites. ${fail} failed.` });
     }
   }, [selectedPaths]);
 
@@ -197,7 +183,7 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
       )}
       {!loading && entries.length < total && (
         <div className="load-more">
-          <button onClick={() => load(true, entries.length)}>
+          <button onClick={() => void loadMore()}>
             Load more ({total - entries.length} remaining)
           </button>
         </div>

@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { ContextAction } from './WallpaperGrid';
+import { emitFeedback } from '../events/appEvents';
 
 interface Props {
   x: number;
@@ -32,9 +33,7 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
             try {
               await a.action(path);
             } catch (e) {
-              window.dispatchEvent(new CustomEvent('wc-feedback', {
-                detail: { state: 'error', label: a.label, detail: String(e) },
-              }));
+              emitFeedback({ state: 'error', label: a.label, detail: String(e) });
             } finally {
               onClose();
             }

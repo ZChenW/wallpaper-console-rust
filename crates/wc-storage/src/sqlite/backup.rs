@@ -7,7 +7,9 @@ use wc_core::error::WcError;
 use super::chrono_now;
 use super::chrono_now_compact;
 use super::import_library_tsv_into;
-use super::schema::create_schema;
+use super::schema::{
+    check_wallpapers_fts_integrity, create_schema, wallpapers_count, wallpapers_fts_count,
+};
 use crate::flat;
 
 /// Result of database verification.
@@ -157,6 +159,15 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         };
         if flat_be != db_be {
             errors.push("last_backend".into());
+        }
+    }
+
+    // Search index: data integrity; stale FTS silently breaks GUI/CLI search.
+    {
+        let wallpaper_count = wallpapers_count(&conn)?;
+        let fts_count = wallpapers_fts_count(&conn)?;
+        if wallpaper_count != fts_count || check_wallpapers_fts_integrity(&conn).is_err() {
+            errors.push("wallpapers_fts".into());
         }
     }
 
@@ -625,6 +636,38 @@ mod tests {
             "missing table should return Err(WcError::Sqlite(_)), got: {:?}",
             result
         );
+    }
+
+    #[test]
+    fn verify_fails_when_wallpaper_fts_count_drifts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
+             VALUES ('/walls/a.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1', 'A', '111')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers_fts(wallpapers_fts) VALUES ('delete-all')",
+            [],
+        )
+        .unwrap();
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+
+        match result {
+            crate::sqlite::VerifyResult::Failed(errors) => {
+                assert!(errors.contains(&"wallpapers_fts".to_string()), "{errors:?}");
+            }
+            other => panic!("expected FTS drift failure, got {other:?}"),
+        }
     }
 
     #[test]

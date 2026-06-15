@@ -1,12 +1,16 @@
 //! wc-cli — wallpaper-console Rust CLI (clap command dispatch).
 
+use std::io::{BufWriter, Write};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 
 use wc_core::config::ConfigDir;
-use wc_core::types::Backend;
+use wc_core::types::{Backend, WallpaperEntry};
 use wc_storage::StorageApi;
+
+const RESCAN_BATCH_SIZE: usize = 250;
 
 #[derive(Parser)]
 #[command(name = "wallpaper-console-rust", version = "0.1.0")]
@@ -255,7 +259,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::Stop => {
-            wc_backend::stop_all_backends(Some(s))?;
+            stop_wallpapers_with(s, wc_backend::stop_all_backends)?;
             println!("All wallpaper backends stopped.");
         }
 
@@ -589,50 +593,91 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             let sources = wc_scan::dedupe_sources(&raw_sources);
             let dup_count = raw_sources.len() - sources.len();
 
-            let files = wc_scan::scan_wallpapers(&sources);
-            let walk_time = t0.elapsed();
-
             // Load prior metadata to skip unchanged files.
             let prior_cache = wc_scan::prior_metadata_cache(&s.cd.library_tsv_path());
 
-            let t1 = std::time::Instant::now();
-            let mut entries: Vec<wc_core::types::WallpaperEntry> = Vec::new();
+            let scan_start = std::time::Instant::now();
+            let mut metadata_time = Duration::ZERO;
+            let mut candidate_count = 0usize;
+            let mut entry_count = 0usize;
             let mut reused = 0usize;
             let mut probed = 0usize;
-            for path in &files {
-                let (entry, was_reused) = wc_scan::make_entry_cached(path, &prior_cache);
-                if let Some(entry) = entry {
+            let mut batch: Vec<WallpaperEntry> = Vec::with_capacity(RESCAN_BATCH_SIZE);
+            let tsv_path = s.cd.library_tsv_path();
+            let tsv_tmp = tsv_path.with_extension("tsv.tmp");
+            let tsv_file = std::fs::File::create(&tsv_tmp)?;
+            let mut tsv_writer = BufWriter::new(tsv_file);
+            let mut sqlite_session = wc_storage::sqlite::library_replace_session_start(&s.cd)?;
+            let mut stream_error: Option<anyhow::Error> = None;
+
+            wc_scan::visit_wallpapers_with_callback(
+                &sources,
+                |_| wc_scan::ScanControl::Continue,
+                |path| {
+                    candidate_count += 1;
+                    let probe_start = std::time::Instant::now();
+                    let (entry, was_reused) = wc_scan::make_entry_cached(&path, &prior_cache);
+                    metadata_time += probe_start.elapsed();
+
+                    let Some(entry) = entry else {
+                        return wc_scan::ScanVisitControl::Continue;
+                    };
+
                     if was_reused {
                         reused += 1;
                     } else {
                         probed += 1;
                     }
-                    entries.push(entry);
+                    entry_count += 1;
+
+                    if let Err(err) = write_library_tsv_entry(&mut tsv_writer, &entry) {
+                        stream_error = Some(err.into());
+                        return wc_scan::ScanVisitControl::Cancel;
+                    }
+                    batch.push(entry);
+                    if batch.len() >= RESCAN_BATCH_SIZE {
+                        if let Err(err) = wc_storage::sqlite::library_replace_session_push(
+                            &mut sqlite_session,
+                            &batch,
+                        ) {
+                            stream_error = Some(err.into());
+                            return wc_scan::ScanVisitControl::Cancel;
+                        }
+                        batch.clear();
+                    }
+                    wc_scan::ScanVisitControl::Continue
+                },
+            );
+            let scan_time = scan_start.elapsed();
+            let walk_time = scan_time.checked_sub(metadata_time).unwrap_or_default();
+            let probe_time = metadata_time;
+
+            if let Some(err) = stream_error {
+                let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
+                let _ = std::fs::remove_file(&tsv_tmp);
+                return Err(err);
+            }
+
+            if !batch.is_empty() {
+                if let Err(err) =
+                    wc_storage::sqlite::library_replace_session_push(&mut sqlite_session, &batch)
+                {
+                    let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
+                    let _ = std::fs::remove_file(&tsv_tmp);
+                    return Err(err.into());
                 }
             }
-            let probe_time = t1.elapsed();
-
-            let mut tsv = String::new();
-            for e in &entries {
-                tsv.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-                    e.file_type.as_str(),
-                    e.ext,
-                    e.backend.as_str(),
-                    e.size,
-                    e.mtime,
-                    e.resolution,
-                    e.path
-                ));
+            if let Err(err) = tsv_writer.flush() {
+                let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
+                let _ = std::fs::remove_file(&tsv_tmp);
+                return Err(err.into());
             }
-            let tsv_path = s.cd.library_tsv_path();
-            let tsv_tmp = tsv_path.with_extension("tsv.tmp");
-            std::fs::write(&tsv_tmp, tsv)?;
+            drop(tsv_writer);
 
-            // Atomically replace the SQLite library when a DB exists.
+            // Atomically replace the SQLite library when staging succeeded.
             let t2 = std::time::Instant::now();
             let sqlite_count =
-                match wc_storage::sqlite::library_replace_entries_batch_atomic(&s.cd, &entries) {
+                match wc_storage::sqlite::library_replace_session_commit(sqlite_session) {
                     Ok(count) => count,
                     Err(err) => {
                         let _ = std::fs::remove_file(&tsv_tmp);
@@ -657,8 +702,8 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 } else {
                     String::new()
                 },
-                files.len(),
-                entries.len(),
+                candidate_count,
+                entry_count,
                 sqlite_count,
                 reused,
                 probed,
@@ -939,6 +984,14 @@ fn sqlite_list_table_paths(
     Ok(rows)
 }
 
+fn stop_wallpapers_with<F>(s: &StorageApi, stop_backends: F) -> Result<(), wc_core::error::WcError>
+where
+    F: FnOnce(Option<&StorageApi>) -> Result<(), wc_core::error::WcError>,
+{
+    stop_backends(Some(s))?;
+    s.runtime_state_clear()
+}
+
 fn apply_selected(s: &StorageApi, path: &str) -> anyhow::Result<()> {
     let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
         path: s.cd.path.clone(),
@@ -948,6 +1001,23 @@ fn apply_selected(s: &StorageApi, path: &str) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e.message))?;
     println!("Applied: {}", target.resolved_path);
     Ok(())
+}
+
+fn write_library_tsv_entry<W: Write>(
+    writer: &mut W,
+    entry: &WallpaperEntry,
+) -> std::io::Result<()> {
+    writeln!(
+        writer,
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        entry.file_type.as_str(),
+        entry.ext,
+        entry.backend.as_str(),
+        entry.size,
+        entry.mtime,
+        entry.resolution,
+        entry.path
+    )
 }
 
 fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<wc_core::types::WallpaperEntry>> {
@@ -1356,4 +1426,58 @@ fn json_library_page_from_tsv(
         }))?
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn storage_with_mode(mode: &str) -> (tempfile::TempDir, StorageApi) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", mode).unwrap();
+        let storage = StorageApi::new(cd);
+        (tmp, storage)
+    }
+
+    fn no_op_stop(_s: Option<&StorageApi>) -> Result<(), wc_core::error::WcError> {
+        Ok(())
+    }
+
+    #[test]
+    fn stop_wallpapers_clears_file_runtime_state_but_keeps_history() {
+        let (_tmp, storage) = storage_with_mode("file");
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage.history_add("/walls/current.jpg", "awww").unwrap();
+
+        stop_wallpapers_with(&storage, no_op_stop).unwrap();
+
+        assert_eq!(storage.current_read().unwrap(), None);
+        assert_eq!(storage.last_backend_read().unwrap(), None);
+        assert_eq!(
+            storage.history_list().unwrap(),
+            vec!["/walls/current.jpg".to_string()]
+        );
+    }
+
+    #[test]
+    fn stop_wallpapers_clears_sqlite_runtime_state_but_keeps_history() {
+        let (_tmp, storage) = storage_with_mode("sqlite");
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage.history_add("/walls/current.jpg", "awww").unwrap();
+
+        stop_wallpapers_with(&storage, no_op_stop).unwrap();
+
+        assert_eq!(storage.current_read().unwrap(), None);
+        assert_eq!(storage.last_backend_read().unwrap(), None);
+        assert_eq!(
+            storage.history_list().unwrap(),
+            vec!["/walls/current.jpg".to_string()]
+        );
+    }
 }

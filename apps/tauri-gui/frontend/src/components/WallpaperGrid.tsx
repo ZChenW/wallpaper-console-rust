@@ -7,6 +7,7 @@ import { isApplyAvailable } from '../domain/applyActions';
 import ContextMenu from './ContextMenu';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { calculateColumnCount, GRID_GAP } from '../utils/layout';
+import { emitFeedback } from '../events/appEvents';
 
 interface Props {
   entries: WallpaperDTO[];
@@ -133,9 +134,7 @@ export default function WallpaperGrid({
 
   const handleDoubleClick = (entry: WallpaperDTO) => {
     if (!canApply(entry)) {
-      window.dispatchEvent(new CustomEvent('wc-feedback', {
-        detail: { state: 'warning', label: 'Cannot apply', detail: 'This item cannot be applied as a live wallpaper.' },
-      }));
+      emitFeedback({ state: 'warning', label: 'Cannot apply', detail: 'This item cannot be applied as a live wallpaper.' });
       return;
     }
     onApply(entry.path);

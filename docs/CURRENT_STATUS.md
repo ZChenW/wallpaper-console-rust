@@ -10,7 +10,7 @@
 
 ---
 
-## Current Closeout Status (2026-06-11)
+## Current Closeout Status (2026-06-15)
 
 This section is the current status source for the maturity work. The original phase checklists below are kept as implementation history and acceptance detail.
 
@@ -25,7 +25,7 @@ This section is the current status source for the maturity work. The original ph
 | Test matrix expansion | Completed | Rust, frontend, smoke, install, storage, thumbnail, scan tests |
 | Documentation slimming/archive cleanup | Completed | README + DEVELOPMENT are Tauri-current; Wails docs are historical only |
 | Performance baseline | Completed | 1k/10k/50k TSV vs SQLite benchmark recorded in `docs/PERFORMANCE_BASELINE.md` |
-| CI automation | Workflow added | `.github/workflows/ci.yml` runs Rust fmt/check/clippy/tests and frontend typecheck/unit/build/smoke on push, PR, and manual dispatch; first GitHub-hosted run remains to be observed after push |
+| CI automation | Workflow added | `.github/workflows/ci.yml` runs `cargo run -p xtask -- verify rust` and `cargo run -p xtask -- verify frontend` on push, PR, and manual dispatch; first GitHub-hosted run remains to be observed after push |
 | Real desktop GUI visual acceptance | Scripted evidence path available; acceptance still open until run | `scripts/manual_tauri_acceptance.sh` captures profile CSV, compositor window listing when available, and screenshot path; complete `docs/TAURI_MANUAL_SMOKE_CHECKLIST.md` before marking accepted |
 | Persistent tab shell | Completed | Library/History/Favorites stay mounted across switches; scroll preserved; `active` prop gates thumbnail enqueue/resize; colCount re-measured on activation; smoke test for tab persistence |
 | History/Favorites pagination | Completed | `history_page`/`favorites_page` Rust commands with SQLite/flat fallback (empty-SQLite-table fallback too); "Load more" button; 2 Rust fallback tests (`history_page_sqlite_empty_falls_back_to_flat`, `favorites_page_sqlite_empty_falls_back_to_flat`) |
@@ -45,6 +45,7 @@ This section is the current status source for the maturity work. The original ph
 | wc-storage SQLite module split | Completed | 2297-line `sqlite.rs` split into 6 submodules (schema, library_page, backup, source_config_state, metadata_cache, row_map); public API preserved via `pub use` re-exports; 31 tests pass |
 | Frontend grid and thumbnail hot-path | Completed | WallpaperGrid: removed O(n) `rows` precompute, O(1) `entryByPath` Map for context menu lookup; thumbnail queue: `snapshot()` includes cached count; 39 unit + 70 smoke tests pass |
 | Backend runtime test seam | Completed | `BackendRuntime` trait with `SystemBackendRuntime` (production) and `FakeRuntime` (tests); `apply_wallpaper_with_runtime` accepts injected runtime for stops AND command execution (awww/mpvpaper); `execute_stop_plan_with_runtime` dispatches all `StopPlan` variants; LWE PID cleanup preserved; LWE apply path remains direct (complex scene projector); 87 backend tests pass |
+| Large optimization pass | Completed locally | Deterministic config registry, bound SQLite migration reads, versioned FTS rebuild/integrity verify, transactional staging push, streaming CLI rescan, CLI stop runtime-state clear, shared frontend paging hook, typed frontend event bus, `xtask` verification runner, and docs sync |
 
 Important verification boundary: automated build/test/smoke/package checks were run locally. Manual GUI acceptance remains open until an interactive desktop session can complete `docs/TAURI_MANUAL_SMOKE_CHECKLIST.md`.
 Manual desktop acceptance remains open; automated smoke tests do not prove compositor/runtime behavior on niri.
@@ -65,6 +66,8 @@ Manual desktop acceptance remains open; automated smoke tests do not prove compo
 Run this after every major phase unless the phase only edits docs:
 
 ```bash
+cargo run -p xtask -- verify all
+
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace -- -D warnings

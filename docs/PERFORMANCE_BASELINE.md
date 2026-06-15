@@ -30,6 +30,12 @@ The script generates both `library.tsv` and `wallpapers.db`, then measures:
 - later page: newest sort, offset 480, limit 120
 - search: filename search with name sort
 
+CLI `rescan` now streams discovered candidates through metadata probing, temporary
+TSV output, and SQLite staging batches. This keeps the hot path bounded by the
+current batch size instead of retaining the full path and entry vectors before
+SQLite replacement. The final SQLite commit remains atomic: failures during
+staging or commit preserve the previous library and remove the temporary TSV.
+
 ## Results From This Run
 
 Measured on 2026-06-11 with `WCR_BIN=target/release/wallpaper-console-rust`:
@@ -91,6 +97,9 @@ Date: 2026-06-15
 
 SQLite search now uses an FTS5 index over path, title, workshop_id, and project_type.
 Empty-search paging still uses the regular ordered indexes.
+Schema creation records the current FTS schema version and rebuilds the index
+when that version changes; `sqlite-verify` also checks FTS/content integrity so
+stale search indexes fail verification instead of silently degrading GUI search.
 
 Record:
 

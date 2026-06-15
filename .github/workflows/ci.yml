@@ -38,24 +38,12 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Format
-        run: cargo fmt --all -- --check
-
-      - name: Check
-        run: cargo check --workspace
-
-      - name: Clippy
-        run: cargo clippy --workspace -- -D warnings
-
-      - name: Test
-        run: cargo test --workspace
+      - name: Verify Rust
+        run: cargo run -p xtask -- verify rust
 
   frontend:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    defaults:
-      run:
-        working-directory: apps/tauri-gui/frontend
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -67,20 +55,19 @@ jobs:
           cache: npm
           cache-dependency-path: apps/tauri-gui/frontend/package-lock.json
 
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies
+        working-directory: apps/tauri-gui/frontend
         run: npm ci
 
-      - name: Typecheck
-        run: npm run typecheck
-
-      - name: Unit tests
-        run: npm run test:unit
-
-      - name: Build
-        run: npm run build
-
       - name: Install Playwright browser
+        working-directory: apps/tauri-gui/frontend
         run: npx playwright install --with-deps chromium
 
-      - name: Smoke tests
-        run: npm run smoke
+      - name: Verify frontend
+        run: cargo run -p xtask -- verify frontend

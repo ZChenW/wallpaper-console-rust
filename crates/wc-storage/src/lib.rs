@@ -64,12 +64,11 @@ impl StorageApi {
             return default.to_string();
         }
         match rusqlite::Connection::open(&db) {
-            Ok(conn) => {
-                let ek = sqlite::sqlite_escape(key);
-                let sql = format!("SELECT value FROM config WHERE key='{}'", ek);
-                conn.query_row(&sql, [], |row| row.get::<_, String>(0))
-                    .unwrap_or_else(|_| default.to_string())
-            }
+            Ok(conn) => conn
+                .query_row("SELECT value FROM config WHERE key=?1", [key], |row| {
+                    row.get::<_, String>(0)
+                })
+                .unwrap_or_else(|_| default.to_string()),
             _ => default.to_string(),
         }
     }
@@ -394,6 +393,26 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
 
         assert_eq!(storage_backend_mode(tmp.path()), StorageBackend::Sqlite);
+    }
+
+    #[test]
+    fn sqlite_config_get_reads_keys_with_apostrophes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = StorageApi::new(cd);
+
+        storage
+            .config_set("artist's_key", "artist's value")
+            .unwrap();
+
+        assert_eq!(
+            storage.config_get("artist's_key", "missing"),
+            "artist's value"
+        );
     }
 
     #[test]

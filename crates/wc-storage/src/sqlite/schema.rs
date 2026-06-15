@@ -12,6 +12,7 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_type_mtime ON wallpapers(type, mtime DESC, path ASC);
     CREATE INDEX IF NOT EXISTS idx_wallpapers_type_size ON wallpapers(type, size DESC, path ASC);
 ";
+pub const FTS_SCHEMA_VERSION: &str = "2";
 
 /// Create the wallpaper-console SQLite schema.
 pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
@@ -103,20 +104,25 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_metadata_columns(conn)?;
     ensure_wallpaper_query_indexes(conn)?;
-    ensure_wallpapers_fts_rebuilt(conn).ok();
+    ensure_wallpapers_fts_rebuilt(conn)?;
     Ok(())
 }
 
 fn ensure_wallpapers_fts_rebuilt(conn: &Connection) -> Result<(), WcError> {
-    let already: bool = conn
+    let current_version: Option<String> = conn
         .query_row(
-            "SELECT value FROM db_meta WHERE key = 'fts_rebuilt_at'",
+            "SELECT value FROM db_meta WHERE key = 'fts_schema_version'",
             [],
-            |_row| Ok(true),
+            |row| row.get(0),
         )
-        .unwrap_or(false);
-    if !already {
+        .ok();
+    if current_version.as_deref() != Some(FTS_SCHEMA_VERSION) {
         rebuild_wallpapers_fts(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_schema_version', ?1)",
+            params![FTS_SCHEMA_VERSION],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
         conn.execute(
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_rebuilt_at', datetime('now'))",
             [],
@@ -124,6 +130,25 @@ fn ensure_wallpapers_fts_rebuilt(conn: &Connection) -> Result<(), WcError> {
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
     Ok(())
+}
+
+pub fn wallpapers_count(conn: &Connection) -> Result<i64, WcError> {
+    conn.query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get(0))
+        .map_err(|e| WcError::Sqlite(e.to_string()))
+}
+
+pub fn wallpapers_fts_count(conn: &Connection) -> Result<i64, WcError> {
+    conn.query_row("SELECT COUNT(*) FROM wallpapers_fts", [], |row| row.get(0))
+        .map_err(|e| WcError::Sqlite(e.to_string()))
+}
+
+pub fn check_wallpapers_fts_integrity(conn: &Connection) -> Result<(), WcError> {
+    conn.execute(
+        "INSERT INTO wallpapers_fts(wallpapers_fts, rank) VALUES ('integrity-check', 1)",
+        [],
+    )
+    .map(|_| ())
+    .map_err(|e| WcError::Sqlite(e.to_string()))
 }
 
 pub fn rebuild_wallpapers_fts(conn: &Connection) -> Result<(), WcError> {
@@ -172,11 +197,6 @@ pub fn ensure_wallpaper_query_indexes(conn: &Connection) -> Result<(), WcError> 
     Ok(())
 }
 
-/// Escape a string for safe use in a SQLite single-quoted literal.
-pub fn sqlite_escape(s: &str) -> String {
-    s.replace('\'', "''")
-}
-
 /// Migrate flat files into wallpapers.db (one-shot operation).
 pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     let db_path = cd.db_path();
@@ -193,31 +213,27 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     // Config
     let config_map = wc_core::config::parse_config_file(&cd.config_path())?;
     for (key, value) in &config_map {
-        let ek = sqlite_escape(key);
-        let ev = sqlite_escape(value);
         conn.execute(
             "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
-            params![ek, ev],
+            params![key, value],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
 
     // Sources
     for path in flat::sources_list(cd)? {
-        let ep = sqlite_escape(&path);
         conn.execute(
             "INSERT OR IGNORE INTO sources (path, added_at) VALUES (?1, ?2)",
-            params![ep, now],
+            params![path, now],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
 
     // Favorites
     for path in flat::favorites_list(cd)? {
-        let ep = sqlite_escape(&path);
         conn.execute(
             "INSERT OR IGNORE INTO favorites (path, added_at) VALUES (?1, ?2)",
-            params![ep, now],
+            params![path, now],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
@@ -231,10 +247,9 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
         .collect();
     let history_rev: Vec<String> = history.into_iter().rev().collect();
     for path in &history_rev {
-        let ep = sqlite_escape(path);
         conn.execute(
             "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'unknown', ?2)",
-            params![ep, now],
+            params![path, now],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
@@ -243,14 +258,14 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     if let Some(cur) = flat::current_read(cd)? {
         conn.execute(
             "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
-            params![sqlite_escape(&cur)],
+            params![cur],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
     if let Some(be) = flat::last_backend_read(cd)? {
         conn.execute(
             "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
-            params![sqlite_escape(&be)],
+            params![be],
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
@@ -268,7 +283,7 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
     conn.execute(
         "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('source_runtime_dir', ?1)",
-        params![sqlite_escape(cd.path.to_string_lossy().as_ref())],
+        params![cd.path.to_string_lossy().as_ref()],
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
 
@@ -285,5 +300,110 @@ pub fn ensure_sqlite_db(cd: &ConfigDir) {
     let db = cd.db_path();
     if let Ok(conn) = Connection::open(&db) {
         create_schema(&conn).ok();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn migrate_to_sqlite_preserves_apostrophes_in_bound_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "custom_name", "artist's value").unwrap();
+        flat::sources_add(&cd, "/wall's/source").unwrap();
+        flat::favorites_add(&cd, "/wall's/favorite.jpg").unwrap();
+        flat::history_add(&cd, "/wall's/history.jpg", 100).unwrap();
+        flat::current_write(&cd, "/wall's/current.jpg").unwrap();
+        flat::last_backend_write(&cd, "awww's").unwrap();
+
+        migrate_to_sqlite(&cd).unwrap();
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let config_value: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key='custom_name'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let source: String = conn
+            .query_row("SELECT path FROM sources", [], |row| row.get(0))
+            .unwrap();
+        let favorite: String = conn
+            .query_row("SELECT path FROM favorites", [], |row| row.get(0))
+            .unwrap();
+        let history: String = conn
+            .query_row("SELECT path FROM history", [], |row| row.get(0))
+            .unwrap();
+        let current: String = conn
+            .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let last_backend: String = conn
+            .query_row(
+                "SELECT value FROM state WHERE key='last_backend'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(config_value, "artist's value");
+        assert_eq!(source, "/wall's/source");
+        assert_eq!(favorite, "/wall's/favorite.jpg");
+        assert_eq!(history, "/wall's/history.jpg");
+        assert_eq!(current, "/wall's/current.jpg");
+        assert_eq!(last_backend, "awww's");
+    }
+
+    #[test]
+    fn create_schema_records_current_fts_schema_version() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
+             VALUES ('/walls/old.jpg', 'image', 'jpg', 'awww', 10, 10, '1x1', 'old title', '111')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_schema_version', 'old')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        let version: String = conn
+            .query_row(
+                "SELECT value FROM db_meta WHERE key='fts_schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, "2");
+        let fts_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM wallpapers_fts", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(fts_count, 1);
+    }
+
+    #[test]
+    fn create_schema_propagates_fts_rebuild_errors() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute("CREATE TABLE wallpapers_fts(dummy TEXT)", [])
+            .unwrap();
+
+        let err = create_schema(&conn).unwrap_err();
+
+        assert!(
+            err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
+            "{err}"
+        );
     }
 }

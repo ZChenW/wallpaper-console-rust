@@ -33,37 +33,40 @@ pub fn library_replace_session_push(
     session: &mut LibraryReplaceSession,
     entries: &[WallpaperEntry],
 ) -> Result<(), WcError> {
+    let tx = session
+        .conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     for entry in entries {
         let project = entry.project.as_ref();
-        session
-            .conn
-            .execute(
-                "INSERT INTO wallpapers_stage
+        tx.execute(
+            "INSERT INTO wallpapers_stage
                  (path, type, ext, backend, size, mtime, resolution,
                   project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    entry.path.as_str(),
-                    entry.file_type.as_str(),
-                    entry.ext.as_str(),
-                    entry.backend.as_str(),
-                    entry.size as i64,
-                    entry.mtime as i64,
-                    entry.resolution.as_str(),
-                    project.map(|p| p.project_type.as_str()).unwrap_or(""),
-                    project
-                        .and_then(|p| p.preview_path.as_deref())
-                        .unwrap_or(""),
-                    project.and_then(|p| p.workshop_id.as_deref()).unwrap_or(""),
-                    project.and_then(|p| p.title.as_deref()).unwrap_or(""),
-                    project.and_then(|p| p.we_file.as_deref()).unwrap_or(""),
-                    project
-                        .and_then(|p| p.unsupported_reason.as_deref())
-                        .unwrap_or(""),
-                ],
-            )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            params![
+                entry.path.as_str(),
+                entry.file_type.as_str(),
+                entry.ext.as_str(),
+                entry.backend.as_str(),
+                entry.size as i64,
+                entry.mtime as i64,
+                entry.resolution.as_str(),
+                project.map(|p| p.project_type.as_str()).unwrap_or(""),
+                project
+                    .and_then(|p| p.preview_path.as_deref())
+                    .unwrap_or(""),
+                project.and_then(|p| p.workshop_id.as_deref()).unwrap_or(""),
+                project.and_then(|p| p.title.as_deref()).unwrap_or(""),
+                project.and_then(|p| p.we_file.as_deref()).unwrap_or(""),
+                project
+                    .and_then(|p| p.unsupported_reason.as_deref())
+                    .unwrap_or(""),
+            ],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
     session.inserted += entries.len();
     Ok(())
 }
@@ -99,6 +102,19 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
     use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
+
+    fn test_entry(path: &str) -> WallpaperEntry {
+        WallpaperEntry {
+            path: Utf8PathBuf::from(path),
+            file_type: FileType::Image,
+            ext: "jpg".into(),
+            backend: Backend::Awww,
+            size: 100,
+            mtime: 200,
+            resolution: "2x2".into(),
+            project: None,
+        }
+    }
 
     #[test]
     fn library_replace_session_commit_replaces_rows_only_at_commit() {
@@ -185,6 +201,48 @@ mod tests {
             .query_row("SELECT path FROM wallpapers", [], |r| r.get(0))
             .unwrap();
         assert_eq!(path, "/walls/old.jpg");
+    }
+
+    #[test]
+    fn library_replace_session_push_rolls_back_failed_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+
+        let mut session = library_replace_session_start(&cd).unwrap();
+        session
+            .conn
+            .execute_batch(
+                "CREATE TEMP TRIGGER fail_wallpapers_stage_insert
+                 BEFORE INSERT ON wallpapers_stage
+                 WHEN NEW.path = '/walls/bad.jpg'
+                 BEGIN
+                     SELECT RAISE(ABORT, 'forced stage failure');
+                 END;",
+            )
+            .unwrap();
+
+        let result = library_replace_session_push(
+            &mut session,
+            &[test_entry("/walls/good.jpg"), test_entry("/walls/bad.jpg")],
+        );
+
+        assert!(result.is_err(), "batch should fail on the injected trigger");
+        let staged_count: usize = session
+            .conn
+            .query_row("SELECT COUNT(*) FROM wallpapers_stage", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            staged_count, 0,
+            "failed batches must not leave partial rows"
+        );
+        assert_eq!(
+            session.inserted, 0,
+            "failed batches must not change counters"
+        );
     }
 
     #[test]

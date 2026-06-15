@@ -25,6 +25,7 @@ import LibraryPage from '../settings/pages/LibraryPage';
 import DatabasePage from '../settings/pages/DatabasePage';
 import AdvancedPage from '../settings/pages/AdvancedPage';
 import type { DbAction } from '../settings/types';
+import { emitConfigChanged } from '../events/appEvents';
 
 interface Props {
   onRefresh: () => void;
@@ -112,7 +113,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
       const r = await api.configSet(key, normalized);
       if (r.success) {
         setConfigs((prev) => ({ ...prev, [key]: normalized }));
-        window.dispatchEvent(new CustomEvent('wc-config-changed', { detail: { key, value: normalized } }));
+        emitConfigChanged({ key, value: normalized });
         if (key.startsWith('linux_wallpaperengine_')) {
           void loadWeStatus();
         }
