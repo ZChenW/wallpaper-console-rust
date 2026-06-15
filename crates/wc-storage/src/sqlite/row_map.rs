@@ -1,9 +1,7 @@
 use camino::Utf8PathBuf;
 use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
-pub fn wallpaper_entry_from_row(
-    row: &rusqlite::Row<'_>,
-) -> rusqlite::Result<WallpaperEntry> {
+pub fn wallpaper_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WallpaperEntry> {
     let path: String = row.get(0)?;
     let ftype_s: String = row.get(1)?;
     let ext: String = row.get(2)?;

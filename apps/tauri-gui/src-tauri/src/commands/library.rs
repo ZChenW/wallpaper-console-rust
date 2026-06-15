@@ -85,9 +85,7 @@ pub async fn library_page_gui(
 
 #[tauri::command]
 pub async fn favorites_list() -> Result<Vec<WallpaperDto>, String> {
-    favorites_page(0, LEGACY_LIST_LIMIT)
-        .await
-        .map(|p| p.items)
+    favorites_page(0, LEGACY_LIST_LIMIT).await.map(|p| p.items)
 }
 
 #[tauri::command]

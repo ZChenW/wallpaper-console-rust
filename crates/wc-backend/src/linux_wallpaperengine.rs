@@ -268,10 +268,13 @@ pub fn stop(s: Option<&StorageApi>) {
             let _ = s.config_set(PID_CONFIG_KEY, "");
         }
     }
-    // Fallback cleanup: kill any residual linux-wallpaperengine processes owned by
-    // current user.  The PID recorded above may be the setsid parent (already
-    // exited) rather than the actual renderer process.  Use -f (match full command
-    // line) instead of -x because Linux truncates /proc/.../comm to 15 chars.
+    stop_tracked_processes();
+}
+
+/// Kill any residual linux-wallpaperengine processes owned by current user.
+/// Uses -f (match full command line) instead of -x because Linux truncates
+/// /proc/.../comm to 15 chars.
+pub fn stop_tracked_processes() {
     if let Ok(user) = std::env::var("USER") {
         let _ = Command::new("pkill")
             .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])

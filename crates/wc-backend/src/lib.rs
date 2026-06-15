@@ -8,6 +8,7 @@ use wc_storage::StorageApi;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
+pub mod runtime;
 pub mod visual_handoff;
 
 /// Stop all wallpaper backends via pkill.
@@ -48,16 +49,37 @@ pub fn stop_non_lwe_backends(_s: &StorageApi) {
 
 use lifecycle::StopPlan;
 
-fn execute_stop_plan(s: &StorageApi, plan: StopPlan) -> Result<(), WcError> {
+fn execute_stop_plan_with_runtime(
+    s: &StorageApi,
+    plan: lifecycle::StopPlan,
+    runtime: &mut dyn runtime::BackendRuntime,
+) -> Result<(), WcError> {
     match plan {
-        StopPlan::All => stop_all_backends(Some(s))?,
-        StopPlan::AwwwDaemonOnly => stop_awww(),
-        StopPlan::LweOnly => linux_wallpaperengine::stop(Some(s)),
-        StopPlan::MpvpaperOnly => stop_mpvpaper(),
-        StopPlan::NonLwe => stop_non_lwe_backends(s),
-        StopPlan::None => {}
+        lifecycle::StopPlan::All => {
+            runtime.stop_awww();
+            runtime.stop_mpvpaper();
+            runtime.stop_lwe(Some(s));
+            Ok(())
+        }
+        lifecycle::StopPlan::AwwwDaemonOnly => {
+            runtime.stop_awww();
+            Ok(())
+        }
+        lifecycle::StopPlan::MpvpaperOnly => {
+            runtime.stop_mpvpaper();
+            Ok(())
+        }
+        lifecycle::StopPlan::LweOnly => {
+            runtime.stop_lwe(Some(s));
+            Ok(())
+        }
+        lifecycle::StopPlan::NonLwe => {
+            runtime.stop_awww();
+            runtime.stop_mpvpaper();
+            Ok(())
+        }
+        lifecycle::StopPlan::None => Ok(()),
     }
-    Ok(())
 }
 
 fn stop_awww() {
@@ -93,6 +115,17 @@ pub fn apply_wallpaper(
     backend: Backend,
     fallback_path: Option<&str>,
 ) -> Result<(), WcError> {
+    let mut runtime = runtime::SystemBackendRuntime;
+    apply_wallpaper_with_runtime(s, path, backend, fallback_path, &mut runtime)
+}
+
+fn apply_wallpaper_with_runtime(
+    s: &StorageApi,
+    path: &str,
+    backend: Backend,
+    fallback_path: Option<&str>,
+    runtime: &mut dyn runtime::BackendRuntime,
+) -> Result<(), WcError> {
     let p = std::path::Path::new(path);
     if backend == Backend::Unsupported {
         return Err(WcError::UnsupportedFileType(path.to_string()));
@@ -107,13 +140,13 @@ pub fn apply_wallpaper(
 
     let mut fallback_error: Option<String> = None;
 
-    execute_stop_plan(s, lifecycle.pre_stop)?;
+    execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
 
     let fallback_ok = match visual.fallback_stage {
         visual_handoff::FallbackStage::TargetImageInstant
         | visual_handoff::FallbackStage::TargetPreviewInstant => {
             if let Some(fb) = fallback_path {
-                match apply_awww_instant(s, fb) {
+                match apply_awww_instant_with_runtime(s, fb, runtime) {
                     Ok(()) => {
                         std::thread::sleep(std::time::Duration::from_millis(
                             visual_handoff::AWWW_FALLBACK_SETTLE_MS,
@@ -154,7 +187,7 @@ pub fn apply_wallpaper(
     if visual.stop_previous_after_fallback {
         let stop_target = lifecycle.post_success_stop;
         if stop_target != StopPlan::None {
-            let _ = execute_stop_plan(s, stop_target);
+            let _ = execute_stop_plan_with_runtime(s, stop_target, runtime);
         }
     }
 
@@ -169,7 +202,7 @@ pub fn apply_wallpaper(
     if !target_already_shown {
         let target_result = match backend {
             Backend::Awww => (|| -> Result<(), WcError> {
-                ensure_awww_daemon()?;
+                runtime.ensure_awww_daemon_running()?;
                 let resize_raw = s.config_get("awww_resize", "crop");
                 let resize = normalize_awww_resize(&resize_raw);
                 let transition_type = s.config_get("awww_transition_type", "fade");
@@ -178,8 +211,8 @@ pub fn apply_wallpaper(
                 let mut cmd =
                     build_awww_img_command(path, resize, &transition_type, &duration, &fps);
                 cmd.arg("--filter").arg("Lanczos3");
-                let output = cmd
-                    .output()
+                let output = runtime
+                    .command_output(&mut cmd)
                     .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -202,9 +235,10 @@ pub fn apply_wallpaper(
                 let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
                 let opts = normalize_mpvpaper_options(&opts_raw);
                 let output = s.config_get("mpvpaper_output", "*");
-                let status = Command::new("setsid")
-                    .args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path])
-                    .status()
+                let mut cmd = Command::new("setsid");
+                cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
+                let status = runtime
+                    .command_status(&mut cmd)
                     .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
                 if !status.success() {
                     return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
@@ -222,8 +256,12 @@ pub fn apply_wallpaper(
         };
 
         if let Err(e) = target_result {
-            let rollback_msg =
-                rollback_visual_fallback_after_target_failure(s, lifecycle.previous, fallback_ok);
+            let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
+                s,
+                lifecycle.previous,
+                fallback_ok,
+                runtime,
+            );
             if let Some(msg) = rollback_msg {
                 write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
             }
@@ -244,13 +282,13 @@ pub fn apply_wallpaper(
     }
 
     if fallback_ok && visual.stop_fallback_after_target_settle {
-        stop_awww();
+        runtime.stop_awww();
     }
 
     let already_stopped = visual.stop_previous_after_fallback
         && visual.fallback_stage != visual_handoff::FallbackStage::None;
     if !already_stopped {
-        execute_stop_plan(s, lifecycle.post_success_stop)?;
+        execute_stop_plan_with_runtime(s, lifecycle.post_success_stop, runtime)?;
     }
 
     write_debug_handoff_log(
@@ -347,25 +385,7 @@ pub fn restore(s: &StorageApi) -> Result<(), WcError> {
     apply_wallpaper(s, &current, backend, fallback_path.as_deref())
 }
 
-fn ensure_awww_daemon() -> Result<(), WcError> {
-    let user = whoami();
-    if is_awww_daemon_running(&user) {
-        return Ok(());
-    }
-    start_awww_daemon_detached()?;
-    for _ in 0..30 {
-        std::thread::sleep(std::time::Duration::from_millis(50));
-        if is_awww_daemon_running(&user) {
-            return Ok(());
-        }
-    }
-    Err(WcError::Other(
-        "awww-daemon failed to start. Check 'awww-daemon' is installed and your compositor supports wlr-layer-shell."
-            .into(),
-    ))
-}
-
-fn is_awww_daemon_running(user: &str) -> bool {
+pub(crate) fn is_awww_daemon_running(user: &str) -> bool {
     if user.is_empty() {
         return false;
     }
@@ -382,36 +402,18 @@ fn is_awww_daemon_running(user: &str) -> bool {
     )
 }
 
-fn start_awww_daemon_detached() -> Result<(), WcError> {
-    let status = std::process::Command::new("setsid")
-        .args(["-f", "awww-daemon"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|_| {
-            WcError::Other(
-                "setsid not available — cannot launch awww-daemon. \
-                 setsid is part of util-linux; install it with your package manager."
-                    .into(),
-            )
-        })?;
-    if !status.success() {
-        return Err(WcError::Other(
-            "awww-daemon not found. Install awww (pip install awww or AUR).".into(),
-        ));
-    }
-    Ok(())
-}
-
-fn apply_awww_instant(s: &StorageApi, path: &str) -> Result<(), WcError> {
-    ensure_awww_daemon()?;
+fn apply_awww_instant_with_runtime(
+    s: &StorageApi,
+    path: &str,
+    runtime: &mut dyn runtime::BackendRuntime,
+) -> Result<(), WcError> {
+    runtime.ensure_awww_daemon_running()?;
     let resize_raw = s.config_get("awww_resize", "crop");
     let resize = normalize_awww_resize(&resize_raw);
     let fps = s.config_get("wallpaper_transition_fps", "60");
     let mut cmd = build_awww_instant_command(path, resize, &fps);
-    let output = cmd
-        .output()
+    let output = runtime
+        .command_output(&mut cmd)
         .map_err(|e| WcError::Other(format!("awww instant failed: {}", e)))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
@@ -448,10 +450,11 @@ fn build_awww_instant_command(path: &str, resize: &str, fps: &str) -> Command {
     cmd
 }
 
-fn rollback_visual_fallback_after_target_failure(
+fn rollback_visual_fallback_after_target_failure_with_runtime(
     s: &StorageApi,
     previous: lifecycle::RunningBackend,
     fallback_ok: bool,
+    runtime: &mut dyn runtime::BackendRuntime,
 ) -> Option<String> {
     if !fallback_ok {
         return None;
@@ -461,7 +464,7 @@ fn rollback_visual_fallback_after_target_failure(
         if let Some(old_path) = s.current_read().ok().flatten() {
             let p = std::path::Path::new(&old_path);
             if p.is_file() {
-                match apply_awww_instant(s, &old_path) {
+                match apply_awww_instant_with_runtime(s, &old_path, runtime) {
                     Ok(()) => Some(format!(
                         "rollback: restored previous awww wallpaper {}",
                         p.file_name().and_then(|n| n.to_str()).unwrap_or(&old_path)
@@ -472,18 +475,18 @@ fn rollback_visual_fallback_after_target_failure(
                     )),
                 }
             } else {
-                stop_awww();
+                runtime.stop_awww();
                 Some(format!(
                     "rollback: previous awww path {} not found, stopped fallback",
                     old_path
                 ))
             }
         } else {
-            stop_awww();
+            runtime.stop_awww();
             Some("rollback: no previous awww state, stopped fallback".into())
         }
     } else {
-        stop_awww();
+        runtime.stop_awww();
         Some("rollback: stopped fallback after non-awww target failure".into())
     }
 }
@@ -527,7 +530,7 @@ fn build_awww_img_command(
     cmd
 }
 
-fn whoami() -> String {
+pub(crate) fn whoami() -> String {
     std::env::var("USER").unwrap_or_default()
 }
 
@@ -1146,5 +1149,242 @@ mod tests {
         );
         // TargetImageInstant means the normal awww apply is skipped in apply_wallpaper
         // when fallback_ok is true.
+    }
+
+    // -----------------------------------------------------------------
+    // FakeRuntime for testing the backend runtime seam
+    // -----------------------------------------------------------------
+
+    #[derive(Default)]
+    struct FakeRuntime {
+        stop_awww_count: usize,
+        stop_mpvpaper_count: usize,
+        stop_lwe_count: usize,
+        command_output_count: usize,
+        command_status_count: usize,
+    }
+
+    impl crate::runtime::BackendRuntime for FakeRuntime {
+        fn command_output(
+            &mut self,
+            _command: &mut std::process::Command,
+        ) -> Result<std::process::Output, WcError> {
+            self.command_output_count += 1;
+            std::process::Command::new("true")
+                .output()
+                .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
+        }
+
+        fn command_status(
+            &mut self,
+            _command: &mut std::process::Command,
+        ) -> Result<std::process::ExitStatus, WcError> {
+            self.command_status_count += 1;
+            std::process::Command::new("true")
+                .status()
+                .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
+        }
+
+        fn stop_awww(&mut self) {
+            self.stop_awww_count += 1;
+        }
+
+        fn stop_mpvpaper(&mut self) {
+            self.stop_mpvpaper_count += 1;
+        }
+
+        fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
+            self.stop_lwe_count += 1;
+        }
+
+        fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn execute_stop_plan_all_calls_all_stops() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::All, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_lwe_count, 1);
+    }
+
+    #[test]
+    fn execute_stop_plan_awww_daemon_only() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::AwwwDaemonOnly, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn execute_stop_plan_mpvpaper_only() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::MpvpaperOnly, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn execute_stop_plan_lwe_only() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::LweOnly, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 1);
+    }
+
+    #[test]
+    fn execute_stop_plan_non_lwe() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::NonLwe, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn execute_stop_plan_none_is_noop() {
+        let (_tmp, s) = temp_storage();
+        let mut rt = FakeRuntime::default();
+        execute_stop_plan_with_runtime(&s, StopPlan::None, &mut rt).unwrap();
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn apply_with_runtime_pre_stop_all_counts_calls() {
+        // When previous backend is None and target is Mpvpaper,
+        // the pre_stop plan is All, which calls all stop methods
+        // via the injected runtime. The apply path also uses
+        // runtime.command_status for mpvpaper (setsid).
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("").unwrap();
+
+        let img = tmp.path().join("test.png");
+        std::fs::write(&img, b"").unwrap();
+
+        let mut rt = FakeRuntime::default();
+        let _result = apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        );
+
+        assert_eq!(rt.stop_awww_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_lwe_count, 1);
+        assert_eq!(
+            rt.command_status_count, 1,
+            "mpvpaper target must use runtime.command_status"
+        );
+    }
+
+    #[test]
+    fn apply_with_runtime_awww_target_uses_command_output() {
+        // Awww TargetImageInstant fallback runs apply_awww_instant_with_runtime
+        // which uses runtime.command_output. FakeRuntime.ensure_awww_daemon_running
+        // returns Ok(()) so the path doesn't depend on a real compositor daemon.
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("").unwrap();
+
+        let img = tmp.path().join("test.png");
+        std::fs::write(&img, b"").unwrap();
+
+        let mut rt = FakeRuntime::default();
+        let _result = apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+        );
+
+        assert!(
+            rt.command_output_count >= 1,
+            "awww instant fallback must use runtime.command_output"
+        );
+    }
+
+    #[test]
+    fn rollback_missing_previous_awww_path_calls_stop_awww() {
+        let (tmp, s) = temp_storage();
+        let missing = tmp.path().join("missing.jpg");
+        s.current_write(&missing.to_string_lossy()).unwrap();
+
+        let mut rt = FakeRuntime::default();
+        let msg = rollback_visual_fallback_after_target_failure_with_runtime(
+            &s,
+            lifecycle::RunningBackend::Awww,
+            true,
+            &mut rt,
+        );
+
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("not found"));
+        assert_eq!(rt.stop_awww_count, 1);
+    }
+
+    #[test]
+    fn rollback_no_previous_awww_state_calls_stop_awww() {
+        let (_tmp, s) = temp_storage();
+        // No current written — s.current_read() returns None.
+
+        let mut rt = FakeRuntime::default();
+        let msg = rollback_visual_fallback_after_target_failure_with_runtime(
+            &s,
+            lifecycle::RunningBackend::Awww,
+            true,
+            &mut rt,
+        );
+
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("no previous awww state"));
+        assert_eq!(rt.stop_awww_count, 1);
+    }
+
+    #[test]
+    fn rollback_non_awww_previous_calls_stop_awww() {
+        let (_tmp, s) = temp_storage();
+
+        let mut rt = FakeRuntime::default();
+        let msg = rollback_visual_fallback_after_target_failure_with_runtime(
+            &s,
+            lifecycle::RunningBackend::Mpvpaper,
+            true,
+            &mut rt,
+        );
+
+        assert!(msg.is_some());
+        assert!(msg.unwrap().contains("non-awww"));
+        assert_eq!(rt.stop_awww_count, 1);
+    }
+
+    #[test]
+    fn rollback_fallback_not_ok_is_noop() {
+        let (_tmp, s) = temp_storage();
+
+        let mut rt = FakeRuntime::default();
+        let msg = rollback_visual_fallback_after_target_failure_with_runtime(
+            &s,
+            lifecycle::RunningBackend::Awww,
+            false,
+            &mut rt,
+        );
+
+        assert!(msg.is_none());
+        assert_eq!(rt.stop_awww_count, 0);
     }
 }

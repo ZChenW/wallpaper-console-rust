@@ -28,9 +28,12 @@ if [[ ! -x "$bin" ]]; then
 fi
 
 echo "starting_profile=1" | tee -a "$report"
-if ! WALLPAPER_CONSOLE_GUI_RUST="$bin" "$SCRIPT_DIR/profile_gui.sh" "$duration" | tee "$csv"; then
+set +o pipefail
+WALLPAPER_CONSOLE_GUI_RUST="$bin" "$SCRIPT_DIR/profile_gui.sh" "$duration" | tee "$csv"
+profile_exit=${PIPESTATUS[0]}
+set -o pipefail
+if [[ $profile_exit -ne 0 ]]; then
   echo "profile_failed=1" >> "$report"
-  exit 1
 fi
 
 if command -v niri >/dev/null 2>&1; then
@@ -54,3 +57,4 @@ fi
 
 echo "profile_csv=$csv" >> "$report"
 echo "report=$report"
+exit $profile_exit
