@@ -82,8 +82,8 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
     }
 
     update_scan_stage("walking files");
-    let paths = wc_scan::scan_wallpapers_with_callback(&sources, |event| {
-        match scan_state().lock() {
+    let paths =
+        wc_scan::scan_wallpapers_with_callback(&sources, |event| match scan_state().lock() {
             Ok(mut state) => {
                 if state.cancel_requested {
                     return wc_scan::ScanControl::Cancel;
@@ -98,12 +98,12 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
                         state.total_hint = Some(count);
                         state.current_path = Some(path);
                     }
+                    wc_scan::ScanEvent::WalkProgress { .. } => {}
                 }
                 wc_scan::ScanControl::Continue
             }
             Err(_) => wc_scan::ScanControl::Cancel,
-        }
-    });
+        });
     if scan_cancelled()? {
         return Err("scan cancelled".to_string());
     }

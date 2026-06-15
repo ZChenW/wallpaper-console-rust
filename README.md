@@ -49,7 +49,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 
 - React 19 + TypeScript + Vite
 - Virtualized wallpaper grid (@tanstack/react-virtual)
-- Library: SQLite-backed paging, filter by type, sort, filename/title/Workshop ID search
+- Library: SQLite-backed SQL paging, filter by type, sort, filename/title/Workshop ID search
 - Favorites & History views with apply, random, remove
 - Sources management: grouped (Wallpaper Engine / Other), add/remove/validate/scan
 - Wallpaper Engine project indexing. Scene wallpapers use optional `linux-wallpaperengine`; Web wallpapers are indexed for browsing/preview only and are not live-apply supported.
@@ -93,7 +93,7 @@ Three modes: `file` (flat files only), `hybrid` (flat + SQLite mirror), `sqlite`
 - **Source deduplication**: canonical paths eliminate symlink duplicates
 - **SQLite batch writes**: single transaction per rescan
 - **Atomic SQLite library replacement**: scan writes either fully commit or preserve the old library
-- **SQLite query indexes**: indexed type/sort paths for paged GUI loading
+- **SQLite query indexes**: indexed type/sort paths used by GUI and CLI paged loading
 - **Virtualized grid**: only visible rows rendered
 - **Thumbnail queue**: bounded concurrency, visible-item priority, stale-request cancellation, batched UI updates
 - **Tauri heavy commands**: scanning and thumbnail generation run on blocking worker threads

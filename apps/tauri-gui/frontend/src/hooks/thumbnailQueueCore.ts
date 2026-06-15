@@ -17,7 +17,7 @@ export class ThumbnailRequestQueue {
   private readonly onUpdate: (state: ThumbState) => void;
   private thumbs: ThumbState = {};
   private queue: QueueItem[] = [];
-  private inFlight = new Set<string>();
+  private inFlight = new Map<string, number>();
   private disposed = false;
   private generation = 0;
   private pathVersions = new Map<string, number>();
@@ -29,9 +29,14 @@ export class ThumbnailRequestQueue {
   }
 
   enqueue(paths: string[], options: EnqueueOptions = {}): void {
-    const unique = Array.from(new Set(paths)).filter((path) =>
-      path && !this.thumbs[path] && !this.inFlight.has(path) && !this.queue.some((item) => item.path === path)
-    );
+    const unique = Array.from(new Set(paths)).filter((path) => {
+      if (!path || this.thumbs[path] || this.queue.some((item) => item.path === path)) {
+        return false;
+      }
+      const inFlightVersion = this.inFlight.get(path);
+      if (inFlightVersion === undefined) return true;
+      return this.versionFor(path) > inFlightVersion;
+    });
     const items = unique.map((path) => ({
       path,
       generation: this.generation,
@@ -82,8 +87,13 @@ export class ThumbnailRequestQueue {
     if (this.disposed) return;
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
       const item = this.queue.shift();
-      if (!item || this.thumbs[item.path] || this.inFlight.has(item.path)) continue;
-      this.inFlight.add(item.path);
+      if (!item || this.thumbs[item.path]) continue;
+
+      if (this.inFlight.has(item.path)) {
+        this.queue.unshift(item);
+        break;
+      }
+      this.inFlight.set(item.path, item.pathVersion);
       void this.load(item.path)
         .then((thumb) => {
           if (

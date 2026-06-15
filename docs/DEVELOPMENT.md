@@ -8,6 +8,16 @@
 - Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
 
+## Priority Hardening Review Rule
+
+For production-hardening work that touches Tauri commands, scan performance, thumbnail queues, or backend lifecycle:
+
+1. Implement one priority at a time.
+2. Run targeted tests for the touched subsystem.
+3. Run `code-review-expert` on the current git diff.
+4. Fix all P0/P1 findings before continuing.
+5. Run the broader verification matrix before final closeout.
+
 ## Rust Verification
 
 ```bash

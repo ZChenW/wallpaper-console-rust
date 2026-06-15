@@ -113,3 +113,55 @@ test('thumbnail queue ignores in-flight completion after forget', async () => {
 
   assert.deepEqual(latestState, {});
 });
+
+test('thumbnail queue re-enqueues after forget of in-flight path when version is newer', async () => {
+  const loaded: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let latestState: Record<string, string> = {};
+
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      loaded.push(path);
+      if (path === 'x' && loaded.length === 1) await firstBlock;
+      return thumb(path);
+    },
+    onUpdate: (state) => { latestState = state; },
+  });
+
+  queue.enqueue(['x']);
+  queue.forget(['x']);
+  queue.enqueue(['x']);
+  releaseFirst?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(loaded, ['x', 'x'], 'load should be called twice');
+  assert.deepEqual(latestState, { x: 'thumb:x' }, 'latest state should have re-enqueued thumbnail');
+});
+
+test('thumbnail queue re-enqueues forgotten in-flight path with default concurrency', async () => {
+  const loaded: string[] = [];
+  let releaseFirst: (() => void) | undefined;
+  const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  let latestState: Record<string, string> = {};
+
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 2,
+    load: async (path) => {
+      loaded.push(path);
+      if (path === 'x' && loaded.length === 1) await firstBlock;
+      return thumb(path);
+    },
+    onUpdate: (state) => { latestState = state; },
+  });
+
+  queue.enqueue(['x']);
+  queue.forget(['x']);
+  queue.enqueue(['x']);
+  releaseFirst?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(loaded, ['x', 'x'], 'load should be called twice');
+  assert.deepEqual(latestState, { x: 'thumb:x' }, 'latest state should have re-enqueued thumbnail');
+});

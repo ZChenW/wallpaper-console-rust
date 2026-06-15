@@ -37,8 +37,13 @@ This section is the current status source for the maturity work. The original ph
 | Frontend apply action model consolidation | Completed | domain/applyActions.ts normalizes backend applyActions DTO; LibraryView builds context menu from normalized actions; WallpaperGrid uses isApplyAvailable(); legacy DTO fallback centralized; 28 unit tests; smoke tests pass |
 | Apply execution pipeline | Completed | `apply_action` Tauri command, `ApplyRequest`/`ApplyExecutionResult` Rust types, `buildApplyRequest` frontend, latest-intent frontend queue, stale request guard (AtomicU64), preview resolves from project metadata, state/history write boundaries, 48 smoke tests, Rust: 15 wc-app + 32 wallpaper-console-tauri + 22 wc-backend tests |
 | Backend apply lifecycle | Completed | Backend apply lifecycle is centralized in `wc-backend::lifecycle`; `apply_wallpaper()` is the single state/history write boundary after successful backend confirmation. |
+| SQL-level GUI pagination | Completed | `library_page_gui`, `favorites_page`, and `history_page` use shared SQLite `COUNT` + `LIMIT/OFFSET` helpers; storage and Tauri tests pass |
+| Frontend apply queue extraction | Completed | `useApplyQueue` isolates latest-intent queueing from `App.tsx`; `useFeedbackBridge` extracts wc-feedback listener; 34 unit tests pass |
+| Thumbnail stale completion hardening | Completed | Generation tokens and path-version invalidation prevent stale writes after `reset()`/`forget()`/`dispose()`; 2 race tests added; `forget()` exposed through hooks and store |
+| Streaming scan progress | Completed | `scan_wallpapers_with_callback` reports `SourceStarted`/`CandidateFound` during directory walk; cancel integration at walking stage; SQLite prior cache reused in metadata phase |
 
 Important verification boundary: automated build/test/smoke/package checks were run locally. Manual GUI acceptance remains open until an interactive desktop session can complete `docs/TAURI_MANUAL_SMOKE_CHECKLIST.md`.
+Manual desktop acceptance remains open; automated smoke tests do not prove compositor/runtime behavior on niri.
 
 ---
 

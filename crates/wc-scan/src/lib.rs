@@ -9,6 +9,8 @@ use walkdir::WalkDir;
 use wc_core::formats;
 use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
+const CANCEL_CHECK_INTERVAL: usize = 500;
+
 const WE_MARKER: &str = "/steamapps/workshop/content/431960";
 /// Flatpak Steam installs workshop content under a different prefix.
 const FLATPAK_WE_MARKER: &str =
@@ -68,6 +70,7 @@ pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
 pub enum ScanEvent {
     SourceStarted { source: String },
     CandidateFound { path: String, count: usize },
+    WalkProgress { entries_visited: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,7 +89,12 @@ where
     let mut files: Vec<String> = Vec::new();
 
     for source in &deduped {
-        if matches!(on_event(ScanEvent::SourceStarted { source: source.clone() }), ScanControl::Cancel) {
+        if matches!(
+            on_event(ScanEvent::SourceStarted {
+                source: source.clone()
+            }),
+            ScanControl::Cancel
+        ) {
             break;
         }
         let src_path = Path::new(source);
@@ -94,9 +102,15 @@ where
             continue;
         }
         let cancelled = match we_source_kind(source) {
-            WeKind::WorkshopRoot => scan_we_workshop_root_with_callback(src_path, &mut seen, &mut files, &mut on_event),
-            WeKind::ProjectDir => scan_we_project_dir_with_callback(src_path, &mut seen, &mut files, &mut on_event),
-            WeKind::Normal => scan_dir_recursive_with_callback(src_path, &mut seen, &mut files, &mut on_event),
+            WeKind::WorkshopRoot => {
+                scan_we_workshop_root_with_callback(src_path, &mut seen, &mut files, &mut on_event)
+            }
+            WeKind::ProjectDir => {
+                scan_we_project_dir_with_callback(src_path, &mut seen, &mut files, &mut on_event)
+            }
+            WeKind::Normal => {
+                scan_dir_recursive_with_callback(src_path, &mut seen, &mut files, &mut on_event)
+            }
         };
         if cancelled {
             break;
@@ -156,7 +170,21 @@ where
         Err(_) => return false,
     };
 
+    let mut visited = 0usize;
+
     for entry in entries.filter_map(|e| e.ok()) {
+        visited += 1;
+        if visited.is_multiple_of(CANCEL_CHECK_INTERVAL)
+            && matches!(
+                on_event(ScanEvent::WalkProgress {
+                    entries_visited: visited
+                }),
+                ScanControl::Cancel
+            )
+        {
+            return true;
+        }
+
         let ftype = entry.file_type().ok();
         if !ftype.map(|t| t.is_dir()).unwrap_or(false) {
             continue;
@@ -172,7 +200,10 @@ where
             if seen.insert(c.clone()) {
                 files.push(c.clone());
                 if matches!(
-                    on_event(ScanEvent::CandidateFound { path: c, count: files.len() }),
+                    on_event(ScanEvent::CandidateFound {
+                        path: c,
+                        count: files.len()
+                    }),
                     ScanControl::Cancel
                 ) {
                     return true;
@@ -205,13 +236,14 @@ where
 {
     if let Some(wp) = indexed_we_project_path(project_dir) {
         let p = Path::new(&wp);
-        let c = canonicalize_str(
-            &std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()),
-        );
+        let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
         if seen.insert(c.clone()) {
             files.push(c.clone());
             if matches!(
-                on_event(ScanEvent::CandidateFound { path: c, count: files.len() }),
+                on_event(ScanEvent::CandidateFound {
+                    path: c,
+                    count: files.len()
+                }),
                 ScanControl::Cancel
             ) {
                 return true;
@@ -231,11 +263,25 @@ fn scan_dir_recursive_with_callback<F>(
 where
     F: FnMut(ScanEvent) -> ScanControl,
 {
+    let mut visited = 0usize;
+
     for entry in WalkDir::new(dir)
         .follow_links(false)
         .into_iter()
         .filter_map(|e| e.ok())
     {
+        visited += 1;
+        if visited.is_multiple_of(CANCEL_CHECK_INTERVAL)
+            && matches!(
+                on_event(ScanEvent::WalkProgress {
+                    entries_visited: visited
+                }),
+                ScanControl::Cancel
+            )
+        {
+            return true;
+        }
+
         if !entry.file_type().is_file() {
             continue;
         }
@@ -252,7 +298,10 @@ where
                 if seen.insert(canonical.clone()) {
                     files.push(canonical.clone());
                     if matches!(
-                        on_event(ScanEvent::CandidateFound { path: canonical, count: files.len() }),
+                        on_event(ScanEvent::CandidateFound {
+                            path: canonical,
+                            count: files.len()
+                        }),
                         ScanControl::Cancel
                     ) {
                         return true;
@@ -977,30 +1026,63 @@ mod tests {
         assert_eq!(result.unwrap(), img.to_string_lossy().to_string());
     }
 
-#[test]
-fn scan_wallpapers_with_callback_can_cancel_after_first_candidate() {
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().join("walls");
-    std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("a.jpg"), b"a").unwrap();
-    std::fs::write(dir.join("b.jpg"), b"b").unwrap();
-    let source = dir.to_string_lossy().to_string();
-    let mut seen_candidates = 0usize;
+    #[test]
+    fn scan_wallpapers_with_callback_can_cancel_after_first_candidate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("walls");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.jpg"), b"a").unwrap();
+        std::fs::write(dir.join("b.jpg"), b"b").unwrap();
+        let source = dir.to_string_lossy().to_string();
+        let mut seen_candidates = 0usize;
 
-    let files = scan_wallpapers_with_callback(&[source], |event| {
-        if matches!(event, ScanEvent::CandidateFound { .. }) {
-            seen_candidates += 1;
-            return ScanControl::Cancel;
+        let files = scan_wallpapers_with_callback(&[source], |event| {
+            if matches!(event, ScanEvent::CandidateFound { .. }) {
+                seen_candidates += 1;
+                return ScanControl::Cancel;
+            }
+            ScanControl::Continue
+        });
+
+        assert_eq!(seen_candidates, 1);
+        assert_eq!(files.len(), 1);
+    }
+
+    #[test]
+    fn we_workshop_root_can_cancel_during_top_level_walk_without_candidates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root_path = format!("{}/steamapps/workshop/content/431960", tmp.path().display());
+        std::fs::create_dir_all(&root_path).unwrap();
+
+        // Create empty subdirs without project.json — these fall through
+        // to recursive walk and will not emit CandidateFound (no files inside).
+        for i in 0..CANCEL_CHECK_INTERVAL + 10 {
+            let sub = format!("{}/{}", root_path, i);
+            std::fs::create_dir_all(&sub).unwrap();
         }
-        ScanControl::Continue
-    });
 
-    assert_eq!(seen_candidates, 1);
-    assert_eq!(files.len(), 1);
-}
+        let mut walk_progress_count = 0usize;
 
-#[test]
-fn we_workshop_root_scans_subdirs() {
+        let files = scan_wallpapers_with_callback(&[root_path], |event| {
+            if matches!(event, ScanEvent::WalkProgress { .. }) {
+                walk_progress_count += 1;
+                return ScanControl::Cancel;
+            }
+            ScanControl::Continue
+        });
+
+        assert!(
+            walk_progress_count >= 1,
+            "WalkProgress should have fired at least once"
+        );
+        assert!(
+            files.is_empty(),
+            "cancel should stop before producing candidates"
+        );
+    }
+
+    #[test]
+    fn we_workshop_root_scans_subdirs() {
         let root = tempfile::tempdir().unwrap();
         let root_path = format!(
             "{}/steamapps/workshop/content/431960",

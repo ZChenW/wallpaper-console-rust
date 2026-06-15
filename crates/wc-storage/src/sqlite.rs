@@ -1440,7 +1440,9 @@ mod tests {
     #[test]
     fn library_page_sqlite_filters_sorts_and_limits_without_full_table_callers() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
@@ -1468,7 +1470,9 @@ mod tests {
     #[test]
     fn library_page_sqlite_keeps_we_web_and_unsupported_after_normal_items() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
@@ -1488,22 +1492,37 @@ mod tests {
         )
         .unwrap();
 
-        let kinds: Vec<&str> = page.items.iter().map(|entry| entry.file_type.as_str()).collect();
+        let kinds: Vec<&str> = page
+            .items
+            .iter()
+            .map(|entry| entry.file_type.as_str())
+            .collect();
         assert_eq!(kinds, vec!["image", "we_web", "unsupported"]);
     }
 
     #[test]
     fn favorites_and_history_page_sqlite_join_to_wallpaper_metadata() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
         insert_wallpaper_for_page_test(&conn, "/walls/a.jpg", "image", 100, 1000, "A", "");
         insert_wallpaper_for_page_test(&conn, "/walls/b.jpg", "image", 200, 2000, "B", "");
-        conn.execute("INSERT INTO favorites (path) VALUES ('/walls/a.jpg')", []).unwrap();
-        conn.execute("INSERT INTO history (path, backend) VALUES ('/walls/a.jpg', 'awww')", []).unwrap();
-        conn.execute("INSERT INTO history (path, backend) VALUES ('/walls/b.jpg', 'awww')", []).unwrap();
+        conn.execute("INSERT INTO favorites (path) VALUES ('/walls/a.jpg')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES ('/walls/a.jpg', 'awww')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES ('/walls/b.jpg', 'awww')",
+            [],
+        )
+        .unwrap();
 
         let favs = favorites_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(favs.total, 1);
@@ -1733,7 +1752,10 @@ pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     Ok(count as usize)
 }
 
-pub fn library_page_sqlite(cd: &ConfigDir, query: &LibraryPageQuery) -> Result<LibraryPage, WcError> {
+pub fn library_page_sqlite(
+    cd: &ConfigDir,
+    query: &LibraryPageQuery,
+) -> Result<LibraryPage, WcError> {
     ensure_sqlite_db(cd);
     let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_query_indexes(&conn)?;
@@ -1758,9 +1780,18 @@ pub fn library_page_sqlite(cd: &ConfigDir, query: &LibraryPageQuery) -> Result<L
          ORDER BY {order_by}
          LIMIT ?2 OFFSET ?3"
     );
-    let mut stmt = conn.prepare(&sql).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let mut stmt = conn
+        .prepare(&sql)
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let items = stmt
-        .query_map(params![search, query.limit as i64, query.offset as i64], wallpaper_entry_from_row)
+        .query_map(
+            params![
+                search,
+                i64::try_from(query.limit).unwrap_or(i64::MAX),
+                i64::try_from(query.offset).unwrap_or(i64::MAX)
+            ],
+            wallpaper_entry_from_row,
+        )
         .map_err(|e| WcError::Sqlite(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -1784,7 +1815,9 @@ pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCo
         .prepare("SELECT type, COUNT(*) FROM wallpapers GROUP BY type")
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     for row in rows {
         let (kind, count) = row.map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -1800,7 +1833,11 @@ pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCo
     Ok(counts)
 }
 
-pub fn favorites_page_sqlite(cd: &ConfigDir, offset: usize, limit: usize) -> Result<LibraryPage, WcError> {
+pub fn favorites_page_sqlite(
+    cd: &ConfigDir,
+    offset: usize,
+    limit: usize,
+) -> Result<LibraryPage, WcError> {
     ensure_sqlite_db(cd);
     let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_query_indexes(&conn)?;
@@ -1824,14 +1861,27 @@ pub fn favorites_page_sqlite(cd: &ConfigDir, offset: usize, limit: usize) -> Res
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let items = stmt
-        .query_map(params![limit as i64, offset as i64], wallpaper_entry_from_row)
+        .query_map(
+            params![
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX)
+            ],
+            wallpaper_entry_from_row,
+        )
         .map_err(|e| WcError::Sqlite(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(LibraryPage { total: total.max(0) as usize, items })
+    Ok(LibraryPage {
+        total: total.max(0) as usize,
+        items,
+    })
 }
 
-pub fn history_page_sqlite(cd: &ConfigDir, offset: usize, limit: usize) -> Result<LibraryPage, WcError> {
+pub fn history_page_sqlite(
+    cd: &ConfigDir,
+    offset: usize,
+    limit: usize,
+) -> Result<LibraryPage, WcError> {
     ensure_sqlite_db(cd);
     let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_query_indexes(&conn)?;
@@ -1855,11 +1905,20 @@ pub fn history_page_sqlite(cd: &ConfigDir, offset: usize, limit: usize) -> Resul
         )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let items = stmt
-        .query_map(params![limit as i64, offset as i64], wallpaper_entry_from_row)
+        .query_map(
+            params![
+                i64::try_from(limit).unwrap_or(i64::MAX),
+                i64::try_from(offset).unwrap_or(i64::MAX)
+            ],
+            wallpaper_entry_from_row,
+        )
         .map_err(|e| WcError::Sqlite(e.to_string()))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(LibraryPage { total: total.max(0) as usize, items })
+    Ok(LibraryPage {
+        total: total.max(0) as usize,
+        items,
+    })
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
@@ -1990,7 +2049,8 @@ fn wallpaper_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wallpap
         "awww" | "swww" => Backend::Awww,
         "mpvpaper" => Backend::Mpvpaper,
         "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
-        "chromium-web" | "webkit-layer-shell" | _ => Backend::Unsupported,
+        "chromium-web" | "webkit-layer-shell" => Backend::Unsupported,
+        _ => Backend::Unsupported,
     };
     let project = if project_type.is_empty()
         && preview_path.is_empty()

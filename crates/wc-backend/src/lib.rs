@@ -167,8 +167,8 @@ pub fn apply_wallpaper(
         );
 
     if !target_already_shown {
-        match backend {
-            Backend::Awww => {
+        let target_result = match backend {
+            Backend::Awww => (|| -> Result<(), WcError> {
                 ensure_awww_daemon()?;
                 let resize_raw = s.config_get("awww_resize", "crop");
                 let resize = normalize_awww_resize(&resize_raw);
@@ -196,7 +196,8 @@ pub fn apply_wallpaper(
                         output.status, detail
                     )));
                 }
-            }
+                Ok(())
+            })(),
             Backend::Mpvpaper => {
                 let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
                 let opts = normalize_mpvpaper_options(&opts_raw);
@@ -208,12 +209,25 @@ pub fn apply_wallpaper(
                 if !status.success() {
                     return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
                 }
+                Ok(())
             }
             Backend::LinuxWallpaperEngine => {
                 let project = linux_wallpaperengine::project_from_path(path)?;
-                linux_wallpaperengine::apply(s, project)?;
+                match linux_wallpaperengine::apply(s, project) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                }
             }
             Backend::Unsupported => unreachable!(),
+        };
+
+        if let Err(e) = target_result {
+            let rollback_msg =
+                rollback_visual_fallback_after_target_failure(s, lifecycle.previous, fallback_ok);
+            if let Some(msg) = rollback_msg {
+                write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
+            }
+            return Err(e);
         }
     }
 
@@ -432,6 +446,46 @@ fn build_awww_instant_command(path: &str, resize: &str, fps: &str) -> Command {
         .arg("--filter")
         .arg("Lanczos3");
     cmd
+}
+
+fn rollback_visual_fallback_after_target_failure(
+    s: &StorageApi,
+    previous: lifecycle::RunningBackend,
+    fallback_ok: bool,
+) -> Option<String> {
+    if !fallback_ok {
+        return None;
+    }
+
+    if previous == lifecycle::RunningBackend::Awww {
+        if let Some(old_path) = s.current_read().ok().flatten() {
+            let p = std::path::Path::new(&old_path);
+            if p.is_file() {
+                match apply_awww_instant(s, &old_path) {
+                    Ok(()) => Some(format!(
+                        "rollback: restored previous awww wallpaper {}",
+                        p.file_name().and_then(|n| n.to_str()).unwrap_or(&old_path)
+                    )),
+                    Err(rollback_err) => Some(format!(
+                        "rollback: failed to restore previous awww wallpaper {}: {}",
+                        old_path, rollback_err
+                    )),
+                }
+            } else {
+                stop_awww();
+                Some(format!(
+                    "rollback: previous awww path {} not found, stopped fallback",
+                    old_path
+                ))
+            }
+        } else {
+            stop_awww();
+            Some("rollback: no previous awww state, stopped fallback".into())
+        }
+    } else {
+        stop_awww();
+        Some("rollback: stopped fallback after non-awww target failure".into())
+    }
 }
 
 fn normalize_awww_resize(raw: &str) -> &'static str {
@@ -855,6 +909,155 @@ mod tests {
         assert_eq!(
             s.current_read().unwrap().as_deref(),
             Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
+        assert_eq!(s.history_list().unwrap().len(), history_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_wallpaper_fallback_ok_target_lwe_fail_previous_mpvpaper_preserves_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.jpg");
+        std::fs::write(&old, b"old").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap().len();
+
+        let bin = tmp.path().join("test-lwe-fallback-fail-state");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/555555");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        let preview = scene.join("preview.gif");
+        std::fs::write(&preview, b"gif").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","preview":"preview.gif","workshopid":"555555"}"#,
+        )
+        .unwrap();
+
+        let err = apply_wallpaper(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            Some(&preview.to_string_lossy().to_string()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("linux-wallpaperengine") || err.to_string().contains("exited")
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap().len(), history_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_wallpaper_fallback_ok_target_lwe_fail_restores_previous_awww_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.jpg");
+        std::fs::write(&old, b"old").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("awww").unwrap();
+        s.history_add(&old.to_string_lossy(), "awww").unwrap();
+        let history_before = s.history_list().unwrap().len();
+
+        let bin = tmp.path().join("test-lwe-fallback-awww-previous");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/666666");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        let preview = scene.join("preview.gif");
+        std::fs::write(&preview, b"gif").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","preview":"preview.gif","workshopid":"666666"}"#,
+        )
+        .unwrap();
+
+        let err = apply_wallpaper(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            Some(&preview.to_string_lossy().to_string()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("linux-wallpaperengine") || err.to_string().contains("exited")
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
+        assert_eq!(s.history_list().unwrap().len(), history_before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_wallpaper_previous_awww_missing_path_lwe_fail_still_preserves_state() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        let missing = tmp.path().join("missing.jpg");
+        s.current_write(&missing.to_string_lossy()).unwrap();
+        s.last_backend_write("awww").unwrap();
+        s.history_add(&missing.to_string_lossy(), "awww").unwrap();
+        let history_before = s.history_list().unwrap().len();
+
+        let bin = tmp.path().join("test-lwe-missing-awww-state");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/777777");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        let preview = scene.join("preview.gif");
+        std::fs::write(&preview, b"gif").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","preview":"preview.gif","workshopid":"777777"}"#,
+        )
+        .unwrap();
+
+        let err = apply_wallpaper(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            Some(&preview.to_string_lossy().to_string()),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("linux-wallpaperengine") || err.to_string().contains("exited")
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(missing.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
         assert_eq!(s.history_list().unwrap().len(), history_before);

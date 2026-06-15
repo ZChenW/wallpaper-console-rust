@@ -72,7 +72,8 @@ pub async fn library_page_gui(
             offset,
             limit,
         };
-        let page = wc_storage::sqlite::library_page_sqlite(&s.cd, &query).map_err(|e| e.to_string())?;
+        let page =
+            wc_storage::sqlite::library_page_sqlite(&s.cd, &query).map_err(|e| e.to_string())?;
         Ok(LibraryPageDto {
             total: page.total,
             items: page.items.into_iter().map(dto_from_entry).collect(),
@@ -84,7 +85,9 @@ pub async fn library_page_gui(
 
 #[tauri::command]
 pub async fn favorites_list() -> Result<Vec<WallpaperDto>, String> {
-    favorites_page(0, UNBOUNDED_PAGE_LIMIT).await.map(|p| p.items)
+    favorites_page(0, UNBOUNDED_PAGE_LIMIT)
+        .await
+        .map(|p| p.items)
 }
 
 #[tauri::command]
@@ -190,7 +193,9 @@ mod tests {
     #[test]
     fn library_count_dto_requires_no_full_table_load() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         wc_storage::sqlite::ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
@@ -198,12 +203,14 @@ mod tests {
             "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
              VALUES ('/a.jpg', 'image', 'jpg', 'awww', 100, 1000, '1920x1080')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
              VALUES ('/b.gif', 'gif', 'gif', 'awww', 200, 2000, '1920x1080')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let counts = wc_storage::sqlite::library_counts_sqlite(&cd).unwrap();
         assert_eq!(counts.total, 2);
@@ -215,7 +222,9 @@ mod tests {
     #[test]
     fn library_page_gui_uses_shared_sql_helper() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         wc_storage::sqlite::ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
@@ -223,12 +232,14 @@ mod tests {
             "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
              VALUES ('/a.png', 'image', 'png', 'awww', 300, 3000, '800x600')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
              VALUES ('/b.mp4', 'video', 'mp4', 'mpvpaper', 400, 4000, '1920x1080')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let page = wc_storage::sqlite::library_page_sqlite(
             &cd,
@@ -239,7 +250,8 @@ mod tests {
                 offset: 0,
                 limit: 10,
             },
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].file_type, FileType::Image);
@@ -249,7 +261,9 @@ mod tests {
     #[test]
     fn favorites_and_history_use_shared_sql_helpers() {
         let tmp = tempfile::tempdir().unwrap();
-        let cd = wc_core::ConfigDir { path: tmp.path().join("wallpaper-console") };
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
         cd.init().unwrap();
         wc_storage::sqlite::ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
@@ -257,9 +271,15 @@ mod tests {
             "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
              VALUES ('/fav.jpg', 'image', 'jpg', 'awww', 100, 1000, '1920x1080')",
             [],
-        ).unwrap();
-        conn.execute("INSERT INTO favorites (path) VALUES ('/fav.jpg')", []).unwrap();
-        conn.execute("INSERT INTO history (path, backend) VALUES ('/fav.jpg', 'awww')", []).unwrap();
+        )
+        .unwrap();
+        conn.execute("INSERT INTO favorites (path) VALUES ('/fav.jpg')", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES ('/fav.jpg', 'awww')",
+            [],
+        )
+        .unwrap();
 
         let favs = wc_storage::sqlite::favorites_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(favs.total, 1);
