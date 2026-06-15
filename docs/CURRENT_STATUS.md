@@ -41,6 +41,10 @@ This section is the current status source for the maturity work. The original ph
 | Frontend apply queue extraction | Completed | `useApplyQueue` isolates latest-intent queueing from `App.tsx`; `useFeedbackBridge` extracts wc-feedback listener; 34 unit tests pass |
 | Thumbnail stale completion hardening | Completed | Generation tokens and path-version invalidation prevent stale writes after `reset()`/`forget()`/`dispose()`; 2 race tests added; `forget()` exposed through hooks and store |
 | Streaming scan progress | Completed | `scan_wallpapers_with_callback` reports `SourceStarted`/`CandidateFound` during directory walk; cancel integration at walking stage; SQLite prior cache reused in metadata phase |
+| Legacy Tauri list command cap | Completed | `library_list`/`favorites_list`/`history_list` capped at 1,000 rows; deprecation comments in bridge.ts and mockBridge.ts; test pins the limit constant |
+| wc-storage SQLite module split | Completed | 2297-line `sqlite.rs` split into 6 submodules (schema, library_page, backup, source_config_state, metadata_cache, row_map); public API preserved via `pub use` re-exports; 31 tests pass |
+| Frontend grid and thumbnail hot-path | Completed | WallpaperGrid: removed O(n) `rows` precompute, O(1) `entryByPath` Map for context menu lookup; thumbnail queue: `snapshot()` includes cached count; 39 unit + 70 smoke tests pass |
+| Backend runtime test seam | Completed | `BackendRuntime` trait with `SystemBackendRuntime` (production) and `FakeRuntime` (tests); `apply_wallpaper_with_runtime` accepts injected runtime for stops AND command execution (awww/mpvpaper); `execute_stop_plan_with_runtime` dispatches all `StopPlan` variants; LWE PID cleanup preserved; LWE apply path remains direct (complex scene projector); 87 backend tests pass |
 
 Important verification boundary: automated build/test/smoke/package checks were run locally. Manual GUI acceptance remains open until an interactive desktop session can complete `docs/TAURI_MANUAL_SMOKE_CHECKLIST.md`.
 Manual desktop acceptance remains open; automated smoke tests do not prove compositor/runtime behavior on niri.
