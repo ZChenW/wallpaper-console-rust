@@ -2,6 +2,7 @@
 
 mod backup;
 mod library_page;
+pub mod library_session;
 mod metadata_cache;
 mod row_map;
 mod schema;

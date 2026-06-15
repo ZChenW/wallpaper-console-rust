@@ -79,14 +79,80 @@ pub enum ScanControl {
     Cancel,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanVisitControl {
+    Continue,
+    Cancel,
+}
+
+enum CandidateSink<'a> {
+    Collect(&'a mut Vec<String>),
+    Stream,
+}
+
+impl CandidateSink<'_> {
+    fn push_if_collecting(&mut self, path: String) {
+        if let CandidateSink::Collect(files) = self {
+            files.push(path);
+        }
+    }
+}
+
 /// Scan all sources for wallpaper files with a callback for progress/cancellation.
 pub fn scan_wallpapers_with_callback<F>(sources: &[String], mut on_event: F) -> Vec<String>
 where
     F: FnMut(ScanEvent) -> ScanControl,
 {
+    let mut files: Vec<String> = Vec::new();
+    let mut sink = CandidateSink::Collect(&mut files);
+    let mut noop = |_| ScanVisitControl::Continue;
+    scan_wallpapers_with_visitor(sources, &mut sink, &mut 0usize, &mut on_event, &mut noop);
+    files
+}
+
+/// Legacy compatibility wrapper — scans without cancellation support.
+pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
+    scan_wallpapers_with_callback(sources, |_| ScanControl::Continue)
+}
+
+/// Stream wallpaper paths through a visitor callback. Paths are yielded
+/// as they are discovered — no full Vec is accumulated in this call.
+/// Returns true if the visitor cancelled.
+pub fn visit_wallpapers_with_callback<F, V>(
+    sources: &[String],
+    mut on_event: F,
+    mut on_candidate: V,
+) -> bool
+where
+    F: FnMut(ScanEvent) -> ScanControl,
+    V: FnMut(String) -> ScanVisitControl,
+{
+    let mut cancelled = false;
+    let mut sink = CandidateSink::Stream;
+    let mut wrapper = |path| {
+        if matches!(on_candidate(path), ScanVisitControl::Cancel) {
+            cancelled = true;
+            ScanVisitControl::Cancel
+        } else {
+            ScanVisitControl::Continue
+        }
+    };
+    scan_wallpapers_with_visitor(sources, &mut sink, &mut 0usize, &mut on_event, &mut wrapper);
+    cancelled
+}
+
+fn scan_wallpapers_with_visitor<F, V>(
+    sources: &[String],
+    sink: &mut CandidateSink<'_>,
+    count: &mut usize,
+    on_event: &mut F,
+    on_candidate: &mut V,
+) where
+    F: FnMut(ScanEvent) -> ScanControl,
+    V: FnMut(String) -> ScanVisitControl,
+{
     let deduped = dedupe_sources(sources);
     let mut seen: HashSet<String> = HashSet::new();
-    let mut files: Vec<String> = Vec::new();
 
     for source in &deduped {
         if matches!(
@@ -102,26 +168,35 @@ where
             continue;
         }
         let cancelled = match we_source_kind(source) {
-            WeKind::WorkshopRoot => {
-                scan_we_workshop_root_with_callback(src_path, &mut seen, &mut files, &mut on_event)
-            }
-            WeKind::ProjectDir => {
-                scan_we_project_dir_with_callback(src_path, &mut seen, &mut files, &mut on_event)
-            }
-            WeKind::Normal => {
-                scan_dir_recursive_with_callback(src_path, &mut seen, &mut files, &mut on_event)
-            }
+            WeKind::WorkshopRoot => scan_we_workshop_root_with_callback(
+                src_path,
+                &mut seen,
+                sink,
+                count,
+                on_event,
+                on_candidate,
+            ),
+            WeKind::ProjectDir => scan_we_project_dir_with_callback(
+                src_path,
+                &mut seen,
+                sink,
+                count,
+                on_event,
+                on_candidate,
+            ),
+            WeKind::Normal => scan_dir_recursive_with_callback(
+                src_path,
+                &mut seen,
+                sink,
+                count,
+                on_event,
+                on_candidate,
+            ),
         };
         if cancelled {
             break;
         }
     }
-    files
-}
-
-/// Legacy compatibility wrapper — scans without cancellation support.
-pub fn scan_wallpapers(sources: &[String]) -> Vec<String> {
-    scan_wallpapers_with_callback(sources, |_| ScanControl::Continue)
 }
 
 /// Classify a WE source path.
@@ -156,14 +231,17 @@ fn we_source_kind(path: &str) -> WeKind {
 }
 
 /// Scan a Wallpaper Engine workshop root with cancellation support.
-fn scan_we_workshop_root_with_callback<F>(
+fn scan_we_workshop_root_with_callback<F, V>(
     root: &Path,
     seen: &mut HashSet<String>,
-    files: &mut Vec<String>,
+    sink: &mut CandidateSink<'_>,
+    count: &mut usize,
     on_event: &mut F,
+    on_candidate: &mut V,
 ) -> bool
 where
     F: FnMut(ScanEvent) -> ScanControl,
+    V: FnMut(String) -> ScanVisitControl,
 {
     let entries = match fs::read_dir(root) {
         Ok(e) => e,
@@ -198,14 +276,18 @@ where
             let p = Path::new(wp);
             let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
             if seen.insert(c.clone()) {
-                files.push(c.clone());
+                sink.push_if_collecting(c.clone());
+                *count += 1;
                 if matches!(
                     on_event(ScanEvent::CandidateFound {
-                        path: c,
-                        count: files.len()
+                        path: c.clone(),
+                        count: *count
                     }),
                     ScanControl::Cancel
                 ) {
+                    return true;
+                }
+                if matches!(on_candidate(c), ScanVisitControl::Cancel) {
                     return true;
                 }
             }
@@ -216,7 +298,14 @@ where
             continue;
         }
 
-        let cancelled = scan_dir_recursive_with_callback(&project_dir, seen, files, on_event);
+        let cancelled = scan_dir_recursive_with_callback(
+            &project_dir,
+            seen,
+            sink,
+            count,
+            on_event,
+            on_candidate,
+        );
         if cancelled {
             return true;
         }
@@ -225,27 +314,34 @@ where
 }
 
 /// Scan a single WE project directory with cancellation support.
-fn scan_we_project_dir_with_callback<F>(
+fn scan_we_project_dir_with_callback<F, V>(
     project_dir: &Path,
     seen: &mut HashSet<String>,
-    files: &mut Vec<String>,
+    sink: &mut CandidateSink<'_>,
+    count: &mut usize,
     on_event: &mut F,
+    on_candidate: &mut V,
 ) -> bool
 where
     F: FnMut(ScanEvent) -> ScanControl,
+    V: FnMut(String) -> ScanVisitControl,
 {
     if let Some(wp) = indexed_we_project_path(project_dir) {
         let p = Path::new(&wp);
         let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
         if seen.insert(c.clone()) {
-            files.push(c.clone());
+            sink.push_if_collecting(c.clone());
+            *count += 1;
             if matches!(
                 on_event(ScanEvent::CandidateFound {
-                    path: c,
-                    count: files.len()
+                    path: c.clone(),
+                    count: *count
                 }),
                 ScanControl::Cancel
             ) {
+                return true;
+            }
+            if matches!(on_candidate(c), ScanVisitControl::Cancel) {
                 return true;
             }
         }
@@ -254,14 +350,17 @@ where
 }
 
 /// Recursively scan a directory for supported wallpaper files with cancellation support.
-fn scan_dir_recursive_with_callback<F>(
+fn scan_dir_recursive_with_callback<F, V>(
     dir: &Path,
     seen: &mut HashSet<String>,
-    files: &mut Vec<String>,
+    sink: &mut CandidateSink<'_>,
+    count: &mut usize,
     on_event: &mut F,
+    on_candidate: &mut V,
 ) -> bool
 where
     F: FnMut(ScanEvent) -> ScanControl,
+    V: FnMut(String) -> ScanVisitControl,
 {
     let mut visited = 0usize;
 
@@ -296,14 +395,18 @@ where
                     &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
                 );
                 if seen.insert(canonical.clone()) {
-                    files.push(canonical.clone());
+                    sink.push_if_collecting(canonical.clone());
+                    *count += 1;
                     if matches!(
                         on_event(ScanEvent::CandidateFound {
-                            path: canonical,
-                            count: files.len()
+                            path: canonical.clone(),
+                            count: *count
                         }),
                         ScanControl::Cancel
                     ) {
+                        return true;
+                    }
+                    if matches!(on_candidate(canonical), ScanVisitControl::Cancel) {
                         return true;
                     }
                 }
@@ -1422,4 +1525,32 @@ fn cached_entry_probes_when_size_changed() {
     let (entry, reused) = make_entry_cached(&img.to_string_lossy().to_string(), &cache);
     assert!(entry.is_some());
     assert!(!reused, "changed file must be re-probed");
+}
+
+#[test]
+fn visit_wallpapers_streams_without_collecting_all_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("walls");
+    std::fs::create_dir_all(&source).unwrap();
+
+    for i in 0..10 {
+        std::fs::write(source.join(format!("wall-{i}.jpg")), b"jpg").unwrap();
+    }
+
+    let mut visited = Vec::new();
+    let cancelled = visit_wallpapers_with_callback(
+        &[source.to_string_lossy().to_string()],
+        |_| ScanControl::Continue,
+        |path| {
+            visited.push(path);
+            if visited.len() == 3 {
+                ScanVisitControl::Cancel
+            } else {
+                ScanVisitControl::Continue
+            }
+        },
+    );
+
+    assert!(cancelled);
+    assert_eq!(visited.len(), 3);
 }
