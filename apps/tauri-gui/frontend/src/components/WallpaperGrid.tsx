@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useGridSelection } from '../hooks/useGridSelection';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { WallpaperDTO } from '../api/bridge';
@@ -43,7 +44,6 @@ export default function WallpaperGrid({
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { thumbs: thumbCache, enqueue } = useThumbnailStore();
-  const lastClickedRef = useRef<string | null>(null);
 
   const prevEntriesRef = useRef(entries);
   const [colCount, setColCount] = useState(4);
@@ -107,17 +107,24 @@ export default function WallpaperGrid({
     );
   }, [entries, colCount, virtualizer.range, enqueue, active]);
 
+  const entryPaths = useMemo(() => entries.map((entry) => entry.path), [entries]);
+  const { clearSelection, handleClick: handleSelectionClick } = useGridSelection({
+    paths: entryPaths,
+    selectedPaths,
+    onSelectionChange,
+  });
+
   // Keyboard: Escape clears selection
   useEffect(() => {
     if (!onSelectionChange) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === 'Escape') {
-        onSelectionChange(new Set());
+        clearSelection();
       }
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [onSelectionChange]);
+  }, [clearSelection]);
 
   const handleContextMenu = (e: React.MouseEvent, path: string) => {
     e.preventDefault();
@@ -141,24 +148,7 @@ export default function WallpaperGrid({
   const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
 
   const handleCardClick = (e: React.MouseEvent, entry: WallpaperDTO) => {
-    if (!onSelectionChange) return;
-    const sel = new Set(selectedPaths ?? []);
-    if (e.ctrlKey || e.metaKey) {
-      if (sel.has(entry.path)) sel.delete(entry.path);
-      else sel.add(entry.path);
-      onSelectionChange(sel);
-      lastClickedRef.current = entry.path;
-    } else if (e.shiftKey && lastClickedRef.current) {
-      const idx = entries.findIndex((x) => x.path === entry.path);
-      const prevIdx = entries.findIndex((x) => x.path === lastClickedRef.current);
-      if (idx >= 0 && prevIdx >= 0) {
-        const [start, end] = prevIdx < idx ? [prevIdx, idx] : [idx, prevIdx];
-        for (let i = start; i <= end; i++) sel.add(entries[i].path);
-        onSelectionChange(sel);
-      }
-    } else {
-      lastClickedRef.current = entry.path;
-    }
+    handleSelectionClick(e, entry.path);
   };
 
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
