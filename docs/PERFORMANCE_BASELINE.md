@@ -85,6 +85,13 @@ XDG_CONFIG_HOME="$XDG_CONFIG_HOME" wallpaper-console-rust rescan
 WALLPAPER_CONSOLE_GUI_RUST=target/release/wallpaper-console-tauri ./scripts/profile_gui.sh 45
 ```
 
+## SQLite FTS Search
+
+Date: 2026-06-15
+
+SQLite search now uses an FTS5 index over path, title, workshop_id, and project_type.
+Empty-search paging still uses the regular ordered indexes.
+
 Record:
 
 - number of image, GIF, and video files

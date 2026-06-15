@@ -72,11 +72,66 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         CREATE TABLE IF NOT EXISTS state (
             key   TEXT PRIMARY KEY,
             value TEXT NOT NULL
-        );",
+        );
+
+        CREATE VIRTUAL TABLE IF NOT EXISTS wallpapers_fts USING fts5(
+            path,
+            title,
+            workshop_id,
+            project_type,
+            content='wallpapers',
+            content_rowid='id'
+        );
+
+        CREATE TRIGGER IF NOT EXISTS wallpapers_ai AFTER INSERT ON wallpapers BEGIN
+            INSERT INTO wallpapers_fts(rowid, path, title, workshop_id, project_type)
+            VALUES (new.id, new.path, new.title, new.workshop_id, new.project_type);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS wallpapers_ad AFTER DELETE ON wallpapers BEGIN
+            INSERT INTO wallpapers_fts(wallpapers_fts, rowid, path, title, workshop_id, project_type)
+            VALUES ('delete', old.id, old.path, old.title, old.workshop_id, old.project_type);
+        END;
+
+        CREATE TRIGGER IF NOT EXISTS wallpapers_au AFTER UPDATE ON wallpapers BEGIN
+            INSERT INTO wallpapers_fts(wallpapers_fts, rowid, path, title, workshop_id, project_type)
+            VALUES ('delete', old.id, old.path, old.title, old.workshop_id, old.project_type);
+            INSERT INTO wallpapers_fts(rowid, path, title, workshop_id, project_type)
+            VALUES (new.id, new.path, new.title, new.workshop_id, new.project_type);
+        END;",
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_metadata_columns(conn)?;
     ensure_wallpaper_query_indexes(conn)?;
+    ensure_wallpapers_fts_rebuilt(conn).ok();
+    Ok(())
+}
+
+fn ensure_wallpapers_fts_rebuilt(conn: &Connection) -> Result<(), WcError> {
+    let already: bool = conn
+        .query_row(
+            "SELECT value FROM db_meta WHERE key = 'fts_rebuilt_at'",
+            [],
+            |_row| Ok(true),
+        )
+        .unwrap_or(false);
+    if !already {
+        rebuild_wallpapers_fts(conn)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_rebuilt_at', datetime('now'))",
+            [],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    }
+    Ok(())
+}
+
+pub fn rebuild_wallpapers_fts(conn: &Connection) -> Result<(), WcError> {
+    conn.execute(
+        "INSERT INTO wallpapers_fts(wallpapers_fts) VALUES ('rebuild')",
+        [],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
 }
 

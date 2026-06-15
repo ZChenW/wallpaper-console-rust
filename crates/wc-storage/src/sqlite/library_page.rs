@@ -87,46 +87,112 @@ pub fn library_page_sqlite(
     let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
     ensure_wallpaper_query_indexes(&conn)?;
 
-    let where_clause = library_where_clause(query.filter);
-    let order_by = library_order_by(query.sort);
+    let filter_cond = library_filter_condition(query.filter);
     let search = query.search.trim();
 
-    let total: i64 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM wallpapers WHERE {where_clause}"),
-            params![search],
-            |row| row.get(0),
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    if search.is_empty() {
+        let order_by = library_order_by(query.sort, None);
+        let where_sql = if filter_cond.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {filter_cond}")
+        };
 
-    let sql = format!(
-        "SELECT path, type, ext, backend, size, mtime, resolution,
-                project_type, preview_path, workshop_id, title, we_file, unsupported_reason
-         FROM wallpapers
-         WHERE {where_clause}
-         ORDER BY {order_by}
-         LIMIT ?2 OFFSET ?3"
-    );
-    let mut stmt = conn
-        .prepare(&sql)
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let items = stmt
-        .query_map(
-            params![
-                search,
-                i64::try_from(query.limit).unwrap_or(i64::MAX),
-                i64::try_from(query.offset).unwrap_or(i64::MAX)
-            ],
-            wallpaper_entry_from_row,
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let total: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM wallpapers {where_sql}"),
+                [],
+                |row| row.get(0),
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
 
-    Ok(LibraryPage {
-        total: total.max(0) as usize,
-        items,
-    })
+        let sql = format!(
+            "SELECT path, type, ext, backend, size, mtime, resolution,
+                    project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+             FROM wallpapers
+             {where_sql}
+             ORDER BY {order_by}
+             LIMIT ?1 OFFSET ?2"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let items = stmt
+            .query_map(
+                params![
+                    i64::try_from(query.limit).unwrap_or(i64::MAX),
+                    i64::try_from(query.offset).unwrap_or(i64::MAX)
+                ],
+                wallpaper_entry_from_row,
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+        Ok(LibraryPage {
+            total: total.max(0) as usize,
+            items,
+        })
+    } else {
+        let fts = fts_query(search);
+        if fts.is_empty() {
+            // All terms were filtered out by sanitizer, fall back to empty search
+            return library_page_sqlite(
+                cd,
+                &LibraryPageQuery {
+                    search: String::new(),
+                    ..query.clone()
+                },
+            );
+        }
+        let order_by = library_order_by(query.sort, Some("w"));
+
+        let where_sql = if filter_cond.is_empty() {
+            "WHERE wallpapers_fts MATCH ?1".to_string()
+        } else {
+            format!("WHERE wallpapers_fts MATCH ?1 AND {filter_cond}")
+        };
+
+        let total: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM wallpapers w JOIN wallpapers_fts ON wallpapers_fts.rowid = w.id {where_sql}"
+                ),
+                params![&fts],
+                |row| row.get(0),
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+        let sql = format!(
+            "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
+                    w.project_type, w.preview_path, w.workshop_id, w.title, w.we_file, w.unsupported_reason
+             FROM wallpapers w
+             JOIN wallpapers_fts ON wallpapers_fts.rowid = w.id
+             {where_sql}
+             ORDER BY {order_by}
+             LIMIT ?2 OFFSET ?3"
+        );
+        let mut stmt = conn
+            .prepare(&sql)
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let items = stmt
+            .query_map(
+                params![
+                    &fts,
+                    i64::try_from(query.limit).unwrap_or(i64::MAX),
+                    i64::try_from(query.offset).unwrap_or(i64::MAX)
+                ],
+                wallpaper_entry_from_row,
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+        Ok(LibraryPage {
+            total: total.max(0) as usize,
+            items,
+        })
+    }
 }
 
 pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCounts, WcError> {
@@ -248,81 +314,54 @@ pub fn history_page_sqlite(
     })
 }
 
-fn library_where_clause(filter: LibraryFilter) -> &'static str {
+fn fts_query(raw: &str) -> String {
+    raw.split_whitespace()
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let cleaned = part
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '_' || *c == '-' || *c == '.')
+                .collect::<String>();
+            let trimmed = cleaned.trim_matches(|c: char| !c.is_alphanumeric());
+            if trimmed.is_empty() {
+                String::new()
+            } else {
+                format!("\"{trimmed}\"*")
+            }
+        })
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn library_filter_condition(filter: LibraryFilter) -> &'static str {
     match filter {
-        LibraryFilter::All => {
-            "(?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::Image => {
-            "type = 'image' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::Gif => {
-            "type = 'gif' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::Video => {
-            "type = 'video' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::We => {
-            "type IN ('we_scene', 'we_web') AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::WeScene => {
-            "type = 'we_scene' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::WeWeb => {
-            "type = 'we_web' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
-        LibraryFilter::Unsupported => {
-            "type = 'unsupported' AND (?1 = ''
-              OR lower(path) LIKE '%' || lower(?1) || '%'
-              OR lower(title) LIKE '%' || lower(?1) || '%'
-              OR lower(workshop_id) LIKE '%' || lower(?1) || '%'
-              OR lower(project_type) LIKE '%' || lower(?1) || '%')"
-        }
+        LibraryFilter::All => "",
+        LibraryFilter::Image => "type = 'image'",
+        LibraryFilter::Gif => "type = 'gif'",
+        LibraryFilter::Video => "type = 'video'",
+        LibraryFilter::We => "type IN ('we_scene', 'we_web')",
+        LibraryFilter::WeScene => "type = 'we_scene'",
+        LibraryFilter::WeWeb => "type = 'we_web'",
+        LibraryFilter::Unsupported => "type = 'unsupported'",
     }
 }
 
-fn library_order_by(sort: LibrarySort) -> &'static str {
+fn library_order_by(sort: LibrarySort, table_prefix: Option<&str>) -> String {
+    let prefix = table_prefix.map(|s| format!("{s}.")).unwrap_or_default();
     match sort {
-        LibrarySort::Newest => {
-            "CASE WHEN type = 'we_web' THEN 1 WHEN type = 'unsupported' THEN 2 ELSE 0 END ASC,
-             mtime DESC, path ASC"
-        }
-        LibrarySort::Largest => {
-            "CASE WHEN type = 'we_web' THEN 1 WHEN type = 'unsupported' THEN 2 ELSE 0 END ASC,
-             size DESC, path ASC"
-        }
-        LibrarySort::Name => {
-            "CASE WHEN type = 'we_web' THEN 1 WHEN type = 'unsupported' THEN 2 ELSE 0 END ASC,
-             path ASC"
-        }
+        LibrarySort::Newest => format!(
+            "CASE WHEN {prefix}type = 'we_web' THEN 1 WHEN {prefix}type = 'unsupported' THEN 2 ELSE 0 END ASC,
+             {prefix}mtime DESC, {prefix}path ASC"
+        ),
+        LibrarySort::Largest => format!(
+            "CASE WHEN {prefix}type = 'we_web' THEN 1 WHEN {prefix}type = 'unsupported' THEN 2 ELSE 0 END ASC,
+             {prefix}size DESC, {prefix}path ASC"
+        ),
+        LibrarySort::Name => format!(
+            "CASE WHEN {prefix}type = 'we_web' THEN 1 WHEN {prefix}type = 'unsupported' THEN 2 ELSE 0 END ASC,
+             {prefix}path ASC"
+        ),
     }
 }
 
@@ -442,5 +481,55 @@ mod tests {
         assert_eq!(hist.total, 2);
         assert_eq!(hist.items.len(), 1);
         assert_eq!(hist.items[0].path.as_str(), "/walls/b.jpg");
+    }
+
+    #[test]
+    fn fts_query_strips_sql_syntax_and_adds_prefix_suffix() {
+        assert_eq!(fts_query("forest scene"), "\"forest\"* \"scene\"*");
+        assert_eq!(fts_query("abc' OR 1=1 --"), "\"abc\"* \"OR\"* \"11\"*");
+    }
+
+    #[test]
+    fn library_page_search_uses_title_and_workshop_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
+             VALUES ('/walls/a.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1', 'Blue Forest', '123456')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
+             VALUES ('/walls/b.jpg', 'image', 'jpg', 'awww', 1, 2, '1x1', 'Red City', '999999')",
+            [],
+        )
+        .unwrap();
+
+        let page = library_page_sqlite(
+            &cd,
+            &LibraryPageQuery {
+                filter: LibraryFilter::All,
+                sort: LibrarySort::Newest,
+                search: "forest".into(),
+                offset: 0,
+                limit: 20,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(
+            page.items[0]
+                .project
+                .as_ref()
+                .and_then(|p| p.title.as_deref()),
+            Some("Blue Forest")
+        );
     }
 }
