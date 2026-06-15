@@ -6,6 +6,7 @@ interface ThumbnailStoreValue {
   thumbs: ThumbState;
   enqueue: (paths: string[], options?: EnqueueOptions) => void;
   reset: () => void;
+  forget: (paths: string[]) => void;
 }
 
 const ThumbnailStoreContext = createContext<ThumbnailStoreValue | null>(null);

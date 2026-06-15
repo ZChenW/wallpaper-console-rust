@@ -71,3 +71,45 @@ test('thumbnail queue forget removes pending item before re-enqueue', async () =
 
   assert.deepEqual(loaded, ['a', 'x']);
 });
+
+test('thumbnail queue ignores in-flight completion after reset', async () => {
+  let release: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let latestState: Record<string, string> = {};
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      await blocked;
+      return thumb(path);
+    },
+    onUpdate: (state) => { latestState = state; },
+  });
+
+  queue.enqueue(['stale']);
+  queue.reset();
+  release?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(latestState, {});
+});
+
+test('thumbnail queue ignores in-flight completion after forget', async () => {
+  let release: (() => void) | undefined;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let latestState: Record<string, string> = {};
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      await blocked;
+      return thumb(path);
+    },
+    onUpdate: (state) => { latestState = state; },
+  });
+
+  queue.enqueue(['x']);
+  queue.forget(['x']);
+  release?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(latestState, {});
+});

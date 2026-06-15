@@ -46,5 +46,9 @@ export function useThumbnailQueue(concurrency = 2) {
     [],
   );
 
-  return { thumbs, enqueue, reset };
+  const forget = useCallback((paths: string[]) => {
+    queueRef.current?.forget(paths);
+  }, []);
+
+  return { thumbs, enqueue, reset, forget };
 }
