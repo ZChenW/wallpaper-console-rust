@@ -76,7 +76,11 @@ export class ThumbnailRequestQueue {
   }
 
   snapshot() {
-    return { pending: this.queue.map((item) => item.path), active: this.inFlight.size };
+    return {
+      pending: this.queue.map((item) => item.path),
+      active: this.inFlight.size,
+      cached: Object.keys(this.thumbs).length,
+    };
   }
 
   private versionFor(path: string): number {

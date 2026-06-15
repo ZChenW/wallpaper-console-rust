@@ -165,3 +165,18 @@ test('thumbnail queue re-enqueues forgotten in-flight path with default concurre
   assert.deepEqual(loaded, ['x', 'x'], 'load should be called twice');
   assert.deepEqual(latestState, { x: 'thumb:x' }, 'latest state should have re-enqueued thumbnail');
 });
+
+test('thumbnail queue snapshot reports cached thumbnails', async () => {
+  let latestState: Record<string, string> = {};
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => thumb(path),
+    onUpdate: (state) => { latestState = state; },
+  });
+
+  queue.enqueue(['a']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(latestState, { a: 'thumb:a' });
+  assert.equal(queue.snapshot().cached, 1);
+});

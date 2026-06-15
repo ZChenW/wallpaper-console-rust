@@ -23,6 +23,7 @@ export function useThumbnailQueue(concurrency = 2) {
       const snap = queue.snapshot();
       recordMetric('thumbnail.queue.pending', snap.pending.length);
       recordMetric('thumbnail.queue.inFlight', snap.active);
+      recordMetric('thumbnail.queue.cached', snap.cached);
     }, 1000);
 
     return () => {

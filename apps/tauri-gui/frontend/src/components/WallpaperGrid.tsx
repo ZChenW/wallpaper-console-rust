@@ -136,9 +136,9 @@ export default function WallpaperGrid({
 
   const canApply = (entry: WallpaperDTO): boolean => isApplyAvailable(entry);
 
-  const findEntry = (path: string): WallpaperDTO | undefined => {
-    return entries.find((e) => e.path === path);
-  };
+  const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
+
+  const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
 
   const handleCardClick = (e: React.MouseEvent, entry: WallpaperDTO) => {
     if (!onSelectionChange) return;
@@ -161,14 +161,6 @@ export default function WallpaperGrid({
     }
   };
 
-  const rows = useMemo(() => {
-    const r: WallpaperDTO[][] = [];
-    for (let i = 0; i < entries.length; i += colCount) {
-      r.push(entries.slice(i, i + colCount));
-    }
-    return r;
-  }, [entries, colCount]);
-
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
   if (entries.length === 0) {
@@ -179,7 +171,8 @@ export default function WallpaperGrid({
     <div className="wallpaper-grid" ref={containerRef}>
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
-          const rowEntries = rows[virtualRow.index] ?? [];
+          const start = virtualRow.index * colCount;
+          const rowEntries = entries.slice(start, start + colCount);
           return (
             <div
               key={virtualRow.key}
