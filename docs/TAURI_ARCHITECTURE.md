@@ -67,6 +67,7 @@ apps/tauri-gui/
 │       ├── lib.rs               # Tauri Builder, setup, invoke_handler (all commands)
 │       └── commands/             # Split #[tauri::command] modules
 │           ├── common.rs
+│           ├── database.rs
 │           ├── files.rs
 │           ├── library.rs
 │           ├── scan.rs
@@ -83,14 +84,57 @@ apps/tauri-gui/
         ├── main.tsx              # React entry
         ├── App.tsx               # Layout, view routing, status polling
         ├── api/
-        │   └── bridge.ts         # invoke<T>() wrappers with explicit generics
+        │   ├── bridge.ts         # invoke<T>() wrappers with explicit generics
+        │   ├── mockBridge.ts     # Mock API for Playwright tests
+        │   └── feedback.ts       # Backend feedback types
         ├── components/
         │   ├── Sidebar.tsx
         │   ├── Toolbar.tsx
         │   ├── StatusBar.tsx
         │   ├── WallpaperGrid.tsx # Virtualized grid + convertFileSrc for thumbs
         │   ├── ContextMenu.tsx
-        │   └── ConfirmDialog.tsx
+        │   ├── ConfirmDialog.tsx
+        │   ├── Toast.tsx
+        │   ├── OpenLocationDialog.tsx
+        │   └── PerformanceOverlay.tsx
+        ├── domain/
+        │   ├── applyActions.ts
+        │   └── applyRequests.ts
+        ├── events/
+        │   └── appEvents.ts
+        ├── hooks/
+        │   ├── usePagedWallpapers.ts
+        │   ├── useThumbnailQueue.ts
+        │   ├── thumbnailQueueCore.ts
+        │   ├── useApplyQueue.ts
+        │   ├── useFeedbackBridge.ts
+        │   ├── useGridSelection.ts
+        │   └── useLibraryEntryActions.ts
+        ├── perf/
+        │   └── metrics.ts
+        ├── state/
+        │   ├── AppStateContext.tsx
+        │   └── ThumbnailStoreContext.tsx
+        ├── settings/
+        │   ├── configSchema.ts
+        │   ├── types.ts
+        │   ├── SettingsSidebar.tsx
+        │   ├── imageBackendDisplay.ts
+        │   ├── components/
+        │   │   ├── ConfigRow.tsx
+        │   │   ├── InfoCallout.tsx
+        │   │   ├── PageSection.tsx
+        │   │   ├── SettingsPageShell.tsx
+        │   │   └── StatusCard.tsx
+        │   └── pages/
+        │       ├── AdvancedPage.tsx
+        │       ├── DatabasePage.tsx
+        │       ├── GeneralPage.tsx
+        │       ├── LibraryPage.tsx
+        │       ├── WallpaperEnginePage.tsx
+        │       └── WallpaperPage.tsx
+        ├── utils/
+        │   └── layout.ts
         ├── views/
         │   ├── LibraryView.tsx
         │   ├── FavoritesView.tsx
@@ -109,10 +153,14 @@ thumbnail, scan, backend-probing, and process work does not block the WebView.
 
 | Rust Command | Implementation | Returns |
 |-------------|---------------|---------|
-| `status` | `StorageApi::current_read` + `last_backend_read` + `sources_list` | StatusDTO |
-| `apply(path)` | `wc_app::AppService::apply` resolves WE project/media paths, chooses backend, maps structured errors | CommandResult |
+| `status` | `StorageApi::current_read` + `last_backend_read` + `sources_list` + backend status | StatusDTO |
+| `linux_wallpaperengine_status` | `which::which("linux-wallpaperengine")` → binary path, Wayland check | BackendStatusDTO |
+| `apply(path)` | Legacy apply command | CommandResult |
+| `apply_action(request)` | `wc_app::apply_execution::execute_apply_request` — supports apply/retry_backend_apply/apply_preview | CommandResult |
 | `stop()` | `wc_backend::stop_all_backends` | CommandResult |
 | `restore()` | `wc_backend::restore` | CommandResult |
+| `we_clear_backend_error(path)` | Clear cached WE backend failure for retry | CommandResult |
+| `we_debug_info()` | Returns last WE command line, stderr, exit status, log path | WeDebugInfoDTO |
 | `config_get(key)` | `StorageApi::config_get` | String |
 | `config_set(key, value)` | `StorageApi::config_set` | CommandResult |
 | `sources_list()` | `StorageApi::sources_list` + local DTO builder (exists/is_we/label) | Vec<SourceDTO> |
@@ -123,13 +171,18 @@ thumbnail, scan, backend-probing, and process work does not block the WebView.
 | `scan_steam_workshop()` | local Steam path enumeration (native + Flatpak) → add sources → full rescan/index | CommandResult |
 | `favorite_add(path)` | `StorageApi::favorites_add` | CommandResult |
 | `favorite_remove(path)` | `StorageApi::favorites_remove` | CommandResult |
+| `favorites_page(offset, limit)` | Paginated favorites from SQLite (or flat-file fallback) | LibraryPageDTO |
 | `history_clear()` | `StorageApi::history_clear` | CommandResult |
+| `history_page(offset, limit)` | Paginated history from SQLite (or flat-file fallback) | LibraryPageDTO |
 | `library_count()` | SQLite count grouped by type, including WE image/video/gif media projects | LibraryCountDTO |
 | `library_page_gui(...)` | SQLite-only GUI paging with title/Workshop/project search | LibraryPageDTO |
 | `library_page(...)` | paging command for explicit `sqlite`/`tsv` source | LibraryPageDTO |
+| `library_source_status()` | SQLite row count, TSV row count, stale flag | LibrarySourceStatusDTO |
 | `rescan()` | `wc_scan::scan_wallpapers` + atomic SQLite replacement + best-effort legacy TSV export | CommandResult |
+| `scan_progress()` | Running status, scanned count, current path, cancel flag | ScanProgressDTO |
+| `scan_cancel()` | Sets cancel flag on running scan | CommandResult |
 | `migrate_to_sqlite()` | `wc_storage::sqlite::migrate_to_sqlite` | CommandResult |
-| `sqlite_verify()` | `wc_storage::sqlite::verify` | CommandResult |
+| `sqlite_verify()` | `wc_storage::sqlite::verify` + FTS integrity check | CommandResult |
 | `sqlite_resync()` | `wc_storage::sqlite::resync` | CommandResult |
 | `sqlite_backup()` | `wc_storage::sqlite::backup` | CommandResult |
 | `sqlite_restore(path)` | `wc_storage::sqlite::restore` | CommandResult |
@@ -140,7 +193,9 @@ thumbnail, scan, backend-probing, and process work does not block the WebView.
 | `thumbnail_cache_cleanup_old(days)` | `wc_preview::thumbnail_cache_cleanup_old` | CommandResult |
 | `open_path(path)` | `run_external("xdg-open", [path])` | CommandResult |
 | `reveal_in_file_manager(path)` | `run_external("xdg-open", [parent])` | CommandResult |
+| `open_project_location(path, mode?)` | Open path in file manager or terminal file manager | CommandResult |
 | `browse_directory()` | local zenity → kdialog → yad fallback chain | String |
+| `export_diagnostics()` | Writes privacy-safe diagnostic file to config dir | CommandResult |
 
 ## Asset Protocol (Local Thumbnail Loading)
 
@@ -158,7 +213,12 @@ asset protocol.
      "assetProtocol": {
        "enable": true,
        "scope": {
-         "allow": ["$HOME/.config/wallpaper-console/cache/gui-thumbnails/**"]
+         "allow": [
+           "$HOME/.config/wallpaper-console/cache/gui-thumbnails/**",
+           "$HOME/.local/share/Steam/steamapps/workshop/content/431960/**",
+           "$HOME/.steam/steam/steamapps/workshop/content/431960/**",
+           "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960/**"
+         ]
        }
      }
    }

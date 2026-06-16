@@ -7,6 +7,8 @@
 - `webkit2gtk-4.1` (Tauri 2)
 - Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
+- Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
+  - Arch/AUR: `yay -S linux-wallpaperengine-git`
 
 ## Priority Hardening Review Rule
 
@@ -219,11 +221,7 @@ History and Favorites use server-side pagination (120 items per page) via `histo
 
 ## Performance Baseline
 
-```bash
-SIZES="1000 10000 50000" ./scripts/benchmark_library.sh
-```
-
-This records TSV vs SQLite page/search timings for generated 1k, 10k, and 50k libraries. See [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md) for current numbers and manual GUI profiling notes.
+See [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md) for benchmark methodology, current numbers, and manual GUI profiling notes.
 
 ## Continuous Integration
 
