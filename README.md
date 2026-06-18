@@ -82,6 +82,11 @@ SQLite is the only runtime storage backend. Legacy flat files in the config dire
 # Full local verification runner
 cargo run -p xtask -- verify all
 
+# Drift verification
+# Checks for stale runtime/config references (removed APIs, migrated wording,
+# retired schema options). Runs scripts/check_runtime_config_drift.sh via rg.
+cargo run -p xtask -- verify drift
+
 # Rust
 cargo build --workspace
 cargo test --workspace

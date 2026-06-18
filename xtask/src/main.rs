@@ -8,6 +8,7 @@ use std::process::{Command, ExitCode};
 enum VerifySuite {
     Rust,
     Frontend,
+    Drift,
     All,
 }
 
@@ -85,6 +86,13 @@ const FRONTEND_STEPS: &[Step] = &[
     },
 ];
 
+const DRIFT_STEPS: &[Step] = &[Step {
+    name: "Runtime/config drift",
+    cwd: StepCwd::RepoRoot,
+    program: "bash",
+    args: &["scripts/check_runtime_config_drift.sh"],
+}];
+
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -103,9 +111,11 @@ fn run() -> Result<(), String> {
     let steps: Vec<Step> = match args.suite {
         VerifySuite::Rust => RUST_STEPS.to_vec(),
         VerifySuite::Frontend => FRONTEND_STEPS.to_vec(),
+        VerifySuite::Drift => DRIFT_STEPS.to_vec(),
         VerifySuite::All => RUST_STEPS
             .iter()
             .chain(FRONTEND_STEPS.iter())
+            .chain(DRIFT_STEPS.iter())
             .copied()
             .collect(),
     };
@@ -128,6 +138,7 @@ fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
     let suite = match args.get(1).map(String::as_str) {
         Some("rust") => VerifySuite::Rust,
         Some("frontend") => VerifySuite::Frontend,
+        Some("drift") => VerifySuite::Drift,
         Some("all") => VerifySuite::All,
         Some(other) => return Err(format!("unknown verify suite: {other}\n\n{}", usage())),
         None => return Err(usage()),
@@ -197,6 +208,7 @@ fn usage() -> String {
     "Usage:
   cargo run -p xtask -- verify rust [--dry-run]
   cargo run -p xtask -- verify frontend [--dry-run]
+  cargo run -p xtask -- verify drift [--dry-run]
   cargo run -p xtask -- verify all [--dry-run]"
         .to_string()
 }
@@ -227,6 +239,39 @@ mod tests {
             VerifyArgs {
                 suite: VerifySuite::Frontend,
                 dry_run: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_drift() {
+        assert_eq!(
+            parse_verify_args(&args(&["verify", "drift"])).unwrap(),
+            VerifyArgs {
+                suite: VerifySuite::Drift,
+                dry_run: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_drift_dry_run() {
+        assert_eq!(
+            parse_verify_args(&args(&["verify", "drift", "--dry-run"])).unwrap(),
+            VerifyArgs {
+                suite: VerifySuite::Drift,
+                dry_run: true,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_all_dry_run() {
+        assert_eq!(
+            parse_verify_args(&args(&["verify", "all", "--dry-run"])).unwrap(),
+            VerifyArgs {
+                suite: VerifySuite::All,
+                dry_run: true,
             }
         );
     }

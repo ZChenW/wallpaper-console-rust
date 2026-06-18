@@ -71,3 +71,13 @@ jobs:
 
       - name: Verify frontend
         run: cargo run -p xtask -- verify frontend
+
+  drift:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify runtime/config drift
+        run: ./scripts/check_runtime_config_drift.sh
