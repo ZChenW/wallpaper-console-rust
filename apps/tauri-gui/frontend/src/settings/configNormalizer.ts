@@ -29,6 +29,12 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'wallpaper_transition_fps') {
     return clampIntString(value, 1, 240, 60);
   }
+  if (key === 'awww_transition_duration') {
+    const trimmed = value.trim();
+    const parsed = Number.parseFloat(trimmed);
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 60) return trimmed;
+    return '1';
+  }
   if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
     return value.trim() || 'auto';
   }

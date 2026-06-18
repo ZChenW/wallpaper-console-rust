@@ -29,6 +29,10 @@ if rg -n "options: .*window" "$ROOT/apps/tauri-gui/frontend/src/settings/configS
   echo "DRIFT: window exposed as LWE target mode option"
   bad=1
 fi
+if rg -n "storage_backend.*file|storage_backend.*hybrid" "$ROOT/apps/tauri-gui/frontend/src/settings/configSchema.ts"; then
+  echo "DRIFT: storage_backend exposes legacy file/hybrid option"
+  bad=1
+fi
 
 check_absent "Run migrate-to-sqlite first" "old sqlite migration wording"
 check_absent "ensure_or_migrate_sqlite" "old sqlite migration API"
