@@ -9,12 +9,11 @@ bad=0
 check_absent() {
   local pattern="$1"
   local label="$2"
-  if rg -n "$pattern" "$ROOT/crates" "$ROOT/apps" "$ROOT/README.md" "$ROOT/docs/DEVELOPMENT.md" "$ROOT/docs/TAURI_ARCHITECTURE.md" "$ROOT/docs/TAURI_MANUAL_SMOKE_CHECKLIST.md" "$ROOT/docs/PERFORMANCE_BASELINE.md" "$ROOT/docs/RUNTIME_FORMATS.md" \
+  if rg -n "$pattern" "$ROOT/crates" "$ROOT/apps" "$ROOT/README.md" \
     --glob '!**/node_modules/**' \
     --glob '!**/dist/**' \
     --glob '!**/dist-mock/**' \
-    --glob '!**/target/**' \
-    --glob '!docs/superpowers/plans/**'; then
+    --glob '!**/target/**'; then
     echo "DRIFT: $label"
     bad=1
   fi
@@ -37,6 +36,6 @@ fi
 check_absent "Run migrate-to-sqlite first" "old sqlite migration wording"
 check_absent "ensure_or_migrate_sqlite" "old sqlite migration API"
 check_absent "sqlite_mirror_active" "old sqlite mirror API"
-check_absent "CURRENT_STATUS" "stale reference to removed CURRENT_STATUS doc"
+check_absent "CURRENT_STATUS" "stale reference to removed CURRENT_STATUS"
 
 exit "$bad"

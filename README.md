@@ -1,139 +1,155 @@
 # wallpaper-console-rust
 
-Rust/Tauri desktop wallpaper manager for Arch Linux + niri/Wayland.
+Rust/Tauri wallpaper manager for Arch Linux, Wayland, and niri.
 
-## Status
+Status: **beta, GUI-first**. The supported user command is
+`wallpaper-console-gui-rust`. The Rust CLI crate stays in the workspace for
+diagnostics and tests, but it is not installed by default.
 
-**Beta — GUI-first Rust/Tauri app.**
-The supported user entrypoint is `wallpaper-console-gui-rust`. The Rust CLI crate remains in the repository as a diagnostic and regression-test tool, but it is not installed by default.
+## What It Does
 
-## Quick Start
+- Browse wallpapers in a fast virtualized React grid.
+- Scan local folders and Wallpaper Engine Workshop folders.
+- Apply images/GIFs with `awww`, videos with `mpvpaper`, and compatible
+  Wallpaper Engine scenes with `linux-wallpaperengine`.
+- Index Wallpaper Engine Web projects for browsing and preview only; live apply
+  is not supported for Web projects.
+- Manage sources, favorites, history, thumbnails, backend settings, SQLite
+  maintenance, and privacy-safe diagnostics from the GUI.
+
+Runtime storage is SQLite-only. Legacy flat files can still be imported into
+SQLite, and explicit flat export remains available as a maintenance action.
+
+## Install
+
+Prerequisites:
+
+- Rust 1.77+
+- Node.js 22+
+- `webkit2gtk-4.1` for Tauri 2
+- Optional thumbnail helpers: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer`
+- Optional scene backend: `linux-wallpaperengine`
+
+Build and install:
 
 ```bash
 ./install.sh
 wallpaper-console-gui-rust
+```
 
-# Build only
+Build without installing:
+
+```bash
 ./install.sh --build-only
-
-# Raw Tauri binary after build
 ./target/release/wallpaper-console-tauri
 ```
 
-## Features
-
-### React GUI (`wallpaper-console-gui-rust`, Tauri 2 app)
-
-- React 19 + TypeScript + Vite
-- Virtualized wallpaper grid (@tanstack/react-virtual)
-- Library: SQLite-backed SQL paging, filter by type, sort, filename/title/Workshop ID search
-- Favorites & History views with apply, random, remove
-- Sources management: grouped (Wallpaper Engine / Other), add/remove/validate/scan
-- Wallpaper Engine project indexing. Scene wallpapers use optional `linux-wallpaperengine`; Web wallpapers are indexed for browsing/preview only and are not live-apply supported.
-- Settings: all backends (awww/mpvpaper/linux-wallpaperengine), library config, SQLite management, thumbnail cache
-- Smart video thumbnails (multi-point frame sampling, 400px scaled, atomic writes, short-lived failure cache)
-- Async apply/stop/restore with status bar
-- Scan progress and cancellation with single-scan guard
-- Structured GUI command errors, optional debug logging, and developer performance overlay
-- Installable through the binary-copy `install.sh` path.
-
-> Developer note: `crates/wc-cli` is retained for diagnostics and parity tests, but the supported product interface is the Tauri GUI.
-
-### Architecture
-
-```
-┌──────────────────────────────┐
-│  React 19 + TypeScript       │
-│  @tanstack/react-virtual      │
-├──────────────────────────────┤
-│  Tauri v2 Rust commands       │
-│  Direct crate calls (no CLI) │
-├──────────────────────────────┤
-│  wc-app service layer         │
-│  apply / inspect / errors     │
-├──────────────────────────────┤
-│  Rust crates                  │
-│  wc-core  wc-storage  wc-scan│
-│  wc-backend  wc-preview       │
-├──────────────────────────────┤
-│  Runtime files + SQLite       │
-│  $XDG_CONFIG_HOME/wallpaper-console│
-└──────────────────────────────┘
-```
-
-### Storage
-
-SQLite is the only runtime storage backend. Legacy flat files in the config directory are imported into SQLite when needed, and flat-file export remains available as an explicit maintenance action.
-
-### Performance
-
-- **Incremental rescan**: unchanged files reuse cached metadata (no identify/ffprobe)
-- **Source deduplication**: canonical paths eliminate symlink duplicates
-- **Streaming rescan writes**: CLI rescan scans, probes metadata, writes TSV, and stages SQLite rows in bounded batches
-- **Atomic SQLite library replacement**: scan writes either fully commit or preserve the old library
-- **SQLite query indexes + FTS5 search**: indexed type/sort paths and FTS-backed path/title/workshop search used by GUI and CLI paged loading
-- **Virtualized grid**: only visible rows rendered
-- **Thumbnail queue**: bounded concurrency, visible-item priority, stale-request cancellation, batched UI updates
-- **Tauri heavy commands**: scanning and thumbnail generation run on blocking worker threads
-
-## Build & Verify
+Install to another prefix:
 
 ```bash
-# Full local verification runner
+./install.sh --prefix "$HOME/.local"
+```
+
+Uninstall files created by this installer:
+
+```bash
+./install.sh --prefix "$HOME/.local" --uninstall
+```
+
+The installer does not modify the older Bash/Python commands:
+`wallpaper-console` and `wallpaper-console-gui`.
+
+## Development
+
+Full verification:
+
+```bash
 cargo run -p xtask -- verify all
+```
 
-# Drift verification
-# Checks for stale runtime/config references (removed APIs, migrated wording,
-# retired schema options). Runs scripts/check_runtime_config_drift.sh via rg.
+Rust only:
+
+```bash
+cargo run -p xtask -- verify rust
+```
+
+Frontend only:
+
+```bash
+cargo run -p xtask -- verify frontend
+```
+
+Runtime/config drift checks:
+
+```bash
 cargo run -p xtask -- verify drift
+```
 
-# Rust
-cargo build --workspace
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
-cargo fmt --all -- --check
+Install-path verification:
 
-# Tauri frontend
-cd apps/tauri-gui/frontend
-npm run test:unit
-npm run typecheck
-npm run build
-npm run smoke
-
-# Tauri build
-cd ../src-tauri
-cargo build --package wallpaper-console-tauri --release
-
-# Install path verification
-cd ../../..
+```bash
 ./install.sh --build-only
 ./scripts/test_install_build_only.sh
 ```
 
-See [docs/TAURI_MANUAL_SMOKE_CHECKLIST.md](docs/TAURI_MANUAL_SMOKE_CHECKLIST.md) for manual GUI verification.
-See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development setup.
-See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable library benchmark commands and current baseline numbers.
-
-Package-manager installs such as AUR are future work; the supported local install path is the binary-copy installer.
-
-## Prerequisites
-
-- Rust 1.77+
-- Node.js 22+
-- `webkit2gtk-4.1` (Tauri 2)
-- Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
-- Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
-  - Arch/AUR: `yay -S linux-wallpaperengine-git`
-
-> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired in favor of Tauri 2. See git history for the archived docs.
-
-## Rollback
-
-The original Bash/Python commands are never modified:
+Manual frontend commands:
 
 ```bash
-# Remove files installed by this script
-./install.sh --prefix "$HOME/.local" --uninstall
+cd apps/tauri-gui/frontend
+npm install
+npm run typecheck
+npm run test:unit
+npm run build
+npm run smoke
+```
+
+## Architecture
+
+```text
+React 19 + TypeScript + Vite
+        |
+Tauri 2 Rust commands
+        |
+wc-app service layer
+        |
+wc-core / wc-storage / wc-scan / wc-backend / wc-preview
+        |
+$XDG_CONFIG_HOME/wallpaper-console + SQLite + thumbnail cache
+```
+
+Important boundaries:
+
+- GUI commands call Rust crates directly; they do not shell out to the CLI.
+- `wc-app` owns shared apply decisions and user-facing error mapping.
+- `wc-storage` is SQLite-only at runtime.
+- Heavy filesystem, scan, thumbnail, SQLite, and backend work runs off the
+  WebView thread.
+- `xtask` is the shared local and CI verification entrypoint.
+
+## Runtime Notes
+
+- Library paging, search, favorites, and history use SQLite helpers.
+- Scans reuse cached metadata for unchanged files and replace the SQLite library
+  atomically.
+- SQLite runtime connections use WAL and a bounded busy timeout.
+- Thumbnail generation uses bounded concurrency, visible-item priority, atomic
+  writes, and a short-lived failure cache.
+- Settings can export a privacy-safe diagnostics file. Full paths are redacted
+  from diagnostic fields; only the exported file location itself is returned.
+
+## Repository Layout
+
+```text
+apps/tauri-gui/        Tauri app and React frontend
+crates/wc-app/         Shared application service layer
+crates/wc-backend/     Wallpaper backend lifecycle and process control
+crates/wc-cli/         Diagnostic CLI and parity tests
+crates/wc-core/        Config, errors, shared types
+crates/wc-preview/     Thumbnail generation and cache logic
+crates/wc-scan/        Source scanning and Wallpaper Engine indexing
+crates/wc-storage/     SQLite storage and legacy import/export
+scripts/               Local verification and helper scripts
+xtask/                 Unified verification runner
 ```
 
 ## License
