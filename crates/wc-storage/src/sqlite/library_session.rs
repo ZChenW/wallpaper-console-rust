@@ -3,7 +3,7 @@ use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
 
-use super::schema::ensure_sqlite_db;
+use super::schema::{apply_runtime_pragmas, ensure_sqlite_db};
 
 pub struct LibraryReplaceSession {
     conn: Connection,
@@ -15,6 +15,7 @@ pub struct LibraryReplaceSession {
 pub fn library_replace_session_start(cd: &ConfigDir) -> Result<LibraryReplaceSession, WcError> {
     ensure_sqlite_db(cd);
     let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    apply_runtime_pragmas(&conn)?;
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS wallpapers_stage AS SELECT * FROM wallpapers WHERE 0",
         [],
@@ -116,6 +117,16 @@ mod tests {
         }
     }
 
+    fn path_exists(conn: &rusqlite::Connection, path: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM wallpapers WHERE path = ?1)",
+            params![path],
+            |r| r.get::<_, i64>(0),
+        )
+        .map(|v| v == 1)
+        .unwrap_or(false)
+    }
+
     #[test]
     fn library_replace_session_commit_replaces_rows_only_at_commit() {
         let tmp = tempfile::tempdir().unwrap();
@@ -158,6 +169,48 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM wallpapers", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count_after, 1);
+    }
+
+    #[test]
+    fn library_replace_session_commit_preserves_old_rows_until_atomic_commit() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/old.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1')",
+            [],
+        )
+        .unwrap();
+
+        let mut session = library_replace_session_start(&cd).unwrap();
+        library_replace_session_push(&mut session, &[test_entry("/walls/new.jpg")]).unwrap();
+
+        assert!(
+            path_exists(&conn, "/walls/old.jpg"),
+            "old row must remain visible in wallpapers before commit"
+        );
+        assert!(
+            !path_exists(&conn, "/walls/new.jpg"),
+            "new row must not be visible in wallpapers before commit"
+        );
+
+        let inserted = library_replace_session_commit(session).unwrap();
+        assert_eq!(inserted, 1);
+
+        assert!(
+            !path_exists(&conn, "/walls/old.jpg"),
+            "old row must be gone after atomic commit"
+        );
+        assert!(
+            path_exists(&conn, "/walls/new.jpg"),
+            "new row must be present after atomic commit"
+        );
     }
 
     #[test]

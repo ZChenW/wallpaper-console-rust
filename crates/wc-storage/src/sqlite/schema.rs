@@ -293,6 +293,20 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     Ok(())
 }
 
+/// Apply runtime PRAGMAs to a connection used for library operations.
+///
+/// Re-asserts WAL (a persistent DB-level setting baked into the file by
+/// `create_schema`; re-asserting is a harmless no-op once set) and sets a
+/// `busy_timeout` so short-lived concurrent-write contention surfaces as a
+/// bounded wait rather than an immediate `SQLITE_BUSY` error.
+pub fn apply_runtime_pragmas(conn: &Connection) -> Result<(), WcError> {
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA busy_timeout = 5000;",
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))
+}
+
 /// Ensure wallpapers.db exists with the full schema.
 /// No-op if the file already exists. Failures are logged and silently ignored
 /// so that callers never get blocked by bootstrap failures.
@@ -300,6 +314,7 @@ pub fn ensure_sqlite_db(cd: &ConfigDir) {
     let db = cd.db_path();
     if let Ok(conn) = Connection::open(&db) {
         create_schema(&conn).ok();
+        apply_runtime_pragmas(&conn).ok();
     }
 }
 
