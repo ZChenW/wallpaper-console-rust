@@ -308,24 +308,25 @@ pub fn repair(cd: &ConfigDir) -> Result<(), WcError> {
 
     // Copy wallpapers from existing DB
     {
+        type WallpaperRow = (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        );
         let mut stmt = src_conn
             .prepare("SELECT path, type, ext, backend, size, mtime, resolution, project_type, preview_path, workshop_id, title, we_file, unsupported_reason FROM wallpapers")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<(
-            String,
-            String,
-            String,
-            String,
-            i64,
-            i64,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-            String,
-        )> = stmt
+        let rows: Vec<WallpaperRow> = stmt
             .query_map([], |row| {
                 Ok((
                     row.get(0)?,
