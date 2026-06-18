@@ -17,6 +17,9 @@ fn scan_state() -> &'static Mutex<ScanProgressDto> {
             reused_metadata: 0,
             probed_metadata: 0,
             inserted_sqlite: 0,
+            staged: 0,
+            skipped: 0,
+            metadata_errors: 0,
             current_path: None,
             cancel_requested: false,
             error: None,
@@ -37,6 +40,9 @@ pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
         reused_metadata: 0,
         probed_metadata: 0,
         inserted_sqlite: 0,
+        staged: 0,
+        skipped: 0,
+        metadata_errors: 0,
         current_path: None,
         cancel_requested: false,
         error: None,
@@ -137,6 +143,9 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
             }
             if let Some(entry) = entry {
                 batch.push(entry);
+                if let Ok(mut state) = scan_state().lock() {
+                    state.staged += 1;
+                }
                 if batch.len() >= 250 {
                     update_scan_stage("writing SQLite");
                     if library_session::library_replace_session_push(&mut session, &batch).is_err()
@@ -149,6 +158,8 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
                     }
                     batch.clear();
                 }
+            } else if let Ok(mut state) = scan_state().lock() {
+                state.skipped += 1;
             }
             wc_scan::ScanVisitControl::Continue
         },
@@ -237,6 +248,9 @@ mod tests {
                 reused_metadata: 0,
                 probed_metadata: 0,
                 inserted_sqlite: 0,
+                staged: 0,
+                skipped: 0,
+                metadata_errors: 0,
                 current_path: None,
                 cancel_requested: false,
                 error: None,
@@ -276,5 +290,98 @@ mod tests {
         }
         assert!(scan_cancelled().unwrap());
         finish_scan_error("scan cancelled");
+    }
+
+    #[test]
+    fn scan_state_reset_zeroes_new_counters() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        {
+            let mut state = scan_state().lock().unwrap();
+            state.staged = 5;
+            state.skipped = 7;
+            state.metadata_errors = 9;
+        }
+        reset_scan_state_for_test();
+        let state = scan_state().lock().unwrap().clone();
+        assert_eq!(state.staged, 0);
+        assert_eq!(state.skipped, 0);
+        assert_eq!(state.metadata_errors, 0);
+    }
+
+    #[test]
+    fn scan_progress_dto_serializes_new_fields_camel_case() {
+        let dto = ScanProgressDto {
+            running: true,
+            stage: "reading metadata".into(),
+            scanned: 10,
+            total_hint: Some(20),
+            reused_metadata: 3,
+            probed_metadata: 5,
+            inserted_sqlite: 8,
+            staged: 8,
+            skipped: 2,
+            metadata_errors: 0,
+            current_path: Some("/x/y.jpg".into()),
+            cancel_requested: false,
+            error: None,
+        };
+        let json = serde_json::to_string(&dto).unwrap();
+        assert!(
+            json.contains("\"staged\":8"),
+            "staged should serialize as camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"skipped\":2"),
+            "skipped should serialize as camelCase: {json}"
+        );
+        assert!(
+            json.contains("\"metadataErrors\":0"),
+            "metadataErrors should serialize as camelCase: {json}"
+        );
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["staged"], 8);
+        assert_eq!(v["skipped"], 2);
+        assert_eq!(v["metadataErrors"], 0);
+    }
+
+    #[test]
+    fn index_current_sources_counts_staged_and_skipped() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let s = wc_storage::StorageApi::new(cd);
+
+        let src = tmp.path().join("src");
+        std::fs::create_dir_all(&src).unwrap();
+        std::fs::write(src.join("wall.jpg"), b"not a real image").unwrap();
+        s.sources_add(&src.to_string_lossy()).unwrap();
+
+        let inserted = index_current_sources(&s).unwrap();
+        assert_eq!(inserted, 1);
+
+        let state = scan_state().lock().unwrap().clone();
+        assert_eq!(
+            state.scanned, 1,
+            "scanned should count the one visited file"
+        );
+        assert_eq!(state.staged, 1, "staged should count the one pushed entry");
+        assert_eq!(
+            state.skipped, 0,
+            "skipped should stay 0 for a supported file"
+        );
+        assert_eq!(
+            state.inserted_sqlite, 1,
+            "inserted_sqlite should match committed count"
+        );
+        assert_eq!(
+            state.metadata_errors, 0,
+            "metadata_errors is always 0 for now"
+        );
     }
 }

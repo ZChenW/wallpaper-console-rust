@@ -43,7 +43,7 @@ export default function Toolbar({ view, onAction, applying }: Props) {
         <span className="toolbar-title">Wallpaper Console</span>
         {scanProgress?.running && (
           <span className="statusbar-badge" style={{ marginLeft: 12 }}>
-            {scanProgress.stage} {scanProgress.scanned}{scanProgress.totalHint ? `/${scanProgress.totalHint}` : ''}
+            {scanProgress.stage} {scanProgress.scanned}{scanProgress.totalHint ? `/${scanProgress.totalHint}` : ''}{scanProgress.skipped > 0 ? ` (skipped: ${scanProgress.skipped})` : ''}
           </span>
         )}
       </div>

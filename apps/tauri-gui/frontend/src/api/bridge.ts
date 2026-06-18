@@ -46,6 +46,9 @@ export interface ScanProgressDTO {
   reusedMetadata: number;
   probedMetadata: number;
   insertedSqlite: number;
+  staged: number;
+  skipped: number;
+  metadataErrors: number;
   currentPath?: string;
   cancelRequested: boolean;
   error?: string;

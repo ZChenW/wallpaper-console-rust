@@ -154,6 +154,11 @@ pub struct ScanProgressDto {
     pub reused_metadata: usize,
     pub probed_metadata: usize,
     pub inserted_sqlite: usize,
+    pub staged: usize,
+    pub skipped: usize,
+    /// Always 0 for now; `make_entry_cached` does not expose a distinguishable
+    /// error path, so unsupported/skipped paths are counted as `skipped` instead.
+    pub metadata_errors: usize,
     pub current_path: Option<String>,
     pub cancel_requested: bool,
     pub error: Option<String>,
