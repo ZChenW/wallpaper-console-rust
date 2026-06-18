@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 
 test('library renders wallpaper grid', async ({ page }) => {
   await page.goto('/');
@@ -556,4 +556,88 @@ test('settings theme switch applies obsidian warm theme', async ({ page }) => {
     getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
   );
   expect(bg).toBe('#241a14');
+});
+
+const resetMock = (page: Page) =>
+  page.evaluate(() => (window as unknown as { __mockControl?: { resetAll: () => void } }).__mockControl?.resetAll());
+
+test('settings save persists and is visible after close and reopen', async ({ page }) => {
+  await page.goto('/');
+  await resetMock(page);
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
+
+  const fitSelect = page.locator('.config-row').filter({ hasText: 'Image fit mode' }).locator('select');
+  await expect(fitSelect).toHaveValue('crop');
+  await fitSelect.selectOption('fit');
+  // Wait for the save to complete (success toast confirms configSet ran)
+  await expect(page.locator('.toast.success')).toContainText(/Setting saved/i, { timeout: 3000 });
+  await expect(fitSelect).toHaveValue('fit');
+
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(0);
+
+  // Reopen settings and confirm the saved value is shown again (config reload)
+  await page.getByRole('button', { name: 'Settings' }).click();
+  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
+  const fitSelectAfter = page.locator('.config-row').filter({ hasText: 'Image fit mode' }).locator('select');
+  await expect(fitSelectAfter).toHaveValue('fit', { timeout: 5000 });
+});
+
+test('scan cancel button appears while scanning and dismisses after cancel', async ({ page }) => {
+  await page.goto('/');
+  await resetMock(page);
+  // Drive the mock bridge into a running scan state.
+  await page.evaluate(() =>
+    (window as unknown as { __mockControl: { setScanProgress: (s: object) => void } }).__mockControl.setScanProgress({
+      running: true,
+      scanned: 5,
+      totalHint: 100,
+      stage: 'walking files',
+    }),
+  );
+
+  // The toolbar only re-fetches scanProgress via polling, started by a rescan.
+  await page.locator('button[title="Rescan library"]').click();
+
+  const cancelBtn = page.locator('button[title="Cancel scan"]');
+  await expect(cancelBtn).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.statusbar-badge')).toContainText(/walking files/);
+  await expect(page.locator('.statusbar-badge')).toContainText(/5\/100/);
+
+  await cancelBtn.click();
+  // scanCancel resets running=false; the cancel button is removed from the DOM.
+  await expect(cancelBtn).toHaveCount(0);
+});
+
+test('failed sqliteVerify surfaces an error toast', async ({ page }) => {
+  await page.goto('/');
+  await resetMock(page);
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
+
+  await page.evaluate(() =>
+    (window as unknown as { __mockControl: { injectCommandFailure: (c: string) => void } }).__mockControl.injectCommandFailure('sqliteVerify'),
+  );
+
+  await page.getByRole('button', { name: 'Verify Database' }).click();
+  await expect(page.locator('.toast.error')).toContainText(/Verify failed/i, { timeout: 5000 });
+  // Operation lock is released after the failed command
+  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeEnabled();
+});
+
+test('diagnostics export success shows a success toast', async ({ page }) => {
+  await page.goto('/');
+  await resetMock(page);
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
+  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
+
+  await page.getByRole('button', { name: 'Export diagnostics' }).click();
+  // Button disables while the export is running (covers "database buttons disabled")
+  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeDisabled();
+  await expect(page.locator('.toast.success')).toContainText(/Diagnostics exported/i, { timeout: 5000 });
+  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeEnabled({ timeout: 5000 });
 });

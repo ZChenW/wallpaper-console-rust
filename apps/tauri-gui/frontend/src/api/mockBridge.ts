@@ -60,6 +60,23 @@ interface ThumbnailDTO {
   path: string;
   thumbnail?: string;
   cacheHit: boolean;
+  failureReason?: string;
+}
+
+interface ScanProgressDTO {
+  running: boolean;
+  stage: string;
+  scanned: number;
+  totalHint?: number;
+  reusedMetadata: number;
+  probedMetadata: number;
+  insertedSqlite: number;
+  staged: number;
+  skipped: number;
+  metadataErrors: number;
+  currentPath?: string;
+  cancelRequested: boolean;
+  error?: string;
 }
 
 type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
@@ -233,6 +250,76 @@ const MOCK_HISTORY: string[] = [
 const ok: CommandResult = { success: true, stdout: 'ok', stderr: '', exitCode: 0 };
 const failResult: CommandResult = { success: false, stdout: '', stderr: 'mock failure', exitCode: 1 };
 
+const defaultScanProgress: ScanProgressDTO = {
+  running: false,
+  stage: 'idle',
+  scanned: 0,
+  reusedMetadata: 0,
+  probedMetadata: 0,
+  insertedSqlite: 0,
+  staged: 0,
+  skipped: 0,
+  metadataErrors: 0,
+  cancelRequested: false,
+};
+
+const defaultConfig: Record<string, string> = {
+  storage_backend: 'sqlite',
+  use_symlinks: 'false',
+  image_backend: 'awww',
+  gif_backend: 'awww',
+  video_backend: 'mpvpaper',
+  awww_resize: 'crop',
+  awww_transition_type: 'fade',
+  awww_transition_duration: '1',
+  wallpaper_transition_fps: '60',
+  mpvpaper_options: '--loop-file=inf --panscan=1.0',
+  mpvpaper_output: '*',
+  linux_wallpaperengine_enabled: 'on',
+  linux_wallpaperengine_path: 'auto',
+  linux_wallpaperengine_target_mode: 'auto',
+  linux_wallpaperengine_target: '',
+  linux_wallpaperengine_scaling: 'default',
+  linux_wallpaperengine_fps: '60',
+  linux_wallpaperengine_muted: 'off',
+  linux_wallpaperengine_volume: '100',
+  linux_wallpaperengine_assets_dir: 'auto',
+  min_wallpaper_width: '1280',
+  min_wallpaper_height: '720',
+  gui_thumbnail_mode: 'cache',
+  gui_thumbnail_cleanup_days: '30',
+  gui_thumbnail_failure_ttl_secs: '900',
+  preview_metadata: 'compact',
+  gui_debug_logs: 'off',
+  gui_theme: 'light',
+  open_project_location_mode: 'ask',
+  gui_file_manager: 'auto',
+  gui_file_manager_custom: '',
+  gui_terminal_file_manager: 'yazi',
+  gui_terminal_file_manager_custom: '',
+};
+
+// Mutable, scenario-driven mock state. When no scenario is active, all methods
+// return the same values as the original static mock (so existing smoke tests
+// remain green). Tests drive this via `api.__mockControl` (also exposed on
+// `globalThis` for Playwright access).
+let scanProgressState: ScanProgressDTO = { ...defaultScanProgress };
+let scanAutoAdvance = false;
+let scanStep = 5;
+let configStore: Record<string, string> = {};
+const commandFailures = new Set<string>();
+const thumbnailFailures = new Set<string>();
+
+function resetScanProgressState(): void {
+  scanProgressState = { ...defaultScanProgress };
+  scanAutoAdvance = false;
+  scanStep = 5;
+}
+
+function resetConfigStore(): void {
+  configStore = {};
+}
+
 export const api = {
   status: async (): Promise<StatusDTO> => ({
     configDir: '/mock/.config/wallpaper-console',
@@ -297,19 +384,16 @@ export const api = {
   },
 
   rescan: async (): Promise<CommandResult> => ok,
-  scanProgress: async () => ({
-    running: false,
-    stage: 'idle',
-    scanned: 0,
-    reusedMetadata: 0,
-    probedMetadata: 0,
-    insertedSqlite: 0,
-    staged: 0,
-    skipped: 0,
-    metadataErrors: 0,
-    cancelRequested: false,
-  }),
-  scanCancel: async (): Promise<CommandResult> => ok,
+  scanProgress: async (): Promise<ScanProgressDTO> => {
+    if (scanProgressState.running && scanAutoAdvance) {
+      scanProgressState = { ...scanProgressState, scanned: scanProgressState.scanned + scanStep };
+    }
+    return { ...scanProgressState };
+  },
+  scanCancel: async (): Promise<CommandResult> => {
+    scanProgressState = { ...scanProgressState, running: false };
+    return ok;
+  },
   librarySourceStatus: async () => ({
     configured: 'sqlite',
     effective: 'sqlite',
@@ -378,53 +462,20 @@ export const api = {
   removeMissingSources: async (): Promise<CommandResult> => ok,
   scanSteamWorkshop: async (): Promise<CommandResult> => ok,
 
-  configGet: async (key: string): Promise<string> => {
-    const defaults: Record<string, string> = {
-      storage_backend: 'sqlite',
-      use_symlinks: 'false',
-      image_backend: 'awww',
-      gif_backend: 'awww',
-      video_backend: 'mpvpaper',
-      awww_resize: 'crop',
-      awww_transition_type: 'fade',
-      awww_transition_duration: '1',
-      wallpaper_transition_fps: '60',
-      mpvpaper_options: '--loop-file=inf --panscan=1.0',
-      mpvpaper_output: '*',
-      linux_wallpaperengine_enabled: 'on',
-      linux_wallpaperengine_path: 'auto',
-      linux_wallpaperengine_target_mode: 'auto',
-      linux_wallpaperengine_target: '',
-      linux_wallpaperengine_scaling: 'default',
-      linux_wallpaperengine_fps: '60',
-      linux_wallpaperengine_muted: 'off',
-      linux_wallpaperengine_volume: '100',
-      linux_wallpaperengine_assets_dir: 'auto',
-      min_wallpaper_width: '1280',
-      min_wallpaper_height: '720',
-      gui_thumbnail_mode: 'cache',
-      gui_thumbnail_cleanup_days: '30',
-      gui_thumbnail_failure_ttl_secs: '900',
-      preview_metadata: 'compact',
-      gui_debug_logs: 'off',
-      gui_theme: 'light',
-      open_project_location_mode: 'ask',
-      gui_file_manager: 'auto',
-      gui_file_manager_custom: '',
-      gui_terminal_file_manager: 'yazi',
-      gui_terminal_file_manager_custom: '',
-    };
-    return defaults[key] ?? '';
-  },
+  configGet: async (key: string): Promise<string> => configStore[key] ?? defaultConfig[key] ?? '',
   configGetMany: async (keys: string[]): Promise<Record<string, string>> => {
     const out: Record<string, string> = {};
     for (const key of keys) out[key] = await api.configGet(key);
     return out;
   },
 
-  configSet: async (): Promise<CommandResult> => ok,
+  configSet: async (key: string, value: string): Promise<CommandResult> => {
+    configStore[key] = value;
+    return ok;
+  },
 
-  sqliteVerify: async (): Promise<CommandResult> => ok,
+  sqliteVerify: async (): Promise<CommandResult> =>
+    commandFailures.has('sqliteVerify') ? failResult : ok,
   sqliteRepair: async (): Promise<CommandResult> => ok,
   sqliteResync: async (): Promise<CommandResult> => ok,
   sqliteBackup: async (): Promise<CommandResult> => ok,
@@ -433,10 +484,12 @@ export const api = {
   migrateToSqlite: async (): Promise<CommandResult> => ok,
   importLegacyFlatFiles: async (): Promise<CommandResult> => ok,
 
-  thumbnailFor: async (path: string): Promise<ThumbnailDTO> => ({
-    path,
-    cacheHit: false,
-  }),
+  thumbnailFor: async (path: string): Promise<ThumbnailDTO> => {
+    if (thumbnailFailures.has(path)) {
+      return { path, cacheHit: false, failureReason: 'mock thumbnail failure' };
+    }
+    return { path, cacheHit: false };
+  },
 
   thumbnailCacheStatus: async () => ({
     dir: '/mock/cache/thumbs',
@@ -454,6 +507,47 @@ export const api = {
   browseDirectory: async (): Promise<string> => '/mock/selected/dir',
   exportDiagnostics: async (): Promise<CommandResult> => {
     await new Promise((resolve) => setTimeout(resolve, 300));
-    return ok;
+    return commandFailures.has('exportDiagnostics') ? failResult : ok;
+  },
+
+  __mockControl: {
+    setScanProgress: (partial: Partial<ScanProgressDTO>): void => {
+      scanProgressState = { ...scanProgressState, ...partial };
+    },
+    resetScanProgress: (): void => {
+      resetScanProgressState();
+    },
+    setScanAutoAdvance: (enabled: boolean, step = 5): void => {
+      scanAutoAdvance = enabled;
+      scanStep = step;
+    },
+    injectCommandFailure: (cmd: string): void => {
+      commandFailures.add(cmd);
+    },
+    clearCommandFailure: (cmd: string): void => {
+      commandFailures.delete(cmd);
+    },
+    setConfig: (key: string, value: string): void => {
+      configStore[key] = value;
+    },
+    resetConfig: (): void => {
+      resetConfigStore();
+    },
+    setThumbnailFailure: (path: string): void => {
+      thumbnailFailures.add(path);
+    },
+    clearThumbnailFailure: (path: string): void => {
+      thumbnailFailures.delete(path);
+    },
+    resetAll: (): void => {
+      resetScanProgressState();
+      resetConfigStore();
+      commandFailures.clear();
+      thumbnailFailures.clear();
+    },
   },
 };
+
+if (typeof globalThis !== 'undefined') {
+  (globalThis as { __mockControl?: typeof api.__mockControl }).__mockControl = api.__mockControl;
+}
