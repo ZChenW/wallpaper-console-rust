@@ -37,5 +37,6 @@ fi
 check_absent "Run migrate-to-sqlite first" "old sqlite migration wording"
 check_absent "ensure_or_migrate_sqlite" "old sqlite migration API"
 check_absent "sqlite_mirror_active" "old sqlite mirror API"
+check_absent "CURRENT_STATUS" "stale reference to removed CURRENT_STATUS doc"
 
 exit "$bad"
