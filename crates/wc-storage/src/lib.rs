@@ -22,20 +22,31 @@ pub struct StorageApi {
 }
 
 impl StorageApi {
-    pub fn new(cd: ConfigDir) -> Self {
-        cd.init().ok();
+    /// Fallible initializer: surfaces errors from `cd.init()`, SQLite
+    /// migration, and config writes instead of swallowing them with `.ok()`.
+    /// Use this in production paths that can propagate errors. Test helpers
+    /// and existing call sites should keep using [`StorageApi::new`].
+    pub fn try_new(cd: ConfigDir) -> Result<Self, WcError> {
+        cd.init()?;
 
         if !cd.db_path().exists() {
-            sqlite::migrate_to_sqlite(&cd).ok();
+            sqlite::migrate_to_sqlite(&cd)?;
         }
         sqlite::ensure_sqlite_db(&cd);
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").ok();
-        sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite").ok();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
+        sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
 
-        StorageApi {
+        Ok(StorageApi {
             cd,
             mode: StorageBackend::Sqlite,
-        }
+        })
+    }
+
+    /// Compatibility wrapper around [`StorageApi::try_new`] that panics on
+    /// failure. Kept for the many existing test call sites that expect the
+    /// historical panicking-on-failure behavior.
+    pub fn new(cd: ConfigDir) -> Self {
+        Self::try_new(cd).expect("storage initialization failed")
     }
 
     /// Re-read the backend mode from config (after config-set).
@@ -589,6 +600,23 @@ mod tests {
         assert_eq!(
             storage.config_get("linux_wallpaperengine_target_mode", "missing"),
             "auto"
+        );
+    }
+
+    #[test]
+    fn try_new_returns_err_when_config_dir_path_is_a_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Create a regular FILE where the config dir would live, so
+        // `cd.init()` cannot create_dir_all on it as a directory.
+        let conflict = tmp.path().join("wallpaper-console");
+        std::fs::write(&conflict, b"not a directory").unwrap();
+
+        let cd = ConfigDir { path: conflict };
+        let result = StorageApi::try_new(cd);
+
+        assert!(
+            result.is_err(),
+            "try_new should surface the init error, got Ok"
         );
     }
 }

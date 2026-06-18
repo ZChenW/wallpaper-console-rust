@@ -185,8 +185,7 @@ pub type CommandResult = CommandResultDto;
 
 pub fn storage() -> Result<StorageApi, String> {
     let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
-    cd.init().map_err(|e| e.to_string())?;
-    Ok(StorageApi::new(cd))
+    StorageApi::try_new(cd).map_err(|e| e.to_string())
 }
 
 pub fn ok(stdout: impl Into<String>) -> CommandResultDto {

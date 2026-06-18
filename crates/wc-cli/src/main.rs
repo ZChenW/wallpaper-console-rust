@@ -244,8 +244,7 @@ fn main() -> anyhow::Result<()> {
                 return Ok(());
             }
             let cd = ConfigDir::new()?;
-            cd.init()?;
-            let storage = StorageApi::new(cd);
+            let storage = StorageApi::try_new(cd)?;
             run_command(cmd, &storage)
         }
     }

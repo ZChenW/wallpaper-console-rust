@@ -49,7 +49,7 @@ impl AppService {
 
     pub fn from_config_dir(cd: wc_core::ConfigDir) -> Self {
         AppService {
-            storage: StorageApi::new(cd),
+            storage: StorageApi::try_new(cd).expect("storage initialization failed"),
         }
     }
 
