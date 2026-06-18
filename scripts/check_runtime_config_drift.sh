@@ -29,7 +29,7 @@ if rg -n "options: .*window" "$ROOT/apps/tauri-gui/frontend/src/settings/configS
   echo "DRIFT: window exposed as LWE target mode option"
   bad=1
 fi
-if rg -n "storage_backend.*file|storage_backend.*hybrid" "$ROOT/apps/tauri-gui/frontend/src/settings/configSchema.ts"; then
+if rg -U --multiline-dotall -n "storage_backend.*?(file|hybrid)" "$ROOT/apps/tauri-gui/frontend/src/settings/configSchema.ts"; then
   echo "DRIFT: storage_backend exposes legacy file/hybrid option"
   bad=1
 fi
