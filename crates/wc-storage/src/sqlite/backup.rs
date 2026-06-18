@@ -45,7 +45,7 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Err(WcError::Sqlite(
-            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
+            "wallpapers.db not found; initialize SQLite storage first.".into(),
         ));
     }
     let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -174,15 +174,13 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     }
 }
 
-/// Resync: repair the SQLite database without importing from flat files.
-/// Rebuilds FTS index and ensures schema consistency. Existing SQLite data
-/// is preserved. Flat files are NOT treated as authoritative — this is a
-/// SQLite-only repair operation.
-pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
+/// Repair the SQLite database without importing from flat files.
+/// Rebuilds schema and FTS while preserving existing SQLite data.
+pub fn repair(cd: &ConfigDir) -> Result<(), WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Err(WcError::Other(
-            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
+            "wallpapers.db not found; initialize SQLite storage first.".into(),
         ));
     }
 
@@ -427,12 +425,17 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     Ok(())
 }
 
+#[deprecated(note = "use repair(); resync no longer imports flat files")]
+pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
+    repair(cd)
+}
+
 /// Export SQLite back to flat files atomically.
 pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Err(WcError::Other(
-            "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
+            "wallpapers.db not found; initialize SQLite storage first.".into(),
         ));
     }
     let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -969,9 +972,9 @@ mod tests {
     }
 
     #[test]
-    fn resync_preserves_sqlite_only_data() {
+    fn repair_preserves_sqlite_only_data() {
         // Regression: P1-2 — create data in SQLite only, leave flat files empty,
-        // call resync(), assert SQLite rows are preserved.
+        // call repair(), assert SQLite rows are preserved.
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -998,7 +1001,7 @@ mod tests {
             .unwrap();
         }
 
-        crate::sqlite::resync(&cd).unwrap();
+        crate::sqlite::repair(&cd).unwrap();
 
         let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
         let src_count: i64 = conn
@@ -1010,25 +1013,25 @@ mod tests {
         let hist_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(src_count, 1, "sources should be preserved after resync");
-        assert_eq!(fav_count, 1, "favorites should be preserved after resync");
-        assert_eq!(hist_count, 1, "history should be preserved after resync");
+        assert_eq!(src_count, 1, "sources should be preserved after repair");
+        assert_eq!(fav_count, 1, "favorites should be preserved after repair");
+        assert_eq!(hist_count, 1, "history should be preserved after repair");
 
-        // Flat files should still be empty (resync does not export)
+        // Flat files should still be empty (repair does not export)
         let flat_src = flat::sources_list(&cd).unwrap();
         let flat_fav = flat::favorites_list(&cd).unwrap();
         let flat_hist = flat::history_list(&cd).unwrap();
         assert!(
             flat_src.is_empty(),
-            "flat sources should be empty after SQLite-only resync"
+            "flat sources should be empty after SQLite-only repair"
         );
         assert!(
             flat_fav.is_empty(),
-            "flat favorites should be empty after SQLite-only resync"
+            "flat favorites should be empty after SQLite-only repair"
         );
         assert!(
             flat_hist.is_empty(),
-            "flat history should be empty after SQLite-only resync"
+            "flat history should be empty after SQLite-only repair"
         );
     }
 }

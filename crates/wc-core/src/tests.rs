@@ -58,17 +58,17 @@ mod tests {
     #[test]
     fn test_storage_backend_from_str() {
         assert_eq!(
-            types::StorageBackend::from_str("file"),
-            Ok(types::StorageBackend::File)
-        );
-        assert_eq!(
-            types::StorageBackend::from_str("hybrid"),
-            Ok(types::StorageBackend::Hybrid)
-        );
-        assert_eq!(
             types::StorageBackend::from_str("sqlite"),
             Ok(types::StorageBackend::Sqlite)
         );
-        assert!(types::StorageBackend::from_str("invalid").is_err());
+        assert_eq!(
+            types::StorageBackend::from_str("file"),
+            Ok(types::StorageBackend::Sqlite)
+        );
+        assert_eq!(
+            types::StorageBackend::from_str("hybrid"),
+            Ok(types::StorageBackend::Sqlite)
+        );
+        assert!(types::StorageBackend::from_str("bad").is_err());
     }
 }

@@ -81,6 +81,11 @@ function AppShell() {
     };
   }, []);
 
+  // Preload Settings chunk so first open doesn't show Suspense fallback
+  useEffect(() => {
+    void import('./views/SettingsView');
+  }, []);
+
   const { applying, handleApply, handleApplyAction } = useApplyQueue({
     refreshStatus,
     setFeedbackWithAutoDismiss,
@@ -143,7 +148,7 @@ function AppShell() {
         </main>
       </div>
       {settingsOpen && (
-        <Suspense fallback={<div className="settings-modal-overlay"><div className="settings-modal">Loading settings...</div></div>}>
+        <Suspense fallback={null}>
           <SettingsView
             onRefresh={refreshStatus}
             onFeedback={handleFeedback}

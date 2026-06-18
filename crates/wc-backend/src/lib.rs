@@ -262,10 +262,14 @@ fn apply_wallpaper_with_runtime(
             }
             let resize_raw = s.config_get("awww_resize", "crop");
             let resize = normalize_awww_resize(&resize_raw);
-            let transition_type = s.config_get("awww_transition_type", "fade");
-            let duration = s.config_get("awww_transition_duration", "1");
-            let fps = s.config_get("wallpaper_transition_fps", "60");
-            let mut cmd = build_awww_img_command(path, resize, &transition_type, &duration, &fps);
+            let transition_raw = s.config_get("awww_transition_type", "fade");
+            let transition_type = normalize_awww_transition_type(&transition_raw);
+            let duration_raw = s.config_get("awww_transition_duration", "1");
+            let duration =
+                wc_core::config_normalizer::normalize_awww_transition_duration(&duration_raw);
+            let fps_raw = s.config_get("wallpaper_transition_fps", "60");
+            let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
+            let mut cmd = build_awww_img_command(path, resize, transition_type, &duration, &fps);
             cmd.arg("--filter").arg("Lanczos3");
             let output = runtime
                 .command_output(&mut cmd)
@@ -418,7 +422,8 @@ fn apply_awww_instant_with_runtime(
     runtime.ensure_awww_daemon_running()?;
     let resize_raw = s.config_get("awww_resize", "crop");
     let resize = normalize_awww_resize(&resize_raw);
-    let fps = s.config_get("wallpaper_transition_fps", "60");
+    let fps_raw = s.config_get("wallpaper_transition_fps", "60");
+    let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
     let mut cmd = build_awww_instant_command(path, resize, &fps);
     let output = runtime
         .command_output(&mut cmd)
@@ -448,7 +453,7 @@ fn build_awww_instant_command(path: &str, resize: &str, fps: &str) -> Command {
         .arg("--resize")
         .arg(resize)
         .arg("--transition-type")
-        .arg("none")
+        .arg("simple")
         .arg("--transition-duration")
         .arg("0")
         .arg("--transition-fps")
@@ -505,6 +510,26 @@ fn normalize_awww_resize(raw: &str) -> &'static str {
         "fit" => "fit",
         "stretch" => "stretch",
         _ => "crop",
+    }
+}
+
+fn normalize_awww_transition_type(raw: &str) -> &'static str {
+    match raw.trim() {
+        "simple" => "simple",
+        "fade" => "fade",
+        "left" => "left",
+        "right" => "right",
+        "top" => "top",
+        "bottom" => "bottom",
+        "wipe" => "wipe",
+        "grow" => "grow",
+        "center" => "center",
+        "outer" => "outer",
+        "random" => "random",
+        "wave" => "wave",
+        "slide" => "left",  // legacy GUI value
+        "none" => "simple", // legacy instant value
+        _ => "fade",
     }
 }
 
@@ -655,6 +680,89 @@ mod tests {
         assert_eq!(normalize_awww_resize("unknown"), "crop");
         assert_eq!(normalize_awww_resize(""), "crop");
         assert_eq!(normalize_awww_resize("center"), "crop");
+    }
+
+    #[test]
+    fn normalize_awww_transition_type_legacy_slide() {
+        assert_eq!(normalize_awww_transition_type("slide"), "left");
+    }
+
+    #[test]
+    fn normalize_awww_transition_type_legacy_none() {
+        assert_eq!(normalize_awww_transition_type("none"), "simple");
+    }
+
+    #[test]
+    fn normalize_awww_transition_type_known_values() {
+        for v in &[
+            "simple", "fade", "left", "right", "top", "bottom", "wipe", "grow", "center", "outer",
+            "random", "wave",
+        ] {
+            assert_eq!(normalize_awww_transition_type(v), *v);
+        }
+    }
+
+    #[test]
+    fn normalize_awww_transition_type_unknown_fallback() {
+        assert_eq!(normalize_awww_transition_type("invalid"), "fade");
+        assert_eq!(normalize_awww_transition_type(""), "fade");
+    }
+
+    #[test]
+    fn build_awww_img_command_normalizes_slide_to_left() {
+        let cmd = build_awww_img_command(
+            "/tmp/test.jpg",
+            "crop",
+            normalize_awww_transition_type("slide"),
+            "1",
+            "60",
+        );
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !args.contains(&"slide".to_string()),
+            "slide must not appear: {:?}",
+            args
+        );
+        assert!(
+            args.contains(&"left".to_string()),
+            "slide should normalize to left"
+        );
+    }
+
+    #[test]
+    fn build_awww_instant_never_uses_none() {
+        let cmd = build_awww_instant_command("/tmp/test.jpg", "crop", "60");
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            !args.contains(&"none".to_string()),
+            "instant must not use none"
+        );
+        assert!(
+            args.contains(&"simple".to_string()),
+            "instant must use simple"
+        );
+    }
+
+    #[test]
+    fn awww_command_clamps_invalid_fps_and_duration() {
+        let duration = wc_core::config_normalizer::normalize_awww_transition_duration("-1");
+        let fps = wc_core::config_normalizer::normalize_awww_transition_fps("999");
+        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", &duration, &fps);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|s| s.to_string_lossy().to_string())
+            .collect();
+
+        assert!(args.contains(&"1".to_string()));
+        assert!(args.contains(&"240".to_string()));
+        assert!(!args.contains(&"-1".to_string()));
+        assert!(!args.contains(&"999".to_string()));
     }
 
     #[test]
@@ -1082,10 +1190,11 @@ mod tests {
             .map(|s| s.to_string_lossy().to_string())
             .collect();
         assert!(args.contains(&"--transition-type".to_string()));
-        assert!(args.contains(&"none".to_string()));
+        assert!(args.contains(&"simple".to_string()));
         assert!(args.contains(&"--transition-duration".to_string()));
         assert!(args.contains(&"0".to_string()));
         assert!(!args.contains(&"fade".to_string()));
+        assert!(!args.contains(&"none".to_string()));
     }
 
     #[test]
@@ -1099,7 +1208,7 @@ mod tests {
         assert!(args.contains(&"fade".to_string()));
         assert!(args.contains(&"--transition-duration".to_string()));
         assert!(args.contains(&"2.5".to_string()));
-        assert!(!args.contains(&"none".to_string()));
+        assert!(!args.contains(&"simple".to_string()));
         assert!(!args.contains(&"0".to_string()));
     }
 

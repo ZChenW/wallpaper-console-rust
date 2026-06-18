@@ -413,15 +413,22 @@ export const api = {
     };
     return defaults[key] ?? '';
   },
+  configGetMany: async (keys: string[]): Promise<Record<string, string>> => {
+    const out: Record<string, string> = {};
+    for (const key of keys) out[key] = await api.configGet(key);
+    return out;
+  },
 
   configSet: async (): Promise<CommandResult> => ok,
 
   sqliteVerify: async (): Promise<CommandResult> => ok,
+  sqliteRepair: async (): Promise<CommandResult> => ok,
   sqliteResync: async (): Promise<CommandResult> => ok,
   sqliteBackup: async (): Promise<CommandResult> => ok,
   sqliteRestore: async (): Promise<CommandResult> => ok,
   sqliteExportFlat: async (): Promise<CommandResult> => ok,
   migrateToSqlite: async (): Promise<CommandResult> => ok,
+  importLegacyFlatFiles: async (): Promise<CommandResult> => ok,
 
   thumbnailFor: async (path: string): Promise<ThumbnailDTO> => ({
     path,

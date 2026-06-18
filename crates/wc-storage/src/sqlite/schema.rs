@@ -303,15 +303,17 @@ pub fn ensure_sqlite_db(cd: &ConfigDir) {
     }
 }
 
-/// Idempotent: migrates from flat files if DB does not exist,
-/// or ensures schema is up-to-date if it already does.
-pub fn ensure_or_migrate_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
+/// Ensure SQLite exists, importing legacy flat files only when the DB is absent.
+/// Returns `true` if legacy flat files were imported into a newly created DB,
+/// `false` if the DB already existed and was only ensured/repaired.
+pub fn ensure_or_import_legacy_flat(cd: &ConfigDir) -> Result<bool, WcError> {
     if cd.db_path().exists() {
         ensure_sqlite_db(cd);
-        Ok(())
-    } else {
-        migrate_to_sqlite(cd)
+        return Ok(false);
     }
+    migrate_to_sqlite(cd)?;
+    ensure_sqlite_db(cd);
+    Ok(true)
 }
 
 #[cfg(test)]

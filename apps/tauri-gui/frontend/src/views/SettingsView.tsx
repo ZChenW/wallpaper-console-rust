@@ -33,11 +33,36 @@ interface Props {
   onClose: () => void;
 }
 
+let cachedSettingsConfigs: Record<string, string> | null = null;
+
+function defaultSettingsConfig(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const setting of ALL_SETTINGS) {
+    if (setting.options?.length) {
+      out[setting.key] = setting.options[0];
+    } else {
+      out[setting.key] = setting.placeholder ?? '';
+    }
+  }
+  out.image_backend = 'awww';
+  out.gif_backend = 'awww';
+  out.video_backend = 'mpvpaper';
+  out.gui_theme = 'light';
+  out.awww_transition_type = 'fade';
+  out.awww_transition_duration = '1';
+  out.wallpaper_transition_fps = '60';
+  out.mpvpaper_output = '*';
+  out.mpvpaper_options = '--loop-file=inf --panscan=1.0';
+  return out;
+}
+
 export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClose }: Props) {
   const { invalidateLibrary } = useAppState();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
-  const [configs, setConfigs] = useState<Record<string, string>>({});
-  const [loading, setLoading] = useState(true);
+  const [configs, setConfigs] = useState<Record<string, string>>(
+    () => cachedSettingsConfigs ?? defaultSettingsConfig(),
+  );
+  const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
   const [confirmAction, setConfirmAction] = useState<{ title: string; msg: string; fn: () => Promise<void> } | null>(null);
   const [confirming, setConfirming] = useState(false);
@@ -52,30 +77,45 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
   const restoreInputRef = useRef<HTMLInputElement>(null);
   const confirmActionRef = useRef(confirmAction);
   confirmActionRef.current = confirmAction;
+  const dirtyKeysRef = useRef<Set<string>>(new Set());
 
   const loadConfigs = useCallback(async () => {
-    setLoading(true);
+    if (!cachedSettingsConfigs) setLoading(true);
     const allKeys = ALL_SETTINGS.map((c) => c.key);
-    const results = await Promise.allSettled(allKeys.map((key) => api.configGet(key)));
-    const map: Record<string, string> = {};
-    const ibIdx = allKeys.indexOf('image_backend');
-    allKeys.forEach((key, i) => {
-      const r = results[i];
-      map[key] = r.status === 'fulfilled' ? r.value : '';
-    });
-    const imageBackendResult = results[ibIdx];
-    const raw = imageBackendResult?.status === 'fulfilled' ? imageBackendResult.value : null;
-    const resolved = resolveImageBackendDisplay(raw, imageBackendResult?.status === 'fulfilled');
-    map['image_backend'] = resolved.display;
+    let values: Record<string, string> = {};
+
+    try {
+      values = await api.configGetMany(allKeys);
+    } catch {
+      const results = await Promise.allSettled(allKeys.map((key) => api.configGet(key)));
+      allKeys.forEach((key, i) => {
+        const r = results[i];
+        values[key] = r.status === 'fulfilled' ? r.value : '';
+      });
+    }
+
+    const raw = values['image_backend'] ?? null;
+    const resolved = resolveImageBackendDisplay(raw, true);
+    values['image_backend'] = resolved.display;
+
     if (resolved.shouldMigrate) {
       void api.configSet('image_backend', 'awww').catch(() => {});
     }
-    const themeRaw = map['gui_theme'];
-    if (themeRaw === 'current') {
-      map['gui_theme'] = 'light';
+
+    if (values['gui_theme'] === 'current') {
+      values['gui_theme'] = 'light';
       void api.configSet('gui_theme', 'light').catch(() => {});
     }
-    setConfigs(map);
+
+    setConfigs((prev) => {
+      const merged = { ...values };
+      for (const key of dirtyKeysRef.current) {
+        if (prev[key] !== undefined) merged[key] = prev[key];
+      }
+      cachedSettingsConfigs = merged;
+      return merged;
+    });
+    dirtyKeysRef.current.clear();
     setLoading(false);
   }, []);
 
@@ -117,7 +157,12 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     try {
       const r = await api.configSet(key, normalized);
       if (r.success) {
-        setConfigs((prev) => ({ ...prev, [key]: normalized }));
+        dirtyKeysRef.current.add(key);
+        setConfigs((prev) => {
+          const next = { ...prev, [key]: normalized };
+          cachedSettingsConfigs = next;
+          return next;
+        });
         emitConfigChanged({ key, value: normalized });
         if (key.startsWith('linux_wallpaperengine_')) {
           void loadWeStatus();
@@ -316,16 +361,6 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     ),
   };
 
-  if (loading) {
-    return (
-      <div className="settings-modal-overlay" onMouseDown={onClose}>
-        <section className="settings-modal" role="dialog" aria-modal="true" aria-label="Settings" onMouseDown={(e) => e.stopPropagation()}>
-          <div className="loading">Loading...</div>
-        </section>
-      </div>
-    );
-  }
-
   return (
     <div className="settings-modal-overlay" onMouseDown={onClose}>
       <section
@@ -338,7 +373,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         <header className="settings-modal-header">
           <div>
             <h2 id="settings-title">Settings</h2>
-            <p>Configure Wallpaper Console behavior.</p>
+            <p>{loading ? 'Refreshing settings...' : 'Configure Wallpaper Console behavior.'}</p>
           </div>
           <button className="icon-btn" aria-label="Close settings" onClick={onClose}>
             <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">

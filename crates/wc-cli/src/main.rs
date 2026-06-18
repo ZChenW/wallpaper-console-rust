@@ -227,6 +227,22 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Some(cmd) => {
+            // MigrateToSqlite must run before StorageApi::new so that
+            // ensure_or_import_legacy_flat sees the real on-disk state.
+            if matches!(&cmd, Commands::MigrateToSqlite) {
+                let cd = ConfigDir::new()?;
+                cd.init()?;
+                let imported = wc_storage::sqlite::ensure_or_import_legacy_flat(&cd)?;
+                if imported {
+                    println!(
+                        "Imported legacy flat files into: {}",
+                        cd.db_path().display()
+                    );
+                } else {
+                    println!("SQLite already initialized at: {}", cd.db_path().display());
+                }
+                return Ok(());
+            }
             let cd = ConfigDir::new()?;
             cd.init()?;
             let storage = StorageApi::new(cd);
@@ -802,8 +818,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         // ── SQLite ───────────────────────────────────────────────────
         Commands::MigrateToSqlite => {
-            wc_storage::sqlite::ensure_or_migrate_sqlite(&s.cd)?;
-            println!("SQLite initialized at: {}", s.cd.db_path().display());
+            unreachable!("MigrateToSqlite is handled before StorageApi::new");
         }
 
         Commands::SqliteVerify => match wc_storage::sqlite::verify(&s.cd) {
@@ -834,8 +849,8 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         },
 
         Commands::SqliteResync => {
-            wc_storage::sqlite::resync(&s.cd)?;
-            println!("Resync complete.");
+            wc_storage::sqlite::repair(&s.cd)?;
+            println!("Repair complete.");
         }
 
         Commands::SqliteExportFlat => {
@@ -1240,7 +1255,7 @@ fn print_help() {
         "  rescan               library              library-count\n",
         "  browse-library (fzf) random-library       library-json [--tsv|--sqlite]\n",
         "  library-page-json    favorites-json       history-json\n",
-        "  migrate-to-sqlite    sqlite-verify        sqlite-resync\n",
+        "  migrate-to-sqlite    sqlite-verify        sqlite-resync (diagnostic repair)\n",
         "  sqlite-export-flat   sqlite-backup         sqlite-restore BACKUP\n",
         "  sqlite-config-get KEY sqlite-sources-list   sqlite-favorites-list\n",
         "  sqlite-history-list  sqlite-current-read   sqlite-last-backend-read\n",

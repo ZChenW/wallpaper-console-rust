@@ -48,22 +48,19 @@ impl Backend {
     }
 }
 
-/// Storage backend mode.
+/// Runtime storage backend. Runtime is SQLite-only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageBackend {
-    File,
-    Hybrid,
     Sqlite,
 }
 
 impl std::str::FromStr for StorageBackend {
     type Err = String;
+
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "file" => Ok(StorageBackend::File),
-            "hybrid" => Ok(StorageBackend::Hybrid),
-            "sqlite" => Ok(StorageBackend::Sqlite),
+            "sqlite" | "file" | "hybrid" => Ok(StorageBackend::Sqlite),
             _ => Err(format!("invalid storage_backend: {}", s)),
         }
     }
@@ -71,11 +68,7 @@ impl std::str::FromStr for StorageBackend {
 
 impl StorageBackend {
     pub fn as_str(&self) -> &'static str {
-        match self {
-            StorageBackend::File => "file",
-            StorageBackend::Hybrid => "hybrid",
-            StorageBackend::Sqlite => "sqlite",
-        }
+        "sqlite"
     }
 }
 

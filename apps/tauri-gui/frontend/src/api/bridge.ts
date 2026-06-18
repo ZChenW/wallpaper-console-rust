@@ -203,14 +203,19 @@ export const api = {
   scanSteamWorkshop: (): Promise<CommandResult> => invoke<CommandResult>('scan_steam_workshop'),
 
   configGet: (key: string): Promise<string> => invoke<string>('config_get', { key }),
+  configGetMany: (keys: string[]): Promise<Record<string, string>> =>
+    invoke<Record<string, string>>('config_get_many', { keys }),
   configSet: (key: string, value: string): Promise<CommandResult> => invoke<CommandResult>('config_set', { key, value }),
 
   sqliteVerify: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_verify'),
+  sqliteRepair: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_repair'),
   sqliteResync: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_resync'),
   sqliteBackup: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_backup'),
   sqliteRestore: (path: string): Promise<CommandResult> => invoke<CommandResult>('sqlite_restore', { path }),
   sqliteExportFlat: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_export_flat'),
   migrateToSqlite: (): Promise<CommandResult> => invoke<CommandResult>('migrate_to_sqlite'),
+  importLegacyFlatFiles: (): Promise<CommandResult> =>
+    invoke<CommandResult>('import_legacy_flat_files'),
 
   thumbnailFor: (path: string): Promise<ThumbnailDTO> =>
     invoke<ThumbnailDTO>('thumbnail_for', { path }).catch(() => ({ path, cacheHit: false })),

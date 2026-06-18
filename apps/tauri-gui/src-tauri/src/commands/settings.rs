@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use super::common::{fail, ok, storage, CommandResult};
 
 #[tauri::command]
@@ -5,6 +7,20 @@ pub async fn config_get(key: String) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = storage()?;
         Ok(s.config_get(&key, ""))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn config_get_many(keys: Vec<String>) -> Result<HashMap<String, String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        let mut out = HashMap::new();
+        for key in keys {
+            out.insert(key.clone(), s.config_get(&key, ""));
+        }
+        Ok(out)
     })
     .await
     .map_err(|e| e.to_string())?

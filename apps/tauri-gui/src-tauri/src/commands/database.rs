@@ -4,12 +4,24 @@ use super::common::{fail, ok, storage, CommandResult};
 
 #[tauri::command]
 pub async fn migrate_to_sqlite() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_storage::sqlite::ensure_or_migrate_sqlite(&s.cd) {
-            Ok(()) => ok("SQLite initialized."),
+    import_legacy_flat_files().await
+}
+
+#[tauri::command]
+pub async fn import_legacy_flat_files() -> CommandResult {
+    tauri::async_runtime::spawn_blocking(|| {
+        let cd = match wc_core::ConfigDir::new() {
+            Ok(c) => c,
+            Err(e) => return fail(e.to_string()),
+        };
+        if let Err(e) = cd.init() {
+            return fail(e.to_string());
+        }
+        match wc_storage::sqlite::ensure_or_import_legacy_flat(&cd) {
+            Ok(true) => ok("Imported legacy flat files into SQLite."),
+            Ok(false) => ok("SQLite already initialized."),
             Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
+        }
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
@@ -37,16 +49,21 @@ pub async fn sqlite_verify() -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn sqlite_resync() -> CommandResult {
+pub async fn sqlite_repair() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_storage::sqlite::resync(&s.cd) {
-            Ok(()) => ok("Resync complete."),
+        Ok(s) => match wc_storage::sqlite::repair(&s.cd) {
+            Ok(()) => ok("Repair complete."),
             Err(e) => fail(e.to_string()),
         },
         Err(e) => fail(e),
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn sqlite_resync() -> CommandResult {
+    sqlite_repair().await
 }
 
 #[tauri::command]

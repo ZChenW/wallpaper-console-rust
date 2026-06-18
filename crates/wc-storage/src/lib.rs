@@ -1,19 +1,17 @@
 //! wc-storage — unified storage API. Runtime storage is SQLite-only.
 
 pub mod flat;
-pub mod mirror;
 pub mod sqlite;
 pub mod tsv;
 pub mod we_compat;
 
-use std::path::Path;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::StorageBackend;
 
 /// Runtime storage is SQLite-only. Legacy flat files may still be imported
-/// during initialization, but file/hybrid are no longer runtime modes.
-pub fn storage_backend_mode(_config_dir: &Path) -> StorageBackend {
+/// during initialization.
+pub fn storage_backend_mode(_config_dir: &std::path::Path) -> StorageBackend {
     StorageBackend::Sqlite
 }
 
@@ -157,13 +155,9 @@ impl StorageApi {
     // ── Writes (always SQLite) ────────────────────────────────────────
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), WcError> {
-        let value = if key == "storage_backend" {
-            "sqlite"
-        } else {
-            value
-        };
-        sqlite::sqlite_config_set(&self.cd, key, value)?;
-        wc_core::config::write_config_value(&self.cd.path, key, value).ok();
+        let value = wc_core::config_normalizer::normalize_config_value(key, value);
+        sqlite::sqlite_config_set(&self.cd, key, &value)?;
+        wc_core::config::write_config_value(&self.cd.path, key, &value).ok();
         Ok(())
     }
 
@@ -273,19 +267,6 @@ mod tests {
             storage.config_get("artist's_key", "missing"),
             "artist's value"
         );
-    }
-
-    #[test]
-    fn sqlite_mirror_active_uses_the_supplied_config_dir() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cd = ConfigDir {
-            path: tmp.path().join("wallpaper-console"),
-        };
-        cd.init().unwrap();
-
-        assert!(!sqlite_mirror_active(&cd.path));
-        sqlite::ensure_sqlite_db(&cd);
-        assert!(sqlite_mirror_active(&cd.path));
     }
 
     #[test]
@@ -576,11 +557,38 @@ mod tests {
             "SQLite config table must be normalized to sqlite"
         );
     }
-}
 
-/// Check whether SQLite mirror writes are active.
-pub fn sqlite_mirror_active(config_dir: &Path) -> bool {
-    let mode = storage_backend_mode(config_dir);
-    matches!(mode, StorageBackend::Hybrid | StorageBackend::Sqlite)
-        && config_dir.join("wallpapers.db").exists()
+    #[test]
+    fn config_set_normalizes_runtime_sensitive_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = StorageApi::new(cd);
+
+        storage
+            .config_set("wallpaper_transition_fps", "999")
+            .unwrap();
+        assert_eq!(
+            storage.config_get("wallpaper_transition_fps", "missing"),
+            "240"
+        );
+
+        storage
+            .config_set("awww_transition_duration", "-1")
+            .unwrap();
+        assert_eq!(
+            storage.config_get("awww_transition_duration", "missing"),
+            "1"
+        );
+
+        storage
+            .config_set("linux_wallpaperengine_target_mode", "window")
+            .unwrap();
+        assert_eq!(
+            storage.config_get("linux_wallpaperengine_target_mode", "missing"),
+            "auto"
+        );
+    }
 }

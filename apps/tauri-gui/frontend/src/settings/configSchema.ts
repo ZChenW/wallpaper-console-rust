@@ -1,4 +1,5 @@
 import { ThumbnailCacheDTO } from '../api/bridge';
+export { normalizeConfigValue } from './configNormalizer';
 
 export interface SettingEntry {
   key: string;
@@ -48,7 +49,7 @@ export const ALL_SETTINGS: SettingEntry[] = [
   },
   {
     key: 'awww_transition_type', label: 'Transition', type: 'select',
-    options: ['fade', 'slide', 'wipe'], category: 'wallpaper',
+    options: ['simple', 'fade', 'left', 'right', 'top', 'bottom', 'wipe', 'grow', 'center', 'outer', 'random', 'wave'], category: 'wallpaper',
     description: 'Animation used when switching static images.',
   },
   {
@@ -84,7 +85,7 @@ export const ALL_SETTINGS: SettingEntry[] = [
   },
   {
     key: 'linux_wallpaperengine_target_mode', label: 'Target type', type: 'select',
-    options: ['auto', 'screen-root', 'screen-span', 'window'], category: 'we',
+    options: ['auto', 'screen-root', 'screen-span'], category: 'we',
     description: 'screen-root is recommended on Niri/Wayland.',
   },
   {
@@ -188,59 +189,6 @@ export function getSettingsByCategoryAndLevel(
   advanced: boolean,
 ): SettingEntry[] {
   return ALL_SETTINGS.filter((s) => s.category === cat && (s.advanced ?? false) === advanced);
-}
-
-export function normalizeConfigValue(key: string, value: string): string {
-  if (key === 'storage_backend') {
-    return 'sqlite';
-  }
-  if (key === 'gui_theme') {
-    return value === 'obsidian_warm' ? 'obsidian_warm' : 'light';
-  }
-  if (key === 'image_backend') {
-    if (value === 'mpvpaper') return 'mpvpaper';
-    return 'awww'; // Legacy swww / unknown values fallback to awww
-  }
-  if (key === 'gui_thumbnail_cleanup_days') {
-    return clampIntString(value, 1, 3650, 30);
-  }
-  if (key === 'gui_thumbnail_failure_ttl_secs') {
-    return clampIntString(value, 60, 86_400, 900);
-  }
-  if (key === 'linux_wallpaperengine_fps') {
-    return clampIntString(value, 1, 240, 60);
-  }
-  if (key === 'linux_wallpaperengine_volume') {
-    return clampIntString(value, 0, 100, 100);
-  }
-  if (key === 'wallpaper_transition_fps') {
-    return clampIntString(value, 1, 240, 60);
-  }
-  if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
-    return value.trim() || 'auto';
-  }
-  if (key === 'linux_wallpaperengine_target') {
-    return value.trim();
-  }
-  if (key === 'open_project_location_mode') {
-    if (value === 'terminal') return 'terminal';
-    if (value === 'files') return 'file_manager'; // Legacy "files" → "file_manager"
-    return 'file_manager';
-  }
-  if (key === 'gui_file_manager') {
-    const valid = ['auto', 'nautilus', 'dolphin', 'thunar', 'nemo', 'pcmanfm', 'custom'];
-    return valid.includes(value) ? value : 'auto';
-  }
-  if (key === 'gui_terminal_file_manager') {
-    return value === 'custom' ? 'custom' : 'yazi';
-  }
-  return value;
-}
-
-function clampIntString(value: string, min: number, max: number, fallback: number): string {
-  const parsed = Number.parseInt(value, 10);
-  if (!Number.isFinite(parsed)) return String(fallback);
-  return String(Math.min(max, Math.max(min, parsed)));
 }
 
 export function cleanupDays(configs: Record<string, string>, cache: ThumbnailCacheDTO | null): number {

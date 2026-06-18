@@ -132,6 +132,42 @@ fn migrate_and_verify() {
 }
 
 #[test]
+fn migrate_to_sqlite_imports_legacy_flat_files_when_no_db() {
+    // Regression: P1 — when no DB exists but flat files have data,
+    // migrate-to-sqlite must import and report success.
+    let (_d, cd) = temp_config();
+    let walls = format!("{}/walls", cd);
+    std::fs::create_dir_all(&walls).unwrap();
+    // Write flat files directly (bypass StorageApi to avoid auto-create)
+    let wc_dir = format!("{}/wallpaper-console", cd);
+    std::fs::write(format!("{}/sources", wc_dir), format!("{}/walls\n", cd)).unwrap();
+    std::fs::write(
+        format!("{}/config", wc_dir),
+        "image_backend=awww\ngui_theme=light\n",
+    )
+    .unwrap();
+
+    // Remove any auto-created DB from a previous command
+    let db = format!("{}/wallpapers.db", wc_dir);
+    let _ = std::fs::remove_file(&db);
+
+    // Run migrate-to-sqlite — must import legacy flat files
+    let out = rust(&["migrate-to-sqlite"], &cd);
+    assert!(
+        out.status.success(),
+        "migrate-to-sqlite failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Imported"),
+        "should report import, got: {}",
+        stdout
+    );
+    assert!(std::fs::metadata(&db).is_ok(), "DB should be created");
+}
+
+#[test]
 fn rescan_writes_sqlite_wallpapers() {
     let (_d, cd) = temp_config();
     let walls = format!("{}/walls", cd);

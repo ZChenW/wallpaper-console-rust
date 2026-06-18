@@ -22,20 +22,36 @@ pub struct LinuxWallpaperEngineConfig {
 
 impl LinuxWallpaperEngineConfig {
     pub fn from_storage(s: &StorageApi) -> Self {
+        let scaling_raw = s.config_get("linux_wallpaperengine_scaling", "default");
+        let scaling = wc_core::config_normalizer::normalize_lwe_scaling(&scaling_raw);
+
+        let fps_raw = s.config_get("linux_wallpaperengine_fps", "60");
+        let fps = wc_core::config_normalizer::normalize_config_value(
+            "linux_wallpaperengine_fps",
+            &fps_raw,
+        )
+        .parse()
+        .unwrap_or(60);
+
+        let volume_raw = s.config_get("linux_wallpaperengine_volume", "100");
+        let volume = wc_core::config_normalizer::normalize_config_value(
+            "linux_wallpaperengine_volume",
+            &volume_raw,
+        )
+        .parse()
+        .unwrap_or(100);
+
+        let target_mode_raw = s.config_get("linux_wallpaperengine_target_mode", "auto");
+        let target_mode = wc_core::config_normalizer::normalize_lwe_target_mode(&target_mode_raw);
+
         LinuxWallpaperEngineConfig {
             enabled: s.config_get("linux_wallpaperengine_enabled", "on") == "on",
             path: s.config_get("linux_wallpaperengine_path", "auto"),
-            scaling: s.config_get("linux_wallpaperengine_scaling", "default"),
-            fps: s
-                .config_get("linux_wallpaperengine_fps", "60")
-                .parse()
-                .unwrap_or(60),
+            scaling: scaling.to_string(),
+            fps,
             muted: s.config_get("linux_wallpaperengine_muted", "off") == "on",
-            volume: s
-                .config_get("linux_wallpaperengine_volume", "100")
-                .parse()
-                .unwrap_or(100),
-            target_mode: s.config_get("linux_wallpaperengine_target_mode", "auto"),
+            volume,
+            target_mode: target_mode.to_string(),
             target: s.config_get("linux_wallpaperengine_target", ""),
         }
     }

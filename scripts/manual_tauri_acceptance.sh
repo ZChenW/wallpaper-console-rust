@@ -12,7 +12,7 @@ report="$out_dir/report.txt"
 csv="$out_dir/profile.csv"
 
 {
-  echo "wallpaper-console-rust Tauri manual acceptance"
+  echo "Wallpaper Console Tauri manual acceptance"
   echo "timestamp=$stamp"
   echo "duration_seconds=$duration"
   echo "binary=$bin"
