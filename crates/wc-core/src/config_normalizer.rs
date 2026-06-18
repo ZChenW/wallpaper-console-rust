@@ -145,6 +145,14 @@ mod tests {
             normalize_config_value("awww_transition_duration", "bad"),
             "1"
         );
+        assert_eq!(
+            normalize_config_value("awww_transition_duration", "1.5abc"),
+            "1"
+        );
+        assert_eq!(
+            normalize_config_value("awww_transition_duration", "2.0foo"),
+            "1"
+        );
 
         // wallpaper_transition_fps: 1..=240 passes through, else fallback 60.
         assert_eq!(

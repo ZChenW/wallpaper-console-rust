@@ -92,6 +92,11 @@ describe('normalizeConfigValue', () => {
       assert.equal(normalizeConfigValue('awww_transition_duration', 'nan'), '1');
       assert.equal(normalizeConfigValue('awww_transition_duration', 'bad'), '1');
     });
+
+    it('falls back to 1 for trailing garbage', () => {
+      assert.equal(normalizeConfigValue('awww_transition_duration', '1.5abc'), '1');
+      assert.equal(normalizeConfigValue('awww_transition_duration', '2.0foo'), '1');
+    });
   });
 
   describe('wallpaper_transition_fps', () => {

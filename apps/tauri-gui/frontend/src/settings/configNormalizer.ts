@@ -32,7 +32,7 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'awww_transition_duration') {
     const trimmed = value.trim();
     const parsed = Number.parseFloat(trimmed);
-    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 60) return trimmed;
+    if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 60 && NUM_RE.test(trimmed)) return trimmed;
     return '1';
   }
   if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
@@ -69,3 +69,5 @@ function clampIntString(value: string, min: number, max: number, fallback: numbe
   if (!Number.isFinite(parsed)) return String(fallback);
   return String(Math.min(max, Math.max(min, parsed)));
 }
+
+const NUM_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?$/;
