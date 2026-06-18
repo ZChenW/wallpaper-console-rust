@@ -1,4 +1,4 @@
-//! wc-storage — unified storage API dispatching on storage_backend_mode.
+//! wc-storage — unified storage API. Runtime storage is SQLite-only.
 
 pub mod flat;
 pub mod mirror;
@@ -11,15 +11,13 @@ use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::StorageBackend;
 
-/// Determine the active storage backend mode.
-pub fn storage_backend_mode(config_dir: &Path) -> StorageBackend {
-    let raw = wc_core::config::read_config_value(config_dir, "storage_backend", "sqlite");
-    raw.parse::<StorageBackend>()
-        .unwrap_or(StorageBackend::File)
+/// Runtime storage is SQLite-only. Legacy flat files may still be imported
+/// during initialization, but file/hybrid are no longer runtime modes.
+pub fn storage_backend_mode(_config_dir: &Path) -> StorageBackend {
+    StorageBackend::Sqlite
 }
 
-/// Unified storage API. Reads dispatch on `storage_backend` mode;
-/// writes always go flat-first then mirror to SQLite when active.
+/// Unified storage API. All reads and writes go through SQLite.
 pub struct StorageApi {
     pub cd: ConfigDir,
     pub mode: StorageBackend,
@@ -27,38 +25,40 @@ pub struct StorageApi {
 
 impl StorageApi {
     pub fn new(cd: ConfigDir) -> Self {
-        let mode = storage_backend_mode(&cd.path);
-        if matches!(mode, StorageBackend::Sqlite) {
-            if cd.db_path().exists() {
-                sqlite::ensure_sqlite_db(&cd);
-            } else {
-                sqlite::migrate_to_sqlite(&cd).ok();
-            }
+        cd.init().ok();
+
+        if !cd.db_path().exists() {
+            sqlite::migrate_to_sqlite(&cd).ok();
         }
-        StorageApi { cd, mode }
+        sqlite::ensure_sqlite_db(&cd);
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").ok();
+        sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite").ok();
+
+        StorageApi {
+            cd,
+            mode: StorageBackend::Sqlite,
+        }
     }
 
     /// Re-read the backend mode from config (after config-set).
     pub fn refresh_mode(&mut self) {
-        self.mode = storage_backend_mode(&self.cd.path);
+        self.mode = StorageBackend::Sqlite;
+        wc_core::config::write_config_value(&self.cd.path, "storage_backend", "sqlite").ok();
+        sqlite::sqlite_config_set(&self.cd, "storage_backend", "sqlite").ok();
+        sqlite::ensure_sqlite_db(&self.cd);
     }
 
-    // ── Reads (dispatch on mode) ───────────────────────────────────────
+    // ── Reads (always SQLite) ─────────────────────────────────────────
 
     pub fn config_get(&self, key: &str, default: &str) -> String {
-        match self.mode {
-            StorageBackend::Sqlite => {
-                if key == "storage_backend" {
-                    // Bootstrap-safe: always read from flat config
-                    return wc_core::config::read_config_value(&self.cd.path, key, default);
-                }
-                self._sqlite_config_get(key, default)
-            }
-            _ => wc_core::config::read_config_value(&self.cd.path, key, default),
+        if key == "storage_backend" {
+            return "sqlite".to_string();
         }
+        self._sqlite_config_get(key, default)
     }
 
     fn _sqlite_config_get(&self, key: &str, default: &str) -> String {
+        sqlite::ensure_sqlite_db(&self.cd);
         let db = self.cd.db_path();
         if !db.exists() {
             return default.to_string();
@@ -74,275 +74,137 @@ impl StorageApi {
     }
 
     pub fn sources_list(&self) -> Result<Vec<String>, WcError> {
-        let raw = match self.mode {
-            StorageBackend::Sqlite => {
-                let db = self.cd.db_path();
-                if !db.exists() {
-                    return Err(WcError::Other(
-                        "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-                    ));
-                }
-                let conn =
-                    rusqlite::Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let mut stmt = conn
-                    .prepare("SELECT path FROM sources ORDER BY path")
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let rows: Vec<String> = stmt
-                    .query_map([], |row| row.get(0))
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                rows
-            }
-            _ => flat::sources_list(&self.cd)?,
-        };
-        let normalized: Vec<String> = raw
+        sqlite::ensure_sqlite_db(&self.cd);
+        let conn = rusqlite::Connection::open(self.cd.db_path())
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM sources ORDER BY path")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let normalized: Vec<String> = rows
             .into_iter()
             .map(|p| wc_scan::normalize_source_path(&p))
             .collect();
         let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<String> = normalized
+        Ok(normalized
             .into_iter()
             .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect();
-        Ok(deduped)
+            .collect())
     }
 
     pub fn favorites_list(&self) -> Result<Vec<String>, WcError> {
-        match self.mode {
-            StorageBackend::Sqlite => {
-                let db = self.cd.db_path();
-                if !db.exists() {
-                    return Err(WcError::Other(
-                        "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-                    ));
-                }
-                let conn =
-                    rusqlite::Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let mut stmt = conn
-                    .prepare("SELECT path FROM favorites ORDER BY path")
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let rows: Vec<String> = stmt
-                    .query_map([], |row| row.get(0))
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                Ok(rows)
-            }
-            _ => flat::favorites_list(&self.cd),
-        }
+        sqlite::ensure_sqlite_db(&self.cd);
+        let conn = rusqlite::Connection::open(self.cd.db_path())
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM favorites ORDER BY path")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let result: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        Ok(result)
     }
 
     pub fn history_list(&self) -> Result<Vec<String>, WcError> {
-        let raw = match self.mode {
-            StorageBackend::Sqlite => {
-                let db = self.cd.db_path();
-                if !db.exists() {
-                    return Err(WcError::Other(
-                        "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-                    ));
-                }
-                let conn =
-                    rusqlite::Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let mut stmt = conn
-                    .prepare("SELECT path FROM history ORDER BY id DESC")
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                let rows: Vec<String> = stmt
-                    .query_map([], |row| row.get(0))
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?
-                    .collect::<Result<Vec<_>, _>>()
-                    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-                rows
-            }
-            _ => flat::history_list(&self.cd)?,
-        };
+        sqlite::ensure_sqlite_db(&self.cd);
+        let conn = rusqlite::Connection::open(self.cd.db_path())
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn
+            .prepare("SELECT path FROM history ORDER BY id DESC")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<String> = stmt
+            .query_map([], |row| row.get(0))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let mut seen = std::collections::HashSet::new();
-        let deduped: Vec<String> = raw
+        Ok(rows
             .into_iter()
             .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect();
-        Ok(deduped)
+            .collect())
     }
 
     pub fn current_read(&self) -> Result<Option<String>, WcError> {
-        match self.mode {
-            StorageBackend::Sqlite => {
-                let db = self.cd.db_path();
-                if !db.exists() {
-                    return Err(WcError::Other(
-                        "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-                    ));
-                }
-                let conn =
-                    rusqlite::Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-                Ok(conn
-                    .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
-                        row.get(0)
-                    })
-                    .ok())
-            }
-            _ => flat::current_read(&self.cd),
-        }
+        sqlite::ensure_sqlite_db(&self.cd);
+        let conn = rusqlite::Connection::open(self.cd.db_path())
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        Ok(conn
+            .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
+                row.get(0)
+            })
+            .ok())
     }
 
     pub fn last_backend_read(&self) -> Result<Option<String>, WcError> {
-        match self.mode {
-            StorageBackend::Sqlite => {
-                let db = self.cd.db_path();
-                if !db.exists() {
-                    return Err(WcError::Other(
-                        "wallpapers.db not found. Run migrate-to-sqlite first.".into(),
-                    ));
-                }
-                let conn =
-                    rusqlite::Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-                Ok(conn
-                    .query_row(
-                        "SELECT value FROM state WHERE key='last_backend'",
-                        [],
-                        |row| row.get(0),
-                    )
-                    .ok())
-            }
-            _ => flat::last_backend_read(&self.cd),
-        }
+        sqlite::ensure_sqlite_db(&self.cd);
+        let conn = rusqlite::Connection::open(self.cd.db_path())
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        Ok(conn
+            .query_row(
+                "SELECT value FROM state WHERE key='last_backend'",
+                [],
+                |row| row.get(0),
+            )
+            .ok())
     }
 
-    // ── Writes (flat-first, then mirror) ──────────────────────────────
+    // ── Writes (always SQLite) ────────────────────────────────────────
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_config_set(&self.cd, key, value)?;
-            wc_core::config::write_config_value(&self.cd.path, key, value).ok();
+        let value = if key == "storage_backend" {
+            "sqlite"
         } else {
-            wc_core::config::write_config_value(&self.cd.path, key, value)?;
-            mirror::mirror_config_set(&self.cd, key, value).ok();
-        }
+            value
+        };
+        sqlite::sqlite_config_set(&self.cd, key, value)?;
+        wc_core::config::write_config_value(&self.cd.path, key, value).ok();
         Ok(())
     }
 
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
         let path = wc_scan::normalize_source_path(path);
-        match self.mode {
-            StorageBackend::Sqlite => {
-                let added = sqlite::sqlite_source_add(&self.cd, &path)?;
-                flat::sources_add(&self.cd, &path).ok();
-                Ok(added)
-            }
-            _ => {
-                let added = flat::sources_add(&self.cd, &path)?;
-                if added {
-                    mirror::mirror_source_add(&self.cd, &path).ok();
-                }
-                Ok(added)
-            }
-        }
+        sqlite::sqlite_source_add(&self.cd, &path)
     }
 
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
         let path = wc_scan::normalize_source_path(path);
-        match self.mode {
-            StorageBackend::Sqlite => {
-                let removed = sqlite::sqlite_source_remove_canonical(&self.cd, &path)?;
-                flat::sources_remove_canonical(&self.cd, &path).ok();
-                Ok(removed)
-            }
-            _ => {
-                let removed = flat::sources_remove_canonical(&self.cd, &path)?;
-                if removed {
-                    mirror::mirror_source_remove(&self.cd, &path).ok();
-                    // Also clean any legacy rows in SQLite that normalise to the same target
-                    sqlite::sqlite_source_remove_canonical(&self.cd, &path).ok();
-                }
-                Ok(removed)
-            }
-        }
+        sqlite::sqlite_source_remove_canonical(&self.cd, &path)
     }
 
     pub fn favorites_add(&self, path: &str) -> Result<bool, WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            let added = sqlite::sqlite_favorite_add(&self.cd, path)?;
-            flat::favorites_add(&self.cd, path).ok();
-            Ok(added)
-        } else {
-            let added = flat::favorites_add(&self.cd, path)?;
-            if added {
-                mirror::mirror_favorite_add(&self.cd, path).ok();
-            }
-            Ok(added)
-        }
+        sqlite::sqlite_favorite_add(&self.cd, path)
     }
 
     pub fn favorites_remove(&self, path: &str) -> Result<(), WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_favorite_remove(&self.cd, path)?;
-            flat::favorites_remove(&self.cd, path).ok();
-        } else {
-            flat::favorites_remove(&self.cd, path)?;
-            mirror::mirror_favorite_remove(&self.cd, path).ok();
-        }
-        Ok(())
+        sqlite::sqlite_favorite_remove(&self.cd, path)
     }
 
     pub fn history_add(&self, path: &str, backend: &str) -> Result<(), WcError> {
         let canon = flat::try_canonicalize(path);
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_history_add(&self.cd, &canon, backend, 100)?;
-            flat::history_add(&self.cd, &canon, 100).ok();
-        } else {
-            flat::history_add(&self.cd, &canon, 100)?;
-            mirror::mirror_history_add(&self.cd, &canon, backend).ok();
-            mirror::mirror_history_trim(&self.cd, 100).ok();
-        }
-        Ok(())
+        sqlite::sqlite_history_add(&self.cd, &canon, backend, 100)
     }
 
     pub fn history_clear(&self) -> Result<(), WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_history_clear(&self.cd)?;
-            flat::history_clear(&self.cd).ok();
-        } else {
-            flat::history_clear(&self.cd)?;
-            mirror::mirror_history_clear(&self.cd).ok();
-        }
-        Ok(())
+        sqlite::sqlite_history_clear(&self.cd)
     }
 
     pub fn current_write(&self, path: &str) -> Result<(), WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_state_write(&self.cd, "current", path)?;
-            flat::current_write(&self.cd, path).ok();
-        } else {
-            flat::current_write(&self.cd, path)?;
-            mirror::mirror_current_write(&self.cd, path).ok();
-        }
-        Ok(())
+        sqlite::sqlite_state_write(&self.cd, "current", path)
     }
 
     pub fn last_backend_write(&self, backend: &str) -> Result<(), WcError> {
-        if matches!(self.mode, StorageBackend::Sqlite) {
-            sqlite::sqlite_state_write(&self.cd, "last_backend", backend)?;
-            flat::last_backend_write(&self.cd, backend).ok();
-        } else {
-            flat::last_backend_write(&self.cd, backend)?;
-            mirror::mirror_last_backend_write(&self.cd, backend).ok();
-        }
-        Ok(())
+        sqlite::sqlite_state_write(&self.cd, "last_backend", backend)
     }
 
     pub fn runtime_state_clear(&self) -> Result<(), WcError> {
-        match self.mode {
-            StorageBackend::Sqlite => {
-                sqlite::sqlite_state_delete(&self.cd, "current")?;
-                sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
-                flat::current_clear(&self.cd).ok();
-                flat::last_backend_clear(&self.cd).ok();
-            }
-            _ => {
-                flat::current_clear(&self.cd)?;
-                flat::last_backend_clear(&self.cd)?;
-            }
-        }
+        sqlite::sqlite_state_delete(&self.cd, "current")?;
+        sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
         Ok(())
     }
 }
@@ -358,7 +220,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         flat::sources_add(&cd, "/walls").unwrap();
         flat::favorites_add(&cd, "/walls/a.jpg").unwrap();
         flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
@@ -402,7 +263,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let storage = StorageApi::new(cd);
 
         storage
@@ -422,7 +282,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "hybrid").unwrap();
 
         assert!(!sqlite_mirror_active(&cd.path));
         sqlite::ensure_sqlite_db(&cd);
@@ -442,10 +301,7 @@ mod tests {
         };
         cd.init().unwrap();
 
-        let storage = StorageApi {
-            cd,
-            mode: StorageBackend::File,
-        };
+        let storage = StorageApi::new(cd);
         storage.sources_add(&project.to_string_lossy()).unwrap();
         let list = storage.sources_list().unwrap();
         assert_eq!(list.len(), 1);
@@ -463,7 +319,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
 
         let root = tmp.path().join("steamapps/workshop/content/431960");
         std::fs::create_dir_all(&root).unwrap();
@@ -502,7 +357,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "file").unwrap();
 
         let root = tmp.path().join("steamapps/workshop/content/431960");
         std::fs::create_dir_all(&root).unwrap();
@@ -532,7 +386,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let storage = StorageApi::new(cd);
 
         storage.current_write("/walls/current.jpg").unwrap();
@@ -556,7 +409,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
 
         let root = tmp.path().join("steamapps/workshop/content/431960");
         std::fs::create_dir_all(&root).unwrap();
@@ -606,10 +458,7 @@ mod tests {
         };
         cd.init().unwrap();
 
-        let storage = StorageApi {
-            cd,
-            mode: StorageBackend::File,
-        };
+        let storage = StorageApi::new(cd);
         storage.sources_add(&real.to_string_lossy()).unwrap();
         storage.sources_add(&link.to_string_lossy()).unwrap();
         let list = storage.sources_list().unwrap();
@@ -623,7 +472,6 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
 
         let root = tmp.path().join("steamapps/workshop/content/431960");
         std::fs::create_dir_all(&root).unwrap();
@@ -634,18 +482,98 @@ mod tests {
         let root_str = root.to_string_lossy().to_string();
         let proj_str = project.to_string_lossy().to_string();
 
-        // Add both root and project-level to sources
         let s = StorageApi::new(cd);
         s.sources_add(&root_str).unwrap();
         s.sources_add(&proj_str).unwrap();
 
-        // Remove root — should also clean up project-level
         assert!(s.sources_remove(&root_str).unwrap());
         let remaining = s.sources_list().unwrap();
         assert!(
             remaining.is_empty(),
             "all sources should be gone, got: {:?}",
             remaining
+        );
+    }
+
+    #[test]
+    fn legacy_file_config_is_repaired_to_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        std::fs::write(cd.config_path(), "storage_backend=file\n").unwrap();
+
+        let storage = StorageApi::new(cd);
+
+        assert_eq!(storage.mode, StorageBackend::Sqlite);
+        assert_eq!(storage.config_get("storage_backend", "file"), "sqlite");
+        assert_eq!(
+            wc_core::config::read_config_value(&storage.cd.path, "storage_backend", "file"),
+            "sqlite"
+        );
+    }
+
+    #[test]
+    fn missing_sqlite_db_is_created_for_empty_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        let storage = StorageApi::new(cd);
+
+        assert!(storage.cd.db_path().exists());
+        assert_eq!(storage.sources_list().unwrap(), Vec::<String>::new());
+        assert_eq!(storage.favorites_list().unwrap(), Vec::<String>::new());
+        assert_eq!(storage.history_list().unwrap(), Vec::<String>::new());
+        assert_eq!(storage.current_read().unwrap(), None);
+        assert_eq!(storage.last_backend_read().unwrap(), None);
+    }
+
+    #[test]
+    fn storage_backend_config_set_is_forced_to_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = StorageApi::new(cd);
+
+        storage.config_set("storage_backend", "hybrid").unwrap();
+
+        assert_eq!(storage.config_get("storage_backend", "missing"), "sqlite");
+        assert_eq!(
+            wc_core::config::read_config_value(&storage.cd.path, "storage_backend", "missing"),
+            "sqlite"
+        );
+    }
+
+    #[test]
+    fn sqlite_config_table_is_normalized_after_legacy_import() {
+        // Regression: P2-3 — after initializing from legacy storage_backend=file,
+        // the SQLite config table must contain storage_backend=sqlite.
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        std::fs::write(cd.config_path(), "storage_backend=file\n").unwrap();
+
+        let storage = StorageApi::new(cd);
+
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        let db_value: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key='storage_backend'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            db_value, "sqlite",
+            "SQLite config table must be normalized to sqlite"
         );
     }
 }

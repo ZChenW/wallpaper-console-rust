@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — build release binaries and install wallpaper-console-rust (CLI + Tauri GUI)
-# side-by-side with existing Bash/Python versions.
+# install.sh — build release Tauri GUI binary and install wallpaper-console-gui-rust.
 #
 # Usage:
 #   ./install.sh              # build + install to ~/.local/bin
@@ -9,7 +8,6 @@
 #   ./install.sh --uninstall          # remove files installed by this script
 #
 # Installs:
-#   $PREFIX/bin/wallpaper-console-rust      Rust CLI
 #   $PREFIX/bin/wallpaper-console-gui-rust  Tauri GUI
 #
 # Does NOT touch or replace:
@@ -65,7 +63,7 @@ if $UNINSTALL; then
   rm -f "$BIN_DIR/wallpaper-console-gui-rust"
   rm -f "$DESKTOP_FILE"
   rm -f "$ICON_FILE"
-  info "Removed Rust CLI/GUI launchers, desktop entry, and icon installed by this script."
+  info "Removed GUI launcher, desktop entry, icon, and any legacy Rust CLI installed by this script."
   exit 0
 fi
 
@@ -77,55 +75,40 @@ check_cmd cargo
 check_cmd node
 check_cmd npm
 
-# ── Build Rust CLI ─────────────────────────────────────────────────────────
-info "Building Rust CLI (release)..."
-cd "$SCRIPT_DIR"
-cargo build -p wc-cli --release
-RUST_CLI="$(realpath target/release/wallpaper-console-rust)"
-info "Rust CLI built: $RUST_CLI"
-
 # ── Build Tauri GUI ────────────────────────────────────────────────────────
+info "Building Tauri GUI frontend..."
+cd "$SCRIPT_DIR/apps/tauri-gui/frontend"
+npm run build
 info "Building Tauri GUI binary..."
 cd "$SCRIPT_DIR/apps/tauri-gui/src-tauri"
 cargo build --package wallpaper-console-tauri --release
 TAURI_BIN="$(realpath "$SCRIPT_DIR/target/release/wallpaper-console-tauri")"
 info "Tauri GUI built: $TAURI_BIN"
 
-# ── Verify binaries ────────────────────────────────────────────────────────
-info "Verifying binaries..."
+# ── Verify GUI build artifacts ─────────────────────────────────────────────
+info "Verifying GUI build artifacts..."
 
-# Smoke test with temp config — never touches real ~/.config/wallpaper-console
-tmp_config="$(mktemp -d)"
-cleanup_tmp_config() { rm -rf "$tmp_config"; }
-trap cleanup_tmp_config EXIT
-XDG_CONFIG_HOME="$tmp_config" "$RUST_CLI" status >/dev/null 2>&1 \
-  || warn "Rust CLI smoke test failed (may be ok if no config exists)"
-"$RUST_CLI" --version >/dev/null 2>&1 || warn "Rust CLI --version failed"
-cleanup_tmp_config
-trap - EXIT
+if [[ ! -f "$SCRIPT_DIR/apps/tauri-gui/frontend/dist/index.html" ]]; then
+  err "Frontend dist/index.html missing. Did npm run build succeed?"
+fi
 
 if [[ ! -x "$TAURI_BIN" ]]; then
   err "Tauri GUI binary not found or not executable: $TAURI_BIN"
 fi
-info "Binaries verified."
+
+info "GUI build artifacts verified."
 
 # ── Install ────────────────────────────────────────────────────────────────
 if $BUILD_ONLY; then
   info "Build-only mode — skipping install."
   info ""
   info "Built artifacts:"
-  info "  Rust CLI:      $RUST_CLI"
   info "  Tauri GUI:     $TAURI_BIN"
   exit 0
 fi
 
 info "Installing to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-
-# Install Rust CLI
-cp "$RUST_CLI" "$BIN_DIR/wallpaper-console-rust"
-chmod +x "$BIN_DIR/wallpaper-console-rust"
-info "  Installed: $BIN_DIR/wallpaper-console-rust"
 
 # Install Tauri GUI
 cp "$TAURI_BIN" "$BIN_DIR/wallpaper-console-gui-rust"
@@ -155,8 +138,7 @@ info "=============================================="
 info " Installation complete"
 info "=============================================="
 info ""
-info "Installed commands:"
-info "  wallpaper-console-rust          Rust CLI"
+info "Installed command:"
 info "  wallpaper-console-gui-rust      Tauri GUI"
 info ""
 info "The original commands are untouched:"
@@ -173,16 +155,12 @@ if [[ ":$PATH:" != *":$BIN_DIR:"* ]]; then
 fi
 
 info ""
-info "To try the Rust CLI with a temp config:"
-info "  XDG_CONFIG_HOME=\$(mktemp -d) wallpaper-console-rust status"
-info ""
 info "To run the Tauri GUI:"
 info "  $BIN_DIR/wallpaper-console-gui-rust"
 info ""
 info "Rollback (restore original Bash/Python):"
 info "  # Your original wallpaper-console and wallpaper-console-gui are untouched."
-info "  # Simply remove the -rust variants if you no longer want them:"
-info "  rm $BIN_DIR/wallpaper-console-rust"
+info "  # Simply remove the -rust variant if you no longer want it:"
 info "  rm $BIN_DIR/wallpaper-console-gui-rust"
 info "  # Or uninstall everything created by this script:"
 info "  ./install.sh --prefix \"$PREFIX\" --uninstall"

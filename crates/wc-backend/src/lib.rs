@@ -204,13 +204,10 @@ fn apply_wallpaper_with_runtime(
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
 
-    let mut fallback_error: Option<String> = None;
-
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
 
     let fallback_ok = match visual.fallback_stage {
-        visual_handoff::FallbackStage::TargetImageInstant
-        | visual_handoff::FallbackStage::TargetPreviewInstant => {
+        visual_handoff::FallbackStage::TargetImageInstant => {
             if let Some(fb) = fallback_path {
                 match apply_awww_instant_with_runtime(s, fb, runtime) {
                     Ok(()) => {
@@ -225,22 +222,16 @@ fn apply_wallpaper_with_runtime(
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "<unknown>".to_string());
                         let msg = format!("instant awww fallback {} failed: {}", fb_name, e);
-                        fallback_error = Some(msg.clone());
-                        if visual.fallback_stage
-                            == visual_handoff::FallbackStage::TargetImageInstant
-                        {
-                            write_debug_handoff_log(
-                                s,
-                                &lifecycle,
-                                backend,
-                                fallback_path,
-                                &visual,
-                                &msg,
-                                path,
-                            );
-                            return Err(WcError::Other(msg));
-                        }
-                        false
+                        write_debug_handoff_log(
+                            s,
+                            &lifecycle,
+                            backend,
+                            fallback_path,
+                            &visual,
+                            &msg,
+                            path,
+                        );
+                        return Err(WcError::Other(msg));
                     }
                 }
             } else {
@@ -355,15 +346,7 @@ fn apply_wallpaper_with_runtime(
         execute_stop_plan_with_runtime(s, lifecycle.post_success_stop, runtime)?;
     }
 
-    write_debug_handoff_log(
-        s,
-        &lifecycle,
-        backend,
-        fallback_path,
-        &visual,
-        fallback_error.as_deref().unwrap_or(""),
-        path,
-    );
+    write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, "", path);
 
     write_success_state(s, path, backend)?;
     Ok(())

@@ -70,6 +70,11 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     if (resolved.shouldMigrate) {
       void api.configSet('image_backend', 'awww').catch(() => {});
     }
+    const themeRaw = map['gui_theme'];
+    if (themeRaw === 'current') {
+      map['gui_theme'] = 'light';
+      void api.configSet('gui_theme', 'light').catch(() => {});
+    }
     setConfigs(map);
     setLoading(false);
   }, []);

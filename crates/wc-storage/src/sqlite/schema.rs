@@ -303,6 +303,17 @@ pub fn ensure_sqlite_db(cd: &ConfigDir) {
     }
 }
 
+/// Idempotent: migrates from flat files if DB does not exist,
+/// or ensures schema is up-to-date if it already does.
+pub fn ensure_or_migrate_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
+    if cd.db_path().exists() {
+        ensure_sqlite_db(cd);
+        Ok(())
+    } else {
+        migrate_to_sqlite(cd)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -404,6 +404,7 @@ export const api = {
       gui_thumbnail_failure_ttl_secs: '900',
       preview_metadata: 'compact',
       gui_debug_logs: 'off',
+      gui_theme: 'light',
       open_project_location_mode: 'ask',
       gui_file_manager: 'auto',
       gui_file_manager_custom: '',

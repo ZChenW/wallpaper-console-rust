@@ -30,7 +30,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_thumbnail_cleanup_days", "30"),
     ("gui_thumbnail_failure_ttl_secs", "900"),
     ("gui_debug_logs", "off"),
-    ("gui_theme", "current"),
+    ("gui_theme", "light"),
     ("storage_backend", "sqlite"),
     ("open_project_location_mode", "ask"),
     ("gui_file_manager", "auto"),
@@ -144,6 +144,11 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
     } else {
         HashMap::new()
     };
+    let value = if key == "storage_backend" {
+        "sqlite"
+    } else {
+        value
+    };
     map.insert(key.to_string(), value.to_string());
 
     let content = serialize_config_map(&map);
@@ -184,19 +189,16 @@ fn serialize_config_map(map: &HashMap<String, String>) -> String {
 
 /// Read a single config value. Returns `default` if key not found.
 pub fn read_config_value(config_dir: &Path, key: &str, default: &str) -> String {
+    let path = config_dir.join("config");
+    let value = parse_config_file(&path)
+        .ok()
+        .and_then(|m| m.get(key).cloned())
+        .unwrap_or_else(|| default.to_string());
+
     if key == "storage_backend" {
-        // Bootstrap-safe: always read from flat config
-        let path = config_dir.join("config");
-        parse_config_file(&path)
-            .ok()
-            .and_then(|m| m.get(key).cloned())
-            .unwrap_or_else(|| default.to_string())
+        "sqlite".to_string()
     } else {
-        let path = config_dir.join("config");
-        parse_config_file(&path)
-            .ok()
-            .and_then(|m| m.get(key).cloned())
-            .unwrap_or_else(|| default.to_string())
+        value
     }
 }
 
@@ -280,10 +282,7 @@ mod tests {
     #[test]
     fn default_config_includes_gui_theme() {
         let defaults = default_config();
-        assert_eq!(
-            defaults.get("gui_theme").map(|s| s.as_str()),
-            Some("current")
-        );
+        assert_eq!(defaults.get("gui_theme").map(|s| s.as_str()), Some("light"));
     }
 
     #[test]
@@ -300,6 +299,30 @@ mod tests {
                 "video_backend=mpvpaper"
             ]
         );
+    }
+
+    #[test]
+    fn storage_backend_reads_are_sqlite_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+        std::fs::write(tmp.path().join("config"), "storage_backend=hybrid\n").unwrap();
+
+        assert_eq!(
+            read_config_value(tmp.path(), "storage_backend", "file"),
+            "sqlite"
+        );
+    }
+
+    #[test]
+    fn storage_backend_writes_are_normalized_to_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+
+        write_config_value(tmp.path(), "storage_backend", "file").unwrap();
+
+        let content = std::fs::read_to_string(tmp.path().join("config")).unwrap();
+        assert!(content.contains("storage_backend=sqlite\n"));
+        assert!(!content.contains("storage_backend=file\n"));
     }
 }
 

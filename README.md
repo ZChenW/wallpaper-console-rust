@@ -1,50 +1,26 @@
 # wallpaper-console-rust
 
-Rust rewrite of [wallpaper-console](https://github.com/ZChenW/wallpaper-console) — a terminal wallpaper manager for Arch Linux + niri/Wayland, with both CLI and GUI interfaces.
+Rust/Tauri desktop wallpaper manager for Arch Linux + niri/Wayland.
 
 ## Status
 
-**Beta — side-by-side with the Bash/Python version.**  
-All core CLI commands, SQLite storage, fzf browsing with preview, and React GUI (Tauri 2) are implemented. The original `wallpaper-console` (Bash) and `wallpaper-console-gui` (Python GTK) are not replaced; install uses `-rust` suffixed commands.
+**Beta — GUI-first Rust/Tauri app.**
+The supported user entrypoint is `wallpaper-console-gui-rust`. The Rust CLI crate remains in the repository as a diagnostic and regression-test tool, but it is not installed by default.
 
 ## Quick Start
 
 ```bash
-# Build and install (CLI + GUI) side-by-side
 ./install.sh
+wallpaper-console-gui-rust
 
-# Custom prefix / uninstall
-./install.sh --prefix "$HOME/.local"
-./install.sh --prefix "$HOME/.local" --uninstall
+# Build only
+./install.sh --build-only
 
-# Installed commands:
-#   wallpaper-console-rust          (Rust CLI)
-#   wallpaper-console-gui-rust      (Tauri GUI)
-
-# Try the CLI with a temp config
-XDG_CONFIG_HOME=$(mktemp -d) wallpaper-console-rust status
-
-# Raw Tauri binary (before install)
+# Raw Tauri binary after build
 ./target/release/wallpaper-console-tauri
 ```
 
 ## Features
-
-### Rust CLI (`wallpaper-console-rust`)
-
-| Category | Commands |
-|----------|----------|
-| Wallpaper | `apply`, `browse` / `browse-all` / `browse-images` / `browse-gifs` / `browse-videos`, `random` / `random-all` / `random-image` / `random-gif` / `random-video`, `stop`, `status`, `restore`, `inspect` |
-| Sources | `add`, `remove` (fzf), `remove-source`, `sources`, `steam-workshop`, `validate-sources`, `remove-missing`, `dedupe-sources` |
-| Favorites | `favorite-add`, `favorite-add-current`, `favorites` (fzf), `favorite-random`, `favorite-remove` |
-| History | `history` (fzf), `history-random`, `history-clear` |
-| Search / Sort | `search`, `search-source`, `search-type`, `sort-mtime`, `sort-size`, `sort-name` |
-| Config | `config-get`, `config-set` |
-| System | `tui` (stub), `help` |
-| Library | `rescan` (incremental, profiled), `library`, `library-count`, `browse-library`, `random-library`, `library-json`, `library-page-json`, `favorites-json`, `history-json` |
-| SQLite | `migrate-to-sqlite`, `sqlite-verify`, `sqlite-resync`, `sqlite-export-flat`, `sqlite-backup`, `sqlite-restore`, `sqlite-config-get`, `sqlite-sources-list`, `sqlite-favorites-list`, `sqlite-history-list`, `sqlite-current-read`, `sqlite-last-backend-read` |
-
-All browse/search/sort/favorites/history commands use fzf with image/video preview via `__preview__`.
 
 ### React GUI (`wallpaper-console-gui-rust`, Tauri 2 app)
 
@@ -60,6 +36,8 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 - Scan progress and cancellation with single-scan guard
 - Structured GUI command errors, optional debug logging, and developer performance overlay
 - Installable through the binary-copy `install.sh` path.
+
+> Developer note: `crates/wc-cli` is retained for diagnostics and parity tests, but the supported product interface is the Tauri GUI.
 
 ### Architecture
 
@@ -85,7 +63,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 
 ### Storage
 
-Three modes: `file` (flat files only), `hybrid` (flat + SQLite mirror), `sqlite` (SQLite primary with flat compatibility copy). All modes share the same config directory — no migration needed when switching.
+SQLite is the only runtime storage backend. Legacy flat files in the config directory are imported into SQLite when needed, and flat-file export remains available as an explicit maintenance action.
 
 ### Performance
 
@@ -139,7 +117,6 @@ Package-manager installs such as AUR are future work; the supported local instal
 - Node.js 22+
 - `webkit2gtk-4.1` (Tauri 2)
 - Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
-- Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
 - Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
   - Arch/AUR: `yay -S linux-wallpaperengine-git`
 

@@ -5,8 +5,8 @@ use super::common::{fail, ok, storage, CommandResult};
 #[tauri::command]
 pub async fn migrate_to_sqlite() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_storage::sqlite::migrate_to_sqlite(&s.cd) {
-            Ok(()) => ok("Migrated to SQLite."),
+        Ok(s) => match wc_storage::sqlite::ensure_or_migrate_sqlite(&s.cd) {
+            Ok(()) => ok("SQLite initialized."),
             Err(e) => fail(e.to_string()),
         },
         Err(e) => fail(e),

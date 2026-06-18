@@ -802,8 +802,8 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         // ── SQLite ───────────────────────────────────────────────────
         Commands::MigrateToSqlite => {
-            wc_storage::sqlite::migrate_to_sqlite(&s.cd)?;
-            println!("Migrated to: {}", s.cd.db_path().display());
+            wc_storage::sqlite::ensure_or_migrate_sqlite(&s.cd)?;
+            println!("SQLite initialized at: {}", s.cd.db_path().display());
         }
 
         Commands::SqliteVerify => match wc_storage::sqlite::verify(&s.cd) {

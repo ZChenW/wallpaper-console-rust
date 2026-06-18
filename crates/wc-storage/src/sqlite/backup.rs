@@ -6,7 +6,6 @@ use wc_core::error::WcError;
 
 use super::chrono_now;
 use super::chrono_now_compact;
-use super::import_library_tsv_into;
 use super::schema::{
     check_wallpapers_fts_integrity, create_schema, wallpapers_count, wallpapers_fts_count,
 };
@@ -25,10 +24,9 @@ pub enum VerifyResult {
 
 /// Compare flat files vs SQLite. Returns:
 /// - `Ok(VerifyResult::Ok)` — all consistent
-/// - `Ok(VerifyResult::OkWithWarnings(w))` — config/sources compatibility copies
-///   have drifted; actual data is fine
-/// - `Ok(VerifyResult::Failed(e))` — real data mismatch (wallpapers, favorites,
-///   history, state)
+/// - `Ok(VerifyResult::OkWithWarnings(w))` — flat-file compatibility copies
+///   have drifted; SQLite is authoritative and fine
+/// - `Ok(VerifyResult::Failed(e))` — SQLite schema/FTS integrity error
 /// - `Err(WcError::Sqlite(...))` — schema corruption or missing DB
 // Normalise a list of paths into canonical, deduplicated, sorted values
 // so that symlink-equivalent paths compare equal in verify().
@@ -89,10 +87,8 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         }
     }
 
-    // Favorites — data integrity; mismatch is an error.
-    // NOTE: flat::favorites_list() does not canonical-dedup (unlike history_list),
-    // so db_fav likewise does not need canonical dedup here. If favorites_list
-    // ever gains dedup, align db_fav to match.
+    // Favorites — any drift from flat files is a legacy-compat warning,
+    // not a data error. SQLite is the authoritative runtime store.
     {
         let mut flat_fav: Vec<String> = flat::favorites_list(cd)?;
         flat_fav.sort();
@@ -105,11 +101,11 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
         if flat_fav != db_fav {
-            errors.push("favorites".into());
+            warnings.push("favorites (legacy flat compat)".into());
         }
     }
 
-    // History — data integrity; mismatch is an error.
+    // History — any drift from flat files is a legacy-compat warning.
     {
         let flat_hist = flat::history_list(cd)?;
         let mut stmt = conn
@@ -120,16 +116,14 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
             .map_err(|e| WcError::Sqlite(e.to_string()))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        // Normalise both sides to canonical values so that symlink /
-        // dot-path variants compare equal.
         let flat_norm = canonical_unique_sorted(&flat_hist);
         let db_norm = canonical_unique_sorted(&db_hist);
         if flat_norm != db_norm {
-            errors.push("history".into());
+            warnings.push("history (legacy flat compat)".into());
         }
     }
 
-    // State: current — data integrity; mismatch is an error.
+    // State: current — any drift from flat files is a legacy-compat warning.
     {
         let flat_cur = flat::current_read(cd)?.unwrap_or_default();
         let db_cur: String =
@@ -141,11 +135,11 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
                 Err(e) => return Err(WcError::Sqlite(e.to_string())),
             };
         if flat_cur != db_cur {
-            errors.push("current".into());
+            warnings.push("current (legacy flat compat)".into());
         }
     }
 
-    // State: last_backend — data integrity; mismatch is an error.
+    // State: last_backend — any drift from flat files is a legacy-compat warning.
     {
         let flat_be = flat::last_backend_read(cd)?.unwrap_or_default();
         let db_be: String = match conn.query_row(
@@ -158,7 +152,7 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
             Err(e) => return Err(WcError::Sqlite(e.to_string())),
         };
         if flat_be != db_be {
-            errors.push("last_backend".into());
+            warnings.push("last_backend (legacy flat compat)".into());
         }
     }
 
@@ -180,7 +174,10 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     }
 }
 
-/// Resync: atomically rebuild wallpapers.db from flat files.
+/// Resync: repair the SQLite database without importing from flat files.
+/// Rebuilds FTS index and ensures schema consistency. Existing SQLite data
+/// is preserved. Flat files are NOT treated as authoritative — this is a
+/// SQLite-only repair operation.
 pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     let db_path = cd.db_path();
     if !db_path.exists() {
@@ -194,7 +191,7 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     let bak = db_path.with_extension(format!("db.bak.{}", ts));
     std::fs::copy(&db_path, &bak).map_err(WcError::Io)?;
 
-    // Build in temp DB alongside real one (random suffix for uniqueness)
+    // Rebuild temp DB from existing SQLite data (not flat files)
     let tmp_db = db_path.with_extension(format!(
         "db.tmp.{}",
         std::time::SystemTime::now()
@@ -205,91 +202,199 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
     if tmp_db.exists() {
         std::fs::remove_file(&tmp_db).map_err(WcError::Io)?;
     }
-    let conn = Connection::open(&tmp_db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    create_schema(&conn)?;
+    let tmp_conn = Connection::open(&tmp_db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    create_schema(&tmp_conn)?;
     let now = chrono_now();
 
-    // Import all data from flat files
-    // Config
-    let config_map = wc_core::config::parse_config_file(&cd.config_path())?;
-    for (key, value) in &config_map {
-        conn.execute(
-            "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
-            params![key, value],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    }
-    // Sources — canonical-deduplicate
-    let mut seen_src = std::collections::HashSet::new();
-    for path in flat::sources_list(cd)? {
-        let canon = flat::try_canonicalize(&path);
-        if !seen_src.insert(canon) {
-            continue;
+    let src_conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Copy config from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT key, value FROM config")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (k, v) in rows {
+            tmp_conn
+                .execute(
+                    "INSERT INTO config (key, value) VALUES (?1, ?2)",
+                    params![k, v],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
         }
-        conn.execute(
-            "INSERT OR IGNORE INTO sources (path, added_at) VALUES (?1, ?2)",
-            params![path, now],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
-    // Favorites
-    for path in flat::favorites_list(cd)? {
-        conn.execute(
-            "INSERT OR IGNORE INTO favorites (path, added_at) VALUES (?1, ?2)",
-            params![path, now],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Copy sources from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT path, added_at FROM sources")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, added_at) in rows {
+            tmp_conn
+                .execute(
+                    "INSERT INTO sources (path, added_at) VALUES (?1, ?2)",
+                    params![path, added_at],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
     }
-    // History (canonical-deduplicate keeping newest, then reverse for id ordering)
-    let mut seen_hist = std::collections::HashSet::new();
-    let history: Vec<String> = flat::history_list(cd)?
-        .into_iter()
-        .filter(|path| seen_hist.insert(flat::try_canonicalize(path)))
-        .collect();
-    let history_rev: Vec<String> = history.into_iter().rev().collect();
-    for path in &history_rev {
-        conn.execute(
-            "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'unknown', ?2)",
-            params![path, now],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Copy favorites from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT path, added_at FROM favorites")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, added_at) in rows {
+            tmp_conn
+                .execute(
+                    "INSERT INTO favorites (path, added_at) VALUES (?1, ?2)",
+                    params![path, added_at],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
     }
-    // State
-    if let Some(cur) = flat::current_read(cd)? {
-        conn.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
-            params![cur],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Copy history from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT path, backend, applied_at FROM history ORDER BY id")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (path, backend, applied_at) in rows {
+            tmp_conn
+                .execute(
+                    "INSERT INTO history (path, backend, applied_at) VALUES (?1, ?2, ?3)",
+                    params![path, backend, applied_at],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
     }
-    if let Some(be) = flat::last_backend_read(cd)? {
-        conn.execute(
-            "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
-            params![be],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+
+    // Copy state from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT key, value FROM state")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(String, String)> = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (k, v) in rows {
+            tmp_conn
+                .execute(
+                    "INSERT INTO state (key, value) VALUES (?1, ?2)",
+                    params![k, v],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
     }
+
+    // Copy wallpapers from existing DB
+    {
+        let mut stmt = src_conn
+            .prepare("SELECT path, type, ext, backend, size, mtime, resolution, project_type, preview_path, workshop_id, title, we_file, unsupported_reason FROM wallpapers")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let rows: Vec<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+            String,
+        )> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                    row.get(9)?,
+                    row.get(10)?,
+                    row.get(11)?,
+                    row.get(12)?,
+                ))
+            })
+            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (
+            path,
+            typ,
+            ext,
+            backend,
+            size,
+            mtime,
+            resolution,
+            project_type,
+            preview_path,
+            workshop_id,
+            title,
+            we_file,
+            unsupported_reason,
+        ) in rows
+        {
+            tmp_conn
+                .execute(
+                    "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, project_type, preview_path, workshop_id, title, we_file, unsupported_reason)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![path, typ, ext, backend, size, mtime, resolution, project_type, preview_path, workshop_id, title, we_file, unsupported_reason],
+                )
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+
     // Meta
-    conn.execute(
-        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('schema_version', '1')",
-        [],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    conn.execute(
-        "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('migrated_at', ?1)",
-        params![now],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tmp_conn
+        .execute(
+            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('schema_version', '1')",
+            [],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tmp_conn
+        .execute(
+            "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('resynced_at', ?1)",
+            params![now],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
 
-    // Wallpapers — import from library.tsv if present
-    import_library_tsv_into(&conn, cd)?;
-
-    conn.close()
+    drop(src_conn);
+    tmp_conn
+        .close()
         .map_err(|(_, e)| WcError::Sqlite(e.to_string()))?;
 
-    // Verify temp DB before swapping — run the full verify against the temp DB
+    // Verify temp DB before swapping
     let temp_conn = Connection::open(&tmp_db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    // Check all expected tables exist (lightweight structural verify)
     for table in &[
         "config",
         "sources",
@@ -297,6 +402,7 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
         "history",
         "state",
         "db_meta",
+        "wallpapers",
     ] {
         let count: i64 = temp_conn
             .query_row(
@@ -313,18 +419,7 @@ pub fn resync(cd: &ConfigDir) -> Result<(), WcError> {
             )));
         }
     }
-    // Check row counts roughly match flat files
-    let src_count: i64 = temp_conn
-        .query_row("SELECT COUNT(*) FROM sources", [], |row| row.get(0))
-        .unwrap_or(-1);
-    let flat_src = flat::sources_list(cd)?.len() as i64;
-    if src_count != flat_src {
-        std::fs::remove_file(&tmp_db).ok();
-        return Err(WcError::Other(format!(
-            "resync: temp DB sources count ({}) != flat ({}) (original DB preserved)",
-            src_count, flat_src
-        )));
-    }
+    drop(temp_conn);
 
     // Atomic swap
     std::fs::rename(&tmp_db, &db_path).map_err(WcError::Io)?;
@@ -558,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn verify_failed_when_favorites_differ() {
+    fn verify_warns_when_favorites_drift() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -571,8 +666,8 @@ mod tests {
 
         let result = crate::sqlite::verify(&cd).unwrap();
         assert!(
-            matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"favorites".to_string())),
-            "expected Failed containing 'favorites', got: {:?}",
+            matches!(result, crate::sqlite::VerifyResult::OkWithWarnings(ref w) if w.iter().any(|s| s.contains("favorites"))),
+            "favorites drift should be a warning, not an error: {:?}",
             result
         );
     }
@@ -594,7 +689,39 @@ mod tests {
     }
 
     #[test]
-    fn verify_ok_with_warnings_does_not_block_failed() {
+    fn verify_warns_when_history_drifts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        flat::history_add(&cd, "/walls/a.jpg", 100).unwrap();
+        flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
+        flat::sources_add(&cd, "/walls").unwrap();
+
+        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
+
+        // Add a path to SQLite history that is NOT in flat
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
+                rusqlite::params!["/walls/extra.jpg"],
+            )
+            .unwrap();
+        }
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::OkWithWarnings(ref w) if w.iter().any(|s| s.contains("history"))),
+            "history drift should be a warning, not an error: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn verify_fails_on_fts_drift_even_with_config_warnings() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -603,14 +730,30 @@ mod tests {
         wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
-        // Both config drift (warning) and history drift (error).
+        // Insert a wallpaper so there is a real mismatch with corrupted FTS
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
+                 VALUES ('/walls/test.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1', 'Test', '111')",
+                [],
+            )
+            .unwrap();
+            // Corrupt FTS: remove the auto-inserted FTS row to create a count mismatch
+            conn.execute(
+                "INSERT INTO wallpapers_fts(wallpapers_fts) VALUES ('delete-all')",
+                [],
+            )
+            .unwrap();
+        }
+
+        // Config drift (warning) + FTS drift (fatal)
         wc_core::config::write_config_value(&cd.path, "extra_config", "val").unwrap();
-        flat::history_add(&cd, "/walls/extra.jpg", 100).unwrap();
 
         let result = crate::sqlite::verify(&cd).unwrap();
         assert!(
             matches!(result, crate::sqlite::VerifyResult::Failed(_)),
-            "errors should take priority over warnings, got: {:?}",
+            "FTS errors should take priority over config warnings, got: {:?}",
             result
         );
     }
@@ -751,38 +894,6 @@ mod tests {
     }
 
     #[test]
-    fn verify_history_fails_with_truly_missing_path() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cd = ConfigDir {
-            path: tmp.path().join("wallpaper-console"),
-        };
-        cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
-        flat::history_add(&cd, "/walls/a.jpg", 100).unwrap();
-        flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
-        flat::sources_add(&cd, "/walls").unwrap();
-
-        crate::sqlite::migrate_to_sqlite(&cd).unwrap();
-
-        // Add a path to SQLite history that is NOT in flat
-        {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
-            conn.execute(
-                "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
-                rusqlite::params!["/walls/extra.jpg"],
-            )
-            .unwrap();
-        }
-
-        let result = crate::sqlite::verify(&cd).unwrap();
-        assert!(
-            matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
-            "truly extra history path should fail verify, got: {:?}",
-            result
-        );
-    }
-
-    #[test]
     fn export_flat_dedupes_history_so_verify_passes() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
@@ -815,6 +926,109 @@ mod tests {
             !matches!(result, crate::sqlite::VerifyResult::Failed(ref e) if e.contains(&"history".to_string())),
             "export_flat should dedup history so verify passes, got: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn verify_sqlite_only_state_drift_is_warning_not_failed() {
+        // Regression: P1-1 — write favorite/history/current via SQLite only,
+        // leave flat files empty, verify() must return OkWithWarnings, not Failed.
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+
+        // Write data directly to SQLite
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO favorites (path, added_at) VALUES ('/sqlite-only-fav.jpg', '2024-01-01T00:00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES ('/sqlite-only-hist.jpg', 'awww', '2024-01-01T00:00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR REPLACE INTO state (key, value) VALUES ('current', '/sqlite-only-cur.jpg')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let result = crate::sqlite::verify(&cd).unwrap();
+        assert!(
+            matches!(result, crate::sqlite::VerifyResult::OkWithWarnings(_)),
+            "SQLite-only data with empty flat files should be OkWithWarnings, not Failed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn resync_preserves_sqlite_only_data() {
+        // Regression: P1-2 — create data in SQLite only, leave flat files empty,
+        // call resync(), assert SQLite rows are preserved.
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::ensure_sqlite_db(&cd);
+
+        {
+            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            conn.execute(
+                "INSERT INTO sources (path, added_at) VALUES ('/src', '2024-01-01T00:00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO favorites (path, added_at) VALUES ('/fav.jpg', '2024-01-01T00:00:00')",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO history (path, backend, applied_at) VALUES ('/hist.jpg', 'awww', '2024-01-01T00:00:00')",
+                [],
+            )
+            .unwrap();
+        }
+
+        crate::sqlite::resync(&cd).unwrap();
+
+        let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+        let src_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
+            .unwrap();
+        let fav_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM favorites", [], |r| r.get(0))
+            .unwrap();
+        let hist_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(src_count, 1, "sources should be preserved after resync");
+        assert_eq!(fav_count, 1, "favorites should be preserved after resync");
+        assert_eq!(hist_count, 1, "history should be preserved after resync");
+
+        // Flat files should still be empty (resync does not export)
+        let flat_src = flat::sources_list(&cd).unwrap();
+        let flat_fav = flat::favorites_list(&cd).unwrap();
+        let flat_hist = flat::history_list(&cd).unwrap();
+        assert!(
+            flat_src.is_empty(),
+            "flat sources should be empty after SQLite-only resync"
+        );
+        assert!(
+            flat_fav.is_empty(),
+            "flat favorites should be empty after SQLite-only resync"
+        );
+        assert!(
+            flat_hist.is_empty(),
+            "flat history should be empty after SQLite-only resync"
         );
     }
 }

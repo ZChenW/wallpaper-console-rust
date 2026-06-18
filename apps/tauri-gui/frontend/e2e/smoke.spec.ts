@@ -539,10 +539,21 @@ test('Known Settings card content has safe inset from card border', async ({ pag
   expect(descBox.x - cardBox.x).toBeGreaterThanOrEqual(12);
 });
 
+test('settings theme defaults to light label', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const themeSelect = page.locator('.config-row').filter({ hasText: 'Theme' }).locator('select');
+  await expect(themeSelect).toHaveValue('light');
+});
+
 test('settings theme switch applies obsidian warm theme', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('button', { name: 'Settings' }).click();
   const themeSelect = page.locator('.config-row').filter({ hasText: 'Theme' }).locator('select');
   await themeSelect.selectOption('obsidian_warm');
   await expect(page.locator('html')).toHaveAttribute('data-theme', 'obsidian_warm');
+  const bg = await page.evaluate(() =>
+    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
+  );
+  expect(bg).toBe('#241a14');
 });

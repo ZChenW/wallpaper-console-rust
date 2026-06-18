@@ -5,11 +5,14 @@ pub const MPVPAPER_STARTUP_SETTLE_MS: u64 = 700;
 pub const LWE_STARTUP_SETTLE_MS: u64 = 1200;
 pub const AWWW_FALLBACK_SETTLE_MS: u64 = 50;
 
+/// Fallback stage for visual handoff. Only TargetImageInstant is used for
+/// cross-backend (video/scene → image) transitions. TargetPreviewInstant was
+/// removed in the clean-handoff pass and must not be re-added for video/scene
+/// target planners.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FallbackStage {
     None,
     TargetImageInstant,
-    TargetPreviewInstant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -16,9 +16,9 @@ export const ALL_SETTINGS: SettingEntry[] = [
   // ── General ──
   {
     key: 'gui_theme', label: 'Theme', type: 'select',
-    options: ['current', 'obsidian_warm'],
+    options: ['light', 'obsidian_warm'],
     optionLabels: {
-      current: 'Current',
+      light: 'Light',
       obsidian_warm: 'Obsidian Warm',
     },
     category: 'general',
@@ -191,8 +191,11 @@ export function getSettingsByCategoryAndLevel(
 }
 
 export function normalizeConfigValue(key: string, value: string): string {
+  if (key === 'storage_backend') {
+    return 'sqlite';
+  }
   if (key === 'gui_theme') {
-    return value === 'obsidian_warm' ? 'obsidian_warm' : 'current';
+    return value === 'obsidian_warm' ? 'obsidian_warm' : 'light';
   }
   if (key === 'image_backend') {
     if (value === 'mpvpaper') return 'mpvpaper';

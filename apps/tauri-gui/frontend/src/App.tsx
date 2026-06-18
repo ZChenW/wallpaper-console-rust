@@ -1,6 +1,7 @@
 import { lazy, startTransition, Suspense, useCallback, useEffect, useState } from 'react';
 import { api, CommandResult, ApplyRequestDTO } from './api/bridge';
 import { APP_EVENTS } from './events/appEvents';
+import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
 import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
@@ -20,12 +21,19 @@ type View = 'library' | 'favorites' | 'history' | 'sources';
 
 const SettingsView = lazy(() => import('./views/SettingsView'));
 
-function normalizeTheme(value: string | null | undefined): 'current' | 'obsidian_warm' {
-  return value === 'obsidian_warm' ? 'obsidian_warm' : 'current';
+function normalizeTheme(value: string | null | undefined): 'light' | 'obsidian_warm' {
+  if (value === 'obsidian_warm') return 'obsidian_warm';
+  return 'light';
 }
 
 function applyTheme(value: string | null | undefined) {
-  document.documentElement.dataset.theme = normalizeTheme(value);
+  const theme = normalizeTheme(value);
+  document.documentElement.dataset.theme = theme;
+
+  const windowTheme = theme === 'obsidian_warm' ? 'dark' : 'light';
+  void setTauriTheme(windowTheme).catch(() => {
+    // Browser/mock/e2e environments may not have a real Tauri runtime.
+  });
 }
 
 export default function App() {

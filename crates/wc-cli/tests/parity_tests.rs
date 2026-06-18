@@ -9,8 +9,6 @@ fn temp_config() -> (tempfile::TempDir, String) {
     let config_dir = dir.path().to_string_lossy().to_string();
     let wc_dir = format!("{}/wallpaper-console", config_dir);
     std::fs::create_dir_all(&wc_dir).unwrap();
-    // CLI parity tests use flat-file mode to test the original file-based storage paths.
-    std::fs::write(format!("{}/config", wc_dir), "storage_backend=file\n").ok();
     (dir, config_dir)
 }
 
@@ -111,9 +109,11 @@ fn library_json_after_rescan() {
 fn missing_db_sqlite_verify() {
     let (_d, cd) = temp_config();
     let out = rust(&["sqlite-verify"], &cd);
-    assert!(!out.status.success());
-    let e = String::from_utf8_lossy(&out.stderr);
-    assert!(e.contains("not found"), "{}", e);
+    assert!(
+        out.status.success(),
+        "verify should auto-create DB and succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -122,12 +122,7 @@ fn migrate_and_verify() {
     let src = format!("{}/walls", cd);
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
-    let out = rust(&["migrate-to-sqlite"], &cd);
-    assert!(
-        out.status.success(),
-        "migrate: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    // migrate-to-sqlite is optional now — DB is auto-created on startup
     let out = rust(&["sqlite-verify"], &cd);
     assert!(
         out.status.success(),
@@ -144,7 +139,6 @@ fn rescan_writes_sqlite_wallpapers() {
     std::fs::create_dir_all(&sub).unwrap();
     std::fs::write(format!("{}/x.png", sub), b"").unwrap();
     rust(&["add", &walls], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
     assert!(rust(&["rescan"], &cd).status.success());
     // Verify library-json --sqlite works
     let out = rust(&["library-json", "--sqlite"], &cd);
@@ -476,9 +470,7 @@ fn sqlite_export_flat_is_atomic() {
     let src = format!("{}/walls", cd);
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
-    // Enable hybrid mode so config-set mirrors to SQLite
-    rust(&["config-set", "storage_backend", "hybrid"], &cd);
+    // storage_backend is always normalized to sqlite
     rust(&["config-set", "test_key", "test_val"], &cd);
 
     let out = rust(&["sqlite-export-flat"], &cd);
@@ -503,9 +495,8 @@ fn sqlite_verify_fails_on_missing_state_table() {
     let src = format!("{}/walls", cd);
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
 
-    // Drop the state table — verify must fail (SQL error, not silent empty)
+    // Drop the state table — auto-repair recreates it, so verify succeeds
     let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch("DROP TABLE state;").unwrap();
@@ -513,14 +504,8 @@ fn sqlite_verify_fails_on_missing_state_table() {
 
     let out = rust(&["sqlite-verify"], &cd);
     assert!(
-        !out.status.success(),
-        "verify should fail when state table is missing"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("VERIFY OK"),
-        "should not print VERIFY OK: {}",
-        stderr
+        out.status.success(),
+        "verify should auto-repair and succeed"
     );
 }
 
@@ -530,9 +515,8 @@ fn sqlite_export_flat_fails_on_missing_state_table() {
     let src = format!("{}/walls", cd);
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
 
-    // Drop the state table — export must fail
+    // Drop the state table — auto-repair recreates it, so export succeeds
     let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch("DROP TABLE state;").unwrap();
@@ -540,14 +524,9 @@ fn sqlite_export_flat_fails_on_missing_state_table() {
 
     let out = rust(&["sqlite-export-flat"], &cd);
     assert!(
-        !out.status.success(),
-        "export should fail when state table is missing"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !stderr.contains("Export complete"),
-        "should not print Export complete: {}",
-        stderr
+        out.status.success(),
+        "export should auto-repair and succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
 }
 
@@ -617,9 +596,7 @@ fn sqlite_mode_add_fails_when_db_missing() {
 #[test]
 fn sqlite_mode_add_and_sources_roundtrip() {
     let (_d, cd) = temp_config();
-    // Set up sqlite mode with a real DB.
-    rust(&["config-set", "storage_backend", "sqlite"], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
+    // DB is auto-created on startup — no explicit migrate needed.
     let walls = format!("{}/walls", cd);
     std::fs::create_dir_all(&walls).unwrap();
     // Add should succeed.
@@ -642,8 +619,7 @@ fn sqlite_mode_add_and_sources_roundtrip() {
 #[test]
 fn sqlite_mode_remove_source_roundtrip() {
     let (_d, cd) = temp_config();
-    rust(&["config-set", "storage_backend", "sqlite"], &cd);
-    rust(&["migrate-to-sqlite"], &cd);
+    // DB is auto-created on startup — no explicit migrate needed.
     let walls = format!("{}/walls", cd);
     std::fs::create_dir_all(&walls).unwrap();
     rust(&["add", &walls], &cd);
@@ -678,7 +654,6 @@ fn sqlite_debug_read_commands_read_database_directly() {
     rust(&["add", &walls], &cd);
     rust(&["config-set", "alpha", "from-db"], &cd);
     rust(&["favorite-add", &fav], &cd);
-    assert!(rust(&["migrate-to-sqlite"], &cd).status.success());
 
     let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -772,7 +747,6 @@ fn library_page_json_filters_sorts_and_paginates_sqlite() {
     std::fs::write(format!("{}/b.png", walls), b"larger image").unwrap();
     std::fs::write(format!("{}/movie.mp4", walls), b"video").unwrap();
     rust(&["add", &walls], &cd);
-    assert!(rust(&["migrate-to-sqlite"], &cd).status.success());
     assert!(rust(&["rescan"], &cd).status.success());
 
     let out = rust(

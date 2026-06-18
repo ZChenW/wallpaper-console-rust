@@ -79,6 +79,12 @@ impl StorageBackend {
     }
 }
 
+/// Runtime storage is SQLite-only. Legacy values are accepted for migration
+/// compatibility but normalize to SQLite before use.
+pub fn normalize_storage_backend(_raw: &str) -> StorageBackend {
+    StorageBackend::Sqlite
+}
+
 /// Wallpaper Engine project-level metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WallpaperProject {
