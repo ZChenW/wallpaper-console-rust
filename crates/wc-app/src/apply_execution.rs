@@ -185,7 +185,7 @@ mod tests {
     }
 
     #[test]
-    fn scene_apply_target_exposes_preview_fallback_path() {
+    fn scene_apply_target_has_no_preview_fallback_for_clean_handoff() {
         let (tmp, service) = temp_service();
         let project = scene_project_with_preview(tmp.path());
         let request = ApplyRequest {
@@ -194,13 +194,8 @@ mod tests {
             request_id: Some("fb-scene".into()),
         };
         let target = service.resolve_apply_request_target(&request).unwrap();
-        assert!(target.fallback_path.is_some());
-        let fb = target.fallback_path.unwrap();
-        assert!(
-            fb.ends_with("preview.gif"),
-            "fallback should be preview.gif, got: {}",
-            fb
-        );
+        assert!(target.fallback_path.is_none());
+        assert_eq!(target.backend, Backend::LinuxWallpaperEngine);
     }
 
     #[test]

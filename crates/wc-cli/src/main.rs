@@ -274,7 +274,7 @@ fn run_command(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::Restore => {
-            wc_backend::restore(s)?;
+            wc_backend::restore_clean(s)?;
             println!("Wallpaper restored.");
         }
 

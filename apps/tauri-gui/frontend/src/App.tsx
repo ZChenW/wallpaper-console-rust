@@ -1,5 +1,6 @@
-import { lazy, startTransition, Suspense, useCallback, useState } from 'react';
-import { CommandResult, ApplyRequestDTO } from './api/bridge';
+import { lazy, startTransition, Suspense, useCallback, useEffect, useState } from 'react';
+import { api, CommandResult, ApplyRequestDTO } from './api/bridge';
+import { APP_EVENTS } from './events/appEvents';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
 import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
@@ -18,6 +19,14 @@ import { useFeedbackBridge } from './hooks/useFeedbackBridge';
 type View = 'library' | 'favorites' | 'history' | 'sources';
 
 const SettingsView = lazy(() => import('./views/SettingsView'));
+
+function normalizeTheme(value: string | null | undefined): 'current' | 'obsidian_warm' {
+  return value === 'obsidian_warm' ? 'obsidian_warm' : 'current';
+}
+
+function applyTheme(value: string | null | undefined) {
+  document.documentElement.dataset.theme = normalizeTheme(value);
+}
 
 export default function App() {
   return (
@@ -42,6 +51,27 @@ function AppShell() {
   } = useAppState();
 
   useFeedbackBridge(setFeedbackWithAutoDismiss);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.configGet('gui_theme')
+      .then((value) => {
+        if (!cancelled) applyTheme(value);
+      })
+      .catch(() => {
+        if (!cancelled) applyTheme('current');
+      });
+
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent<{ key: string; value: string }>).detail;
+      if (detail?.key === 'gui_theme') applyTheme(detail.value);
+    };
+    window.addEventListener(APP_EVENTS.configChanged, handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener(APP_EVENTS.configChanged, handler);
+    };
+  }, []);
 
   const { applying, handleApply, handleApplyAction } = useApplyQueue({
     refreshStatus,

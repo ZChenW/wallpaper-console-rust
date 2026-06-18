@@ -7,6 +7,8 @@
 - `webkit2gtk-4.1` (Tauri 2)
 - Optional: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer` (thumbnails)
 - Optional: `fzf`, `kitty`/`chafa` (CLI browse preview)
+- Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
+  - Arch/AUR: `yay -S linux-wallpaperengine-git`
 
 ## Priority Hardening Review Rule
 
@@ -72,16 +74,11 @@ From the repository root, the same frontend matrix is available as:
 cargo run -p xtask -- verify frontend
 ```
 
-## Tauri Bundle
+## Developer Bundle Experiments
 
-```bash
-cd apps/tauri-gui/src-tauri
-cargo tauri build --bundles deb,rpm
-```
+The user-facing install path is `./install.sh`, which copies release binaries into the selected prefix. deb/rpm/AUR packaging is not the supported install path for this pass.
 
-Outputs:
-- `target/release/bundle/deb/wallpaper-console-gui-rust_0.1.0_amd64.deb`
-- `target/release/bundle/rpm/wallpaper-console-gui-rust-0.1.0-1.x86_64.rpm`
+Clean handoff policy: cross image/video/scene switching intentionally favors stopping conflicting renderers over using preview fallback layers. A short blank transition is acceptable; stale image or preview persistence is not.
 
 ## Install Test
 
@@ -219,11 +216,7 @@ History and Favorites use server-side pagination (120 items per page) via `histo
 
 ## Performance Baseline
 
-```bash
-SIZES="1000 10000 50000" ./scripts/benchmark_library.sh
-```
-
-This records TSV vs SQLite page/search timings for generated 1k, 10k, and 50k libraries. See [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md) for current numbers and manual GUI profiling notes.
+See [PERFORMANCE_BASELINE.md](PERFORMANCE_BASELINE.md) for benchmark methodology, current numbers, and manual GUI profiling notes.
 
 ## Continuous Integration
 

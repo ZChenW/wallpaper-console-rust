@@ -5,13 +5,26 @@ export interface SettingEntry {
   label: string;
   type: 'select' | 'text' | 'number';
   options?: string[];
+  optionLabels?: Record<string, string>;
   placeholder?: string;
-  category: 'wallpaper' | 'we' | 'library' | 'advanced';
+  category: 'general' | 'wallpaper' | 'we' | 'library' | 'advanced';
   advanced?: boolean;
   description?: string;
 }
 
 export const ALL_SETTINGS: SettingEntry[] = [
+  // ── General ──
+  {
+    key: 'gui_theme', label: 'Theme', type: 'select',
+    options: ['current', 'obsidian_warm'],
+    optionLabels: {
+      current: 'Current',
+      obsidian_warm: 'Obsidian Warm',
+    },
+    category: 'general',
+    description: 'Switch between the current UI palette and a warm Obsidian-style palette.',
+  },
+
   // ── Wallpaper (image/GIF/video backends) ──
   {
     key: 'image_backend', label: 'Image backend', type: 'select',
@@ -178,6 +191,9 @@ export function getSettingsByCategoryAndLevel(
 }
 
 export function normalizeConfigValue(key: string, value: string): string {
+  if (key === 'gui_theme') {
+    return value === 'obsidian_warm' ? 'obsidian_warm' : 'current';
+  }
   if (key === 'image_backend') {
     if (value === 'mpvpaper') return 'mpvpaper';
     return 'awww'; // Legacy swww / unknown values fallback to awww

@@ -8,6 +8,9 @@ export interface GeneralPageProps {
   libraryStatus: LibrarySourceStatusDTO | null;
   weStatus: LinuxWallpaperEngineStatusDTO | null;
   thumbCache: ThumbnailCacheDTO | null;
+  configs: Record<string, string>;
+  saving: string | null;
+  onSet: (key: string, value: string) => Promise<boolean>;
 }
 
 export interface WallpaperPageProps {

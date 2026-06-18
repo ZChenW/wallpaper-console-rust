@@ -261,7 +261,7 @@ pub async fn stop() -> CommandResult {
 #[tauri::command]
 pub async fn restore() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_backend::restore(&s) {
+        Ok(s) => match wc_backend::restore_clean(&s) {
             Ok(()) => ok("Restored wallpaper."),
             Err(e) => fail(e.to_string()),
         },

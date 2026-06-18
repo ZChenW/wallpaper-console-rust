@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# install.sh — build and install wallpaper-console-rust (CLI + Tauri GUI)
+# install.sh — build release binaries and install wallpaper-console-rust (CLI + Tauri GUI)
 # side-by-side with existing Bash/Python versions.
 #
 # Usage:
@@ -85,9 +85,9 @@ RUST_CLI="$(realpath target/release/wallpaper-console-rust)"
 info "Rust CLI built: $RUST_CLI"
 
 # ── Build Tauri GUI ────────────────────────────────────────────────────────
-info "Building Tauri GUI..."
+info "Building Tauri GUI binary..."
 cd "$SCRIPT_DIR/apps/tauri-gui/src-tauri"
-cargo tauri build --bundles deb,rpm
+cargo build --package wallpaper-console-tauri --release
 TAURI_BIN="$(realpath "$SCRIPT_DIR/target/release/wallpaper-console-tauri")"
 info "Tauri GUI built: $TAURI_BIN"
 

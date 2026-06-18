@@ -38,6 +38,16 @@ mpvpaper_output=*
 awww_transition_type=fade
 awww_transition_duration=1
 awww_resize=crop
+wallpaper_transition_fps=60
+linux_wallpaperengine_enabled=on
+linux_wallpaperengine_path=auto
+linux_wallpaperengine_scaling=default
+linux_wallpaperengine_fps=60
+linux_wallpaperengine_muted=off
+linux_wallpaperengine_volume=100
+linux_wallpaperengine_assets_dir=auto
+linux_wallpaperengine_target_mode=auto
+linux_wallpaperengine_target=
 min_wallpaper_width=1280
 min_wallpaper_height=720
 preview_metadata=compact
@@ -45,14 +55,24 @@ gui_thumbnail_mode=cache
 gui_thumbnail_cleanup_days=30
 gui_thumbnail_failure_ttl_secs=900
 gui_debug_logs=off
+gui_theme=current
 storage_backend=sqlite
+open_project_location_mode=ask
+gui_file_manager=auto
+gui_file_manager_custom=
+gui_terminal_file_manager=yazi
+gui_terminal_file_manager_custom=
 ```
+
+`gui_theme` accepts `current` and `obsidian_warm`.
 
 ## SQLite schema
 
-See `create_schema()` in `crates/wc-storage/src/sqlite.rs` for the authoritative DDL.
+See `create_schema()` in `crates/wc-storage/src/sqlite/schema.rs` for the authoritative DDL.
 
 Tables: `db_meta`, `config`, `sources`, `wallpapers`, `favorites`, `history`, `state`
+
+Virtual tables: `wallpapers_fts` (FTS5 index over `path`, `title`, `workshop_id`, `project_type`), kept in sync via insert/delete/update triggers.
 
 The `wallpapers` table includes Wallpaper Engine metadata columns used by the GUI:
 `project_type`, `preview_path`, `workshop_id`, `title`, `we_file`, and `unsupported_reason`.

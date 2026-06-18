@@ -34,13 +34,14 @@ XDG_CONFIG_HOME=$(mktemp -d) wallpaper-console-rust status
 
 | Category | Commands |
 |----------|----------|
-| Wallpaper | `apply`, `browse` / `browse-images` / `browse-gifs` / `browse-videos`, `random` / `random-image` / `random-gif` / `random-video`, `stop`, `status`, `restore` |
+| Wallpaper | `apply`, `browse` / `browse-all` / `browse-images` / `browse-gifs` / `browse-videos`, `random` / `random-all` / `random-image` / `random-gif` / `random-video`, `stop`, `status`, `restore`, `inspect` |
 | Sources | `add`, `remove` (fzf), `remove-source`, `sources`, `steam-workshop`, `validate-sources`, `remove-missing`, `dedupe-sources` |
 | Favorites | `favorite-add`, `favorite-add-current`, `favorites` (fzf), `favorite-random`, `favorite-remove` |
 | History | `history` (fzf), `history-random`, `history-clear` |
 | Search / Sort | `search`, `search-source`, `search-type`, `sort-mtime`, `sort-size`, `sort-name` |
 | Config | `config-get`, `config-set` |
-| Library | `rescan` (incremental, profiled), `library`, `library-count`, `browse-library`, `random-library`, `library-json`, `library-page-json`, `favorites-json`, `history-json`, `inspect` |
+| System | `tui` (stub), `help` |
+| Library | `rescan` (incremental, profiled), `library`, `library-count`, `browse-library`, `random-library`, `library-json`, `library-page-json`, `favorites-json`, `history-json` |
 | SQLite | `migrate-to-sqlite`, `sqlite-verify`, `sqlite-resync`, `sqlite-export-flat`, `sqlite-backup`, `sqlite-restore`, `sqlite-config-get`, `sqlite-sources-list`, `sqlite-favorites-list`, `sqlite-history-list`, `sqlite-current-read`, `sqlite-last-backend-read` |
 
 All browse/search/sort/favorites/history commands use fzf with image/video preview via `__preview__`.
@@ -58,8 +59,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 - Async apply/stop/restore with status bar
 - Scan progress and cancellation with single-scan guard
 - Structured GUI command errors, optional debug logging, and developer performance overlay
-- Dark/light theme support
-- Installable as `.deb`/`.rpm` bundle
+- Installable through the binary-copy `install.sh` path.
 
 ### Architecture
 
@@ -117,22 +117,21 @@ npm run typecheck
 npm run build
 npm run smoke
 
-# Tauri bundle
+# Tauri build
 cd ../src-tauri
-cargo tauri build --bundles deb,rpm
+cargo build --package wallpaper-console-tauri --release
 
 # Install path verification
 cd ../../..
 ./install.sh --build-only
 ./scripts/test_install_build_only.sh
-
-# Library performance baseline
-SIZES="1000 10000 50000" ./scripts/benchmark_library.sh
 ```
 
 See [docs/TAURI_MANUAL_SMOKE_CHECKLIST.md](docs/TAURI_MANUAL_SMOKE_CHECKLIST.md) for manual GUI verification.
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development setup.
 See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable library benchmark commands and current baseline numbers.
+
+Package-manager installs such as AUR are future work; the supported local install path is the binary-copy installer.
 
 ## Prerequisites
 
@@ -144,7 +143,7 @@ See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable 
 - Optional: `linux-wallpaperengine` for Wallpaper Engine scene wallpapers
   - Arch/AUR: `yay -S linux-wallpaperengine-git`
 
-> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired. See [docs/archive/WAILS_ARCHITECTURE.md](docs/archive/WAILS_ARCHITECTURE.md) for background.
+> **Historical note:** The project previously supported a Wails v3 + Go bridge GUI. That implementation has been retired in favor of Tauri 2. See git history for the archived docs.
 
 ## Rollback
 

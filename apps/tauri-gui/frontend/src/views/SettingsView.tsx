@@ -259,6 +259,9 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         libraryStatus={libraryStatus}
         weStatus={weStatus}
         thumbCache={thumbCache}
+        configs={configs}
+        saving={saving}
+        onSet={handleSet}
       />
     ),
     wallpaper: () => (

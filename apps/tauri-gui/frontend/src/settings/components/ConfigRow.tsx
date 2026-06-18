@@ -31,7 +31,7 @@ export default function ConfigRow({ setting, value, saving, onSet }: ConfigRowPr
             disabled={saving}
           >
             {setting.options.map((o) => (
-              <option key={o} value={o}>{o}</option>
+              <option key={o} value={o}>{setting.optionLabels?.[o] ?? o}</option>
             ))}
           </select>
         ) : (
