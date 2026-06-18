@@ -108,7 +108,15 @@ fn run() -> Result<(), String> {
     let args = parse_verify_args(&raw_args)?;
     let repo_root = repo_root();
 
-    let steps: Vec<Step> = match args.suite {
+    for step in steps_for(args.suite) {
+        run_step(&repo_root, step, args.dry_run)?;
+    }
+
+    Ok(())
+}
+
+fn steps_for(suite: VerifySuite) -> Vec<Step> {
+    match suite {
         VerifySuite::Rust => RUST_STEPS.to_vec(),
         VerifySuite::Frontend => FRONTEND_STEPS.to_vec(),
         VerifySuite::Drift => DRIFT_STEPS.to_vec(),
@@ -118,13 +126,7 @@ fn run() -> Result<(), String> {
             .chain(DRIFT_STEPS.iter())
             .copied()
             .collect(),
-    };
-
-    for step in steps {
-        run_step(&repo_root, step, args.dry_run)?;
     }
-
-    Ok(())
 }
 
 fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
@@ -274,6 +276,39 @@ mod tests {
                 dry_run: true,
             }
         );
+    }
+
+    #[test]
+    fn all_steps_run_rust_then_frontend_then_drift() {
+        let steps = steps_for(VerifySuite::All);
+        let names: Vec<&str> = steps.iter().map(|s| s.name).collect();
+        assert_eq!(
+            steps.len(),
+            RUST_STEPS.len() + FRONTEND_STEPS.len() + DRIFT_STEPS.len()
+        );
+        assert_eq!(names.first(), Some(&"Rust format"));
+        assert_eq!(names.last(), Some(&"Runtime/config drift"));
+    }
+
+    #[test]
+    fn steps_for_rust_returns_only_rust_steps() {
+        let steps = steps_for(VerifySuite::Rust);
+        assert_eq!(steps.len(), RUST_STEPS.len());
+        assert_eq!(steps.first().map(|s| s.name), Some("Rust format"));
+    }
+
+    #[test]
+    fn steps_for_frontend_returns_only_frontend_steps() {
+        let steps = steps_for(VerifySuite::Frontend);
+        assert_eq!(steps.len(), FRONTEND_STEPS.len());
+        assert_eq!(steps.first().map(|s| s.name), Some("Frontend typecheck"));
+    }
+
+    #[test]
+    fn steps_for_drift_returns_only_drift_steps() {
+        let steps = steps_for(VerifySuite::Drift);
+        assert_eq!(steps.len(), DRIFT_STEPS.len());
+        assert_eq!(steps.first().map(|s| s.name), Some("Runtime/config drift"));
     }
 
     #[test]
