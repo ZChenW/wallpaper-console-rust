@@ -55,6 +55,7 @@ gui_thumbnail_mode=cache
 gui_thumbnail_cleanup_days=30
 gui_thumbnail_failure_ttl_secs=900
 gui_debug_logs=off
+gui_theme=current
 storage_backend=sqlite
 open_project_location_mode=ask
 gui_file_manager=auto
@@ -62,6 +63,8 @@ gui_file_manager_custom=
 gui_terminal_file_manager=yazi
 gui_terminal_file_manager_custom=
 ```
+
+`gui_theme` accepts `current` and `obsidian_warm`.
 
 ## SQLite schema
 

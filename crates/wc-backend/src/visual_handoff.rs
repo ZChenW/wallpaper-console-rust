@@ -67,43 +67,27 @@ fn plan_awww_handoff(previous: RunningBackend, fallback_path: Option<&str>) -> V
 
 fn plan_mpvpaper_handoff(
     previous: RunningBackend,
-    fallback_path: Option<&str>,
+    _fallback_path: Option<&str>,
 ) -> VisualHandoffPlan {
     match previous {
-        RunningBackend::Mpvpaper => {
-            // video -> video: known limitation, may still black briefly
-            // If fallback_path is available, use preview instant fallback
-            let stage = if fallback_path.is_some() {
-                FallbackStage::TargetPreviewInstant
-            } else {
-                FallbackStage::None
-            };
-            VisualHandoffPlan {
-                fallback_stage: stage,
-                target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: fallback_path.is_some(),
-                stop_fallback_after_target_settle: fallback_path.is_some(),
-            }
-        }
+        RunningBackend::Mpvpaper => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
         RunningBackend::Awww => VisualHandoffPlan {
             fallback_stage: FallbackStage::None,
             target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
             stop_previous_after_fallback: false,
             stop_fallback_after_target_settle: false,
         },
-        RunningBackend::LinuxWallpaperEngine => {
-            let stage = if fallback_path.is_some() {
-                FallbackStage::TargetPreviewInstant
-            } else {
-                FallbackStage::None
-            };
-            VisualHandoffPlan {
-                fallback_stage: stage,
-                target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: false,
-                stop_fallback_after_target_settle: fallback_path.is_some(),
-            }
-        }
+        RunningBackend::LinuxWallpaperEngine => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
         RunningBackend::None | RunningBackend::Unknown | RunningBackend::Unsupported => {
             VisualHandoffPlan {
                 fallback_stage: FallbackStage::None,
@@ -115,34 +99,20 @@ fn plan_mpvpaper_handoff(
     }
 }
 
-fn plan_lwe_handoff(previous: RunningBackend, fallback_path: Option<&str>) -> VisualHandoffPlan {
+fn plan_lwe_handoff(previous: RunningBackend, _fallback_path: Option<&str>) -> VisualHandoffPlan {
     match previous {
-        RunningBackend::LinuxWallpaperEngine => {
-            let stage = if fallback_path.is_some() {
-                FallbackStage::TargetPreviewInstant
-            } else {
-                FallbackStage::None
-            };
-            VisualHandoffPlan {
-                fallback_stage: stage,
-                target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: false,
-                stop_fallback_after_target_settle: fallback_path.is_some(),
-            }
-        }
-        RunningBackend::Awww | RunningBackend::Mpvpaper => {
-            let stage = if fallback_path.is_some() {
-                FallbackStage::TargetPreviewInstant
-            } else {
-                FallbackStage::None
-            };
-            VisualHandoffPlan {
-                fallback_stage: stage,
-                target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: false,
-                stop_fallback_after_target_settle: fallback_path.is_some(),
-            }
-        }
+        RunningBackend::LinuxWallpaperEngine => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
+        RunningBackend::Awww | RunningBackend::Mpvpaper => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
         RunningBackend::None | RunningBackend::Unknown | RunningBackend::Unsupported => {
             VisualHandoffPlan {
                 fallback_stage: FallbackStage::None,
@@ -188,41 +158,42 @@ mod tests {
     }
 
     #[test]
-    fn video_after_image_waits_before_stopping_awww() {
-        let plan = plan_visual_handoff(RunningBackend::Awww, Backend::Mpvpaper, None);
+    fn video_after_image_uses_no_preview_fallback() {
+        let plan = plan_visual_handoff(
+            RunningBackend::Awww,
+            Backend::Mpvpaper,
+            Some("/tmp/preview.gif"),
+        );
         assert_eq!(plan.fallback_stage, FallbackStage::None);
         assert_eq!(plan.target_startup_settle_ms, MPVPAPER_STARTUP_SETTLE_MS);
         assert!(!plan.stop_previous_after_fallback);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]
-    fn scene_after_image_waits_before_stopping_awww() {
-        let plan = plan_visual_handoff(RunningBackend::Awww, Backend::LinuxWallpaperEngine, None);
-        assert_eq!(plan.fallback_stage, FallbackStage::None);
-        assert_eq!(plan.target_startup_settle_ms, LWE_STARTUP_SETTLE_MS);
-        assert!(!plan.stop_previous_after_fallback);
-    }
-
-    #[test]
-    fn scene_with_preview_uses_preview_fallback() {
+    fn scene_after_video_uses_no_preview_fallback() {
         let plan = plan_visual_handoff(
-            RunningBackend::Awww,
+            RunningBackend::Mpvpaper,
             Backend::LinuxWallpaperEngine,
             Some("/tmp/preview.gif"),
         );
-        assert_eq!(plan.fallback_stage, FallbackStage::TargetPreviewInstant);
+        assert_eq!(plan.fallback_stage, FallbackStage::None);
         assert_eq!(plan.target_startup_settle_ms, LWE_STARTUP_SETTLE_MS);
-        assert!(plan.stop_fallback_after_target_settle);
+        assert!(!plan.stop_previous_after_fallback);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]
-    fn video_without_fallback_records_no_fallback_stage() {
-        let plan = plan_visual_handoff(RunningBackend::Mpvpaper, Backend::Mpvpaper, None);
+    fn scene_to_scene_uses_no_preview_fallback() {
+        let plan = plan_visual_handoff(
+            RunningBackend::LinuxWallpaperEngine,
+            Backend::LinuxWallpaperEngine,
+            Some("/tmp/preview.gif"),
+        );
         assert_eq!(plan.fallback_stage, FallbackStage::None);
-        assert_eq!(plan.target_startup_settle_ms, MPVPAPER_STARTUP_SETTLE_MS);
-        // Known limitation: video -> video without fallback may still black briefly.
-        // stop_previous_after_fallback is false because there is no fallback.
+        assert_eq!(plan.target_startup_settle_ms, LWE_STARTUP_SETTLE_MS);
         assert!(!plan.stop_previous_after_fallback);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]
@@ -240,10 +211,10 @@ mod tests {
             Backend::LinuxWallpaperEngine,
             Some("/tmp/preview.gif"),
         );
-        assert_eq!(plan.fallback_stage, FallbackStage::TargetPreviewInstant);
+        assert_eq!(plan.fallback_stage, FallbackStage::None);
         assert_eq!(plan.target_startup_settle_ms, LWE_STARTUP_SETTLE_MS);
         assert!(!plan.stop_previous_after_fallback);
-        assert!(plan.stop_fallback_after_target_settle);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]
@@ -253,8 +224,8 @@ mod tests {
             Backend::LinuxWallpaperEngine,
             Some("/tmp/preview.gif"),
         );
-        assert_eq!(plan.fallback_stage, FallbackStage::TargetPreviewInstant);
-        assert!(plan.stop_fallback_after_target_settle);
+        assert_eq!(plan.fallback_stage, FallbackStage::None);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]
@@ -264,8 +235,8 @@ mod tests {
             Backend::Mpvpaper,
             Some("/tmp/preview.gif"),
         );
-        assert_eq!(plan.fallback_stage, FallbackStage::TargetPreviewInstant);
-        assert!(plan.stop_fallback_after_target_settle);
+        assert_eq!(plan.fallback_stage, FallbackStage::None);
+        assert!(!plan.stop_fallback_after_target_settle);
     }
 
     #[test]

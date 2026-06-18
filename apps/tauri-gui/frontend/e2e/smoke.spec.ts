@@ -149,16 +149,13 @@ test('settings disables database actions while diagnostics export is running', a
   await expect(page.getByRole('button', { name: 'Backup Database' })).toBeEnabled();
 });
 
-test('batch add favorites does not apply to unsupported items', async ({ page }) => {
+test('single click does not show batch selection toolbar', async ({ page }) => {
   await page.goto('/');
-  // Select the WE Web wallpaper
-  const weWebCard = page.locator('.wallpaper-card').filter({ hasText: 'WE Web' }).first();
-  await weWebCard.click({ modifiers: ['Control'] });
-  await expect(page.getByText('1 selected')).toBeVisible();
-  // Batch add to favorites should handle unsupported paths correctly
-  await page.getByRole('button', { name: 'Add to Favorites' }).click();
-  // Selection should be cleared after batch operation
-  await expect(page.getByText('1 selected')).toHaveCount(0);
+  const card = page.locator('.wallpaper-card').first();
+  await card.click();
+  await expect(page.getByText(/selected$/)).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Add to Favorites' })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Clear' })).toHaveCount(0);
 });
 
 test('context menu action shows error feedback on failure', async ({ page }) => {
@@ -540,4 +537,12 @@ test('Known Settings card content has safe inset from card border', async ({ pag
 
   expect(descBox.y - cardBox.y).toBeGreaterThanOrEqual(12);
   expect(descBox.x - cardBox.x).toBeGreaterThanOrEqual(12);
+});
+
+test('settings theme switch applies obsidian warm theme', async ({ page }) => {
+  await page.goto('/');
+  await page.getByRole('button', { name: 'Settings' }).click();
+  const themeSelect = page.locator('.config-row').filter({ hasText: 'Theme' }).locator('select');
+  await themeSelect.selectOption('obsidian_warm');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'obsidian_warm');
 });

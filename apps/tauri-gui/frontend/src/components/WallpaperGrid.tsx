@@ -1,5 +1,4 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { useGridSelection } from '../hooks/useGridSelection';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import { WallpaperDTO } from '../api/bridge';
@@ -17,8 +16,6 @@ interface Props {
   contextActions?: ContextAction[];
   buildContextActions?: (entry: WallpaperDTO) => ContextAction[];
   active?: boolean;
-  selectedPaths?: Set<string>;
-  onSelectionChange?: (paths: Set<string>) => void;
 }
 
 export interface ContextAction {
@@ -39,8 +36,6 @@ export default function WallpaperGrid({
   contextActions = [],
   buildContextActions,
   active = true,
-  selectedPaths,
-  onSelectionChange,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -108,25 +103,6 @@ export default function WallpaperGrid({
     );
   }, [entries, colCount, virtualizer.range, enqueue, active]);
 
-  const entryPaths = useMemo(() => entries.map((entry) => entry.path), [entries]);
-  const { clearSelection, handleClick: handleSelectionClick } = useGridSelection({
-    paths: entryPaths,
-    selectedPaths,
-    onSelectionChange,
-  });
-
-  // Keyboard: Escape clears selection
-  useEffect(() => {
-    if (!onSelectionChange) return;
-    const handler = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
-        clearSelection();
-      }
-    };
-    window.addEventListener('keydown', handler);
-    return () => window.removeEventListener('keydown', handler);
-  }, [clearSelection]);
-
   const handleContextMenu = (e: React.MouseEvent, path: string) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, path });
@@ -145,10 +121,6 @@ export default function WallpaperGrid({
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
   const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
-
-  const handleCardClick = (e: React.MouseEvent, entry: WallpaperDTO) => {
-    handleSelectionClick(e, entry.path);
-  };
 
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
@@ -178,13 +150,11 @@ export default function WallpaperGrid({
               }}
             >
               {rowEntries.map((e) => {
-                const selected = selectedPaths?.has(e.path) ?? false;
                 return (
                   <div
                     key={e.path}
-                    className={`wallpaper-card${applying ? ' disabled' : ''}${selected ? ' selected' : ''}`}
+                    className={`wallpaper-card${applying ? ' disabled' : ''}`}
                     onContextMenu={(ev) => handleContextMenu(ev, e.path)}
-                    onClick={(ev) => handleCardClick(ev, e)}
                     onDoubleClick={() => handleDoubleClick(e)}
                     title={e.path}
                   >

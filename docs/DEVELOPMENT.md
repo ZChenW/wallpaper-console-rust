@@ -74,16 +74,11 @@ From the repository root, the same frontend matrix is available as:
 cargo run -p xtask -- verify frontend
 ```
 
-## Tauri Bundle
+## Developer Bundle Experiments
 
-```bash
-cd apps/tauri-gui/src-tauri
-cargo tauri build --bundles deb,rpm
-```
+The user-facing install path is `./install.sh`, which copies release binaries into the selected prefix. deb/rpm/AUR packaging is not the supported install path for this pass.
 
-Outputs:
-- `target/release/bundle/deb/wallpaper-console-gui-rust_0.1.0_amd64.deb`
-- `target/release/bundle/rpm/wallpaper-console-gui-rust-0.1.0-1.x86_64.rpm`
+Clean handoff policy: cross image/video/scene switching intentionally favors stopping conflicting renderers over using preview fallback layers. A short blank transition is acceptable; stale image or preview persistence is not.
 
 ## Install Test
 

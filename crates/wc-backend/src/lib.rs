@@ -49,6 +49,72 @@ pub fn stop_non_lwe_backends(_s: &StorageApi) {
 
 use lifecycle::StopPlan;
 
+/// Clean restore: stop all backends first, then reapply current wallpaper.
+pub fn restore_clean(s: &StorageApi) -> Result<(), WcError> {
+    let mut runtime = runtime::SystemBackendRuntime;
+    restore_clean_with_runtime(s, &mut runtime)
+}
+
+fn restore_clean_with_runtime(
+    s: &StorageApi,
+    runtime: &mut dyn runtime::BackendRuntime,
+) -> Result<(), WcError> {
+    let current = s
+        .current_read()?
+        .ok_or_else(|| WcError::Other("no previous wallpaper to restore".into()))?;
+    let p = std::path::Path::new(&current);
+    if !p.is_file() && !p.is_dir() {
+        return Err(WcError::WallpaperMissing(p.to_path_buf()));
+    }
+
+    let entry = wc_scan::make_entry(&current)
+        .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
+    let backend = backend_for_restore_entry(s, &entry);
+    let fallback_path = fallback_for_restore_entry(&entry, p);
+
+    execute_stop_plan_with_runtime(s, lifecycle::StopPlan::All, runtime)?;
+    apply_wallpaper_with_runtime(s, &current, backend, fallback_path.as_deref(), runtime)
+}
+
+fn backend_for_restore_entry(s: &StorageApi, entry: &wc_core::types::WallpaperEntry) -> Backend {
+    match entry.file_type {
+        wc_core::types::FileType::Image => {
+            match wc_core::config::normalize_image_backend(&s.config_get("image_backend", "awww")) {
+                "mpvpaper" => Backend::Mpvpaper,
+                _ => Backend::Awww,
+            }
+        }
+        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
+            "mpvpaper" => Backend::Mpvpaper,
+            _ => Backend::Awww,
+        },
+        wc_core::types::FileType::Video => match s.config_get("video_backend", "mpvpaper").as_str()
+        {
+            "awww" => Backend::Awww,
+            _ => Backend::Mpvpaper,
+        },
+        wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
+        wc_core::types::FileType::WeWeb | wc_core::types::FileType::WeApplication => {
+            Backend::Unsupported
+        }
+    }
+}
+
+fn fallback_for_restore_entry(
+    entry: &wc_core::types::WallpaperEntry,
+    _path: &std::path::Path,
+) -> Option<String> {
+    match entry.file_type {
+        wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
+            Some(entry.path.to_string())
+        }
+        wc_core::types::FileType::Video
+        | wc_core::types::FileType::WeScene
+        | wc_core::types::FileType::WeWeb
+        | wc_core::types::FileType::WeApplication => None,
+    }
+}
+
 fn execute_stop_plan_with_runtime(
     s: &StorageApi,
     plan: lifecycle::StopPlan,
@@ -341,46 +407,7 @@ fn write_debug_handoff_log(
 
 /// Restore the last wallpaper.
 pub fn restore(s: &StorageApi) -> Result<(), WcError> {
-    let current = s
-        .current_read()?
-        .ok_or_else(|| WcError::Other("no previous wallpaper to restore".into()))?;
-    let p = std::path::Path::new(&current);
-    if !p.is_file() && !p.is_dir() {
-        return Err(WcError::WallpaperMissing(p.to_path_buf()));
-    }
-    let entry = wc_scan::make_entry(&current)
-        .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    let raw = s.config_get("image_backend", "awww");
-    let backend = match entry.file_type {
-        wc_core::types::FileType::Image => match wc_core::config::normalize_image_backend(&raw) {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Video => {
-            match s.config_get("video_backend", "mpvpaper").as_str() {
-                "awww" => Backend::Awww,
-                _ => Backend::Mpvpaper,
-            }
-        }
-        wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb => Backend::Unsupported,
-        wc_core::types::FileType::WeApplication => Backend::Unsupported,
-    };
-
-    let fallback_path: Option<String> = match entry.file_type {
-        wc_core::types::FileType::Image | wc_core::types::FileType::Gif => Some(current.clone()),
-        wc_core::types::FileType::Video => None,
-        wc_core::types::FileType::WeScene => {
-            wc_scan::read_we_project_info(p).and_then(|info| info.preview_path)
-        }
-        wc_core::types::FileType::WeWeb | wc_core::types::FileType::WeApplication => None,
-    };
-
-    apply_wallpaper(s, &current, backend, fallback_path.as_deref())
+    restore_clean(s)
 }
 
 pub(crate) fn is_awww_daemon_running(user: &str) -> bool {
@@ -721,8 +748,8 @@ mod tests {
     #[test]
     fn stop_plan_mpvpaper_handoff_depends_on_previous_backend() {
         let plan_awww = lifecycle::plan_apply_lifecycle("awww", Backend::Mpvpaper);
-        assert_eq!(plan_awww.pre_stop, StopPlan::None);
-        assert_eq!(plan_awww.post_success_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan_awww.pre_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan_awww.post_success_stop, StopPlan::None);
 
         let plan_mpv = lifecycle::plan_apply_lifecycle("mpvpaper", Backend::Mpvpaper);
         assert_eq!(plan_mpv.pre_stop, StopPlan::MpvpaperOnly);
@@ -1137,7 +1164,11 @@ mod tests {
         std::fs::write(&img, b"jpg").unwrap();
         s.last_backend_write("mpvpaper").unwrap();
 
-        let mut rt = FakeRuntime::default();
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
         apply_wallpaper_with_runtime(
             &s,
             &img.to_string_lossy(),
@@ -1160,7 +1191,11 @@ mod tests {
         let img = tmp.path().join("target.jpg");
         std::fs::write(&img, b"jpg").unwrap();
 
-        let mut rt = FakeRuntime::default();
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
         apply_wallpaper_with_runtime(
             &s,
             &img.to_string_lossy(),
@@ -1185,25 +1220,43 @@ mod tests {
         command_output_count: usize,
         command_status_count: usize,
         clear_awww_state_hint_count: usize,
+        command_output_success: bool,
+        command_status_success: bool,
+        command_output_programs: Vec<String>,
+        command_status_programs: Vec<String>,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
         fn command_output(
             &mut self,
-            _command: &mut std::process::Command,
+            command: &mut std::process::Command,
         ) -> Result<std::process::Output, WcError> {
             self.command_output_count += 1;
-            std::process::Command::new("true")
+            self.command_output_programs
+                .push(command.get_program().to_string_lossy().to_string());
+            let program = if self.command_output_success {
+                "true"
+            } else {
+                "false"
+            };
+            std::process::Command::new(program)
                 .output()
                 .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
         }
 
         fn command_status(
             &mut self,
-            _command: &mut std::process::Command,
+            command: &mut std::process::Command,
         ) -> Result<std::process::ExitStatus, WcError> {
             self.command_status_count += 1;
-            std::process::Command::new("true")
+            self.command_status_programs
+                .push(command.get_program().to_string_lossy().to_string());
+            let program = if self.command_status_success {
+                "true"
+            } else {
+                "false"
+            };
+            std::process::Command::new(program)
                 .status()
                 .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
         }
@@ -1301,7 +1354,11 @@ mod tests {
         let img = tmp.path().join("test.png");
         std::fs::write(&img, b"").unwrap();
 
-        let mut rt = FakeRuntime::default();
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
         let _result = apply_wallpaper_with_runtime(
             &s,
             &img.to_string_lossy(),
@@ -1330,7 +1387,11 @@ mod tests {
         let img = tmp.path().join("test.png");
         std::fs::write(&img, b"").unwrap();
 
-        let mut rt = FakeRuntime::default();
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
         let _result = apply_wallpaper_with_runtime(
             &s,
             &img.to_string_lossy(),
@@ -1413,5 +1474,163 @@ mod tests {
 
         assert!(msg.is_none());
         assert_eq!(rt.stop_awww_count, 0);
+    }
+
+    #[test]
+    fn restore_clean_stops_all_before_reapplying_current_image() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("current.png");
+        std::fs::write(&img, b"png").unwrap();
+        s.current_write(&img.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+
+        restore_clean_with_runtime(&s, &mut rt).unwrap();
+
+        assert_eq!(rt.stop_awww_count, 1, "clean restore must stop awww");
+        assert!(
+            rt.stop_mpvpaper_count >= 1,
+            "clean restore must stop mpvpaper"
+        );
+        assert_eq!(rt.stop_lwe_count, 1, "clean restore must stop LWE");
+        assert!(
+            rt.command_output_programs.iter().any(|p| p == "awww"),
+            "restore should apply image through awww"
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(img.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
+    }
+
+    #[test]
+    fn restore_clean_failure_preserves_previous_state() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("current.png");
+        std::fs::write(&img, b"png").unwrap();
+        s.current_write(&img.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&img.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: false,
+            command_status_success: true,
+            ..Default::default()
+        };
+
+        let err = restore_clean_with_runtime(&s, &mut rt).unwrap_err();
+        assert!(
+            err.to_string().contains("awww") || err.to_string().contains("false"),
+            "error should mention awww failure: {}",
+            err
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(img.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+    }
+
+    #[test]
+    fn video_after_image_stops_awww_before_starting_mpvpaper_without_fallback() {
+        let (tmp, s) = temp_storage();
+        let video = tmp.path().join("next.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        s.last_backend_write("awww").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+
+        apply_wallpaper_with_runtime(
+            &s,
+            &video.to_string_lossy(),
+            Backend::Mpvpaper,
+            Some("/tmp/should-not-be-used.gif"),
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(rt.stop_awww_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(
+            rt.command_output_count, 0,
+            "video target must not use awww fallback command_output"
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn scene_after_video_stops_mpvpaper_before_lwe_without_preview_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        let scene = tmp
+            .path()
+            .join("steamapps/workshop/content/431960/2651567796");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","workshopid":"2651567796"}"#,
+        )
+        .unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+
+        let bin = tmp.path().join("fake-linux-wallpaperengine");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        apply_wallpaper_with_runtime(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            Some("/tmp/should-not-be-used.gif"),
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(
+            rt.command_output_count, 0,
+            "scene target must not use preview fallback command_output"
+        );
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(scene.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            s.last_backend_read().unwrap().as_deref(),
+            Some(crate::LWE_BACKEND_NAME)
+        );
+
+        let pid = s.config_get("linux_wallpaperengine_pid", "");
+        if let Ok(pid) = pid.parse::<i32>() {
+            let _ = std::process::Command::new("kill")
+                .args(["-TERM", &format!("-{}", pid)])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+        }
     }
 }

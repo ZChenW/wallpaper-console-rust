@@ -30,6 +30,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_thumbnail_cleanup_days", "30"),
     ("gui_thumbnail_failure_ttl_secs", "900"),
     ("gui_debug_logs", "off"),
+    ("gui_theme", "current"),
     ("storage_backend", "sqlite"),
     ("open_project_location_mode", "ask"),
     ("gui_file_manager", "auto"),
@@ -274,6 +275,15 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains("gif_backend=awww\nimage_backend=awww\n"));
         assert!(first.ends_with("z_custom=last\n"));
+    }
+
+    #[test]
+    fn default_config_includes_gui_theme() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("gui_theme").map(|s| s.as_str()),
+            Some("current")
+        );
     }
 
     #[test]

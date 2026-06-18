@@ -236,13 +236,12 @@ app.asset_protocol_scope()
 
 ```bash
 cd apps/tauri-gui/src-tauri
-cargo tauri build --bundles deb,rpm
+cargo build --package wallpaper-console-tauri --release
 ```
 
 Outputs:
-- `target/release/bundle/deb/wallpaper-console-gui-rust_0.1.0_amd64.deb`
-- `target/release/bundle/rpm/wallpaper-console-gui-rust-0.1.0-1.x86_64.rpm`
 - Binary: `target/release/wallpaper-console-tauri`
+- Installed GUI command: `wallpaper-console-gui-rust`
 
 ## Prerequisites
 

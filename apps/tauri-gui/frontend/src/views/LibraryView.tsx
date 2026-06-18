@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Search, Filter, X } from 'lucide-react';
+import { Search } from 'lucide-react';
 import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid from '../components/WallpaperGrid';
@@ -27,7 +27,6 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
   const [filter, setFilter] = useState<FilterType>('all');
   const [sort, setSort] = useState<SortMode>('newest');
   const { libraryVersion, invalidateLibrary } = useAppState();
-  const [selectedPaths, setSelectedPaths] = useState<Set<string>>(new Set());
   const [openLocDialog, setOpenLocDialog] = useState<{ path: string } | null>(null);
 
   useEffect(() => {
@@ -81,28 +80,6 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     }
   }, [openLocDialog]);
 
-  const handleBatchAddFavorites = useCallback(async () => {
-    if (selectedPaths.size === 0) return;
-    const paths = [...selectedPaths];
-    let success = 0;
-    let fail = 0;
-    for (let i = 0; i < paths.length; i += 4) {
-      const batch = paths.slice(i, i + 4);
-      const results = await Promise.allSettled(batch.map((p) => api.favoriteAdd(p)));
-      for (const r of results) {
-        if (r.status === 'fulfilled' && r.value.success) success++;
-        else fail++;
-      }
-    }
-    invalidateFavoritesCache();
-    setSelectedPaths(new Set());
-    if (fail === 0) {
-      emitFeedback({ state: 'success', label: 'Batch add', detail: `Added ${success} to favorites.` });
-    } else {
-      emitFeedback({ state: 'warning', label: 'Batch add', detail: `Added ${success} to favorites. ${fail} failed.` });
-    }
-  }, [selectedPaths]);
-
   const { buildContextActions: buildBaseActions } = useLibraryEntryActions({
     onApplyAction,
     invalidate: () => invalidateLibrary(),
@@ -128,17 +105,6 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
       <div className="view-header">
         <h2>Library</h2>
         <div className="view-controls">
-          {selectedPaths.size > 0 && (
-            <>
-              <span className="selection-count">{selectedPaths.size} selected</span>
-              <button className="btn small" onClick={handleBatchAddFavorites}>
-                Add to Favorites
-              </button>
-              <button className="btn small" onClick={() => setSelectedPaths(new Set())}>
-                <X size={14} /> Clear
-              </button>
-            </>
-          )}
           <div className="search-box">
             <Search size={14} />
             <input
@@ -177,8 +143,6 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
           emptyText="Library is empty. Add sources or scan Wallpaper Engine."
           buildContextActions={buildContextActions}
           active={active}
-          selectedPaths={selectedPaths}
-          onSelectionChange={setSelectedPaths}
         />
       )}
       {!loading && entries.length < total && (

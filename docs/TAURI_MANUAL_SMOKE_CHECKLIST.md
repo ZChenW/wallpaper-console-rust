@@ -1,9 +1,8 @@
 # Tauri Manual Smoke Checklist
 
-Run after `./install.sh` or after installing a `.deb` / `.rpm` bundle.
+Run after `./install.sh` or `./install.sh --build-only`.
 
-Do not use `cargo build --release -p wallpaper-console-tauri` as the release GUI acceptance build.
-That command builds only the Rust side. Use `./install.sh --build-only` or `cargo tauri build`
+Use `./install.sh --build-only` or `cargo build --package wallpaper-console-tauri --release`
 so Tauri runs the frontend build and release asset packaging path.
 
 ## Evidence Capture
@@ -101,3 +100,21 @@ Use the checklist below from an interactive desktop session.
 - Video -> scene: brief wait is acceptable; long black screen is not.
 - Scene -> image/video: old scene should disappear only after target backend has started.
 - Failed scene apply: current state should remain the previous wallpaper.
+
+### Cross-type switching
+
+- [ ] Image → video → scene → video: confirm no old image or preview remains after the target starts.
+- [ ] Scene → video: old scene should stop before video starts; brief blank is acceptable.
+
+### Reboot / login restore
+
+- [ ] With `current` set to a scene project such as `/home/chakew/.local/share/Steam/steamapps/workshop/content/431960/2651567796`, confirm no unrelated project such as `3558034522` appears before the target.
+
+### Theme
+
+- [ ] Settings → General → Theme: switch between Current and Obsidian Warm; confirm the whole shell changes without text overlap.
+
+### Library click
+
+- [ ] Single-click a card; confirm no `selected/Add to Favorites/Clear` toolbar appears.
+- [ ] Right-click still shows context actions.

@@ -63,13 +63,19 @@ pub fn pre_stop_plan(previous: RunningBackend, target: Backend) -> StopPlan {
     match target {
         Backend::Awww => StopPlan::None,
         Backend::Mpvpaper => match previous {
+            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
             RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
+            RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
             RunningBackend::None => StopPlan::All,
-            _ => StopPlan::None,
+            RunningBackend::Unsupported | RunningBackend::Unknown => StopPlan::None,
         },
         Backend::LinuxWallpaperEngine => match previous {
+            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
+            RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
             RunningBackend::LinuxWallpaperEngine => StopPlan::NonLwe,
-            _ => StopPlan::None,
+            RunningBackend::None | RunningBackend::Unsupported | RunningBackend::Unknown => {
+                StopPlan::None
+            }
         },
         Backend::Unsupported => StopPlan::All,
     }
@@ -85,22 +91,8 @@ pub fn post_success_stop_plan(previous: RunningBackend, target: Backend) -> Stop
                 StopPlan::None
             }
         },
-        Backend::Mpvpaper => match previous {
-            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
-            RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
-            RunningBackend::Mpvpaper
-            | RunningBackend::None
-            | RunningBackend::Unsupported
-            | RunningBackend::Unknown => StopPlan::None,
-        },
-        Backend::LinuxWallpaperEngine => match previous {
-            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
-            RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
-            RunningBackend::LinuxWallpaperEngine
-            | RunningBackend::None
-            | RunningBackend::Unsupported
-            | RunningBackend::Unknown => StopPlan::None,
-        },
+        Backend::Mpvpaper => StopPlan::None,
+        Backend::LinuxWallpaperEngine => StopPlan::None,
         Backend::Unsupported => StopPlan::None,
     }
 }
@@ -147,30 +139,24 @@ mod tests {
     }
 
     #[test]
-    fn video_after_image_keeps_old_image_until_new_video_succeeds_then_stops_image() {
+    fn video_after_image_stops_old_image_before_new_video() {
         let plan = plan_apply_lifecycle("awww", Backend::Mpvpaper);
-        assert_eq!(plan.pre_stop, StopPlan::None);
-        assert_eq!(
-            plan.post_success_settle_ms,
-            MPVPAPER_CROSS_BACKEND_SETTLE_MS
-        );
-        assert_eq!(plan.post_success_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan.pre_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan.post_success_stop, StopPlan::None);
     }
 
     #[test]
-    fn scene_after_image_keeps_old_image_until_scene_survives_then_stops_image() {
+    fn scene_after_image_stops_old_image_before_scene() {
         let plan = plan_apply_lifecycle("awww", Backend::LinuxWallpaperEngine);
-        assert_eq!(plan.pre_stop, StopPlan::None);
-        assert_eq!(plan.post_success_settle_ms, LWE_CROSS_BACKEND_SETTLE_MS);
-        assert_eq!(plan.post_success_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan.pre_stop, StopPlan::AwwwDaemonOnly);
+        assert_eq!(plan.post_success_stop, StopPlan::None);
     }
 
     #[test]
-    fn scene_after_video_keeps_old_video_until_scene_survives_then_stops_video() {
+    fn scene_after_video_stops_old_video_before_scene() {
         let plan = plan_apply_lifecycle("mpvpaper", Backend::LinuxWallpaperEngine);
-        assert_eq!(plan.pre_stop, StopPlan::None);
-        assert_eq!(plan.post_success_settle_ms, LWE_CROSS_BACKEND_SETTLE_MS);
-        assert_eq!(plan.post_success_stop, StopPlan::MpvpaperOnly);
+        assert_eq!(plan.pre_stop, StopPlan::MpvpaperOnly);
+        assert_eq!(plan.post_success_stop, StopPlan::None);
     }
 
     #[test]

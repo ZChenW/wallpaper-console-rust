@@ -59,7 +59,7 @@ All browse/search/sort/favorites/history commands use fzf with image/video previ
 - Async apply/stop/restore with status bar
 - Scan progress and cancellation with single-scan guard
 - Structured GUI command errors, optional debug logging, and developer performance overlay
-- Installable as `.deb`/`.rpm` bundle
+- Installable through the binary-copy `install.sh` path.
 
 ### Architecture
 
@@ -117,9 +117,9 @@ npm run typecheck
 npm run build
 npm run smoke
 
-# Tauri bundle
+# Tauri build
 cd ../src-tauri
-cargo tauri build --bundles deb,rpm
+cargo build --package wallpaper-console-tauri --release
 
 # Install path verification
 cd ../../..
@@ -130,6 +130,8 @@ cd ../../..
 See [docs/TAURI_MANUAL_SMOKE_CHECKLIST.md](docs/TAURI_MANUAL_SMOKE_CHECKLIST.md) for manual GUI verification.
 See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for full development setup.
 See [docs/PERFORMANCE_BASELINE.md](docs/PERFORMANCE_BASELINE.md) for repeatable library benchmark commands and current baseline numbers.
+
+Package-manager installs such as AUR are future work; the supported local install path is the binary-copy installer.
 
 ## Prerequisites
 

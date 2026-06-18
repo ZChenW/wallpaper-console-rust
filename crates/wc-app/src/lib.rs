@@ -183,18 +183,9 @@ impl AppService {
 }
 
 fn resolve_fallback(target: &ApplyTarget) -> Option<String> {
-    let path = std::path::Path::new(&target.resolved_path);
     match target.file_type {
         FileType::Image | FileType::Gif => Some(target.resolved_path.clone()),
-        FileType::Video => None,
-        FileType::WeScene => {
-            if let Some(info) = wc_scan::read_we_project_info(path) {
-                info.preview_path
-            } else {
-                None
-            }
-        }
-        FileType::WeWeb | FileType::WeApplication => None,
+        FileType::Video | FileType::WeScene | FileType::WeWeb | FileType::WeApplication => None,
     }
 }
 
