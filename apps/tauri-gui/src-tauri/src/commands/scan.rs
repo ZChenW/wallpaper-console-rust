@@ -27,6 +27,27 @@ fn scan_state() -> &'static Mutex<ScanProgressDto> {
     })
 }
 
+pub(crate) fn current_scan_progress_snapshot() -> ScanProgressDto {
+    match scan_state().lock() {
+        Ok(state) => state.clone(),
+        Err(_) => ScanProgressDto {
+            running: false,
+            stage: "idle".into(),
+            scanned: 0,
+            total_hint: None,
+            reused_metadata: 0,
+            probed_metadata: 0,
+            inserted_sqlite: 0,
+            staged: 0,
+            skipped: 0,
+            metadata_errors: 0,
+            current_path: None,
+            cancel_requested: false,
+            error: None,
+        },
+    }
+}
+
 pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
     let mut state = scan_state().lock().map_err(|e| e.to_string())?;
     if state.running {
@@ -307,6 +328,18 @@ mod tests {
         assert_eq!(state.staged, 0);
         assert_eq!(state.skipped, 0);
         assert_eq!(state.metadata_errors, 0);
+    }
+
+    #[test]
+    fn current_scan_progress_snapshot_returns_idle_state() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        let snap = current_scan_progress_snapshot();
+        assert!(!snap.running, "idle snapshot should not be running");
+        assert_eq!(snap.stage, "idle");
+        assert_eq!(snap.scanned, 0);
+        assert_eq!(snap.staged, 0);
+        assert_eq!(snap.skipped, 0);
     }
 
     #[test]
