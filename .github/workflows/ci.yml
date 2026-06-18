@@ -84,3 +84,6 @@ jobs:
 
       - name: Verify runtime/config drift
         run: ./scripts/check_runtime_config_drift.sh
+
+      - name: Verify install contract
+        run: ./scripts/test_install_contract.sh

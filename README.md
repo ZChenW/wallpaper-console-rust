@@ -37,6 +37,12 @@ Build and install:
 wallpaper-console-gui-rust
 ```
 
+Installed commands:
+
+- `wallpaper-console-gui-rust` opens the Tauri GUI.
+- `wallpaper-console-rust restore` restores the last wallpaper from startup
+  hooks or scripts.
+
 Build without installing:
 
 ```bash
@@ -58,6 +64,34 @@ Uninstall files created by this installer:
 
 The installer does not modify the older Bash/Python commands:
 `wallpaper-console` and `wallpaper-console-gui`.
+
+## Niri
+
+Use absolute paths in `~/.config/niri/config.kdl`, because compositor sessions
+do not always inherit the same `PATH` as your shell.
+
+Startup restore:
+
+```kdl
+spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore"
+```
+
+Launch the GUI:
+
+```kdl
+Mod+Shift+0 hotkey-overlay-title="Open Wallpaper Console" {
+    spawn "/home/USER/.local/bin/wallpaper-console-gui-rust"
+}
+```
+
+Open the GUI as floating:
+
+```kdl
+window-rule {
+    match app-id="wallpaper-console-gui-rust"
+    open-floating true
+}
+```
 
 ## Development
 
@@ -90,6 +124,7 @@ Install-path verification:
 ```bash
 ./install.sh --build-only
 ./scripts/test_install_build_only.sh
+./scripts/test_install_contract.sh
 ```
 
 Manual frontend commands:
@@ -125,6 +160,9 @@ Important boundaries:
 - Heavy filesystem, scan, thumbnail, SQLite, and backend work runs off the
   WebView thread.
 - `xtask` is the shared local and CI verification entrypoint.
+- Installed GUI launches through a small wrapper that sets
+  `WEBKIT_DISABLE_DMABUF_RENDERER=1`, avoiding blank WebKitGTK windows on
+  affected Wayland compositors.
 
 ## Runtime Notes
 
