@@ -8,3 +8,6 @@ apps/tauri-gui/frontend/dist-mock/
 apps/tauri-gui/frontend/tsconfig.tsbuildinfo
 apps/tauri-gui/frontend/test-results/
 apps/tauri-gui/frontend/e2e/screenshots/
+
+# Documentation (superpowers plans are transient, not project artifacts)
+docs/
