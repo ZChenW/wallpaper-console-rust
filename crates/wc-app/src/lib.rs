@@ -1,5 +1,6 @@
 pub mod apply_execution;
 pub mod apply_plan;
+pub mod apply_stage_labels;
 
 use std::path::{Path, PathBuf};
 
@@ -8,10 +9,13 @@ use wc_core::error::WcError;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 use wc_storage::StorageApi;
 
-pub use apply_execution::{ApplyExecutionResult, ApplyRequest, ApplyRequestKind};
+pub use apply_execution::{
+    ApplyExecutionOptions, ApplyExecutionResult, ApplyRequest, ApplyRequestKind,
+};
 pub use apply_plan::{
     ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan, CompatibilityKind,
 };
+pub use apply_stage_labels::{apply_stage_detail, apply_stage_label, ApplyStageContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {
@@ -74,12 +78,42 @@ impl AppService {
         &self,
         request: ApplyRequest,
     ) -> Result<ApplyExecutionResult, AppError> {
+        self.execute_apply_request_with_options(request, ApplyExecutionOptions::default())
+    }
+
+    pub fn execute_apply_request_with_options(
+        &self,
+        request: ApplyRequest,
+        mut options: ApplyExecutionOptions,
+    ) -> Result<ApplyExecutionResult, AppError> {
+        let request_id = request.request_id.as_deref();
+        let mut noop = wc_backend::apply_stage::NoopReporter;
+        let reporter: &mut dyn wc_backend::apply_stage::ApplyStageReporter =
+            match options.stage_reporter.as_mut() {
+                Some(r) => r.as_mut(),
+                None => &mut noop,
+            };
+
+        wc_backend::apply_stage::report_stage(
+            reporter,
+            wc_backend::apply_stage::ApplyStage::ResolveTarget,
+            request_id,
+        );
         let target = self.resolve_apply_request_target(&request)?;
-        let result = wc_backend::apply_wallpaper(
+        if let Some(on_resolved) = options.on_target_resolved.as_mut() {
+            on_resolved(ApplyStageContext {
+                preview: target.preview,
+                backend: target.backend,
+            });
+        }
+
+        let result = wc_backend::apply_wallpaper_with_reporter(
             &self.storage,
             &target.resolved_path,
             target.backend,
             target.fallback_path.as_deref(),
+            reporter,
+            request_id,
         );
         match result {
             Ok(()) => {
@@ -97,11 +131,12 @@ impl AppService {
             }
             Err(WcError::LinuxWallpaperEngine { kind, detail }) => {
                 if target.file_type == FileType::WeScene {
-                    let backend_status = if kind == wc_core::error::BackendErrorKind::RendererLimitation {
-                        "renderer_limitation"
-                    } else {
-                        "failed"
-                    };
+                    let backend_status =
+                        if kind == wc_core::error::BackendErrorKind::RendererLimitation {
+                            "renderer_limitation"
+                        } else {
+                            "failed"
+                        };
                     let app_err = AppError::from_wc_error(WcError::LinuxWallpaperEngine {
                         kind: kind.clone(),
                         detail: detail.clone(),
@@ -114,7 +149,10 @@ impl AppService {
                         Some(detail.clone()),
                     );
                 }
-                Err(AppError::from_wc_error(WcError::LinuxWallpaperEngine { kind, detail }))
+                Err(AppError::from_wc_error(WcError::LinuxWallpaperEngine {
+                    kind,
+                    detail,
+                }))
             }
             Err(e) => Err(AppError::from_wc_error(e)),
         }

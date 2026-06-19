@@ -61,8 +61,7 @@ pub(crate) fn wait_for_awww_socket_ready(
     let socket_path = awww_socket_path()
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
-    let wayland =
-        std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
+    let wayland = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
     if crate::is_awww_daemon_running(user) {
         Err(WcError::Other(format!(
             "awww-daemon is running but socket is not ready for WAYLAND_DISPLAY={} \

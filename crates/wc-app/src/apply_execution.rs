@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use wc_core::types::{Backend, FileType};
 
+use crate::apply_stage_labels::ApplyStageContext;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ApplyRequestKind {
@@ -38,6 +40,12 @@ pub struct ApplyExecutionResult {
     pub backend: Backend,
     pub file_type: FileType,
     pub preview: bool,
+}
+
+#[derive(Default)]
+pub struct ApplyExecutionOptions {
+    pub stage_reporter: Option<Box<dyn wc_backend::apply_stage::ApplyStageReporter + Send>>,
+    pub on_target_resolved: Option<Box<dyn FnMut(ApplyStageContext) + Send>>,
 }
 
 #[cfg(test)]
@@ -255,6 +263,108 @@ mod tests {
         assert!(
             target.fallback_path.is_none(),
             "scene without preview should have no fallback"
+        );
+    }
+
+    #[test]
+    fn execute_apply_request_emits_resolve_target_before_resolution_failure() {
+        use std::sync::{Arc, Mutex};
+        use wc_backend::apply_stage::{ApplyStage, ApplyStageEvent, ApplyStageReporter};
+
+        let (tmp, service) = temp_service();
+        let project = web_project(tmp.path());
+        let events = Arc::new(Mutex::new(Vec::<ApplyStageEvent>::new()));
+        let events_for_reporter = events.clone();
+
+        struct SharedReporter(Arc<Mutex<Vec<ApplyStageEvent>>>);
+        impl ApplyStageReporter for SharedReporter {
+            fn emit(&mut self, event: ApplyStageEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::Apply,
+            path: project.to_string_lossy().to_string(),
+            request_id: Some("resolve-only".into()),
+        };
+        let options = ApplyExecutionOptions {
+            stage_reporter: Some(Box::new(SharedReporter(events_for_reporter))),
+            on_target_resolved: None,
+        };
+
+        let err = service
+            .execute_apply_request_with_options(request, options)
+            .unwrap_err();
+        assert_eq!(err.code, "we_web_unsupported");
+        let captured = events.lock().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(captured[0].stage, ApplyStage::ResolveTarget);
+        assert_eq!(captured[0].request_id.as_deref(), Some("resolve-only"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn execute_apply_request_lwe_crash_includes_resolve_and_wait_stages() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::{Arc, Mutex};
+        use wc_backend::apply_stage::{ApplyStage, ApplyStageEvent, ApplyStageReporter};
+
+        let (tmp, service) = temp_service();
+        let bin = tmp.path().join("test-lwe-app-stages");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        service
+            .storage_for_tests()
+            .config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/888888");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","workshopid":"888888"}"#,
+        )
+        .unwrap();
+
+        let events = Arc::new(Mutex::new(Vec::<ApplyStageEvent>::new()));
+        let events_for_reporter = events.clone();
+        struct SharedReporter(Arc<Mutex<Vec<ApplyStageEvent>>>);
+        impl ApplyStageReporter for SharedReporter {
+            fn emit(&mut self, event: ApplyStageEvent) {
+                self.0.lock().unwrap().push(event);
+            }
+        }
+
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::Apply,
+            path: scene.to_string_lossy().to_string(),
+            request_id: Some("lwe-crash".into()),
+        };
+        let options = ApplyExecutionOptions {
+            stage_reporter: Some(Box::new(SharedReporter(events_for_reporter))),
+            on_target_resolved: None,
+        };
+
+        assert!(service
+            .execute_apply_request_with_options(request, options)
+            .is_err());
+        let stages: Vec<_> = events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| e.stage.clone())
+            .collect();
+        assert_eq!(
+            stages,
+            vec![
+                ApplyStage::ResolveTarget,
+                ApplyStage::StartLwe,
+                ApplyStage::WaitRendererAlive,
+            ]
         );
     }
 }

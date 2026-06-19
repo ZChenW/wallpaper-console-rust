@@ -6,6 +6,7 @@ use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
+pub mod apply_stage;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
@@ -69,7 +70,16 @@ fn restore_clean_with_runtime(
     let fallback_path = fallback_for_restore_entry(&entry, p);
 
     execute_stop_plan_with_runtime(s, lifecycle::StopPlan::All, runtime)?;
-    apply_wallpaper_with_runtime(s, &current, backend, fallback_path.as_deref(), runtime)
+    let mut reporter = apply_stage::NoopReporter;
+    apply_wallpaper_with_runtime(
+        s,
+        &current,
+        backend,
+        fallback_path.as_deref(),
+        runtime,
+        &mut reporter,
+        None,
+    )
 }
 
 fn backend_for_restore_entry(s: &StorageApi, entry: &wc_core::types::WallpaperEntry) -> Backend {
@@ -217,7 +227,37 @@ pub fn apply_wallpaper(
     fallback_path: Option<&str>,
 ) -> Result<(), WcError> {
     let mut runtime = runtime::SystemBackendRuntime;
-    apply_wallpaper_with_runtime(s, path, backend, fallback_path, &mut runtime)
+    let mut reporter = apply_stage::NoopReporter;
+    apply_wallpaper_with_runtime(
+        s,
+        path,
+        backend,
+        fallback_path,
+        &mut runtime,
+        &mut reporter,
+        None,
+    )
+}
+
+/// Apply a wallpaper and emit structured apply stages through `reporter`.
+pub fn apply_wallpaper_with_reporter(
+    s: &StorageApi,
+    path: &str,
+    backend: Backend,
+    fallback_path: Option<&str>,
+    reporter: &mut dyn apply_stage::ApplyStageReporter,
+    request_id: Option<&str>,
+) -> Result<(), WcError> {
+    let mut runtime = runtime::SystemBackendRuntime;
+    apply_wallpaper_with_runtime(
+        s,
+        path,
+        backend,
+        fallback_path,
+        &mut runtime,
+        reporter,
+        request_id,
+    )
 }
 
 fn apply_wallpaper_with_runtime(
@@ -226,6 +266,8 @@ fn apply_wallpaper_with_runtime(
     backend: Backend,
     fallback_path: Option<&str>,
     runtime: &mut dyn runtime::BackendRuntime,
+    reporter: &mut dyn apply_stage::ApplyStageReporter,
+    request_id: Option<&str>,
 ) -> Result<(), WcError> {
     let p = std::path::Path::new(path);
     if backend == Backend::Unsupported {
@@ -291,7 +333,17 @@ fn apply_wallpaper_with_runtime(
     } else {
         match backend {
             Backend::Awww => (|| -> Result<(), WcError> {
+                apply_stage::report_stage(
+                    reporter,
+                    apply_stage::ApplyStage::EnsureAwwwDaemon,
+                    request_id,
+                );
                 runtime.ensure_awww_daemon_running()?;
+                apply_stage::report_stage(
+                    reporter,
+                    apply_stage::ApplyStage::AwwwSocketReady,
+                    request_id,
+                );
                 if matches!(
                     lifecycle.previous,
                     lifecycle::RunningBackend::Mpvpaper
@@ -354,6 +406,12 @@ fn apply_wallpaper_with_runtime(
             }
             Backend::LinuxWallpaperEngine => {
                 let project = linux_wallpaperengine::project_from_path(path)?;
+                apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, request_id);
+                apply_stage::report_stage(
+                    reporter,
+                    apply_stage::ApplyStage::WaitRendererAlive,
+                    request_id,
+                );
                 match linux_wallpaperengine::apply(s, project) {
                     Ok(()) => Ok(()),
                     Err(e) => Err(e),
@@ -396,6 +454,11 @@ fn apply_wallpaper_with_runtime(
     let already_stopped = visual.stop_previous_after_fallback
         && visual.fallback_stage != visual_handoff::FallbackStage::None;
     if !already_stopped {
+        apply_stage::report_stage(
+            reporter,
+            apply_stage::ApplyStage::CleanupPrevious,
+            request_id,
+        );
         execute_stop_plan_with_runtime(s, lifecycle.post_success_stop, runtime)?;
     }
 
@@ -409,6 +472,7 @@ fn apply_wallpaper_with_runtime(
         backend,
     );
 
+    apply_stage::report_stage(reporter, apply_stage::ApplyStage::RefreshStatus, request_id);
     write_success_state(s, path, backend)?;
     Ok(())
 }
@@ -657,6 +721,17 @@ mod tests {
         wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         (tmp, s)
+    }
+
+    fn apply_with_fake_runtime(
+        s: &StorageApi,
+        path: &str,
+        backend: Backend,
+        fallback_path: Option<&str>,
+        rt: &mut FakeRuntime,
+    ) -> Result<(), WcError> {
+        let mut reporter = apply_stage::NoopReporter;
+        apply_wallpaper_with_runtime(s, path, backend, fallback_path, rt, &mut reporter, None)
     }
 
     #[test]
@@ -1344,7 +1419,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &img.to_string_lossy(),
             Backend::Awww,
@@ -1376,7 +1451,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &img.to_string_lossy(),
             Backend::Awww,
@@ -1406,7 +1481,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &video.to_string_lossy(),
             Backend::Mpvpaper,
@@ -1475,7 +1550,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &img.to_string_lossy(),
             Backend::Awww,
@@ -1676,7 +1751,10 @@ mod tests {
         }
 
         fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            if matches!(self.awww_socket_ready(), crate::runtime::AwwwReadiness::Ready) {
+            if matches!(
+                self.awww_socket_ready(),
+                crate::runtime::AwwwReadiness::Ready
+            ) {
                 return Ok(());
             }
             let user = crate::whoami();
@@ -1840,13 +1918,8 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        let _result = apply_wallpaper_with_runtime(
-            &s,
-            &img.to_string_lossy(),
-            Backend::Mpvpaper,
-            None,
-            &mut rt,
-        );
+        let _result =
+            apply_with_fake_runtime(&s, &img.to_string_lossy(), Backend::Mpvpaper, None, &mut rt);
 
         assert_eq!(rt.stop_awww_count, 1);
         assert_eq!(rt.stop_mpvpaper_count, 1);
@@ -1873,7 +1946,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        let _result = apply_wallpaper_with_runtime(
+        let _result = apply_with_fake_runtime(
             &s,
             &img.to_string_lossy(),
             Backend::Awww,
@@ -2033,7 +2106,7 @@ mod tests {
             ..Default::default()
         };
 
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &video.to_string_lossy(),
             Backend::Mpvpaper,
@@ -2082,7 +2155,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        apply_wallpaper_with_runtime(
+        apply_with_fake_runtime(
             &s,
             &scene.to_string_lossy(),
             Backend::LinuxWallpaperEngine,
@@ -2113,5 +2186,184 @@ mod tests {
                 .stderr(std::process::Stdio::null())
                 .status();
         }
+    }
+
+    #[test]
+    fn apply_awww_success_emits_expected_stages() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("test.png");
+        std::fs::write(&img, b"png").unwrap();
+        s.last_backend_write("awww").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = apply_stage::test_support::CapturingReporter::new();
+        apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+            &mut reporter,
+            Some("req-awww"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            reporter.stages(),
+            vec![
+                apply_stage::ApplyStage::EnsureAwwwDaemon,
+                apply_stage::ApplyStage::AwwwSocketReady,
+                apply_stage::ApplyStage::CleanupPrevious,
+                apply_stage::ApplyStage::RefreshStatus,
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_lwe_success_emits_expected_stages() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("awww").unwrap();
+
+        let bin = tmp.path().join("test-lwe-stages");
+        std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/123456");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","workshopid":"123456"}"#,
+        )
+        .unwrap();
+
+        let mut rt = FakeRuntime::default();
+        let mut reporter = apply_stage::test_support::CapturingReporter::new();
+        apply_wallpaper_with_runtime(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            None,
+            &mut rt,
+            &mut reporter,
+            Some("req-lwe"),
+        )
+        .unwrap();
+
+        assert_eq!(
+            reporter.stages(),
+            vec![
+                apply_stage::ApplyStage::StartLwe,
+                apply_stage::ApplyStage::WaitRendererAlive,
+                apply_stage::ApplyStage::CleanupPrevious,
+                apply_stage::ApplyStage::RefreshStatus,
+            ]
+        );
+
+        let pid = s.config_get("linux_wallpaperengine_pid", "");
+        if let Ok(pid) = pid.parse::<i32>() {
+            let _ = Command::new("kill")
+                .args(["-TERM", &format!("-{}", pid)])
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+
+    #[test]
+    fn apply_awww_socket_timeout_stops_at_ensure_daemon() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("test.png");
+        std::fs::write(&img, b"png").unwrap();
+        s.last_backend_write("awww").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new(vec![
+                crate::runtime::AwwwReadiness::SocketMissing;
+                40
+            ]),
+            ..Default::default()
+        };
+        let mut reporter = apply_stage::test_support::CapturingReporter::new();
+        let err = apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+            &mut reporter,
+            Some("req-timeout"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("socket") || err.to_string().contains("failed to start"),
+            "expected readiness error, got: {err}"
+        );
+        assert_eq!(
+            reporter.stages(),
+            vec![apply_stage::ApplyStage::EnsureAwwwDaemon]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn apply_lwe_crash_reaches_wait_renderer_alive() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("awww").unwrap();
+
+        let bin = tmp.path().join("test-lwe-crash-stages");
+        std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
+        let mut perms = std::fs::metadata(&bin).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&bin, perms).unwrap();
+        s.config_set("linux_wallpaperengine_path", &bin.to_string_lossy())
+            .unwrap();
+
+        let scene = tmp.path().join("steamapps/workshop/content/431960/999999");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(scene.join("scene.pkg"), b"scene").unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","workshopid":"999999"}"#,
+        )
+        .unwrap();
+
+        let mut rt = FakeRuntime::default();
+        let mut reporter = apply_stage::test_support::CapturingReporter::new();
+        let err = apply_wallpaper_with_runtime(
+            &s,
+            &scene.to_string_lossy(),
+            Backend::LinuxWallpaperEngine,
+            None,
+            &mut rt,
+            &mut reporter,
+            Some("req-crash"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("linux-wallpaperengine") || err.to_string().contains("exited"),
+            "expected LWE failure, got: {err}"
+        );
+        assert_eq!(
+            reporter.stages(),
+            vec![
+                apply_stage::ApplyStage::StartLwe,
+                apply_stage::ApplyStage::WaitRendererAlive,
+            ]
+        );
     }
 }

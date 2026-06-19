@@ -1,11 +1,45 @@
 use super::common::{
     fail, ok, storage, BackendStatusDto, CommandErrorDto, CommandResult, StatusDto, WeDebugInfoDto,
 };
+use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use wc_storage::StorageApi;
 
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct TauriStageReporter {
+    app: tauri::AppHandle,
+    context: Arc<Mutex<wc_app::ApplyStageContext>>,
+}
+
+impl TauriStageReporter {
+    fn new(app: tauri::AppHandle) -> Self {
+        Self {
+            app,
+            context: Arc::new(Mutex::new(wc_app::ApplyStageContext::default())),
+        }
+    }
+
+    fn context_handle(&self) -> Arc<Mutex<wc_app::ApplyStageContext>> {
+        self.context.clone()
+    }
+}
+
+impl wc_backend::apply_stage::ApplyStageReporter for TauriStageReporter {
+    fn emit(&mut self, event: wc_backend::apply_stage::ApplyStageEvent) {
+        let ctx = self.context.lock().unwrap().clone();
+        let _ = self.app.emit(
+            "wc-apply-stage",
+            serde_json::json!({
+                "requestId": event.request_id,
+                "stage": format!("{:?}", event.stage),
+                "label": wc_app::apply_stage_label(&event.stage),
+                "detail": wc_app::apply_stage_detail(&event.stage, &ctx),
+            }),
+        );
+    }
+}
 
 #[tauri::command]
 pub async fn status() -> Result<StatusDto, String> {
@@ -60,21 +94,9 @@ pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> 
     .map_err(|e| e.to_string())?
 }
 
-fn emit_apply_feedback(app: &tauri::AppHandle, label: &str, detail: &str) {
-    let _ = app.emit(
-        "wc-feedback",
-        serde_json::json!({
-            "state": "running",
-            "label": label,
-            "detail": detail,
-        }),
-    );
-}
-
 #[tauri::command]
 pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    emit_apply_feedback(&app, "Preparing wallpaper", "Resolving apply target.");
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -85,12 +107,7 @@ pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
                 path: path.clone(),
                 request_id: None,
             };
-            emit_apply_feedback(
-                &app,
-                "Starting backend",
-                "Starting renderer. Scene wallpapers may take several seconds.",
-            );
-            execute_and_format_result(&service, request, seq)
+            execute_and_format_result(&app, &service, request, seq)
         }
         Err(e) => fail(e),
     })
@@ -104,7 +121,6 @@ pub async fn apply_action(
     request: super::common::ApplyRequestDto,
 ) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    emit_apply_feedback(&app, "Preparing wallpaper", "Resolving apply target.");
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -114,12 +130,7 @@ pub async fn apply_action(
                 Ok(r) => r,
                 Err(err) => return command_error_from_app_error(err),
             };
-            emit_apply_feedback(
-                &app,
-                "Starting backend",
-                "Starting renderer. Scene wallpapers may take several seconds.",
-            );
-            execute_and_format_result(&service, request, seq)
+            execute_and_format_result(&app, &service, request, seq)
         }
         Err(e) => fail(e),
     })
@@ -140,6 +151,7 @@ fn apply_stale_guard(seq: u64, current_seq: u64) -> Option<CommandResult> {
 }
 
 fn execute_and_format_result(
+    app: &tauri::AppHandle,
     service: &wc_app::AppService,
     request: wc_app::ApplyRequest,
     seq: u64,
@@ -168,7 +180,16 @@ fn execute_and_format_result(
         return stale;
     }
 
-    match service.execute_apply_request(request) {
+    let reporter = TauriStageReporter::new(app.clone());
+    let context = reporter.context_handle();
+    let options = wc_app::ApplyExecutionOptions {
+        stage_reporter: Some(Box::new(reporter)),
+        on_target_resolved: Some(Box::new(move |ctx| {
+            *context.lock().unwrap() = ctx;
+        })),
+    };
+
+    match service.execute_apply_request_with_options(request, options) {
         Ok(result) => {
             let dto = super::common::ApplyResultDto {
                 request_id: result.request_id,
@@ -308,6 +329,7 @@ pub async fn we_debug_info() -> Result<WeDebugInfoDto, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wc_backend::apply_stage::ApplyStage;
 
     #[test]
     fn stale_apply_result_returns_structured_error() {
@@ -345,6 +367,28 @@ mod tests {
 
         let fresh = apply_stale_guard(10, 10);
         assert!(fresh.is_none(), "current seq should not be guarded");
+    }
+
+    #[test]
+    fn apply_stage_payload_includes_request_id_and_labels() {
+        let ctx = wc_app::ApplyStageContext {
+            preview: true,
+            backend: wc_core::types::Backend::Awww,
+        };
+        let event = wc_backend::apply_stage::ApplyStageEvent {
+            stage: ApplyStage::WaitRendererAlive,
+            request_id: Some("req-1".into()),
+        };
+        let payload = serde_json::json!({
+            "requestId": event.request_id,
+            "stage": format!("{:?}", event.stage),
+            "label": wc_app::apply_stage_label(&event.stage),
+            "detail": wc_app::apply_stage_detail(&event.stage, &ctx),
+        });
+        assert_eq!(payload["requestId"], "req-1");
+        assert_eq!(payload["stage"], "WaitRendererAlive");
+        assert_eq!(payload["label"], "Waiting for renderer");
+        assert!(payload["detail"].as_str().unwrap().contains("preview"));
     }
 
     #[test]
