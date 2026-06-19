@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { Search } from 'lucide-react';
 import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
 import { measureAsync, recordMetric } from '../perf/metrics';
@@ -9,6 +9,7 @@ import { usePagedWallpapers, type WallpaperPageDTO } from '../hooks/usePagedWall
 import { useAppState } from '../state/AppStateContext';
 import { invalidateFavoritesCache } from './FavoritesView';
 import { emitFeedback } from '../events/appEvents';
+import { resolveLibraryDisplay } from './libraryDisplay';
 
 interface Props {
   onApply: (path: string) => void;
@@ -26,8 +27,16 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [sort, setSort] = useState<SortMode>('newest');
-  const { libraryVersion, invalidateLibrary } = useAppState();
+  const { libraryVersion, invalidateLibrary, scanProgress } = useAppState();
   const [openLocDialog, setOpenLocDialog] = useState<{ path: string } | null>(null);
+  const mountTimeRef = useRef<number | null>(null);
+  const firstPageRecordedRef = useRef(false);
+  const firstContentRecordedRef = useRef(false);
+  const prevDisplayRef = useRef<string>('loading');
+
+  if (mountTimeRef.current === null) {
+    mountTimeRef.current = performance.now();
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedSearch(search), 200);
@@ -42,12 +51,20 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
 
   const handlePage = useCallback((page: WallpaperPageDTO) => {
     recordMetric('library.page.total', page.total);
+    if (!firstPageRecordedRef.current) {
+      firstPageRecordedRef.current = true;
+      if (mountTimeRef.current !== null) {
+        recordMetric('library.firstPage.ms', performance.now() - mountTimeRef.current);
+      }
+    }
   }, []);
 
   const {
     entries,
     total,
-    loading,
+    initialLoading,
+    refreshing,
+    hasLoadedOnce,
     loadMore,
     entryByPath,
   } = usePagedWallpapers({
@@ -55,6 +72,30 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     loadPage,
     onPage: handlePage,
   });
+
+  const display = resolveLibraryDisplay({
+    initialLoading,
+    hasLoadedOnce,
+    total,
+    entryCount: entries.length,
+    scanRunning: scanProgress?.running ?? false,
+  });
+
+  useEffect(() => {
+    if (!firstContentRecordedRef.current && entries.length > 0) {
+      firstContentRecordedRef.current = true;
+      if (mountTimeRef.current !== null) {
+        recordMetric('library.firstContent.ms', performance.now() - mountTimeRef.current);
+      }
+    }
+  }, [entries.length]);
+
+  useEffect(() => {
+    if (prevDisplayRef.current === 'empty' && display === 'grid') {
+      recordMetric('library.emptyFlash.count', 1);
+    }
+    prevDisplayRef.current = display;
+  }, [display]);
 
   const handleOpenProjectFolder = useCallback(async (entryPath: string) => {
     const entry = entryByPath.get(entryPath);
@@ -133,24 +174,31 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
           </span>
         </div>
       </div>
-      {loading ? (
-        <div className="loading">Loading library...</div>
+      {display === 'grid' ? (
+        <>
+          <WallpaperGrid
+            entries={entries}
+            onApply={onApply}
+            applying={applying}
+            emptyText="Library is empty. Add sources or scan Wallpaper Engine."
+            buildContextActions={buildContextActions}
+            active={active}
+            refreshing={refreshing}
+          />
+          {!refreshing && entries.length < total && (
+            <div className="load-more">
+              <button onClick={() => void loadMore()}>
+                Load more ({total - entries.length} remaining)
+              </button>
+            </div>
+          )}
+        </>
+      ) : display === 'empty' ? (
+        <div className="empty-state">Library is empty. Add sources or scan Wallpaper Engine.</div>
+      ) : display === 'indexing' ? (
+        <div className="loading">Indexing library…</div>
       ) : (
-        <WallpaperGrid
-          entries={entries}
-          onApply={onApply}
-          applying={applying}
-          emptyText="Library is empty. Add sources or scan Wallpaper Engine."
-          buildContextActions={buildContextActions}
-          active={active}
-        />
-      )}
-      {!loading && entries.length < total && (
-        <div className="load-more">
-          <button onClick={() => void loadMore()}>
-            Load more ({total - entries.length} remaining)
-          </button>
-        </div>
+        <div className="loading">Loading library...</div>
       )}
 
       {openLocDialog && (

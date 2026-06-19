@@ -16,6 +16,7 @@ interface Props {
   contextActions?: ContextAction[];
   buildContextActions?: (entry: WallpaperDTO) => ContextAction[];
   active?: boolean;
+  refreshing?: boolean;
 }
 
 export interface ContextAction {
@@ -36,6 +37,7 @@ export default function WallpaperGrid({
   contextActions = [],
   buildContextActions,
   active = true,
+  refreshing = false,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -129,7 +131,7 @@ export default function WallpaperGrid({
   }
 
   return (
-    <div className="wallpaper-grid" ref={containerRef}>
+    <div className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`} ref={containerRef}>
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const start = virtualRow.index * colCount;

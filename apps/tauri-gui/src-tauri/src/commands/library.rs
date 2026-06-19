@@ -41,7 +41,9 @@ pub async fn library_page_gui(
     limit: usize,
 ) -> Result<LibraryPageDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
+        let t0 = std::time::Instant::now();
         let s = storage()?;
+        let storage_init = t0.elapsed();
         let query = wc_storage::sqlite::LibraryPageQuery {
             filter: wc_storage::sqlite::LibraryFilter::parse(&filter).map_err(|e| e.to_string())?,
             sort: wc_storage::sqlite::LibrarySort::parse(&sort).map_err(|e| e.to_string())?,
@@ -51,13 +53,57 @@ pub async fn library_page_gui(
         };
         let page =
             wc_storage::sqlite::library_page_sqlite(&s.cd, &query).map_err(|e| e.to_string())?;
+        let query_end = t0.elapsed();
+        let items = page
+            .items
+            .into_iter()
+            .map(dto_from_entry)
+            .collect::<Vec<_>>();
+        let dto_map_end = t0.elapsed();
+        maybe_write_library_page_debug_log(
+            &s,
+            storage_init,
+            query_end - storage_init,
+            dto_map_end - query_end,
+            page.total,
+            items.len(),
+        );
         Ok(LibraryPageDto {
             total: page.total,
-            items: page.items.into_iter().map(dto_from_entry).collect(),
+            items,
         })
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn format_library_page_debug_log(
+    storage_init: std::time::Duration,
+    query: std::time::Duration,
+    dto_map: std::time::Duration,
+    total: usize,
+    item_count: usize,
+) -> String {
+    format!(
+        "library_page_gui stages: storage_init={:?} query={:?} dto_map={:?} total={} items={}\n",
+        storage_init, query, dto_map, total, item_count
+    )
+}
+
+fn maybe_write_library_page_debug_log(
+    s: &wc_storage::StorageApi,
+    storage_init: std::time::Duration,
+    query: std::time::Duration,
+    dto_map: std::time::Duration,
+    total: usize,
+    item_count: usize,
+) {
+    if s.config_get("gui_debug_logs", "off") != "on" {
+        return;
+    }
+    let log = format_library_page_debug_log(storage_init, query, dto_map, total, item_count);
+    let log_path = s.cd.path.join("library-page-last.log");
+    let _ = std::fs::write(&log_path, log);
 }
 
 #[tauri::command]
@@ -154,6 +200,60 @@ pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
 #[cfg(test)]
 mod tests {
     use wc_core::types::FileType;
+
+    #[test]
+    fn format_library_page_debug_log_records_all_stages() {
+        let log = super::format_library_page_debug_log(
+            std::time::Duration::from_micros(120),
+            std::time::Duration::from_micros(3400),
+            std::time::Duration::from_micros(80),
+            42,
+            120,
+        );
+        assert!(log.contains("storage_init="));
+        assert!(log.contains("query="));
+        assert!(log.contains("dto_map="));
+        assert!(log.contains("total=42"));
+        assert!(log.contains("items=120"));
+    }
+
+    #[test]
+    fn maybe_write_library_page_debug_log_writes_only_when_debug_enabled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let s = wc_storage::StorageApi::new(cd);
+        let log_path = s.cd.path.join("library-page-last.log");
+
+        super::maybe_write_library_page_debug_log(
+            &s,
+            std::time::Duration::from_micros(1),
+            std::time::Duration::from_micros(2),
+            std::time::Duration::from_micros(3),
+            0,
+            0,
+        );
+        assert!(
+            !log_path.exists(),
+            "log should not be written when debug off"
+        );
+
+        s.config_set("gui_debug_logs", "on").unwrap();
+        super::maybe_write_library_page_debug_log(
+            &s,
+            std::time::Duration::from_micros(1),
+            std::time::Duration::from_micros(2),
+            std::time::Duration::from_micros(3),
+            5,
+            5,
+        );
+        assert!(log_path.exists(), "log should be written when debug on");
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("total=5"));
+    }
 
     #[test]
     fn library_count_dto_requires_no_full_table_load() {

@@ -146,3 +146,27 @@ test('resetAll restores scan progress, config, command failures, and thumbnail f
   const thumb = await api.thumbnailFor('/mock/path/wallpaper-001.jpg');
   assert.equal(thumb.failureReason, undefined);
 });
+
+test('setLibraryFirstPageEmpty returns empty first page then filled on subsequent calls', async () => {
+  ctrl.setLibraryFirstPageEmpty(true);
+  const first = await api.libraryPage('all', 'newest', '', 0, 120);
+  assert.equal(first.total, 0);
+  assert.deepEqual(first.items, []);
+
+  const second = await api.libraryPage('all', 'newest', '', 0, 120);
+  assert.ok(second.total > 0, 'second call should be filled');
+  assert.ok(second.items.length > 0, 'filled page should have items');
+});
+
+test('setLibraryFirstPageEmpty does not affect appended (offset>0) pages', async () => {
+  ctrl.setLibraryFirstPageEmpty(true);
+  const appendPage = await api.libraryPage('all', 'newest', '', 120, 120);
+  assert.ok(appendPage.total > 0, 'append page should be filled despite scenario');
+});
+
+test('resetAll clears the library first-page-empty scenario', async () => {
+  ctrl.setLibraryFirstPageEmpty(true);
+  ctrl.resetAll();
+  const page = await api.libraryPage('all', 'newest', '', 0, 120);
+  assert.ok(page.total > 0, 'scenario should be cleared after resetAll');
+});
