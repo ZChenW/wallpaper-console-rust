@@ -645,6 +645,7 @@ pub(crate) fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::BackendRuntime;
     use wc_core::config::ConfigDir;
 
     fn temp_storage() -> (tempfile::TempDir, StorageApi) {
@@ -1601,6 +1602,7 @@ mod tests {
         command_status_programs: Vec<String>,
         command_output_args: Vec<Vec<String>>,
         command_status_args: Vec<Vec<String>>,
+        awww_readiness_sequence: std::cell::RefCell<Vec<crate::runtime::AwwwReadiness>>,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
@@ -1662,13 +1664,103 @@ mod tests {
             self.stop_lwe_count += 1;
         }
 
+        fn awww_socket_ready(&mut self) -> crate::runtime::AwwwReadiness {
+            let mut seq = self.awww_readiness_sequence.borrow_mut();
+            if seq.len() > 1 {
+                seq.remove(0)
+            } else if !seq.is_empty() {
+                seq[0].clone()
+            } else {
+                crate::runtime::AwwwReadiness::Ready
+            }
+        }
+
         fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            Ok(())
+            if matches!(self.awww_socket_ready(), crate::runtime::AwwwReadiness::Ready) {
+                return Ok(());
+            }
+            let user = crate::whoami();
+            if !crate::is_awww_daemon_running(&user) {
+                let mut cmd = crate::runtime::build_awww_daemon_command();
+                let _ = self.command_status(&mut cmd);
+            }
+            crate::runtime::wait_for_awww_socket_ready(self, &user)
         }
 
         fn clear_awww_state_hint(&mut self) {
             self.clear_awww_state_hint_count += 1;
         }
+    }
+
+    #[test]
+    fn ensure_daemon_ok_fast_path_when_socket_ready() {
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new(vec![
+                crate::runtime::AwwwReadiness::Ready,
+            ]),
+            ..Default::default()
+        };
+        assert!(rt.ensure_awww_daemon_running().is_ok());
+        assert_eq!(
+            rt.command_status_count, 0,
+            "fast path must not spawn daemon"
+        );
+    }
+
+    #[test]
+    fn ensure_daemon_err_when_socket_never_ready_and_process_absent() {
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new(vec![
+                crate::runtime::AwwwReadiness::SocketMissing;
+                40
+            ]),
+            ..Default::default()
+        };
+        let err = rt.ensure_awww_daemon_running().unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("failed to start") || msg.contains("socket is not ready"),
+            "should give a clear readiness error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn wait_for_socket_ok_when_ready_after_polls() {
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new({
+                let mut v = vec![
+                    crate::runtime::AwwwReadiness::SocketMissing,
+                    crate::runtime::AwwwReadiness::SocketMissing,
+                    crate::runtime::AwwwReadiness::SocketMissing,
+                ];
+                v.push(crate::runtime::AwwwReadiness::Ready);
+                v
+            }),
+            ..Default::default()
+        };
+        let result = crate::runtime::wait_for_awww_socket_ready(&mut rt, "testuser");
+        assert!(result.is_ok(), "should become ready after polls");
+    }
+
+    #[test]
+    fn ensure_daemon_spawns_when_socket_missing_and_no_process() {
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new({
+                let mut v = vec![crate::runtime::AwwwReadiness::SocketMissing];
+                v.push(crate::runtime::AwwwReadiness::Ready);
+                v
+            }),
+            ..Default::default()
+        };
+        assert!(rt.ensure_awww_daemon_running().is_ok());
+        assert_eq!(
+            rt.command_status_count, 1,
+            "should spawn daemon when socket missing and no process"
+        );
     }
 
     #[test]
