@@ -1,20 +1,38 @@
-import { createContext, ReactNode, useContext } from 'react';
-import { useThumbnailQueue } from '../hooks/useThumbnailQueue';
-import type { EnqueueOptions, ThumbState } from '../hooks/thumbnailQueueCore';
+import { createContext, ReactNode, useContext, useRef } from 'react';
+import { api } from '../api/bridge';
+import { recordMetric } from '../perf/metrics';
+import { ThumbnailStore } from './thumbnailStore';
+import type { EnqueueOptions } from '../hooks/thumbnailQueueCore';
 
 interface ThumbnailStoreValue {
-  thumbs: ThumbState;
-  enqueue: (paths: string[], options?: EnqueueOptions) => void;
-  reset: () => void;
+  get: (path: string) => string | undefined;
+  subscribe: (path: string, cb: () => void) => () => void;
+  enqueueVisible: (paths: string[], options?: EnqueueOptions) => void;
   forget: (paths: string[]) => void;
+  reset: () => void;
 }
 
 const ThumbnailStoreContext = createContext<ThumbnailStoreValue | null>(null);
 
 export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
-  const queue = useThumbnailQueue(4);
+  const storeRef = useRef<ThumbnailStore | null>(null);
+  if (!storeRef.current) {
+    storeRef.current = new ThumbnailStore(4, async (path) => {
+      const r = await api.thumbnailFor(path);
+      recordMetric(r.cacheHit ? 'thumbnail.cache.hit' : 'thumbnail.cache.miss', 1);
+      return r;
+    });
+  }
+  const store = storeRef.current;
+  const value: ThumbnailStoreValue = {
+    get: (path: string) => store.get(path),
+    subscribe: (path: string, cb: () => void) => store.subscribe(path, cb),
+    enqueueVisible: (paths: string[], options?: EnqueueOptions) => store.enqueueVisible(paths, options),
+    forget: (paths: string[]) => store.forget(paths),
+    reset: () => store.reset(),
+  };
   return (
-    <ThumbnailStoreContext.Provider value={queue}>
+    <ThumbnailStoreContext.Provider value={value}>
       {children}
     </ThumbnailStoreContext.Provider>
   );

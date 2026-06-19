@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef } from 'react';
 import { api } from '../api/bridge';
-import { ThumbnailRequestQueue, type EnqueueOptions, type ThumbState } from './thumbnailQueueCore';
+import { ThumbnailRequestQueue, type EnqueueOptions } from './thumbnailQueueCore';
 import { recordMetric } from '../perf/metrics';
 
 export function useThumbnailQueue(concurrency = 2) {
-  const [thumbs, setThumbs] = useState<ThumbState>({});
   const queueRef = useRef<ThumbnailRequestQueue | null>(null);
 
   useEffect(() => {
@@ -15,7 +14,8 @@ export function useThumbnailQueue(concurrency = 2) {
         recordMetric(r.cacheHit ? 'thumbnail.cache.hit' : 'thumbnail.cache.miss', 1);
         return r;
       },
-      onUpdate: setThumbs,
+      onThumbnail: () => {},
+      onFailure: () => {},
     });
     queueRef.current = queue;
 
@@ -37,7 +37,6 @@ export function useThumbnailQueue(concurrency = 2) {
 
   const reset = useCallback(() => {
     queueRef.current?.reset();
-    setThumbs({});
   }, []);
 
   const enqueue = useCallback(
@@ -51,5 +50,5 @@ export function useThumbnailQueue(concurrency = 2) {
     queueRef.current?.forget(paths);
   }, []);
 
-  return { thumbs, enqueue, reset, forget };
+  return { queueRef, enqueue, reset, forget };
 }

@@ -156,6 +156,7 @@ export interface WallpaperDTO {
   applyBackend?: string;
   applyReason?: string;
   applyActions?: ApplyActionDTO[];
+  rendererCompatibility?: string;
 }
 
 export const api = {

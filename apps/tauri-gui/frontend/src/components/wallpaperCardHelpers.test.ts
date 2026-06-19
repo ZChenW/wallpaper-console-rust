@@ -49,6 +49,24 @@ test('weBadge marks incompatible scene', () => {
   assert.equal(weBadge(baseEntry({ type: 'we_scene' })), 'WE Scene');
 });
 
+test('weBadge shows renderer limitation for renderer_limitation status', () => {
+  assert.equal(
+    weBadge(baseEntry({ type: 'we_scene', backendStatus: 'renderer_limitation' })),
+    'Renderer limitation',
+  );
+});
+
+test('weBadge shows Web browse only for we_web', () => {
+  assert.equal(weBadge(baseEntry({ type: 'we_web' })), 'Web · browse only');
+});
+
+test('weBadgeClass uses danger class for renderer_limitation', () => {
+  assert.equal(
+    weBadgeClass(baseEntry({ type: 'we_scene', backendStatus: 'renderer_limitation' })),
+    'wallpaper-badge wallpaper-badge-danger',
+  );
+});
+
 test('weBadgeClass uses danger class for failed backend', () => {
   assert.equal(
     weBadgeClass(baseEntry({ type: 'we_scene', backendStatus: 'failed' })),

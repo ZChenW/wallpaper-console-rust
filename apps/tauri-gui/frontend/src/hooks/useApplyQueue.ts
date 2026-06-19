@@ -3,6 +3,7 @@ import { api, ApplyRequestDTO } from '../api/bridge';
 import { commandErrorFeedback, CommandFeedback } from '../api/feedback';
 import { recordMetric } from '../perf/metrics';
 import { ApplyQueueController } from './applyQueueController';
+import { createSubscribeApplyStage } from './subscribeApplyStage';
 
 export type { ApplyQueueController, ApplyQueueDeps, ApplyStage } from './applyQueueController';
 
@@ -23,6 +24,7 @@ export function useApplyQueue(args: {
         setFeedback: args.setFeedbackWithAutoDismiss,
         makeErrorFeedback: (label, error) => commandErrorFeedback(label, error),
         recordMetric,
+        subscribeApplyStage: createSubscribeApplyStage(),
       },
       setApplying,
     );

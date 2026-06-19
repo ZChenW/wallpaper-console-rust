@@ -1,5 +1,6 @@
 import type { ApplyRequestDTO, ApplyResultDTO } from '../api/bridge';
 import type { CommandFeedback } from '../api/feedback';
+import type { ApplyStagePayload } from '../events/appEvents';
 
 export type ApplyStage = 'queued' | 'starting backend' | 'settling' | 'applied';
 
@@ -10,6 +11,7 @@ export interface ApplyQueueDeps {
   setFeedback: (feedback: CommandFeedback) => void;
   makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
   recordMetric?: (name: string, value: number) => void;
+  subscribeApplyStage?: (handler: (event: ApplyStagePayload) => void) => () => void;
 }
 
 export class ApplyQueueController {
@@ -43,9 +45,22 @@ export class ApplyQueueController {
     while (current !== null) {
       const req = current;
       current = null;
-      const isBackendApply = req.kind === 'apply' || req.kind === 'retry_backend_apply';
       const requestStart = performance.now();
-      this.emitStage('starting backend', isBackendApply);
+      const queuedSuffix = () => (this.pending !== null ? ' · Next wallpaper queued.' : '');
+
+      const unsubscribeStage = this.deps.subscribeApplyStage?.((event) => {
+        if (req.requestId) {
+          if (event.requestId !== req.requestId) return;
+        } else if (event.requestId) {
+          return;
+        }
+        this.deps.setFeedback({
+          state: 'running',
+          label: event.label,
+          detail: `${event.detail}${queuedSuffix()}`,
+        });
+      }) ?? (() => {});
+
       try {
         const result = await this.deps.applyAction(req);
         if (result.success) {
@@ -56,7 +71,7 @@ export class ApplyQueueController {
           } catch {
             detail = undefined;
           }
-          this.emitStage('settling', isBackendApply);
+          this.emitStage('settling', false);
           await this.deps.refreshStatus();
           this.deps.setFeedback({
             state: 'success',
@@ -69,6 +84,8 @@ export class ApplyQueueController {
         }
       } catch (error) {
         this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', error));
+      } finally {
+        unsubscribeStage();
       }
 
       const next = this.pending;

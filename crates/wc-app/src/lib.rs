@@ -1,5 +1,6 @@
 pub mod apply_execution;
 pub mod apply_plan;
+pub mod apply_stage_labels;
 
 use std::path::{Path, PathBuf};
 
@@ -8,8 +9,13 @@ use wc_core::error::WcError;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 use wc_storage::StorageApi;
 
-pub use apply_execution::{ApplyExecutionResult, ApplyRequest, ApplyRequestKind};
-pub use apply_plan::{ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan};
+pub use apply_execution::{
+    ApplyExecutionOptions, ApplyExecutionResult, ApplyRequest, ApplyRequestKind,
+};
+pub use apply_plan::{
+    ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan, CompatibilityKind,
+};
+pub use apply_stage_labels::{apply_stage_detail, apply_stage_label, ApplyStageContext};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {
@@ -72,22 +78,84 @@ impl AppService {
         &self,
         request: ApplyRequest,
     ) -> Result<ApplyExecutionResult, AppError> {
+        self.execute_apply_request_with_options(request, ApplyExecutionOptions::default())
+    }
+
+    pub fn execute_apply_request_with_options(
+        &self,
+        request: ApplyRequest,
+        mut options: ApplyExecutionOptions,
+    ) -> Result<ApplyExecutionResult, AppError> {
+        let request_id = request.request_id.as_deref();
+        let mut noop = wc_backend::apply_stage::NoopReporter;
+        let reporter: &mut dyn wc_backend::apply_stage::ApplyStageReporter =
+            match options.stage_reporter.as_mut() {
+                Some(r) => r.as_mut(),
+                None => &mut noop,
+            };
+
+        wc_backend::apply_stage::report_stage(
+            reporter,
+            wc_backend::apply_stage::ApplyStage::ResolveTarget,
+            request_id,
+        );
         let target = self.resolve_apply_request_target(&request)?;
-        wc_backend::apply_wallpaper(
+        if let Some(on_resolved) = options.on_target_resolved.as_mut() {
+            on_resolved(ApplyStageContext {
+                preview: target.preview,
+                backend: target.backend,
+            });
+        }
+
+        let result = wc_backend::apply_wallpaper_with_reporter(
             &self.storage,
             &target.resolved_path,
             target.backend,
             target.fallback_path.as_deref(),
-        )
-        .map_err(AppError::from_wc_error)?;
-        Ok(ApplyExecutionResult {
-            request_id: request.request_id,
-            applied_path: target.resolved_path,
-            state_path: target.state_path,
-            backend: target.backend,
-            file_type: target.file_type,
-            preview: target.preview,
-        })
+            reporter,
+            request_id,
+        );
+        match result {
+            Ok(()) => {
+                if target.file_type == FileType::WeScene {
+                    let _ = wc_storage::we_compat::clear_failure(&target.state_path);
+                }
+                Ok(ApplyExecutionResult {
+                    request_id: request.request_id,
+                    applied_path: target.resolved_path,
+                    state_path: target.state_path,
+                    backend: target.backend,
+                    file_type: target.file_type,
+                    preview: target.preview,
+                })
+            }
+            Err(WcError::LinuxWallpaperEngine { kind, detail }) => {
+                if target.file_type == FileType::WeScene {
+                    let backend_status =
+                        if kind == wc_core::error::BackendErrorKind::RendererLimitation {
+                            "renderer_limitation"
+                        } else {
+                            "failed"
+                        };
+                    let app_err = AppError::from_wc_error(WcError::LinuxWallpaperEngine {
+                        kind: kind.clone(),
+                        detail: detail.clone(),
+                    });
+                    let _ = wc_storage::we_compat::record_failure(
+                        &target.state_path,
+                        backend_status,
+                        &app_err.code,
+                        &app_err.message,
+                        Some(detail.clone()),
+                    );
+                }
+                Err(AppError::from_wc_error(WcError::LinuxWallpaperEngine {
+                    kind,
+                    detail,
+                }))
+            }
+            Err(e) => Err(AppError::from_wc_error(e)),
+        }
     }
 
     pub fn inspect_path(&self, path: &str) -> Result<InspectResult, AppError> {
@@ -216,13 +284,64 @@ pub fn resolve_wallpaper_path(path: &str) -> Result<String, WcError> {
 
 impl AppError {
     pub fn from_wc_error(err: WcError) -> Self {
-        let text = err.to_string();
-        AppError {
-            code: "command_failed".into(),
-            message: text,
-            detail: None,
-            recoverable: true,
-            suggestion: None,
+        match &err {
+            WcError::LinuxWallpaperEngine { kind, detail } => {
+                let (code, message, suggestion) = match kind {
+                    wc_core::error::BackendErrorKind::RendererLimitation => (
+                        "renderer_limitation",
+                        "This Wallpaper Engine scene is not compatible with \
+                         linux-wallpaperengine."
+                            .to_string(),
+                        Some(
+                            "Use the preview GIF or choose another Wallpaper Engine scene."
+                                .to_string(),
+                        ),
+                    ),
+                    wc_core::error::BackendErrorKind::TargetConfig => (
+                        "target_config_error",
+                        "linux-wallpaperengine could not find the correct display output."
+                            .to_string(),
+                        Some(
+                            "Set target_mode=screen-root and target=<output name> in Settings \
+                             (e.g. eDP-1)."
+                                .to_string(),
+                        ),
+                    ),
+                    wc_core::error::BackendErrorKind::WorkshopDirectory => (
+                        "workshop_directory_missing",
+                        "Wallpaper Engine workshop directory not found.".to_string(),
+                        Some(
+                            "Check the workshop content path in your Wallpaper Engine sources."
+                                .to_string(),
+                        ),
+                    ),
+                    wc_core::error::BackendErrorKind::Generic => (
+                        "linux_wallpaperengine_failed",
+                        "Wallpaper Engine scene support is not ready.".to_string(),
+                        Some(
+                            "Use the preview GIF or choose another Wallpaper Engine scene."
+                                .to_string(),
+                        ),
+                    ),
+                };
+                AppError {
+                    code: code.into(),
+                    message,
+                    detail: Some(detail.clone()),
+                    recoverable: true,
+                    suggestion,
+                }
+            }
+            _ => {
+                let text = err.to_string();
+                AppError {
+                    code: "command_failed".into(),
+                    message: text,
+                    detail: None,
+                    recoverable: true,
+                    suggestion: None,
+                }
+            }
         }
     }
 

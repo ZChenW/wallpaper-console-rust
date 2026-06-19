@@ -1,6 +1,5 @@
 import type { ThumbnailDTO } from '../api/bridge';
 
-export type ThumbState = Record<string, string>;
 export type EnqueueOptions = { priority?: 'front' | 'back' };
 
 type QueueItem = { path: string; generation: number; pathVersion: number };
@@ -8,30 +7,32 @@ type QueueItem = { path: string; generation: number; pathVersion: number };
 interface QueueOptions {
   concurrency: number;
   load: (path: string) => Promise<ThumbnailDTO>;
-  onUpdate: (state: ThumbState) => void;
+  onThumbnail: (path: string, thumbnail: string) => void;
+  onFailure: (path: string, reason?: string) => void;
 }
 
 export class ThumbnailRequestQueue {
   private readonly concurrency: number;
   private readonly load: (path: string) => Promise<ThumbnailDTO>;
-  private readonly onUpdate: (state: ThumbState) => void;
-  private thumbs: ThumbState = {};
+  private readonly onThumbnail: (path: string, thumbnail: string) => void;
+  private readonly onFailure: (path: string, reason?: string) => void;
+  private cache = new Map<string, string>();
   private queue: QueueItem[] = [];
   private inFlight = new Map<string, number>();
   private disposed = false;
   private generation = 0;
   private pathVersions = new Map<string, number>();
-  private emitScheduled = false;
 
   constructor(options: QueueOptions) {
     this.concurrency = Math.max(1, options.concurrency);
     this.load = options.load;
-    this.onUpdate = options.onUpdate;
+    this.onThumbnail = options.onThumbnail;
+    this.onFailure = options.onFailure;
   }
 
   enqueue(paths: string[], options: EnqueueOptions = {}): void {
     const unique = Array.from(new Set(paths)).filter((path) => {
-      if (!path || this.thumbs[path] || this.queue.some((item) => item.path === path)) {
+      if (!path || this.cache.has(path) || this.queue.some((item) => item.path === path)) {
         return false;
       }
       const inFlightVersion = this.inFlight.get(path);
@@ -54,19 +55,17 @@ export class ThumbnailRequestQueue {
   forget(paths: string[]): void {
     const set = new Set(paths);
     for (const path of set) {
-      delete this.thumbs[path];
+      this.cache.delete(path);
       this.pathVersions.set(path, this.versionFor(path) + 1);
     }
     this.queue = this.queue.filter((item) => !set.has(item.path));
-    this.scheduleEmit();
   }
 
   reset(): void {
     this.generation += 1;
-    this.thumbs = {};
+    this.cache.clear();
     this.queue = [];
     this.inFlight.clear();
-    this.scheduleEmit();
   }
 
   dispose(): void {
@@ -76,11 +75,15 @@ export class ThumbnailRequestQueue {
     this.inFlight.clear();
   }
 
+  get(path: string): string | undefined {
+    return this.cache.get(path);
+  }
+
   snapshot() {
     return {
       pending: this.queue.map((item) => item.path),
       active: this.inFlight.size,
-      cached: Object.keys(this.thumbs).length,
+      cached: this.cache.size,
     };
   }
 
@@ -92,7 +95,7 @@ export class ThumbnailRequestQueue {
     if (this.disposed) return;
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
       const item = this.queue.shift();
-      if (!item || this.thumbs[item.path]) continue;
+      if (!item || this.cache.has(item.path)) continue;
 
       if (this.inFlight.has(item.path)) {
         this.queue.unshift(item);
@@ -107,35 +110,21 @@ export class ThumbnailRequestQueue {
             item.pathVersion === this.versionFor(item.path) &&
             thumb.thumbnail
           ) {
-            this.thumbs = { ...this.thumbs, [item.path]: thumb.thumbnail };
+            this.cache.set(item.path, thumb.thumbnail);
+            this.onThumbnail(item.path, thumb.thumbnail);
+          } else if (!this.disposed && item.generation === this.generation && item.pathVersion === this.versionFor(item.path)) {
+            this.onFailure(item.path, thumb.failureReason);
           }
-          this.scheduleEmit();
         })
-        .catch(() => {
-          this.scheduleEmit();
+        .catch((err) => {
+          if (!this.disposed && item.generation === this.generation && item.pathVersion === this.versionFor(item.path)) {
+            this.onFailure(item.path, String(err));
+          }
         })
         .finally(() => {
           this.inFlight.delete(item.path);
           if (!this.disposed) this.pump();
         });
     }
-  }
-
-  private scheduleEmit(): void {
-    if (this.disposed || this.emitScheduled) return;
-    this.emitScheduled = true;
-    const flush = () => {
-      this.emitScheduled = false;
-      this.emit();
-    };
-    if (typeof requestAnimationFrame === 'function') {
-      requestAnimationFrame(flush);
-    } else {
-      Promise.resolve().then(flush);
-    }
-  }
-
-  private emit(): void {
-    if (!this.disposed) this.onUpdate({ ...this.thumbs });
   }
 }

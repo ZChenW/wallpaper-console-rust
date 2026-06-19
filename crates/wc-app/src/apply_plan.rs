@@ -51,6 +51,12 @@ pub struct ApplyAction {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompatibilityKind {
+    NativeScene { disclaimer: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyPlan {
     pub availability: ApplyAvailability,
@@ -59,12 +65,21 @@ pub struct ApplyPlan {
     pub current_state_path: Option<String>,
     pub reason: Option<String>,
     pub actions: Vec<ApplyAction>,
+    pub compatibility: Option<CompatibilityKind>,
 }
 
 pub fn plan_for_entry(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
+    plan_for_entry_with_kind(entry, backend_failed, None)
+}
+
+pub fn plan_for_entry_with_kind(
+    entry: &WallpaperEntry,
+    backend_failed: bool,
+    error_kind: Option<&str>,
+) -> ApplyPlan {
     match entry.file_type {
         FileType::Image | FileType::Gif | FileType::Video => plan_image(entry),
-        FileType::WeScene => plan_we_scene(entry, backend_failed),
+        FileType::WeScene => plan_we_scene(entry, backend_failed, error_kind),
         FileType::WeWeb => plan_we_web(entry),
         FileType::WeApplication => plan_we_application(entry),
     }
@@ -91,10 +106,21 @@ fn plan_image(entry: &WallpaperEntry) -> ApplyPlan {
                 reason: None,
             },
         ],
+        compatibility: None,
     }
 }
 
-fn plan_we_scene(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
+fn we_scene_compatibility() -> CompatibilityKind {
+    CompatibilityKind::NativeScene {
+        disclaimer: "Rendered by linux-wallpaperengine — may differ from Wallpaper Engine".into(),
+    }
+}
+
+fn plan_we_scene(
+    entry: &WallpaperEntry,
+    backend_failed: bool,
+    error_kind: Option<&str>,
+) -> ApplyPlan {
     let has_preview = entry
         .project
         .as_ref()
@@ -105,6 +131,8 @@ fn plan_we_scene(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
         .as_ref()
         .and_then(|p| p.workshop_id.as_ref())
         .is_some();
+
+    let is_renderer_limitation = error_kind == Some("renderer_limitation");
 
     if backend_failed {
         let mut actions = vec![ApplyAction {
@@ -140,8 +168,13 @@ fn plan_we_scene(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
             backend: Some(Backend::LinuxWallpaperEngine),
             apply_path: Some(entry.path.to_string()),
             current_state_path: Some(entry.path.to_string()),
-            reason: None,
+            reason: if is_renderer_limitation {
+                Some("Renderer limitation".into())
+            } else {
+                None
+            },
             actions,
+            compatibility: Some(we_scene_compatibility()),
         }
     } else {
         let mut actions = vec![ApplyAction {
@@ -179,6 +212,7 @@ fn plan_we_scene(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
             current_state_path: Some(entry.path.to_string()),
             reason: None,
             actions,
+            compatibility: Some(we_scene_compatibility()),
         }
     }
 }
@@ -189,6 +223,11 @@ fn plan_we_web(entry: &WallpaperEntry) -> ApplyPlan {
         .as_ref()
         .and_then(|p| p.workshop_id.as_ref())
         .is_some();
+    let has_preview = entry
+        .project
+        .as_ref()
+        .and_then(|p| p.preview_path.as_ref())
+        .is_some();
 
     let mut actions = vec![ApplyAction {
         kind: ApplyActionKind::OpenFolder,
@@ -196,6 +235,16 @@ fn plan_we_web(entry: &WallpaperEntry) -> ApplyPlan {
         enabled: true,
         reason: None,
     }];
+    if has_preview {
+        actions.push(ApplyAction {
+            kind: ApplyActionKind::ApplyPreview,
+            label: "Apply preview only".into(),
+            enabled: true,
+            reason: Some(
+                "Only the preview GIF can be applied as a static wallpaper; the Web scene itself is not supported.".into(),
+            ),
+        });
+    }
     if has_workshop_id {
         actions.push(ApplyAction {
             kind: ApplyActionKind::CopyWorkshopId,
@@ -211,6 +260,7 @@ fn plan_we_web(entry: &WallpaperEntry) -> ApplyPlan {
         current_state_path: None,
         reason: Some("Wallpaper Engine Web projects are indexed for browsing only.".into()),
         actions,
+        compatibility: None,
     }
 }
 
@@ -242,6 +292,7 @@ fn plan_we_application(entry: &WallpaperEntry) -> ApplyPlan {
         current_state_path: None,
         reason: None,
         actions,
+        compatibility: None,
     }
 }
 
@@ -455,11 +506,11 @@ mod tests {
         assert_eq!(plan.availability, ApplyAvailability::Unsupported);
         assert_eq!(plan.backend, None);
         assert!(!action_kind(&plan, ApplyActionKind::Apply));
-        assert!(!action_kind(&plan, ApplyActionKind::ApplyPreview));
+        assert!(action_kind(&plan, ApplyActionKind::ApplyPreview));
         assert!(action_kind(&plan, ApplyActionKind::OpenFolder));
         assert!(action_kind(&plan, ApplyActionKind::CopyWorkshopId));
         assert!(plan.reason.as_deref().unwrap().contains("browsing only"));
-        assert_eq!(plan.actions.len(), 2);
+        assert_eq!(plan.actions.len(), 3);
     }
 
     #[test]

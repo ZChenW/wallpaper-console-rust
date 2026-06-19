@@ -1,9 +1,10 @@
-import { memo } from 'react';
+import { memo, useSyncExternalStore } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
 import { BoundedFileSrcCache } from './fileSrcCache';
+import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import {
   displayName,
   formatSize,
@@ -27,13 +28,18 @@ export function safeFileSrc(path: string): string {
 
 interface CardProps {
   entry: WallpaperDTO;
-  thumbnail?: string;
   applying: boolean;
   onApply: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
 }
 
-function WallpaperCardImpl({ entry, thumbnail, applying, onApply, onContextMenu }: CardProps) {
+function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProps) {
+  const store = useThumbnailStore();
+  const thumbnail = useSyncExternalStore(
+    (cb) => store.subscribe(entry.path, cb),
+    () => store.get(entry.path),
+  );
+
   const handleDoubleClick = () => {
     if (!isApplyAvailable(entry)) {
       emitFeedback({

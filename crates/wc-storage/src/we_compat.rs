@@ -53,6 +53,7 @@ fn save(map: &HashMap<String, WeCompatEntry>) -> Result<(), WcError> {
 
 pub fn record_failure(
     project_path: &str,
+    backend_status: &str,
     error_kind: &str,
     error_message: &str,
     error_detail: Option<String>,
@@ -62,7 +63,7 @@ pub fn record_failure(
         project_path.to_string(),
         WeCompatEntry {
             project_path: project_path.to_string(),
-            backend_status: "failed".into(),
+            backend_status: backend_status.into(),
             error_kind: error_kind.into(),
             error_message: error_message.into(),
             error_detail,
@@ -110,6 +111,7 @@ mod tests {
         std::fs::write(project.join("project.json"), "{}").unwrap();
         record_failure(
             &project.to_string_lossy(),
+            "failed",
             "kind",
             "message",
             Some("detail".into()),

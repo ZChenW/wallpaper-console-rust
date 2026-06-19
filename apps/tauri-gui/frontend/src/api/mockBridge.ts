@@ -118,6 +118,7 @@ interface WallpaperDTO {
   applyBackend?: string;
   applyReason?: string;
   applyActions?: ApplyActionDTO[];
+  rendererCompatibility?: string;
 }
 
 const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
@@ -142,6 +143,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
       { kind: 'open_folder', label: 'Open folder', enabled: true },
       { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
     ],
+    rendererCompatibility: 'Rendered by linux-wallpaperengine — may differ from Wallpaper Engine',
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/3589454154',
@@ -156,9 +158,9 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     workshopId: '3589454154',
     title: 'Incompatible Scene',
     weFile: 'scene.json',
-    backendStatus: 'failed',
-    backendErrorKind: 'scene_projection_unsupported',
-    backendErrorMessage: 'This scene uses projection data that linux-wallpaperengine cannot render.',
+    backendStatus: 'renderer_limitation',
+    backendErrorKind: 'renderer_limitation',
+    backendErrorMessage: 'This scene has renderer limitations with linux-wallpaperengine.',
     applyAvailability: 'retryable_failure',
     applyBackend: 'linux-wallpaperengine',
     applyActions: [
@@ -167,6 +169,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
       { kind: 'open_folder', label: 'Open folder', enabled: true },
       { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
     ],
+    rendererCompatibility: 'Rendered by linux-wallpaperengine — may differ from Wallpaper Engine',
   },
   {
     path: '/mock/Steam/steamapps/workshop/content/431960/3650880224',
@@ -186,6 +189,7 @@ const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
     applyReason: 'Wallpaper Engine Web projects are indexed for browsing only.',
     applyActions: [
       { kind: 'open_folder', label: 'Open folder', enabled: true },
+      { kind: 'apply_preview', label: 'Apply preview only', enabled: true, reason: 'Only the preview GIF can be applied as a static wallpaper; the Web scene itself is not supported.' },
       { kind: 'copy_workshop_id', label: 'Copy Workshop ID', enabled: true },
     ],
   },

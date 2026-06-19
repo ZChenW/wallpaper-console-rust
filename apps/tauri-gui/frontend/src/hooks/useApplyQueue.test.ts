@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import { ApplyQueueController } from './applyQueueController.ts';
 import type { ApplyQueueDeps } from './applyQueueController.ts';
+import type { ApplyStagePayload } from '../events/appEvents.ts';
 
 type ApplyRequestDTO = {
   kind: string;
@@ -27,6 +28,7 @@ function makeDeps(opts: {
   applyAction: ApplyQueueDeps['applyAction'];
   feedback: CommandFeedback[];
   metrics?: string[];
+  subscribeApplyStage?: ApplyQueueDeps['subscribeApplyStage'];
 }): ApplyQueueDeps {
   return {
     applyAction: opts.applyAction,
@@ -35,6 +37,7 @@ function makeDeps(opts: {
     setFeedback: (value) => { opts.feedback.push(value); },
     makeErrorFeedback: (label) => ({ state: 'error', label, detail: 'test error' }),
     recordMetric: (name) => { opts.metrics?.push(name); },
+    subscribeApplyStage: opts.subscribeApplyStage,
   };
 }
 
@@ -63,6 +66,15 @@ test('apply queue runs current request then latest pending request only', async 
       };
     },
     feedback,
+    subscribeApplyStage: (handler) => {
+      handler({
+        requestId: 'a',
+        stage: 'EnsureAwwwDaemon',
+        label: 'Starting awww daemon',
+        detail: 'Starting awww daemon.',
+      });
+      return () => {};
+    },
   });
 
   const controller = new ApplyQueueController(deps, (value) => applyingStates.push(value));
@@ -74,17 +86,14 @@ test('apply queue runs current request then latest pending request only', async 
 
   assert.deepEqual(calls, ['a', 'c'], 'should execute current then latest pending only; drop superseded middle');
   assert.deepEqual(applyingStates, [true, false]);
-  // The first request's "starting backend" stage must NOT be overwritten by a queued message.
   assert(
-    feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Starting')),
-    'starting backend stage emitted for active request',
+    feedback.some((f) => f.state === 'running' && f.label === 'Starting awww daemon'),
+    'apply stage feedback surfaced for active request',
   );
-  // No feedback detail should start with "Queued" — queued state is appended as a suffix, not a standalone stage.
   assert(
     !feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Queued')),
     'queued must not overwrite the active apply stage',
   );
-  // The settling stage of the first request should include the queued suffix since 'c' is pending.
   assert(
     feedback.some((f) => f.state === 'running' && f.detail?.includes('Next wallpaper queued.')),
     'queued suffix appended to active stage when a request is pending',
@@ -116,7 +125,6 @@ test('apply queue emits settling stage before success', async () => {
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   const stages = feedback.filter((f) => f.state === 'running').map((f) => f.detail);
-  assert.ok(stages.some((d) => d?.startsWith('Starting')), 'starting backend stage emitted');
   assert.ok(stages.some((d) => d?.startsWith('Settling')), 'settling stage emitted');
 });
 
@@ -153,4 +161,169 @@ test('apply queue does not record metric on failure', async () => {
 
   assert.equal(metrics.length, 0, 'no metric recorded for failed apply');
   assert.ok(feedback.some((f) => f.state === 'error'));
+});
+
+test('apply queue updates feedback from wc-apply-stage and unsubscribes on success', async () => {
+  const feedback: CommandFeedback[] = [];
+  let unsubscribeCount = 0;
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+
+  const deps = makeDeps({
+    applyAction: async () => {
+      emitStage?.({
+        requestId: 'stage-success',
+        stage: 'StartLwe',
+        label: 'Starting linux-wallpaperengine',
+        detail: 'Starting linux-wallpaperengine.',
+      });
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => { unsubscribeCount += 1; };
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('stage-success'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.ok(
+    feedback.some((f) => f.state === 'running' && f.detail?.includes('linux-wallpaperengine')),
+    'stage detail should update running feedback',
+  );
+  assert.equal(unsubscribeCount, 1, 'should unsubscribe after successful apply');
+});
+
+test('apply queue unsubscribes from wc-apply-stage on failure', async () => {
+  const feedback: CommandFeedback[] = [];
+  let unsubscribeCount = 0;
+
+  const deps = makeDeps({
+    applyAction: async () => ({ success: false, stdout: '', stderr: 'failed' }),
+    feedback,
+    subscribeApplyStage: () => {
+      return () => { unsubscribeCount += 1; };
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('stage-fail'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(unsubscribeCount, 1, 'should unsubscribe after failed apply');
+  assert.ok(feedback.some((f) => f.state === 'error'));
+});
+
+test('apply queue ignores wc-apply-stage events with null requestId when current request has id', async () => {
+  const feedback: CommandFeedback[] = [];
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+
+  const deps = makeDeps({
+    applyAction: async () => {
+      emitStage?.({
+        requestId: null,
+        stage: 'StartLwe',
+        label: 'Stale listener',
+        detail: 'Should be ignored.',
+      });
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => {};
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('current-request'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.ok(
+    !feedback.some((f) => f.detail?.includes('Should be ignored')),
+    'null requestId events must not update a request that has requestId',
+  );
+});
+
+test('apply queue ignores wc-apply-stage events for other request ids', async () => {
+  const feedback: CommandFeedback[] = [];
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+
+  const deps = makeDeps({
+    applyAction: async () => {
+      emitStage?.({
+        requestId: 'other-request',
+        stage: 'StartLwe',
+        label: 'Other request',
+        detail: 'Should be ignored.',
+      });
+      emitStage?.({
+        requestId: 'current-request',
+        stage: 'WaitRendererAlive',
+        label: 'Waiting for renderer',
+        detail: 'Waiting for linux-wallpaperengine to start.',
+      });
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => {};
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('current-request'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.ok(
+    feedback.some((f) => f.state === 'running' && f.detail?.includes('linux-wallpaperengine to start')),
+    'should apply stage for matching request id only',
+  );
+  assert.ok(
+    !feedback.some((f) => f.detail?.includes('Should be ignored')),
+    'should ignore stages for other request ids',
+  );
+});
+
+test('apply queue surfaces different preview and scene stage details', async () => {
+  const feedback: CommandFeedback[] = [];
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+
+  const deps = makeDeps({
+    applyAction: async (request) => {
+      if (request.requestId === 'preview') {
+        emitStage?.({
+          requestId: 'preview',
+          stage: 'WaitRendererAlive',
+          label: 'Waiting for renderer',
+          detail: 'Waiting for Awww to display the preview.',
+        });
+      } else {
+        emitStage?.({
+          requestId: 'scene',
+          stage: 'WaitRendererAlive',
+          label: 'Waiting for renderer',
+          detail: 'Waiting for linux-wallpaperengine to start.',
+        });
+      }
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => {};
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('preview'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.enqueue(req('scene'));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.ok(feedback.some((f) => f.detail?.includes('Awww to display the preview')));
+  assert.ok(feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')));
 });

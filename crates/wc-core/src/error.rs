@@ -1,6 +1,14 @@
 use std::path::PathBuf;
 use thiserror::Error;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendErrorKind {
+    RendererLimitation,
+    TargetConfig,
+    WorkshopDirectory,
+    Generic,
+}
+
 #[derive(Error, Debug)]
 pub enum WcError {
     #[error("HOME is not set; cannot resolve config directory")]
@@ -29,6 +37,12 @@ pub enum WcError {
 
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+
+    #[error("linux-wallpaperengine error ({kind:?}): {detail}")]
+    LinuxWallpaperEngine {
+        kind: BackendErrorKind,
+        detail: String,
+    },
 
     #[error("{0}")]
     Other(String),

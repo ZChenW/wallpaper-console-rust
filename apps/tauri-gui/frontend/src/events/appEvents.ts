@@ -2,10 +2,18 @@ import type { CommandFeedback } from '../api/feedback';
 
 export const APP_EVENTS = {
   feedback: 'wc-feedback',
+  applyStage: 'wc-apply-stage',
   configChanged: 'wc-config-changed',
   favoritesInvalidated: 'favorites-cache-invalidated',
   historyInvalidated: 'history-cache-invalidated',
 } as const;
+
+export interface ApplyStagePayload {
+  requestId?: string | null;
+  stage: string;
+  label: string;
+  detail: string;
+}
 
 export interface ConfigChangedEvent {
   key: string;
