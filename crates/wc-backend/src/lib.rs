@@ -1,6 +1,7 @@
 //! wc-backend — wallpaper backend process management.
 
 use std::process::{Command, Stdio};
+use std::time::Duration;
 use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
@@ -18,9 +19,7 @@ pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let _ = Command::new("pkill")
         .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
         .status();
-    let _ = Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)awww\b"])
-        .status();
+    stop_awww();
     // Fallback cleanup: kill residual scene renderer processes that may not have been
     // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
     // left the process behind).
@@ -41,10 +40,7 @@ pub fn stop_non_lwe_backends(_s: &StorageApi) {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
-    let _ = build_pkill_exact_command(&user, "awww-daemon")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    stop_awww();
 }
 
 use lifecycle::StopPlan;
@@ -149,8 +145,9 @@ fn execute_stop_plan_with_runtime(
 }
 
 fn stop_awww() {
-    let user = whoami();
-    let _ = build_pkill_exact_command(&user, "awww-daemon").status();
+    let pc = process_control::RealProcessControl::new();
+    stop_awww_daemon_with_wait(&pc, Duration::from_millis(50));
+    clear_awww_cache();
 }
 
 fn stop_mpvpaper() {
@@ -160,10 +157,48 @@ fn stop_mpvpaper() {
         .status();
 }
 
+#[cfg(test)]
 fn build_pkill_exact_command(user: &str, process_name: &str) -> Command {
     let mut cmd = Command::new("pkill");
     cmd.args(["-u", user, "-x", process_name]);
     cmd
+}
+
+fn stop_awww_daemon_with_wait(pc: &dyn process_control::ProcessControl, sleep: Duration) {
+    const AWWW_DAEMON_PATTERN: &str = r"(^|/)awww-daemon\b";
+    const TERM_CHECKS: usize = 20;
+    const KILL_CHECKS: usize = 5;
+
+    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
+        pc.term_process(pid);
+    }
+
+    for _ in 0..TERM_CHECKS {
+        let running = pc.find_processes(AWWW_DAEMON_PATTERN);
+        if running.is_empty() {
+            return;
+        }
+        std::thread::sleep(sleep);
+    }
+
+    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
+        pc.kill_process(pid);
+    }
+
+    for _ in 0..KILL_CHECKS {
+        if pc.find_processes(AWWW_DAEMON_PATTERN).is_empty() {
+            return;
+        }
+        std::thread::sleep(sleep);
+    }
+}
+
+fn clear_awww_cache() {
+    let _ = Command::new("awww")
+        .arg("clear-cache")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
 }
 
 fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Result<(), WcError> {
@@ -251,71 +286,81 @@ fn apply_wallpaper_with_runtime(
         }
     }
 
-    let target_result = match backend {
-        Backend::Awww => (|| -> Result<(), WcError> {
-            runtime.ensure_awww_daemon_running()?;
-            if matches!(
-                lifecycle.previous,
-                lifecycle::RunningBackend::None
-                    | lifecycle::RunningBackend::Mpvpaper
-                    | lifecycle::RunningBackend::LinuxWallpaperEngine
-                    | lifecycle::RunningBackend::Unknown
-            ) {
-                runtime.clear_awww_state_hint();
-            }
-            let resize_raw = s.config_get("awww_resize", "crop");
-            let resize = normalize_awww_resize(&resize_raw);
-            let transition_raw = s.config_get("awww_transition_type", "fade");
-            let transition_type = normalize_awww_transition_type(&transition_raw);
-            let duration_raw = s.config_get("awww_transition_duration", "1");
-            let duration =
-                wc_core::config_normalizer::normalize_awww_transition_duration(&duration_raw);
-            let fps_raw = s.config_get("wallpaper_transition_fps", "60");
-            let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
-            let mut cmd = build_awww_img_command(path, resize, transition_type, &duration, &fps);
-            cmd.arg("--filter").arg("Lanczos3");
-            let output = runtime
-                .command_output(&mut cmd)
-                .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                let detail = if !stderr.is_empty() {
-                    stderr
-                } else if !stdout.is_empty() {
-                    stdout
+    let target_result = if backend == Backend::Awww && fallback_ok {
+        Ok(())
+    } else {
+        match backend {
+            Backend::Awww => (|| -> Result<(), WcError> {
+                runtime.ensure_awww_daemon_running()?;
+                if matches!(
+                    lifecycle.previous,
+                    lifecycle::RunningBackend::Mpvpaper
+                        | lifecycle::RunningBackend::LinuxWallpaperEngine
+                        | lifecycle::RunningBackend::Unknown
+                ) {
+                    runtime.clear_awww_state_hint();
+                }
+                let fps_raw = s.config_get("wallpaper_transition_fps", "60");
+                let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
+                let resize_raw = s.config_get("awww_resize", "crop");
+                let resize = normalize_awww_resize(&resize_raw);
+                let mut cmd = if lifecycle.previous == lifecycle::RunningBackend::None {
+                    build_awww_instant_command(path, resize, &fps)
                 } else {
-                    "no renderer output".into()
+                    let transition_raw = s.config_get("awww_transition_type", "fade");
+                    let transition_type = normalize_awww_transition_type(&transition_raw);
+                    let duration_raw = s.config_get("awww_transition_duration", "1");
+                    let duration = wc_core::config_normalizer::normalize_awww_transition_duration(
+                        &duration_raw,
+                    );
+                    let mut cmd =
+                        build_awww_img_command(path, resize, transition_type, &duration, &fps);
+                    cmd.arg("--filter").arg("Lanczos3");
+                    cmd
                 };
-                return Err(WcError::Other(format!(
-                    "awww apply failed with status {}: {}",
-                    output.status, detail
-                )));
+                let output = runtime
+                    .command_output(&mut cmd)
+                    .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    let detail = if !stderr.is_empty() {
+                        stderr
+                    } else if !stdout.is_empty() {
+                        stdout
+                    } else {
+                        "no renderer output".into()
+                    };
+                    return Err(WcError::Other(format!(
+                        "awww apply failed with status {}: {}",
+                        output.status, detail
+                    )));
+                }
+                Ok(())
+            })(),
+            Backend::Mpvpaper => {
+                let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
+                let opts = normalize_mpvpaper_options(&opts_raw);
+                let output = s.config_get("mpvpaper_output", "*");
+                let mut cmd = Command::new("setsid");
+                cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
+                let status = runtime
+                    .command_status(&mut cmd)
+                    .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
+                if !status.success() {
+                    return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
+                }
+                Ok(())
             }
-            Ok(())
-        })(),
-        Backend::Mpvpaper => {
-            let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
-            let opts = normalize_mpvpaper_options(&opts_raw);
-            let output = s.config_get("mpvpaper_output", "*");
-            let mut cmd = Command::new("setsid");
-            cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
-            let status = runtime
-                .command_status(&mut cmd)
-                .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
-            if !status.success() {
-                return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
+            Backend::LinuxWallpaperEngine => {
+                let project = linux_wallpaperengine::project_from_path(path)?;
+                match linux_wallpaperengine::apply(s, project) {
+                    Ok(()) => Ok(()),
+                    Err(e) => Err(e),
+                }
             }
-            Ok(())
+            Backend::Unsupported => unreachable!(),
         }
-        Backend::LinuxWallpaperEngine => {
-            let project = linux_wallpaperengine::project_from_path(path)?;
-            match linux_wallpaperengine::apply(s, project) {
-                Ok(()) => Ok(()),
-                Err(e) => Err(e),
-            }
-        }
-        Backend::Unsupported => unreachable!(),
     };
     let target_elapsed = timing_start.elapsed();
 
@@ -681,6 +726,13 @@ mod tests {
             "apply_wallpaper should reject Unsupported backend, got: {}",
             msg
         );
+    }
+
+    fn assert_command_arg(args: &[String], name: &str, value: &str) {
+        let actual = args
+            .windows(2)
+            .find_map(|pair| (pair[0] == name).then_some(pair[1].as_str()));
+        assert_eq!(actual, Some(value), "missing or wrong {name} in {args:?}");
     }
 
     #[test]
@@ -1280,7 +1332,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_backend_image_runs_instant_fallback_and_normal_awww_target() {
+    fn cross_backend_image_uses_instant_target_without_second_awww_apply() {
         let (tmp, s) = temp_storage();
         let img = tmp.path().join("target.jpg");
         std::fs::write(&img, b"jpg").unwrap();
@@ -1301,8 +1353,12 @@ mod tests {
         .unwrap();
 
         assert_eq!(
-            rt.command_output_count, 2,
-            "instant fallback plus normal awww target"
+            rt.command_output_count, 1,
+            "instant target image should not be followed by a second awww apply"
+        );
+        assert_eq!(
+            rt.clear_awww_state_hint_count, 0,
+            "clearing awww after instant target causes image -> black -> image flicker"
         );
         assert_eq!(rt.stop_mpvpaper_count, 1);
     }
@@ -1408,7 +1464,7 @@ mod tests {
     }
 
     #[test]
-    fn awww_from_none_clears_awww_state_hint_before_apply() {
+    fn awww_from_none_applies_without_clear_to_avoid_old_image_black_flash() {
         let (tmp, s) = temp_storage();
         let img = tmp.path().join("target.jpg");
         std::fs::write(&img, b"jpg").unwrap();
@@ -1427,12 +1483,109 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(rt.clear_awww_state_hint_count, 1);
+        assert_eq!(
+            rt.clear_awww_state_hint_count, 0,
+            "after Stop Backends, awww daemon startup may restore its old layer; clearing after startup causes old image -> black -> new image"
+        );
+        assert_eq!(rt.command_output_count, 1);
+        assert_command_arg(&rt.command_output_args[0], "--transition-type", "simple");
+        assert_command_arg(&rt.command_output_args[0], "--transition-duration", "0");
+    }
+
+    #[test]
+    fn stop_awww_waits_until_daemon_is_gone_before_returning() {
+        let pc = SequenceProcessControl::new(vec![vec![42], vec![42], vec![]]);
+
+        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
+
+        assert_eq!(pc.termed(), vec![42]);
+        assert!(pc.killed().is_empty());
+        assert_eq!(pc.find_calls(), 3);
+    }
+
+    #[test]
+    fn stop_awww_kills_daemon_when_term_does_not_exit() {
+        let pc = SequenceProcessControl::new(vec![vec![42], vec![42], vec![42], vec![42]]);
+
+        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
+
+        assert_eq!(pc.termed(), vec![42]);
+        assert_eq!(pc.killed(), vec![42]);
+    }
+
+    #[test]
+    fn ensure_awww_daemon_starts_with_no_cache_to_avoid_restoring_old_wallpaper() {
+        let cmd = runtime::build_awww_daemon_command();
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect();
+        assert!(
+            args.iter().any(|arg| arg == "--no-cache"),
+            "daemon startup args must include --no-cache, got {args:?}"
+        );
     }
 
     // -----------------------------------------------------------------
     // FakeRuntime for testing the backend runtime seam
     // -----------------------------------------------------------------
+
+    struct SequenceProcessControl {
+        results: std::cell::RefCell<Vec<Vec<u32>>>,
+        last: std::cell::RefCell<Vec<u32>>,
+        find_calls: std::cell::Cell<usize>,
+        termed: std::cell::RefCell<Vec<u32>>,
+        killed: std::cell::RefCell<Vec<u32>>,
+    }
+
+    impl SequenceProcessControl {
+        fn new(results: Vec<Vec<u32>>) -> Self {
+            Self {
+                results: std::cell::RefCell::new(results),
+                last: std::cell::RefCell::new(Vec::new()),
+                find_calls: std::cell::Cell::new(0),
+                termed: std::cell::RefCell::new(Vec::new()),
+                killed: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+
+        fn find_calls(&self) -> usize {
+            self.find_calls.get()
+        }
+
+        fn termed(&self) -> Vec<u32> {
+            self.termed.borrow().clone()
+        }
+
+        fn killed(&self) -> Vec<u32> {
+            self.killed.borrow().clone()
+        }
+    }
+
+    impl process_control::ProcessControl for SequenceProcessControl {
+        fn find_processes(&self, _pattern: &str) -> Vec<u32> {
+            self.find_calls.set(self.find_calls.get() + 1);
+            let next = if self.results.borrow().is_empty() {
+                self.last.borrow().clone()
+            } else {
+                self.results.borrow_mut().remove(0)
+            };
+            *self.last.borrow_mut() = next.clone();
+            next
+        }
+
+        fn process_group_of(&self, _pid: u32) -> Option<u32> {
+            None
+        }
+
+        fn term_process(&self, pid: u32) {
+            self.termed.borrow_mut().push(pid);
+        }
+
+        fn kill_process(&self, pid: u32) {
+            self.killed.borrow_mut().push(pid);
+        }
+    }
 
     #[derive(Default)]
     struct FakeRuntime {
@@ -1446,6 +1599,8 @@ mod tests {
         command_status_success: bool,
         command_output_programs: Vec<String>,
         command_status_programs: Vec<String>,
+        command_output_args: Vec<Vec<String>>,
+        command_status_args: Vec<Vec<String>>,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
@@ -1456,6 +1611,12 @@ mod tests {
             self.command_output_count += 1;
             self.command_output_programs
                 .push(command.get_program().to_string_lossy().to_string());
+            self.command_output_args.push(
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().to_string())
+                    .collect(),
+            );
             let program = if self.command_output_success {
                 "true"
             } else {
@@ -1473,6 +1634,12 @@ mod tests {
             self.command_status_count += 1;
             self.command_status_programs
                 .push(command.get_program().to_string_lossy().to_string());
+            self.command_status_args.push(
+                command
+                    .get_args()
+                    .map(|arg| arg.to_string_lossy().to_string())
+                    .collect(),
+            );
             let program = if self.command_status_success {
                 "true"
             } else {

@@ -50,3 +50,53 @@
 - P3-3：applyQueueController 移除 enqueue 中的独立 queued feedback emit（不再覆盖当前 apply 阶段）；改为在 starting/settling 阶段 detail 末尾追加 " · Next wallpaper queued." 后缀。
 - P3-4：fileSrcCache 抽为 BoundedFileSrcCache（LRU，默认上限 2000），超出时淘汰最旧条目；新增纯单元测试覆盖缓存/淘汰/LRU 提升/clear。
 - P3-5：doc/construct.md 末尾多余空行清理。
+
+## 2026-06-19 14:24:07 CST: 手工验收后视觉 handoff 修复
+
+目标：
+- 修复其他类型壁纸切换到 image 时出现 image -> black -> image 的二次闪烁。
+
+结果：
+- 定位原因：cross-backend -> Awww 时 TargetImageInstant 已先通过 awww 显示目标 image，随后普通 Awww target 路径又调用 `awww clear` 并执行第二次 `awww img`，导致刚显示的 image layer 被清掉后再出现。
+- 修复：当 Awww 的 instant fallback 已成功显示目标 image 时，跳过后续普通 Awww target command 和 `clear_awww_state_hint`，仍保留后置 stop 旧 backend 与状态写入。
+- 测试：将 cross-backend image 测试改为断言只执行一次 awww command，且不调用 clear_awww_state_hint。
+
+## 2026-06-19 14:43:00 CST: Stop Backends 后 image 闪回修复
+
+目标：
+- 修复点击 Stop Backends 后，再点击新 image 仍短暂出现旧 image，然后黑屏，再切到新 image 的问题。
+
+结果：
+- 定位原因：Stop Backends 已清空应用 runtime state，下一次 apply 的 previous 为 None；但 Awww target 路径在启动 awww-daemon 后仍执行 `awww clear`。awww-daemon 可能先恢复自身旧 layer，随后 `awww clear` 把画面清黑，再执行新 `awww img`，形成旧 image -> black -> 新 image。
+- 修复：Awww target 路径不再对 previous=None 执行 `clear_awww_state_hint`；只有明确从其他 backend 或 Unknown 状态进入 Awww 时才做 state hint 清理。
+- 测试：新增/更新 None -> Awww 用例，断言 Stop 后的新 image apply 不调用 clear_awww_state_hint 且只执行一次 awww command。
+
+## 2026-06-19 14:53:34 CST: Stop Backends 等待 daemon 退出
+
+目标：
+- 修复 Stop Backends 发出停止命令后立即返回，用户快速点击新 image 时可能复用旧 awww-daemon 的竞态。
+
+结果：
+- 运行环境确认：niri 中的 `spawn-at-startup "awww-daemon"` 会让 daemon 独立于应用存在，可能保留旧 layer；用户已删除该配置，但当前会话中已存在的 daemon 仍需 kill 或重启 session 才消失。
+- 后端修复：Stop Awww 改为通过 process_control 对 `awww-daemon` 发 TERM 后轮询确认退出；若仍未退出则发 KILL 并再次确认。`stop_all_backends` 与 `stop_non_lwe_backends` 统一走该等待路径。
+- 测试：新增 stop_awww_waits_until_daemon_is_gone_before_returning 与 stop_awww_kills_daemon_when_term_does_not_exit，覆盖等待退出和 TERM 失败升级 KILL。
+
+## 2026-06-19 15:01:58 CST: Stop 后首次 image 使用 instant apply
+
+目标：
+- 修复 Stop -> image A -> Stop -> image B 时，B 之前仍短暂出现 A 的问题。
+
+结果：
+- 定位原因：Stop 后应用 runtime state 为 None，但 Awww target 路径仍使用用户配置的普通 transition（默认 fade/1s）。如果 awww-daemon 冷启动时恢复上一张 layer，普通 fade 会把旧 image 当作过渡起点，表现为先出现 A 再切到 B。
+- 修复：previous=None -> Awww 的首次 apply 改用 instant command（transition-type simple、transition-duration 0）；已有 Awww->Awww 正常切换仍保留用户配置的 transition。
+- 测试：扩展 None -> Awww 用例，断言不调用 clear_awww_state_hint、只执行一次 awww command，且命令参数为 simple/0。
+
+## 2026-06-19 15:11:01 CST: 禁用 Awww daemon cache 恢复
+
+目标：
+- 继续修复 Stop -> image A -> Stop -> image B 时，B 前仍出现 A 的问题。
+
+结果：
+- 定位原因：`awww-daemon --help` 明确说明默认会从 cache 搜索每个输出的上一张壁纸；因此 A 不是 transition 生成，而是 daemon 冷启动时先从 Awww cache 恢复出来。
+- 修复：应用启动 awww-daemon 时改为 `awww-daemon --no-cache`；Stop Awww 等待 daemon 退出后执行 `awww clear-cache`，清理历史版本或外部 daemon 写入的 Awww cache。
+- 测试：新增 ensure_awww_daemon_starts_with_no_cache_to_avoid_restoring_old_wallpaper，断言 daemon 启动命令包含 `--no-cache`；后端全量测试 104 pass。

@@ -18,6 +18,15 @@ pub trait BackendRuntime {
 
 pub struct SystemBackendRuntime;
 
+pub(crate) fn build_awww_daemon_command() -> Command {
+    let mut cmd = Command::new("setsid");
+    cmd.args(["-f", "awww-daemon", "--no-cache"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
+    cmd
+}
+
 impl BackendRuntime for SystemBackendRuntime {
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
         command
@@ -51,11 +60,7 @@ impl BackendRuntime for SystemBackendRuntime {
         if crate::is_awww_daemon_running(&user) {
             return Ok(());
         }
-        let mut cmd = Command::new("setsid");
-        cmd.args(["-f", "awww-daemon"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
+        let mut cmd = build_awww_daemon_command();
         let status = self.command_status(&mut cmd).map_err(|_| {
             WcError::Other(
                 "setsid not available — cannot launch awww-daemon. \
