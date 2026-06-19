@@ -74,8 +74,21 @@ test('apply queue runs current request then latest pending request only', async 
 
   assert.deepEqual(calls, ['a', 'c'], 'should execute current then latest pending only; drop superseded middle');
   assert.deepEqual(applyingStates, [true, false]);
-  assert(feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Queued')));
-  assert(feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Starting')));
+  // The first request's "starting backend" stage must NOT be overwritten by a queued message.
+  assert(
+    feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Starting')),
+    'starting backend stage emitted for active request',
+  );
+  // No feedback detail should start with "Queued" — queued state is appended as a suffix, not a standalone stage.
+  assert(
+    !feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Queued')),
+    'queued must not overwrite the active apply stage',
+  );
+  // The settling stage of the first request should include the queued suffix since 'c' is pending.
+  assert(
+    feedback.some((f) => f.state === 'running' && f.detail?.includes('Next wallpaper queued.')),
+    'queued suffix appended to active stage when a request is pending',
+  );
   assert(feedback.some((f) => f.state === 'success' && f.label === 'Applied'));
 });
 

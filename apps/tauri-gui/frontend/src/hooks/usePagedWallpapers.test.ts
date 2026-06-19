@@ -4,6 +4,7 @@ import {
   mergePagedWallpaperItems,
   resolveRequestKind,
   loadingStateForKind,
+  shouldConfirmEmpty,
 } from './usePagedWallpapers.ts';
 
 const item = (path: string) => ({
@@ -54,4 +55,14 @@ test('loadingStateForKind sets initialLoading only for initial kind', () => {
   assert.deepEqual(loadingStateForKind('initial'), { initialLoading: true, refreshing: false });
   assert.deepEqual(loadingStateForKind('refresh'), { initialLoading: false, refreshing: true });
   assert.deepEqual(loadingStateForKind('append'), { initialLoading: false, refreshing: false });
+});
+
+test('shouldConfirmEmpty requires at least two consecutive zero results', () => {
+  assert.equal(shouldConfirmEmpty(1, true), false, 'first zero must not confirm empty');
+  assert.equal(shouldConfirmEmpty(2, true), true, 'second consecutive zero confirms empty');
+  assert.equal(shouldConfirmEmpty(3, true), true);
+});
+
+test('shouldConfirmEmpty ignores consecutive zeros when hasLoadedOnce is false', () => {
+  assert.equal(shouldConfirmEmpty(2, false), false);
 });

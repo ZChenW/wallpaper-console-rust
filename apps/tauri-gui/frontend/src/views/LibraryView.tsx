@@ -65,7 +65,10 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     initialLoading,
     refreshing,
     hasLoadedOnce,
+    loadError,
+    emptyConfirmed,
     loadMore,
+    reload,
     entryByPath,
   } = usePagedWallpapers({
     pageSize: PAGE_SIZE,
@@ -79,6 +82,8 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     total,
     entryCount: entries.length,
     scanRunning: scanProgress?.running ?? false,
+    loadError,
+    emptyConfirmed,
   });
 
   useEffect(() => {
@@ -196,6 +201,13 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
         </>
       ) : display === 'empty' ? (
         <div className="empty-state">Library is empty. Add sources or scan Wallpaper Engine.</div>
+      ) : display === 'error' ? (
+        <div className="empty-state">
+          Failed to load library.
+          <button className="toolbar-btn" onClick={() => void reload()} style={{ marginLeft: 8 }}>
+            Retry
+          </button>
+        </div>
       ) : display === 'indexing' ? (
         <div className="loading">Indexing library…</div>
       ) : (

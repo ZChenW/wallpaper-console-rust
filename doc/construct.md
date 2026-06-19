@@ -42,5 +42,11 @@
 - apply path 增加阶段耗时 debug log（pre_stop/fallback/target/settle），仅在 gui_debug_logs=on 写入 backend-apply-timings-last.log；默认 settle 时长本轮未改。
 - 验证：npm run typecheck/test:unit（126 pass）/build/smoke（82 pass）；cargo test -p wc-backend（101 pass）/wallpaper-console-tauri（43 pass）；cargo clippy -D warnings 干净。
 
+## 2026-06-19 代码评审修复
 
-
+结果：
+- P2-1：usePagedWallpapers 增加 emptyConfirmed——首个零页不确认 empty，需连续两次零页或延迟 400ms 确认重载后才显示 empty；resolveLibraryDisplay 新增 emptyConfirmed 入口，未确认时显示 loading；新增 Playwright 渲染测试验证 mock 场景下不闪烁 empty。
+- P2-2：usePagedWallpapers 增加 loadError 追踪——初始加载失败不再设 hasLoadedOnce=true，resolveLibraryDisplay 新增 error 状态，LibraryView 渲染错误提示 + Retry 按钮；有旧 entries 时刷新失败仍保留 grid。
+- P3-3：applyQueueController 移除 enqueue 中的独立 queued feedback emit（不再覆盖当前 apply 阶段）；改为在 starting/settling 阶段 detail 末尾追加 " · Next wallpaper queued." 后缀。
+- P3-4：fileSrcCache 抽为 BoundedFileSrcCache（LRU，默认上限 2000），超出时淘汰最旧条目；新增纯单元测试覆盖缓存/淘汰/LRU 提升/clear。
+- P3-5：doc/construct.md 末尾多余空行清理。

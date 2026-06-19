@@ -3,6 +3,7 @@ import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
+import { BoundedFileSrcCache } from './fileSrcCache';
 import {
   displayName,
   formatSize,
@@ -12,19 +13,16 @@ import {
   weBadgeClass,
 } from './wallpaperCardHelpers';
 
-const fileSrcCache = new Map<string, string>();
+const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
+  try {
+    return convertFileSrc(path);
+  } catch {
+    return path;
+  }
+});
 
 export function safeFileSrc(path: string): string {
-  const cached = fileSrcCache.get(path);
-  if (cached !== undefined) return cached;
-  let src: string;
-  try {
-    src = convertFileSrc(path);
-  } catch {
-    src = path;
-  }
-  fileSrcCache.set(path, src);
-  return src;
+  return fileSrcCache.get(path);
 }
 
 interface CardProps {

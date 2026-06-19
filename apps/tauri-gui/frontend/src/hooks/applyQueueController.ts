@@ -30,7 +30,6 @@ export class ApplyQueueController {
   enqueue(request: ApplyRequestDTO): void {
     if (this.applying) {
       this.pending = request;
-      this.emitStage('queued', false);
       return;
     }
     void this.run(request);
@@ -84,28 +83,24 @@ export class ApplyQueueController {
   }
 
   private emitStage(stage: ApplyStage, isBackendApply: boolean): void {
+    const queuedSuffix = this.pending !== null ? ' · Next wallpaper queued.' : '';
     switch (stage) {
       case 'queued':
-        this.deps.setFeedback({
-          state: 'running',
-          label: 'Applying wallpaper',
-          detail: 'Queued — waiting for current apply to finish.',
-        });
         break;
       case 'starting backend':
         this.deps.setFeedback({
           state: 'running',
           label: 'Applying wallpaper',
           detail: isBackendApply
-            ? 'Starting renderer. Scene wallpapers may take several seconds.'
-            : 'Applying wallpaper.',
+            ? `Starting renderer. Scene wallpapers may take several seconds.${queuedSuffix}`
+            : `Applying wallpaper.${queuedSuffix}`,
         });
         break;
       case 'settling':
         this.deps.setFeedback({
           state: 'running',
           label: 'Applying wallpaper',
-          detail: 'Settling…',
+          detail: `Settling…${queuedSuffix}`,
         });
         break;
       case 'applied':
