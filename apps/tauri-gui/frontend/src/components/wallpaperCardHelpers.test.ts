@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  compatibilityLine,
   displayName,
   formatSize,
   metaLine,
@@ -66,14 +65,6 @@ test('weBadgeClass uses danger class for renderer_limitation', () => {
     weBadgeClass(baseEntry({ type: 'we_scene', backendStatus: 'renderer_limitation' })),
     'wallpaper-badge wallpaper-badge-danger',
   );
-});
-
-test('compatibilityLine returns disclaimer when present', () => {
-  assert.equal(
-    compatibilityLine(baseEntry({ rendererCompatibility: 'Rendered by lwe' })),
-    'Rendered by lwe',
-  );
-  assert.equal(compatibilityLine(baseEntry({})), null);
 });
 
 test('weBadgeClass uses danger class for failed backend', () => {

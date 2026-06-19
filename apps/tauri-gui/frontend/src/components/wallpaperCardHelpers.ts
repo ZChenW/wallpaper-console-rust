@@ -34,11 +34,6 @@ export function weBadgeClass(e: WallpaperDTO): string {
   return 'wallpaper-badge';
 }
 
-export function compatibilityLine(e: WallpaperDTO): string | null {
-  if (e.rendererCompatibility) return e.rendererCompatibility;
-  return null;
-}
-
 export function metaLine(e: WallpaperDTO): string {
   if (e.type === 'we_scene' || e.type === 'we_web' || e.type === 'unsupported') {
     if (e.type === 'unsupported' && e.unsupportedReason) {

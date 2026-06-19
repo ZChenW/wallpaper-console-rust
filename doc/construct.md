@@ -122,3 +122,22 @@
 - Awww socket 超时或 LWE 立即崩溃时，最后停留的阶段与失败 toast 衔接正常，不出现无限卡在某一阶段。
 - 快速连续 apply 时，旧 requestId 的 stage event 不覆盖新请求的 feedback。
 - Phase 1–3 手工项仍适用（awww readiness、renderer limitation 卡片、Library 滚动缩略图）；本轮未改其公共 command/config key。
+
+## 2026-06-19 readiness / compatibility / stages — Phase 4 review fixes (db15c2d)
+
+结果：
+- P1：`subscribeApplyStage` 抽出为 `subscribeApplyStage.ts` + `subscribeApplyStageCore.ts`，`listen()` resolve 前 unsubscribe 时用 `disposed` 守卫立即调用 deferred unlisten，避免泄漏 listener 污染后续 apply feedback。
+- P2：`ApplyQueueController` 收紧 `requestId` 过滤——当前请求有 ID 时拒绝 `null`/其他 ID 的 stage event；新增 null requestId 单测。
+- P3：`apply_awww_instant_with_runtime` 在 cross-backend `TargetImageInstant` fallback 路径 emit `EnsureAwwwDaemon` / `AwwwSocketReady`（rollback 路径仍 silent）；新增 `cross_backend_image_fallback_emits_awww_readiness_stages` 测试。
+- P4：`apply_stage_detail` 按 `ctx.backend` 生成 renderer 名称（`backend_renderer_name`），`StartLwe` / `WaitRendererAlive` 不再仅靠 preview 分支硬编码文案。
+
+## 2026-06-19 readiness / compatibility / stages — Final verification (post db15c2d)
+
+命令与结果：
+- `CARGO_TARGET_DIR=.../target cargo run -p xtask -- verify all`：Rust fmt/check/clippy/test（workspace 全绿，wc-backend 113 pass、wc-app 25 pass、wallpaper-console-tauri 44 pass）、frontend typecheck、frontend unit（149 pass）、frontend build 均通过；Playwright smoke 因沙箱缓存路径缺少 chromium 可执行文件失败（`browserType.launch: Executable doesn't exist`），属环境限制，非代码回归。
+- `git diff --check`：通过。
+
+手工验收项（review fixes，需在真实 Tauri 会话中确认）：
+- 快速 apply 后立即切换/完成时，旧 stage listener 不再更新后续请求的 running feedback。
+- video/scene → image（Awww instant fallback）时，UI 在 fallback 期间显示 `EnsureAwwwDaemon` / `AwwwSocketReady`，而非长时间停在 `ResolveTarget`。
+- 带 `requestId` 的 apply 忽略 `requestId: null` 的 stage event（防泄漏 listener 或 legacy 路径干扰）。

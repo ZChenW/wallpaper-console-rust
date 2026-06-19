@@ -6,7 +6,6 @@ import { emitFeedback } from '../events/appEvents';
 import { BoundedFileSrcCache } from './fileSrcCache';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import {
-  compatibilityLine,
   displayName,
   formatSize,
   metaLine,
@@ -77,9 +76,6 @@ function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProp
       <div className="wallpaper-info">
         <span className="wallpaper-name">{displayName(entry)}</span>
         <span className="wallpaper-meta">{metaLine(entry)}</span>
-        {compatibilityLine(entry) && (
-          <span className="wallpaper-compatibility">{compatibilityLine(entry)}</span>
-        )}
       </div>
     </div>
   );
