@@ -216,6 +216,37 @@ test('apply queue unsubscribes from wc-apply-stage on failure', async () => {
   assert.ok(feedback.some((f) => f.state === 'error'));
 });
 
+test('apply queue ignores wc-apply-stage events with null requestId when current request has id', async () => {
+  const feedback: CommandFeedback[] = [];
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+
+  const deps = makeDeps({
+    applyAction: async () => {
+      emitStage?.({
+        requestId: null,
+        stage: 'StartLwe',
+        label: 'Stale listener',
+        detail: 'Should be ignored.',
+      });
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => {};
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('current-request'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.ok(
+    !feedback.some((f) => f.detail?.includes('Should be ignored')),
+    'null requestId events must not update a request that has requestId',
+  );
+});
+
 test('apply queue ignores wc-apply-stage events for other request ids', async () => {
   const feedback: CommandFeedback[] = [];
   let emitStage: ((event: ApplyStagePayload) => void) | undefined;

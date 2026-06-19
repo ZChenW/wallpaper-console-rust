@@ -49,10 +49,9 @@ export class ApplyQueueController {
       const queuedSuffix = () => (this.pending !== null ? ' · Next wallpaper queued.' : '');
 
       const unsubscribeStage = this.deps.subscribeApplyStage?.((event) => {
-        if (event.requestId && req.requestId && event.requestId !== req.requestId) {
-          return;
-        }
-        if (event.requestId && !req.requestId) {
+        if (req.requestId) {
+          if (event.requestId !== req.requestId) return;
+        } else if (event.requestId) {
           return;
         }
         this.deps.setFeedback({

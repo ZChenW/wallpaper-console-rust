@@ -1,10 +1,9 @@
 import { useCallback, useRef, useState } from 'react';
-import { listen } from '@tauri-apps/api/event';
 import { api, ApplyRequestDTO } from '../api/bridge';
 import { commandErrorFeedback, CommandFeedback } from '../api/feedback';
-import { APP_EVENTS, type ApplyStagePayload } from '../events/appEvents';
 import { recordMetric } from '../perf/metrics';
 import { ApplyQueueController } from './applyQueueController';
+import { createSubscribeApplyStage } from './subscribeApplyStage';
 
 export type { ApplyQueueController, ApplyQueueDeps, ApplyStage } from './applyQueueController';
 
@@ -25,13 +24,7 @@ export function useApplyQueue(args: {
         setFeedback: args.setFeedbackWithAutoDismiss,
         makeErrorFeedback: (label, error) => commandErrorFeedback(label, error),
         recordMetric,
-        subscribeApplyStage: (handler) => {
-          let unlisten: (() => void) | undefined;
-          void listen<ApplyStagePayload>(APP_EVENTS.applyStage, (event) => {
-            if (event.payload) handler(event.payload);
-          }).then((u) => { unlisten = u; });
-          return () => { unlisten?.(); };
-        },
+        subscribeApplyStage: createSubscribeApplyStage(),
       },
       setApplying,
     );

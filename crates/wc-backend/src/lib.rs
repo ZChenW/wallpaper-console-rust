@@ -288,7 +288,7 @@ fn apply_wallpaper_with_runtime(
     let fallback_ok = match visual.fallback_stage {
         visual_handoff::FallbackStage::TargetImageInstant => {
             if let Some(fb) = fallback_path {
-                match apply_awww_instant_with_runtime(s, fb, runtime) {
+                match apply_awww_instant_with_runtime(s, fb, runtime, Some(reporter), request_id) {
                     Ok(()) => {
                         std::thread::sleep(std::time::Duration::from_millis(
                             visual_handoff::AWWW_FALLBACK_SETTLE_MS,
@@ -557,8 +557,25 @@ fn apply_awww_instant_with_runtime(
     s: &StorageApi,
     path: &str,
     runtime: &mut dyn runtime::BackendRuntime,
+    reporter: Option<&mut dyn apply_stage::ApplyStageReporter>,
+    request_id: Option<&str>,
 ) -> Result<(), WcError> {
-    runtime.ensure_awww_daemon_running()?;
+    match reporter {
+        Some(reporter) => {
+            apply_stage::report_stage(
+                reporter,
+                apply_stage::ApplyStage::EnsureAwwwDaemon,
+                request_id,
+            );
+            runtime.ensure_awww_daemon_running()?;
+            apply_stage::report_stage(
+                reporter,
+                apply_stage::ApplyStage::AwwwSocketReady,
+                request_id,
+            );
+        }
+        None => runtime.ensure_awww_daemon_running()?,
+    }
     let resize_raw = s.config_get("awww_resize", "crop");
     let resize = normalize_awww_resize(&resize_raw);
     let fps_raw = s.config_get("wallpaper_transition_fps", "60");
@@ -616,7 +633,7 @@ fn rollback_visual_fallback_after_target_failure_with_runtime(
         if let Some(old_path) = s.current_read().ok().flatten() {
             let p = std::path::Path::new(&old_path);
             if p.is_file() {
-                match apply_awww_instant_with_runtime(s, &old_path, runtime) {
+                match apply_awww_instant_with_runtime(s, &old_path, runtime, None, None) {
                     Ok(()) => Some(format!(
                         "rollback: restored previous awww wallpaper {}",
                         p.file_name().and_then(|n| n.to_str()).unwrap_or(&old_path)
@@ -1405,6 +1422,45 @@ mod tests {
             .collect();
         assert_eq!(args, ["-u", "alice", "-x", "awww-daemon"]);
         assert!(!args.contains(&r"(^|/)awww\b".to_string()));
+    }
+
+    #[test]
+    fn cross_backend_image_fallback_emits_awww_readiness_stages() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("fallback.jpg");
+        std::fs::write(&img, b"jpg").unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = apply_stage::test_support::CapturingReporter::new();
+        apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+            &mut reporter,
+            Some("req-fallback"),
+        )
+        .unwrap();
+
+        let stages = reporter.stages();
+        assert!(
+            stages
+                .iter()
+                .any(|stage| *stage == apply_stage::ApplyStage::EnsureAwwwDaemon),
+            "fallback instant path must emit EnsureAwwwDaemon"
+        );
+        assert!(
+            stages
+                .iter()
+                .any(|stage| *stage == apply_stage::ApplyStage::AwwwSocketReady),
+            "fallback instant path must emit AwwwSocketReady"
+        );
     }
 
     #[test]
