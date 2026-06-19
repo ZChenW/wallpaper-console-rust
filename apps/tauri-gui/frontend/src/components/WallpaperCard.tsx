@@ -5,6 +5,7 @@ import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
 import { BoundedFileSrcCache } from './fileSrcCache';
 import {
+  compatibilityLine,
   displayName,
   formatSize,
   metaLine,
@@ -70,6 +71,9 @@ function WallpaperCardImpl({ entry, thumbnail, applying, onApply, onContextMenu 
       <div className="wallpaper-info">
         <span className="wallpaper-name">{displayName(entry)}</span>
         <span className="wallpaper-meta">{metaLine(entry)}</span>
+        {compatibilityLine(entry) && (
+          <span className="wallpaper-compatibility">{compatibilityLine(entry)}</span>
+        )}
       </div>
     </div>
   );

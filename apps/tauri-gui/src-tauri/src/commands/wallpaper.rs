@@ -2,7 +2,6 @@ use super::common::{
     fail, ok, storage, BackendStatusDto, CommandErrorDto, CommandResult, StatusDto, WeDebugInfoDto,
 };
 use tauri::Emitter;
-use wc_core::types::FileType;
 use wc_storage::StorageApi;
 
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -171,9 +170,6 @@ fn execute_and_format_result(
 
     match service.execute_apply_request(request) {
         Ok(result) => {
-            if result.file_type == FileType::WeScene {
-                wc_storage::we_compat::clear_failure(&result.state_path).ok();
-            }
             let dto = super::common::ApplyResultDto {
                 request_id: result.request_id,
                 applied_path: result.applied_path.clone(),

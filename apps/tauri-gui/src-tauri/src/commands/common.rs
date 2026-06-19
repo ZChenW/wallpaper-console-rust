@@ -86,6 +86,7 @@ pub struct WallpaperDto {
     pub apply_backend: Option<String>,
     pub apply_reason: Option<String>,
     pub apply_actions: Option<Vec<ApplyActionDto>>,
+    pub renderer_compatibility: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -337,7 +338,11 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
     };
 
     let backend_failed = cached_failure.is_some();
-    let plan = wc_app::apply_plan::plan_for_entry(&entry, backend_failed);
+    let error_kind = cached_failure.as_ref().map(|f| f.error_kind.as_str());
+    let plan = wc_app::apply_plan::plan_for_entry_with_kind(&entry, backend_failed, error_kind);
+    let renderer_compatibility = plan.compatibility.as_ref().map(|c| match c {
+        wc_app::apply_plan::CompatibilityKind::NativeScene { disclaimer } => disclaimer.clone(),
+    });
 
     let mut dto = WallpaperDto {
         path: entry.path.to_string(),
@@ -372,6 +377,7 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
                 })
                 .collect(),
         ),
+        renderer_compatibility,
     };
     if let Some(cached) = cached_failure {
         dto.backend_status = Some(cached.backend_status);

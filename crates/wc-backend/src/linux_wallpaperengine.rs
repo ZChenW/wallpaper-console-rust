@@ -340,33 +340,22 @@ fn resolve_binary(config: &LinuxWallpaperEngineConfig) -> Result<String, WcError
 
 fn map_renderer_error(status: String, stderr: &str) -> WcError {
     let lower = stderr.to_lowercase();
-    if lower.contains("projection must have a width") {
-        return WcError::Other(format!(
-            "This scene uses projection data that linux-wallpaperengine cannot render. Use the preview GIF or choose another scene. (status {})",
-            status
-        ));
-    }
-    if lower.contains("cannot find workshop directory") {
-        return WcError::Other(format!(
-            "linux-wallpaperengine could not find the Wallpaper Engine workshop directory. Check target mode/output settings. (status {})",
-            status
-        ));
-    }
-    if lower.contains("failed to create window")
+    let kind = if lower.contains("projection must have a width") {
+        wc_core::error::BackendErrorKind::RendererLimitation
+    } else if lower.contains("cannot find workshop directory") {
+        wc_core::error::BackendErrorKind::WorkshopDirectory
+    } else if lower.contains("failed to create window")
         || lower.contains("no suitable output")
         || lower.contains("no display")
     {
-        return WcError::Other(format!(
-            "linux-wallpaperengine could not create a window/display output. For Wayland/Niri, set target_mode=screen-root and target=<output name> in Settings. (status {}. Output: {})",
-            status,
-            stderr.trim()
-        ));
+        wc_core::error::BackendErrorKind::TargetConfig
+    } else {
+        wc_core::error::BackendErrorKind::Generic
+    };
+    WcError::LinuxWallpaperEngine {
+        kind,
+        detail: format!("status={}, stderr={}", status, stderr.trim()),
     }
-    WcError::Other(format!(
-        "linux-wallpaperengine exited unexpectedly with status {}. Output: {}",
-        status,
-        stderr.trim()
-    ))
 }
 
 #[cfg(test)]
@@ -378,35 +367,63 @@ mod tests {
     #[test]
     fn projection_error_is_mapped() {
         let err = map_renderer_error("exit status: 1".into(), "Projection must have a width");
-        assert!(err.to_string().contains("projection data"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, detail } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::RendererLimitation);
+                assert!(detail.to_lowercase().contains("projection"));
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
     }
 
     #[test]
     fn target_output_error_is_mapped() {
         let err = map_renderer_error("exit status: 1".into(), "failed to create window");
-        assert!(err.to_string().contains("could not create a window"));
-        assert!(err.to_string().contains("screen-root"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, .. } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::TargetConfig);
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
 
         let err = map_renderer_error("exit status: 1".into(), "no suitable output");
-        assert!(err.to_string().contains("could not create a window"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, .. } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::TargetConfig);
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
 
         let err = map_renderer_error("exit status: 1".into(), "no display");
-        assert!(err.to_string().contains("could not create a window"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, .. } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::TargetConfig);
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
     }
 
     #[test]
     fn workshop_directory_error_is_mapped() {
         let err = map_renderer_error("exit status: 1".into(), "cannot find workshop directory");
-        assert!(err
-            .to_string()
-            .contains("could not find the Wallpaper Engine workshop directory"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, .. } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::WorkshopDirectory);
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
     }
 
     #[test]
-    fn generic_lwe_error_includes_stderr() {
+    fn generic_lwe_error_is_classified_as_generic() {
         let err = map_renderer_error("exit status: 1".into(), "unknown OpenGL error: framebuffer");
-        assert!(err.to_string().contains("exited unexpectedly"));
-        assert!(err.to_string().contains("OpenGL error"));
+        match err {
+            WcError::LinuxWallpaperEngine { kind, detail } => {
+                assert_eq!(kind, wc_core::error::BackendErrorKind::Generic);
+                assert!(detail.contains("OpenGL error"));
+            }
+            other => panic!("expected LinuxWallpaperEngine error, got {other:?}"),
+        }
     }
 
     fn config_with_path(path: PathBuf) -> LinuxWallpaperEngineConfig {

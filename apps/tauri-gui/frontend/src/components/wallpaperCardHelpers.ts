@@ -17,19 +17,26 @@ export function displayName(e: WallpaperDTO): string {
 
 export function weBadge(e: WallpaperDTO): string | null {
   if (e.type === 'we_scene') {
+    if (e.backendStatus === 'renderer_limitation') return 'Renderer limitation';
     if (e.backendStatus === 'failed') return 'Scene incompatible';
     return 'WE Scene';
   }
   if (e.type === 'we_web') {
-    return 'WE Web · Unsupported';
+    return 'Web · browse only';
   }
   if (e.type === 'unsupported') return 'Unsupported';
   return null;
 }
 
 export function weBadgeClass(e: WallpaperDTO): string {
-  if (e.backendStatus === 'failed') return 'wallpaper-badge wallpaper-badge-danger';
+  if (e.backendStatus === 'failed' || e.backendStatus === 'renderer_limitation')
+    return 'wallpaper-badge wallpaper-badge-danger';
   return 'wallpaper-badge';
+}
+
+export function compatibilityLine(e: WallpaperDTO): string | null {
+  if (e.rendererCompatibility) return e.rendererCompatibility;
+  return null;
 }
 
 export function metaLine(e: WallpaperDTO): string {
@@ -40,7 +47,10 @@ export function metaLine(e: WallpaperDTO): string {
     if (e.type === 'we_web') {
       return ['Web wallpaper — unsupported', e.workshopId].filter(Boolean).join(' · ');
     }
-    if (e.type === 'we_scene' && e.backendStatus === 'failed') {
+    if (e.type === 'we_scene' && (e.backendStatus === 'failed' || e.backendStatus === 'renderer_limitation')) {
+      if (e.backendStatus === 'renderer_limitation') {
+        return e.backendErrorMessage || 'This scene has renderer limitations with linux-wallpaperengine.';
+      }
       return e.backendErrorMessage || 'This scene is not compatible with linux-wallpaperengine.';
     }
     const kind = 'Wallpaper Engine Scene';
