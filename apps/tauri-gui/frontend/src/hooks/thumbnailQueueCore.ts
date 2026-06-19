@@ -21,6 +21,7 @@ export class ThumbnailRequestQueue {
   private disposed = false;
   private generation = 0;
   private pathVersions = new Map<string, number>();
+  private emitScheduled = false;
 
   constructor(options: QueueOptions) {
     this.concurrency = Math.max(1, options.concurrency);
@@ -57,7 +58,7 @@ export class ThumbnailRequestQueue {
       this.pathVersions.set(path, this.versionFor(path) + 1);
     }
     this.queue = this.queue.filter((item) => !set.has(item.path));
-    this.emit();
+    this.scheduleEmit();
   }
 
   reset(): void {
@@ -65,7 +66,7 @@ export class ThumbnailRequestQueue {
     this.thumbs = {};
     this.queue = [];
     this.inFlight.clear();
-    this.emit();
+    this.scheduleEmit();
   }
 
   dispose(): void {
@@ -108,15 +109,29 @@ export class ThumbnailRequestQueue {
           ) {
             this.thumbs = { ...this.thumbs, [item.path]: thumb.thumbnail };
           }
-          this.emit();
+          this.scheduleEmit();
         })
         .catch(() => {
-          this.emit();
+          this.scheduleEmit();
         })
         .finally(() => {
           this.inFlight.delete(item.path);
           if (!this.disposed) this.pump();
         });
+    }
+  }
+
+  private scheduleEmit(): void {
+    if (this.disposed || this.emitScheduled) return;
+    this.emitScheduled = true;
+    const flush = () => {
+      this.emitScheduled = false;
+      this.emit();
+    };
+    if (typeof requestAnimationFrame === 'function') {
+      requestAnimationFrame(flush);
+    } else {
+      Promise.resolve().then(flush);
     }
   }
 

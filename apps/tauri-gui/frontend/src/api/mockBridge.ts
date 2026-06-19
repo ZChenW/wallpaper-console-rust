@@ -309,6 +309,8 @@ let scanStep = 5;
 let configStore: Record<string, string> = {};
 const commandFailures = new Set<string>();
 const thumbnailFailures = new Set<string>();
+let libraryFirstPageEmpty = false;
+let libraryFirstPageEmptyConsumed = false;
 
 function resetScanProgressState(): void {
   scanProgressState = { ...defaultScanProgress };
@@ -318,6 +320,11 @@ function resetScanProgressState(): void {
 
 function resetConfigStore(): void {
   configStore = {};
+}
+
+function resetLibraryScenario(): void {
+  libraryFirstPageEmpty = false;
+  libraryFirstPageEmptyConsumed = false;
 }
 
 export const api = {
@@ -370,6 +377,10 @@ export const api = {
     offset: number,
     limit: number,
   ): Promise<LibraryPageDTO> => {
+    if (libraryFirstPageEmpty && !libraryFirstPageEmptyConsumed && offset === 0) {
+      libraryFirstPageEmptyConsumed = true;
+      return { total: 0, items: [] };
+    }
     let items = [...MOCK_WALLPAPERS];
     if (_search) {
       const q = _search.toLowerCase();
@@ -539,9 +550,14 @@ export const api = {
     clearThumbnailFailure: (path: string): void => {
       thumbnailFailures.delete(path);
     },
+    setLibraryFirstPageEmpty: (enabled: boolean): void => {
+      libraryFirstPageEmpty = enabled;
+      libraryFirstPageEmptyConsumed = false;
+    },
     resetAll: (): void => {
       resetScanProgressState();
       resetConfigStore();
+      resetLibraryScenario();
       commandFailures.clear();
       thumbnailFailures.clear();
     },

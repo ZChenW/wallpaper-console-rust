@@ -128,8 +128,16 @@ pub async fn apply_action(
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
-fn is_stale_apply(seq: u64) -> bool {
-    seq != APPLY_SEQUENCE.load(std::sync::atomic::Ordering::SeqCst)
+/// Returns a stale-apply result when the request sequence has been superseded,
+/// otherwise `None` so the caller proceeds with the real apply side effects.
+/// Checking this after acquiring the apply lock ensures a request that became
+/// stale while waiting for the lock is still skipped before backend stop/start.
+fn apply_stale_guard(seq: u64, current_seq: u64) -> Option<CommandResult> {
+    if seq != current_seq {
+        Some(stale_apply_result())
+    } else {
+        None
+    }
 }
 
 fn execute_and_format_result(
@@ -156,8 +164,9 @@ fn execute_and_format_result(
         }
     };
 
-    if is_stale_apply(seq) {
-        return stale_apply_result();
+    let current_seq = APPLY_SEQUENCE.load(std::sync::atomic::Ordering::SeqCst);
+    if let Some(stale) = apply_stale_guard(seq, current_seq) {
+        return stale;
     }
 
     match service.execute_apply_request(request) {
@@ -333,20 +342,13 @@ mod tests {
     }
 
     #[test]
-    fn stale_apply_helper_detects_superseded_sequence() {
-        let previous = APPLY_SEQUENCE.load(std::sync::atomic::Ordering::SeqCst);
-        APPLY_SEQUENCE.store(10, std::sync::atomic::Ordering::SeqCst);
+    fn apply_stale_guard_skips_superseded_request_without_side_effects() {
+        let stale = apply_stale_guard(9, 10);
+        assert!(stale.is_some(), "superseded seq should be guarded");
+        assert_eq!(stale.unwrap().error.unwrap().kind, "stale_apply_request");
 
-        struct RestoreSeq(u64);
-        impl Drop for RestoreSeq {
-            fn drop(&mut self) {
-                APPLY_SEQUENCE.store(self.0, std::sync::atomic::Ordering::SeqCst);
-            }
-        }
-        let _guard = RestoreSeq(previous);
-
-        assert!(is_stale_apply(9));
-        assert!(!is_stale_apply(10));
+        let fresh = apply_stale_guard(10, 10);
+        assert!(fresh.is_none(), "current seq should not be guarded");
     }
 
     #[test]

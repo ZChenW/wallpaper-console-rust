@@ -35,6 +35,7 @@ export default function HistoryView({ onApply, onApplyAction, applying, active =
     reload,
     loadMore,
     entryByPath,
+    replaceCount,
   } = usePagedWallpapers({
     pageSize: PAGE_SIZE,
     loadPage,
@@ -88,6 +89,7 @@ export default function HistoryView({ onApply, onApplyAction, applying, active =
           emptyText="No history yet — apply a wallpaper to start"
           buildContextActions={buildContextActions}
           active={active}
+          resetKey={String(replaceCount)}
         />
       )}
       {!loading && entries.length < total && (

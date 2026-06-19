@@ -32,6 +32,7 @@ export default function FavoritesView({ onApply, onApplyAction, applying, active
     reload,
     loadMore,
     entryByPath,
+    replaceCount,
   } = usePagedWallpapers({
     pageSize: PAGE_SIZE,
     loadPage,
@@ -89,6 +90,7 @@ export default function FavoritesView({ onApply, onApplyAction, applying, active
           emptyText="No favorites yet — right-click a wallpaper in Library to add"
           buildContextActions={buildContextActions}
           active={active}
+          resetKey={String(replaceCount)}
         />
       )}
       {!loading && entries.length < total && (

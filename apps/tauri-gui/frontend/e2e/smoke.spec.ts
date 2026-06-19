@@ -641,3 +641,26 @@ test('diagnostics export success shows a success toast', async ({ page }) => {
   await expect(page.locator('.toast.success')).toContainText(/Diagnostics exported/i, { timeout: 5000 });
   await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeEnabled({ timeout: 5000 });
 });
+
+test('library does not flash empty state on transient first zero page', async ({ page }) => {
+  await page.goto('/');
+  await resetMock(page);
+  // Grid is visible from the initial full load.
+  await expect(page.locator('.wallpaper-card').first()).toBeVisible();
+
+  // Enable the "first page empty, then filled" mock scenario.
+  await page.evaluate(() =>
+    (window as unknown as { __mockControl: { setLibraryFirstPageEmpty: (e: boolean) => void } })
+      .__mockControl.setLibraryFirstPageEmpty(true),
+  );
+
+  // Trigger a reload via sort change. The first page returns total=0 (scenario).
+  await page.getByRole('combobox').nth(1).selectOption('name');
+
+  // The unconfirmed zero must show a loading state, NOT the empty state.
+  await expect(page.locator('.library-view .loading')).toBeVisible({ timeout: 5000 });
+  await expect(page.locator('.library-view .empty-state')).toHaveCount(0);
+
+  // After the confirmation reload, the grid reappears with content.
+  await expect(page.locator('.wallpaper-card').first()).toBeVisible({ timeout: 5000 });
+});

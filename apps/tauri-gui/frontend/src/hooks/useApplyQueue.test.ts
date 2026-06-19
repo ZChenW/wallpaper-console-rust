@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { ApplyQueueController } from './applyQueueController.ts';
+import type { ApplyQueueDeps } from './applyQueueController.ts';
+
 type ApplyRequestDTO = {
   kind: string;
   path: string;
@@ -9,85 +12,10 @@ type ApplyRequestDTO = {
 
 type CommandFeedback =
   | { state: 'idle' }
-  | { state: 'running'; label: string }
+  | { state: 'running'; label: string; detail?: string }
   | { state: 'success'; label: string; detail?: string }
   | { state: 'warning'; label: string; detail: string }
   | { state: 'error'; label: string; detail: string };
-
-interface ApplyQueueDeps {
-  applyAction: (request: ApplyRequestDTO) => Promise<{ success: boolean; stdout: string; stderr: string; error?: { message: string } }>;
-  refreshStatus: () => Promise<void>;
-  invalidateHistory: () => void;
-  setFeedback: (feedback: CommandFeedback) => void;
-  makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
-}
-
-class ApplyQueueController {
-  private applying = false;
-  private pending: ApplyRequestDTO | null = null;
-  private readonly onApplyingChange: (value: boolean) => void;
-  private readonly deps: ApplyQueueDeps;
-
-  constructor(deps: ApplyQueueDeps, onApplyingChange: (value: boolean) => void) {
-    this.deps = deps;
-    this.onApplyingChange = onApplyingChange;
-  }
-
-  isApplying(): boolean {
-    return this.applying;
-  }
-
-  enqueue(request: ApplyRequestDTO): void {
-    if (this.applying) {
-      this.pending = request;
-      return;
-    }
-    void this.run(request);
-  }
-
-  private async run(first: ApplyRequestDTO): Promise<void> {
-    this.applying = true;
-    this.onApplyingChange(true);
-    let current: ApplyRequestDTO | null = first;
-
-    while (current !== null) {
-      const req = current;
-      current = null;
-      this.deps.setFeedback({ state: 'running', label: 'Applying wallpaper' });
-      try {
-        const result = await this.deps.applyAction(req);
-        if (result.success) {
-          this.deps.invalidateHistory();
-          let detail: { preview?: boolean; appliedPath?: string } | undefined;
-          try {
-            detail = result.stdout ? JSON.parse(result.stdout) : undefined;
-          } catch {
-            detail = undefined;
-          }
-          this.deps.setFeedback({
-            state: 'success',
-            label: 'Applied',
-            detail: detail?.preview ? 'Preview wallpaper applied.' : detail?.appliedPath?.split('/').pop(),
-          });
-        } else {
-          this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', result));
-        }
-        await this.deps.refreshStatus();
-      } catch (error) {
-        this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', error));
-      }
-
-      const next = this.pending;
-      this.pending = null;
-      if (next && next.requestId !== req.requestId) {
-        current = next;
-      }
-    }
-
-    this.applying = false;
-    this.onApplyingChange(false);
-  }
-}
 
 const req = (id: string, path = `/wall/${id}.jpg`): ApplyRequestDTO => ({
   kind: 'apply',
@@ -95,14 +23,29 @@ const req = (id: string, path = `/wall/${id}.jpg`): ApplyRequestDTO => ({
   requestId: id,
 });
 
+function makeDeps(opts: {
+  applyAction: ApplyQueueDeps['applyAction'];
+  feedback: CommandFeedback[];
+  metrics?: string[];
+}): ApplyQueueDeps {
+  return {
+    applyAction: opts.applyAction,
+    refreshStatus: async () => {},
+    invalidateHistory: () => {},
+    setFeedback: (value) => { opts.feedback.push(value); },
+    makeErrorFeedback: (label) => ({ state: 'error', label, detail: 'test error' }),
+    recordMetric: (name) => { opts.metrics?.push(name); },
+  };
+}
+
 test('apply queue runs current request then latest pending request only', async () => {
   const calls: string[] = [];
   let releaseFirst: (() => void) | undefined;
   const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  const feedback: string[] = [];
+  const feedback: CommandFeedback[] = [];
   const applyingStates: boolean[] = [];
 
-  const deps: ApplyQueueDeps = {
+  const deps = makeDeps({
     applyAction: async (request) => {
       calls.push(request.requestId ?? '');
       if (request.requestId === 'a') await firstBlock;
@@ -119,21 +62,95 @@ test('apply queue runs current request then latest pending request only', async 
         stderr: '',
       };
     },
-    refreshStatus: async () => {},
-    invalidateHistory: () => {},
-    setFeedback: (value) => feedback.push(`${value.state}:${value.label}`),
-    makeErrorFeedback: (label) => ({ state: 'error', label, detail: 'test error' }),
-  };
+    feedback,
+  });
 
   const controller = new ApplyQueueController(deps, (value) => applyingStates.push(value));
   controller.enqueue(req('a'));
   controller.enqueue(req('b'));
   controller.enqueue(req('c'));
   releaseFirst?.();
-  await new Promise((resolve) => setTimeout(resolve, 20));
+  await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.deepEqual(calls, ['a', 'c']);
+  assert.deepEqual(calls, ['a', 'c'], 'should execute current then latest pending only; drop superseded middle');
   assert.deepEqual(applyingStates, [true, false]);
-  assert(feedback.includes('running:Applying wallpaper'));
-  assert(feedback.includes('success:Applied'));
+  // The first request's "starting backend" stage must NOT be overwritten by a queued message.
+  assert(
+    feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Starting')),
+    'starting backend stage emitted for active request',
+  );
+  // No feedback detail should start with "Queued" — queued state is appended as a suffix, not a standalone stage.
+  assert(
+    !feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Queued')),
+    'queued must not overwrite the active apply stage',
+  );
+  // The settling stage of the first request should include the queued suffix since 'c' is pending.
+  assert(
+    feedback.some((f) => f.state === 'running' && f.detail?.includes('Next wallpaper queued.')),
+    'queued suffix appended to active stage when a request is pending',
+  );
+  assert(feedback.some((f) => f.state === 'success' && f.label === 'Applied'));
+});
+
+test('apply queue emits settling stage before success', async () => {
+  const feedback: CommandFeedback[] = [];
+
+  const deps = makeDeps({
+    applyAction: async (request) => ({
+      success: true,
+      stdout: JSON.stringify({
+        requestId: request.requestId,
+        appliedPath: request.path,
+        statePath: request.path,
+        backend: 'awww',
+        fileType: 'image',
+        preview: false,
+      }),
+      stderr: '',
+    }),
+    feedback,
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('a'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  const stages = feedback.filter((f) => f.state === 'running').map((f) => f.detail);
+  assert.ok(stages.some((d) => d?.startsWith('Starting')), 'starting backend stage emitted');
+  assert.ok(stages.some((d) => d?.startsWith('Settling')), 'settling stage emitted');
+});
+
+test('apply queue records request duration metric on success', async () => {
+  const metrics: string[] = [];
+  const feedback: CommandFeedback[] = [];
+
+  const deps = makeDeps({
+    applyAction: async () => ({ success: true, stdout: '{}', stderr: '' }),
+    feedback,
+    metrics,
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('a'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.ok(metrics.includes('apply.request.ms'), 'should record apply.request.ms');
+});
+
+test('apply queue does not record metric on failure', async () => {
+  const metrics: string[] = [];
+  const feedback: CommandFeedback[] = [];
+
+  const deps = makeDeps({
+    applyAction: async () => ({ success: false, stdout: '', stderr: 'boom' }),
+    feedback,
+    metrics,
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('a'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(metrics.length, 0, 'no metric recorded for failed apply');
+  assert.ok(feedback.some((f) => f.state === 'error'));
 });
