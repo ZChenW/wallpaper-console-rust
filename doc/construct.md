@@ -100,3 +100,25 @@
 - 定位原因：`awww-daemon --help` 明确说明默认会从 cache 搜索每个输出的上一张壁纸；因此 A 不是 transition 生成，而是 daemon 冷启动时先从 Awww cache 恢复出来。
 - 修复：应用启动 awww-daemon 时改为 `awww-daemon --no-cache`；Stop Awww 等待 daemon 退出后执行 `awww clear-cache`，清理历史版本或外部 daemon 写入的 Awww cache。
 - 测试：新增 ensure_awww_daemon_starts_with_no_cache_to_avoid_restoring_old_wallpaper，断言 daemon 启动命令包含 `--no-cache`；后端全量测试 104 pass。
+
+## 2026-06-19 readiness / compatibility / stages — Phase 4: structured apply stage events
+
+结果：
+- wc-backend 新增 `apply_stage.rs`：`ApplyStage` / `ApplyStageEvent` / `ApplyStageReporter`（无 Tauri 依赖）；`apply_wallpaper_with_reporter` 在 Awww / LWE 成功与失败路径按序 emit `EnsureAwwwDaemon` / `AwwwSocketReady` / `StartLwe` / `WaitRendererAlive` / `CleanupPrevious` / `RefreshStatus`。
+- wc-app 新增 `ApplyExecutionOptions` + `execute_apply_request_with_options`：在 `resolve_apply_request_target` 前 emit `ResolveTarget`；`apply_stage_labels` 在 wc-app 层根据 preview/backend 生成 label/detail（不塞进 wc-backend）。
+- Tauri `wallpaper.rs`：`TauriStageReporter` 将 stage event 转为 `wc-apply-stage`（`{ requestId, stage, label, detail }`）；移除 apply 命令里静态 `wc-feedback`「Starting backend」占位。
+- 前端：`APP_EVENTS.applyStage`；`ApplyQueueController` 在 `await applyAction` 期间订阅 `wc-apply-stage`，按 `requestId` 过滤并更新 running feedback，成功/失败均在 `finally` unsubscribe；`useFeedbackBridge` 仍只监听 `wc-feedback`。
+- 测试：wc-backend capturing reporter（Awww 成功、LWE 成功、socket timeout 停在 EnsureAwwwDaemon、LWE crash 到 WaitRendererAlive）；wc-app ResolveTarget + LWE crash 顺序；Tauri stage payload 单测；前端 ApplyQueueController stage/unsubscribe/preview-vs-scene detail 单测。
+
+## 2026-06-19 readiness / compatibility / stages — Final verification
+
+命令与结果：
+- `cargo run -p xtask -- verify all`：Rust fmt/check/clippy/test（workspace 全绿）、frontend typecheck、frontend unit（146 pass）、frontend build 均通过；Playwright smoke 因沙箱缓存路径缺少 chromium 可执行文件失败（`browserType.launch: Executable doesn't exist`），属环境限制，非代码回归。
+- `CARGO_TARGET_DIR=.../target cargo build --workspace`：通过。
+- `git diff --check`：通过。
+
+手工验收项（Phase 4，需在真实 Tauri 会话中确认）：
+- 应用 WE Scene 时 UI 依次显示 ResolveTarget → StartLwe → WaitRendererAlive → CleanupPrevious → RefreshStatus 等阶段文案，而非静态「Starting renderer」。
+- Awww socket 超时或 LWE 立即崩溃时，最后停留的阶段与失败 toast 衔接正常，不出现无限卡在某一阶段。
+- 快速连续 apply 时，旧 requestId 的 stage event 不覆盖新请求的 feedback。
+- Phase 1–3 手工项仍适用（awww readiness、renderer limitation 卡片、Library 滚动缩略图）；本轮未改其公共 command/config key。
