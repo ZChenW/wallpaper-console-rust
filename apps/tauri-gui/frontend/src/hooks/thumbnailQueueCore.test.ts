@@ -6,19 +6,29 @@ import type { ThumbnailDTO } from '../api/bridge.ts';
 
 const thumb = (path: string): ThumbnailDTO => ({ path, thumbnail: `thumb:${path}`, cacheHit: false });
 
+function makeHandlers() {
+  const thumbnails: Record<string, string> = {};
+  const failures: Record<string, string | undefined> = {};
+  return {
+    onThumbnail: (path: string, t: string) => { thumbnails[path] = t; },
+    onFailure: (path: string, reason?: string) => { failures[path] = reason; },
+    thumbnails,
+    failures,
+  };
+}
+
 test('thumbnail queue deduplicates repeated paths', async () => {
   const loaded: string[] = [];
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 2,
-    load: async (path) => {
-      loaded.push(path);
-      return thumb(path);
-    },
-    onUpdate: () => {},
+    load: async (path) => { loaded.push(path); return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a', 'a', 'b']);
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.deepEqual(loaded.sort(), ['a', 'b']);
 });
@@ -26,17 +36,13 @@ test('thumbnail queue deduplicates repeated paths', async () => {
 test('thumbnail queue prioritizes front items before pending back items', async () => {
   const loaded: string[] = [];
   let releaseFirst: (() => void) | undefined;
-  const firstLoad = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
+  const firstLoad = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
-    load: async (path) => {
-      loaded.push(path);
-      if (path === 'a') await firstLoad;
-      return thumb(path);
-    },
-    onUpdate: () => {},
+    load: async (path) => { loaded.push(path); if (path === 'a') await firstLoad; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a', 'b']);
@@ -50,17 +56,13 @@ test('thumbnail queue prioritizes front items before pending back items', async 
 test('thumbnail queue forget removes pending item before re-enqueue', async () => {
   const loaded: string[] = [];
   let releaseFirst: (() => void) | undefined;
-  const firstLoad = new Promise<void>((resolve) => {
-    releaseFirst = resolve;
-  });
+  const firstLoad = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
-    load: async (path) => {
-      loaded.push(path);
-      if (path === 'a') await firstLoad;
-      return thumb(path);
-    },
-    onUpdate: () => {},
+    load: async (path) => { loaded.push(path); if (path === 'a') await firstLoad; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a', 'x']);
@@ -75,14 +77,12 @@ test('thumbnail queue forget removes pending item before re-enqueue', async () =
 test('thumbnail queue ignores in-flight completion after reset', async () => {
   let release: (() => void) | undefined;
   const blocked = new Promise<void>((resolve) => { release = resolve; });
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
-    load: async (path) => {
-      await blocked;
-      return thumb(path);
-    },
-    onUpdate: (state) => { latestState = state; },
+    load: async (path) => { await blocked; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['stale']);
@@ -90,20 +90,18 @@ test('thumbnail queue ignores in-flight completion after reset', async () => {
   release?.();
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.deepEqual(latestState, {});
+  assert.deepEqual(h.thumbnails, {});
 });
 
 test('thumbnail queue ignores in-flight completion after forget', async () => {
   let release: (() => void) | undefined;
   const blocked = new Promise<void>((resolve) => { release = resolve; });
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
-    load: async (path) => {
-      await blocked;
-      return thumb(path);
-    },
-    onUpdate: (state) => { latestState = state; },
+    load: async (path) => { await blocked; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['x']);
@@ -111,23 +109,20 @@ test('thumbnail queue ignores in-flight completion after forget', async () => {
   release?.();
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.deepEqual(latestState, {});
+  assert.deepEqual(h.thumbnails, {});
 });
 
 test('thumbnail queue re-enqueues after forget of in-flight path when version is newer', async () => {
   const loaded: string[] = [];
   let releaseFirst: (() => void) | undefined;
   const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
 
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
-    load: async (path) => {
-      loaded.push(path);
-      if (path === 'x' && loaded.length === 1) await firstBlock;
-      return thumb(path);
-    },
-    onUpdate: (state) => { latestState = state; },
+    load: async (path) => { loaded.push(path); if (path === 'x' && loaded.length === 1) await firstBlock; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['x']);
@@ -137,23 +132,20 @@ test('thumbnail queue re-enqueues after forget of in-flight path when version is
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.deepEqual(loaded, ['x', 'x'], 'load should be called twice');
-  assert.deepEqual(latestState, { x: 'thumb:x' }, 'latest state should have re-enqueued thumbnail');
+  assert.deepEqual(h.thumbnails, { x: 'thumb:x' }, 'should have re-enqueued thumbnail');
 });
 
 test('thumbnail queue re-enqueues forgotten in-flight path with default concurrency', async () => {
   const loaded: string[] = [];
   let releaseFirst: (() => void) | undefined;
   const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
 
   const queue = new ThumbnailRequestQueue({
     concurrency: 2,
-    load: async (path) => {
-      loaded.push(path);
-      if (path === 'x' && loaded.length === 1) await firstBlock;
-      return thumb(path);
-    },
-    onUpdate: (state) => { latestState = state; },
+    load: async (path) => { loaded.push(path); if (path === 'x' && loaded.length === 1) await firstBlock; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['x']);
@@ -163,64 +155,74 @@ test('thumbnail queue re-enqueues forgotten in-flight path with default concurre
   await new Promise((resolve) => setTimeout(resolve, 20));
 
   assert.deepEqual(loaded, ['x', 'x'], 'load should be called twice');
-  assert.deepEqual(latestState, { x: 'thumb:x' }, 'latest state should have re-enqueued thumbnail');
+  assert.deepEqual(h.thumbnails, { x: 'thumb:x' }, 'should have re-enqueued thumbnail');
 });
 
 test('thumbnail queue snapshot reports cached thumbnails', async () => {
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 1,
     load: async (path) => thumb(path),
-    onUpdate: (state) => { latestState = state; },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a']);
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.deepEqual(latestState, { a: 'thumb:a' });
+  assert.deepEqual(h.thumbnails, { a: 'thumb:a' });
   assert.equal(queue.snapshot().cached, 1);
 });
 
-test('thumbnail queue batches same-frame completions into a single emit', async () => {
-  let emitCount = 0;
-  let latestState: Record<string, string> = {};
+test('thumbnail queue get returns cached value synchronously', async () => {
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => thumb(path),
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['a']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.equal(queue.get('a'), 'thumb:a');
+  assert.equal(queue.get('b'), undefined);
+});
+
+test('thumbnail queue onThumbnail called per-path on completion', async () => {
+  const h = makeHandlers();
   const queue = new ThumbnailRequestQueue({
     concurrency: 4,
     load: async (path) => thumb(path),
-    onUpdate: (state) => { emitCount += 1; latestState = state; },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a', 'b', 'c', 'd']);
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.deepEqual(
-    latestState,
-    { a: 'thumb:a', b: 'thumb:b', c: 'thumb:c', d: 'thumb:d' },
-  );
-  assert.equal(emitCount, 1, 'all same-frame completions should coalesce into one emit');
+  assert.deepEqual(h.thumbnails, {
+    a: 'thumb:a', b: 'thumb:b', c: 'thumb:c', d: 'thumb:d',
+  });
 });
 
 test('thumbnail queue still emits when completions land in separate frames', async () => {
-  let emitCount = 0;
-  let latestState: Record<string, string> = {};
+  const h = makeHandlers();
   let releaseFirst: (() => void) | undefined;
   const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const queue = new ThumbnailRequestQueue({
     concurrency: 2,
-    load: async (path) => {
-      if (path === 'a') await firstBlock;
-      return thumb(path);
-    },
-    onUpdate: (state) => { emitCount += 1; latestState = state; },
+    load: async (path) => { if (path === 'a') await firstBlock; return thumb(path); },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
   });
 
   queue.enqueue(['a', 'b']);
   await new Promise((resolve) => setTimeout(resolve, 20));
-  // 'b' completed in the first frame; 'a' is still blocked.
-  assert.deepEqual(latestState, { b: 'thumb:b' });
+  assert.deepEqual(h.thumbnails, { b: 'thumb:b' });
 
   releaseFirst?.();
   await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.deepEqual(latestState, { a: 'thumb:a', b: 'thumb:b' });
-  assert.ok(emitCount >= 2, 'separate-frame completions each emit');
+  assert.deepEqual(h.thumbnails, { a: 'thumb:a', b: 'thumb:b' });
 });

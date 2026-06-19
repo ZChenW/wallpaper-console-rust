@@ -27,7 +27,9 @@ export interface ContextAction {
 }
 
 const CARD_HEIGHT = 188;
-const OVERSCAN = 2;
+const OVERSCAN_SLOW = 2;
+const OVERSCAN_FAST = 6;
+const SCROLL_VELOCITY_THRESHOLD = 50;
 
 export default function WallpaperGrid({
   entries,
@@ -42,10 +44,13 @@ export default function WallpaperGrid({
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { thumbs: thumbCache, enqueue } = useThumbnailStore();
+  const { enqueueVisible } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
   const [colCount, setColCount] = useState(4);
+  const [overscan, setOverscan] = useState(OVERSCAN_SLOW);
+  const lastScrollTop = useRef(0);
+  const lastScrollTime = useRef(0);
 
   const remeasure = useCallback(() => {
     const el = containerRef.current;
@@ -79,7 +84,7 @@ export default function WallpaperGrid({
     count: rowCount,
     getScrollElement: () => containerRef.current,
     estimateSize: () => CARD_HEIGHT,
-    overscan: OVERSCAN,
+    overscan,
   });
 
   useEffect(() => {
@@ -97,14 +102,29 @@ export default function WallpaperGrid({
     if (!range) return;
     const startIdx = range.startIndex * colCount;
     const endIdx = Math.min((range.endIndex + 1) * colCount, entries.length);
-    enqueue(
+    enqueueVisible(
       entries
         .slice(startIdx, endIdx)
         .filter((e) => !e.previewPath)
         .map((e) => e.path),
       { priority: 'front' },
     );
-  }, [entries, colCount, virtualizer.range, enqueue, active]);
+  }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
+
+  const handleScroll = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const now = performance.now();
+    const delta = Math.abs(el.scrollTop - lastScrollTop.current);
+    const dt = now - lastScrollTime.current;
+    lastScrollTop.current = el.scrollTop;
+    lastScrollTime.current = now;
+    if (dt > 0) {
+      const velocity = delta / dt;
+      const bucket = velocity > SCROLL_VELOCITY_THRESHOLD ? OVERSCAN_FAST : OVERSCAN_SLOW;
+      setOverscan((prev) => (prev !== bucket ? bucket : prev));
+    }
+  }, []);
 
   const handleContextMenu = useCallback((e: React.MouseEvent, path: string) => {
     e.preventDefault();
@@ -122,7 +142,11 @@ export default function WallpaperGrid({
   }
 
   return (
-    <div className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`} ref={containerRef}>
+    <div
+      className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`}
+      ref={containerRef}
+      onScroll={handleScroll}
+    >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
           const start = virtualRow.index * colCount;
@@ -146,7 +170,6 @@ export default function WallpaperGrid({
                 <WallpaperCard
                   key={e.path}
                   entry={e}
-                  thumbnail={thumbCache[e.path]}
                   applying={applying}
                   onApply={onApply}
                   onContextMenu={handleContextMenu}
