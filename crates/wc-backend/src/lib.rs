@@ -204,7 +204,9 @@ fn apply_wallpaper_with_runtime(
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
 
+    let timing_start = std::time::Instant::now();
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
+    let pre_stop_elapsed = timing_start.elapsed();
 
     let fallback_ok = match visual.fallback_stage {
         visual_handoff::FallbackStage::TargetImageInstant => {
@@ -240,6 +242,7 @@ fn apply_wallpaper_with_runtime(
         }
         visual_handoff::FallbackStage::None => false,
     };
+    let fallback_elapsed = timing_start.elapsed();
 
     if visual.stop_previous_after_fallback {
         let stop_target = lifecycle.post_success_stop;
@@ -314,6 +317,7 @@ fn apply_wallpaper_with_runtime(
         }
         Backend::Unsupported => unreachable!(),
     };
+    let target_elapsed = timing_start.elapsed();
 
     if let Err(e) = target_result {
         let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
@@ -351,9 +355,35 @@ fn apply_wallpaper_with_runtime(
     }
 
     write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, "", path);
+    write_apply_stage_timings(
+        s,
+        pre_stop_elapsed,
+        fallback_elapsed - pre_stop_elapsed,
+        target_elapsed - fallback_elapsed,
+        timing_start.elapsed() - target_elapsed,
+        backend,
+    );
 
     write_success_state(s, path, backend)?;
     Ok(())
+}
+
+fn write_apply_stage_timings(
+    s: &StorageApi,
+    pre_stop: std::time::Duration,
+    fallback: std::time::Duration,
+    target: std::time::Duration,
+    settle: std::time::Duration,
+    backend: Backend,
+) {
+    if s.config_get("gui_debug_logs", "off") != "on" {
+        return;
+    }
+    let log = format!(
+        "apply stages: backend={:?} pre_stop={:?} fallback={:?} target={:?} settle={:?}\n",
+        backend, pre_stop, fallback, target, settle
+    );
+    let _ = std::fs::write(s.cd.path.join("backend-apply-timings-last.log"), log);
 }
 
 fn write_debug_handoff_log(
@@ -1275,6 +1305,106 @@ mod tests {
             "instant fallback plus normal awww target"
         );
         assert_eq!(rt.stop_mpvpaper_count, 1);
+    }
+
+    #[test]
+    fn same_backend_awww_to_awww_does_not_stop_awww_daemon() {
+        let (tmp, s) = temp_storage();
+        let img = tmp.path().join("target.jpg");
+        std::fs::write(&img, b"jpg").unwrap();
+        s.last_backend_write("awww").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        apply_wallpaper_with_runtime(
+            &s,
+            &img.to_string_lossy(),
+            Backend::Awww,
+            Some(&img.to_string_lossy()),
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rt.stop_awww_count, 0,
+            "image->image awww fast path must not stop the awww daemon"
+        );
+        // awww->awww still cleans up a residual mpvpaper via post_success_stop.
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn same_backend_mpvpaper_to_mpvpaper_only_stops_mpvpaper() {
+        let (tmp, s) = temp_storage();
+        let video = tmp.path().join("target.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        apply_wallpaper_with_runtime(
+            &s,
+            &video.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(
+            rt.stop_mpvpaper_count, 1,
+            "video->video stops old mpvpaper before starting the new one"
+        );
+        assert_eq!(
+            rt.stop_awww_count, 0,
+            "video->video fast path must not stop unrelated awww daemon"
+        );
+        assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn write_apply_stage_timings_only_writes_when_debug_enabled() {
+        let (_tmp, s) = temp_storage();
+        let log_path = s.cd.path.join("backend-apply-timings-last.log");
+
+        write_apply_stage_timings(
+            &s,
+            std::time::Duration::from_micros(1),
+            std::time::Duration::from_micros(2),
+            std::time::Duration::from_micros(3),
+            std::time::Duration::from_micros(4),
+            Backend::Awww,
+        );
+        assert!(
+            !log_path.exists(),
+            "timings log must not be written when debug off"
+        );
+
+        s.config_set("gui_debug_logs", "on").unwrap();
+        write_apply_stage_timings(
+            &s,
+            std::time::Duration::from_micros(1),
+            std::time::Duration::from_micros(2),
+            std::time::Duration::from_micros(3),
+            std::time::Duration::from_micros(4),
+            Backend::Awww,
+        );
+        assert!(
+            log_path.exists(),
+            "timings log should be written when debug on"
+        );
+        let content = std::fs::read_to_string(&log_path).unwrap();
+        assert!(content.contains("backend=Awww"));
+        assert!(content.contains("pre_stop="));
+        assert!(content.contains("target="));
+        assert!(content.contains("settle="));
     }
 
     #[test]

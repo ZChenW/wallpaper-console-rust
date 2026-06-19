@@ -32,4 +32,15 @@
 - ThumbnailRequestQueue 改为帧级批量 emit：同一 animation frame（node 测试回退 microtask）内完成的多个缩略图只触发一次 onUpdate；新增 batch emit 测试与跨帧 emit 测试。
 - 验证：npm run typecheck/test:unit（123 pass）/build/smoke（82 pass）。
 
+## 2026-06-19 Phase 3: 壁纸切换
+
+结果：
+- 前端 ApplyQueueController 抽出到独立可测文件 hooks/applyQueueController.ts（仅 type-only 导入），useApplyQueue 复用真实类；测试改为导入真实类，覆盖快速连续点击只执行当前 + 最新 pending（b 被丢弃），并新增 settling 阶段反馈与 apply.request.ms metric 测试。
+- apply queue 增加阶段反馈：queued / starting backend / settling / applied；成功路径记录 apply.request.ms，失败不记录。
+- 后端 execute_and_format_result 提取 apply_stale_guard(seq, current_seq)：拿到 APPLY_LOCK 后、执行 execute_apply_request 前用其判定过期，过期直接返回 stale_apply_result 不执行 stop/start；原 is_stale_apply 删除，测试改为 race-free 的 apply_stale_guard 单测。
+- 新增 backend lifecycle 测试：same-backend awww->awww 不 stop awww daemon（stop_awww_count=0）、mpvpaper->mpvpaper 只 stop mpvpaper；cross-backend 既有 cleanup（mpvpaper->awww stop_mpvpaper=1）保留。
+- apply path 增加阶段耗时 debug log（pre_stop/fallback/target/settle），仅在 gui_debug_logs=on 写入 backend-apply-timings-last.log；默认 settle 时长本轮未改。
+- 验证：npm run typecheck/test:unit（126 pass）/build/smoke（82 pass）；cargo test -p wc-backend（101 pass）/wallpaper-console-tauri（43 pass）；cargo clippy -D warnings 干净。
+
+
 
