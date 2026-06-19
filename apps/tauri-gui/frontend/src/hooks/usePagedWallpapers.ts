@@ -59,6 +59,7 @@ export function usePagedWallpapers({
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRequestKind, setLastRequestKind] = useState<RequestKind>('initial');
+  const [replaceCount, setReplaceCount] = useState(0);
   const requestSeq = useRef(0);
   const hasLoadedOnceRef = useRef(false);
 
@@ -78,6 +79,7 @@ export function usePagedWallpapers({
       onPage?.(page);
       setTotal(page.total);
       setEntries((prev) => mergePagedWallpaperItems(prev, page.items, append));
+      if (!append) setReplaceCount((c) => c + 1);
     } catch {
       if (!isCurrent()) return;
       if (!append && !hasLoadedOnceRef.current) {
@@ -130,6 +132,7 @@ export function usePagedWallpapers({
     refreshing,
     hasLoadedOnce,
     lastRequestKind,
+    replaceCount,
     load,
     reload,
     loadMore,

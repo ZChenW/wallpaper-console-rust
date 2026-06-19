@@ -1,0 +1,57 @@
+import type { WallpaperDTO } from '../api/bridge';
+
+export function typeIcon(type: string): string {
+  switch (type) {
+    case 'image': return '\u{1F5BC}';
+    case 'gif': return '\u{1F39E}';
+    case 'video': return '\u{1F3AC}';
+    case 'we_scene': return 'WE';
+    case 'we_web': return 'WEB';
+    default: return '\u{1F4C4}';
+  }
+}
+
+export function displayName(e: WallpaperDTO): string {
+  return e.title || e.workshopId || e.path.split('/').pop() || e.path;
+}
+
+export function weBadge(e: WallpaperDTO): string | null {
+  if (e.type === 'we_scene') {
+    if (e.backendStatus === 'failed') return 'Scene incompatible';
+    return 'WE Scene';
+  }
+  if (e.type === 'we_web') {
+    return 'WE Web · Unsupported';
+  }
+  if (e.type === 'unsupported') return 'Unsupported';
+  return null;
+}
+
+export function weBadgeClass(e: WallpaperDTO): string {
+  if (e.backendStatus === 'failed') return 'wallpaper-badge wallpaper-badge-danger';
+  return 'wallpaper-badge';
+}
+
+export function metaLine(e: WallpaperDTO): string {
+  if (e.type === 'we_scene' || e.type === 'we_web' || e.type === 'unsupported') {
+    if (e.type === 'unsupported' && e.unsupportedReason) {
+      return e.unsupportedReason;
+    }
+    if (e.type === 'we_web') {
+      return ['Web wallpaper — unsupported', e.workshopId].filter(Boolean).join(' · ');
+    }
+    if (e.type === 'we_scene' && e.backendStatus === 'failed') {
+      return e.backendErrorMessage || 'This scene is not compatible with linux-wallpaperengine.';
+    }
+    const kind = 'Wallpaper Engine Scene';
+    return [kind, e.workshopId, e.backend].filter(Boolean).join(' · ');
+  }
+  return `${e.resolution} · ${e.type} · ${formatSize(e.size)}`;
+}
+
+export function formatSize(bytes: number): string {
+  if (bytes >= 1 << 30) return `${(bytes / (1 << 30)).toFixed(1)} GB`;
+  if (bytes >= 1 << 20) return `${(bytes / (1 << 20)).toFixed(1)} MB`;
+  if (bytes >= 1 << 10) return `${(bytes / (1 << 10)).toFixed(0)} KB`;
+  return `${bytes} B`;
+}

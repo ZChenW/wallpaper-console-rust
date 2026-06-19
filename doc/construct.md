@@ -22,3 +22,14 @@
 - 后端 library_page_gui 增加阶段耗时 debug log（storage_init/query/dto_map），仅在 gui_debug_logs=on 时写入 library-page-last.log；SQLite 内部 open/index/count/page 细粒度拆分留待后续 wc-storage 插桩。
 - 验证：npm run typecheck/test:unit（110 pass）/smoke（82 pass）；cargo test -p wallpaper-console-tauri library（5 pass）。
 
+## 2026-06-19 Phase 2: 滚动与缩略图
+
+结果：
+- WallpaperGrid 改用 resetKey 触发回顶：仅 filter/sort/search 变化时 scrollToIndex(0)，loadMore append 与 thumbnail update 不再回顶；新增 shouldResetScroll 纯函数及测试。
+- usePagedWallpapers 新增 replaceCount（非 append 加载自增），Favorites/History 用其作为 resetKey 保留刷新回顶、append 不回顶的行为。
+- 拆出 memoized WallpaperCard（components/WallpaperCard.tsx）+ 纯渲染 helpers（wallpaperCardHelpers.ts，含 displayName/metaLine/formatSize/typeIcon/weBadge 等单元测试）；卡片只在 entry/thumbnail/applying 变化时重渲染。
+- 缓存 convertFileSrc 结果（safeFileSrc 模块级 Map），img 增加 decoding="async" 避免 decode 阻塞滚动。
+- ThumbnailRequestQueue 改为帧级批量 emit：同一 animation frame（node 测试回退 microtask）内完成的多个缩略图只触发一次 onUpdate；新增 batch emit 测试与跨帧 emit 测试。
+- 验证：npm run typecheck/test:unit（123 pass）/build/smoke（82 pass）。
+
+

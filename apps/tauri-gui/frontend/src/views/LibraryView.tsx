@@ -184,6 +184,7 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
             buildContextActions={buildContextActions}
             active={active}
             refreshing={refreshing}
+            resetKey={`${filter}|${sort}|${debouncedSearch}`}
           />
           {!refreshing && entries.length < total && (
             <div className="load-more">
