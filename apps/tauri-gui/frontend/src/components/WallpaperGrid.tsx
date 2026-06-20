@@ -5,7 +5,7 @@ import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
 import { shouldResetScroll } from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
-import { calculateColumnCount, GRID_GAP } from '../utils/layout';
+import { calculateColumnCount, GRID_GAP, overscanRowsFor } from '../utils/layout';
 
 interface Props {
   entries: WallpaperDTO[];
@@ -27,8 +27,6 @@ export interface ContextAction {
 }
 
 const CARD_HEIGHT = 188;
-const OVERSCAN_SLOW = 2;
-const OVERSCAN_FAST = 6;
 const SCROLL_VELOCITY_THRESHOLD = 50;
 
 export default function WallpaperGrid({
@@ -48,30 +46,56 @@ export default function WallpaperGrid({
 
   const prevResetKeyRef = useRef(resetKey);
   const [colCount, setColCount] = useState(4);
-  const [overscan, setOverscan] = useState(OVERSCAN_SLOW);
+  const [fastScroll, setFastScroll] = useState(false);
+  const pendingScrollTopRef = useRef<number | null>(null);
+  const lastEnqueueKeyRef = useRef('');
   const lastScrollTop = useRef(0);
   const lastScrollTime = useRef(0);
+
+  const overscan = overscanRowsFor(colCount, fastScroll);
+
+  const anchorScrollForColumnChange = useCallback((oldCols: number, newCols: number) => {
+    const el = containerRef.current;
+    if (!el || oldCols === newCols) return;
+
+    const firstVisibleRow = Math.floor(el.scrollTop / CARD_HEIGHT);
+    const firstVisibleItem = firstVisibleRow * oldCols;
+    const nextRow = Math.floor(firstVisibleItem / newCols);
+    pendingScrollTopRef.current = nextRow * CARD_HEIGHT;
+  }, []);
+
+  const updateColCountFromWidth = useCallback(
+    (w: number) => {
+      setColCount((prev) => {
+        const next = calculateColumnCount(w);
+        if (next !== prev) {
+          anchorScrollForColumnChange(prev, next);
+        }
+        return next;
+      });
+    },
+    [anchorScrollForColumnChange],
+  );
 
   const remeasure = useCallback(() => {
     const el = containerRef.current;
     if (!el) return;
     const w = el.clientWidth;
     if (w > 0) {
-      setColCount(calculateColumnCount(w));
+      updateColCountFromWidth(w);
     }
-  }, []);
+  }, [updateColCountFromWidth]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const obs = new ResizeObserver(([entry]) => {
       if (!active) return;
-      const w = entry.contentRect.width;
-      setColCount(calculateColumnCount(w));
+      updateColCountFromWidth(entry.contentRect.width);
     });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [active]);
+  }, [active, updateColCountFromWidth]);
 
   useEffect(() => {
     if (!active) return;
@@ -88,6 +112,20 @@ export default function WallpaperGrid({
   });
 
   useEffect(() => {
+    const nextTop = pendingScrollTopRef.current;
+    if (nextTop === null) return;
+    pendingScrollTopRef.current = null;
+
+    const el = containerRef.current;
+    if (!el) return;
+
+    requestAnimationFrame(() => {
+      el.scrollTop = Math.min(nextTop, Math.max(0, el.scrollHeight - el.clientHeight));
+      virtualizer.measure();
+    });
+  }, [colCount, virtualizer]);
+
+  useEffect(() => {
     if (shouldResetScroll(prevResetKeyRef.current, resetKey)) {
       prevResetKeyRef.current = resetKey;
       if (active) {
@@ -100,15 +138,21 @@ export default function WallpaperGrid({
     if (!active) return;
     const range = virtualizer.range;
     if (!range) return;
+
     const startIdx = range.startIndex * colCount;
     const endIdx = Math.min((range.endIndex + 1) * colCount, entries.length);
-    enqueueVisible(
-      entries
-        .slice(startIdx, endIdx)
-        .filter((e) => !e.previewPath)
-        .map((e) => e.path),
-      { priority: 'front' },
-    );
+    const paths = entries
+      .slice(startIdx, endIdx)
+      .filter((e) => !e.previewPath)
+      .map((e) => e.path);
+
+    if (paths.length === 0) return;
+
+    const key = `${range.startIndex}:${range.endIndex}:${colCount}:${paths.join('\0')}`;
+    if (lastEnqueueKeyRef.current === key) return;
+    lastEnqueueKeyRef.current = key;
+
+    enqueueVisible(paths, { priority: 'front' });
   }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
 
   const handleScroll = useCallback(() => {
@@ -121,8 +165,8 @@ export default function WallpaperGrid({
     lastScrollTime.current = now;
     if (dt > 0) {
       const velocity = delta / dt;
-      const bucket = velocity > SCROLL_VELOCITY_THRESHOLD ? OVERSCAN_FAST : OVERSCAN_SLOW;
-      setOverscan((prev) => (prev !== bucket ? bucket : prev));
+      const fast = velocity > SCROLL_VELOCITY_THRESHOLD;
+      setFastScroll((prev) => (prev !== fast ? fast : prev));
     }
   }, []);
 
