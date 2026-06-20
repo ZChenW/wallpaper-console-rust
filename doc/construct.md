@@ -324,6 +324,26 @@
 - `WallpaperGrid` 程序化 `scrollToIndex` / 列变更 anchor scroll 用 `suppressScrollPauseRef` 跳过 interaction pause；grid 指标改为 500ms `setInterval` 采样。
 - Settings status 轮询仅在 `general|database|library|we` tab 激活；`poll` 不触发 `onRefresh()`；`weDebugError` 接入 Advanced 页。
 
+## 2026-06-20 Library 最大化拉伸最终修复
+
+现象：
+- 窗口最大化/全屏时，Library 可见卡片会先横向拉长，再在列数更新后恢复。
+
+最终根因：
+- 虚拟行使用 `width: 100%` 与 `gridTemplateColumns: repeat(colCount, minmax(0, 1fr))`。
+- 当窗口宽度先被浏览器布局更新、React 尚未提交新的 `colCount` 时，旧列数会按新容器宽度重新分配 `1fr`，导致一帧或数帧的可见横向拉伸。
+- 直接在 `ResizeObserver` 里更新 `colCount` 只能缩短中间态，不能消除旧列数参与新宽度 `1fr` 布局的问题。
+
+结果：
+- `utils/layout.ts` 新增 `calculateGridLayout()`，返回一次测量的 `{ colCount, columnWidth, rowWidth }` 像素快照。
+- `WallpaperGrid` 保存 `gridLayout` 快照，虚拟行改用 `width: ${rowWidth}px` 与 `repeat(colCount, ${columnWidth}px)`；窗口尺寸变化但 React 尚未提交新布局时，旧行保持旧像素宽度，不再被新容器宽度拉伸。
+- `.wallpaper-grid` 增加 `overflow-x: hidden`，缩小窗口时隐藏旧快照短暂超宽，避免水平抖动。
+- 保留自然列数与滚动期间 thumbnail reveal pause；本次不恢复列数 cap。
+
+验证：
+- 新增 layout 单测覆盖 900px / 1920px 的像素快照，以及未测量前的 fallback。
+- `npm run test:unit -- src/utils/layout.test.ts`、`npm run typecheck`：通过。
+
 ## 2026-06-20 Library 滚动修复 — review follow-up
 
 结果：

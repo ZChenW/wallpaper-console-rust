@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  calculateGridLayout,
   calculateColumnCount,
   overscanRowsFor,
 } from './layout.ts';
@@ -23,6 +24,27 @@ test('calculateColumnCount scales across compact and wide layouts', () => {
 test('calculateColumnCount scales on ultra-wide layouts without cap', () => {
   assert.equal(calculateColumnCount(2560), 11);
   assert.equal(calculateColumnCount(3840), 16);
+});
+
+test('calculateGridLayout returns fixed pixel row snapshot for measured width', () => {
+  assert.deepEqual(calculateGridLayout(900), {
+    colCount: 3,
+    columnWidth: 293.3333333333333,
+    rowWidth: 900,
+  });
+  assert.deepEqual(calculateGridLayout(1920), {
+    colCount: 8,
+    columnWidth: 231.25,
+    rowWidth: 1920,
+  });
+});
+
+test('calculateGridLayout keeps an invalid width usable before first measurement', () => {
+  assert.deepEqual(calculateGridLayout(0), {
+    colCount: 1,
+    columnWidth: 220,
+    rowWidth: 220,
+  });
 });
 
 test('overscanRowsFor uses fewer rows while scrolling fast', () => {

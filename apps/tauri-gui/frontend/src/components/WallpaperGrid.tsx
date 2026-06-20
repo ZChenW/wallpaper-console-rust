@@ -6,7 +6,7 @@ import { WallpaperCard } from './WallpaperCard';
 import { shouldResetScroll } from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
-import { calculateColumnCount, GRID_GAP, overscanRowsFor } from '../utils/layout';
+import { COL_MIN_WIDTH, calculateGridLayout, GRID_GAP, overscanRowsFor, type GridLayout } from '../utils/layout';
 
 interface Props {
   entries: WallpaperDTO[];
@@ -30,6 +30,11 @@ export interface ContextAction {
 const CARD_HEIGHT = 188;
 const SCROLL_IDLE_MS = 180;
 const METRICS_SAMPLE_MS = 500;
+const INITIAL_GRID_LAYOUT: GridLayout = {
+  colCount: 4,
+  columnWidth: COL_MIN_WIDTH,
+  rowWidth: COL_MIN_WIDTH * 4 + GRID_GAP * 3,
+};
 
 export default function WallpaperGrid({
   entries,
@@ -47,7 +52,8 @@ export default function WallpaperGrid({
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
-  const [colCount, setColCount] = useState(4);
+  const [gridLayout, setGridLayout] = useState<GridLayout>(INITIAL_GRID_LAYOUT);
+  const colCount = gridLayout.colCount;
   const [thumbnailPaused, setThumbnailPaused] = useState(false);
   const isScrollingRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
@@ -74,10 +80,18 @@ export default function WallpaperGrid({
   const updateColCountFromWidth = useCallback(
     (w: number) => {
       if (w <= 0) return;
-      setColCount((prev) => {
-        const next = calculateColumnCount(w);
-        if (next === prev) return prev;
-        anchorScrollForColumnChange(prev, next);
+      setGridLayout((prev) => {
+        const next = calculateGridLayout(w);
+        if (next.colCount !== prev.colCount) {
+          anchorScrollForColumnChange(prev.colCount, next.colCount);
+        }
+        if (
+          next.colCount === prev.colCount &&
+          next.columnWidth === prev.columnWidth &&
+          next.rowWidth === prev.rowWidth
+        ) {
+          return prev;
+        }
         return next;
       });
     },
@@ -252,11 +266,11 @@ export default function WallpaperGrid({
                 position: 'absolute',
                 top: 0,
                 left: 0,
-                width: '100%',
+                width: `${gridLayout.rowWidth}px`,
                 height: virtualRow.size,
                 transform: `translateY(${virtualRow.start}px)`,
                 display: 'grid',
-                gridTemplateColumns: `repeat(${colCount}, minmax(0, 1fr))`,
+                gridTemplateColumns: `repeat(${colCount}, ${gridLayout.columnWidth}px)`,
                 gap: `${GRID_GAP}px`,
               }}
             >
