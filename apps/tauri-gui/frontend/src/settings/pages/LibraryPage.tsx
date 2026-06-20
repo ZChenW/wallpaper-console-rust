@@ -6,20 +6,29 @@ import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 import ConfigRow from '../components/ConfigRow';
+import { resolveThumbnailStatusCard } from '../statusCards';
 
 export default function LibraryPage({
   configs,
   saving,
   onSet,
   thumbCache,
+  thumbCacheError,
+  thumbCacheLoading,
   onFeedback,
   handleCleanupThumbnails,
-  loadThumbCache,
+  refreshSettingsStatus,
   confirmAndRun,
   operationLock,
 }: LibraryPageProps) {
   const regular = getSettingsByCategoryAndLevel('library', false);
   const advanced = getSettingsByCategoryAndLevel('library', true);
+  const thumbCard = resolveThumbnailStatusCard(
+    thumbCache,
+    thumbCacheError,
+    thumbCacheLoading,
+    { cleanupDays: cleanupDays(configs, thumbCache) },
+  );
 
   return (
     <SettingsPageShell
@@ -41,12 +50,9 @@ export default function LibraryPage({
       >
         <StatusCard
           label="Status"
-          value={thumbCache
-            ? `${thumbCache.entries} thumbnails, ${thumbCache.size}${thumbCache.failureEntries > 0 ? ` · ${thumbCache.failureEntries} failed` : ''}`
-            : '...'}
-          detail={thumbCache
-            ? `Cleanup: older than ${cleanupDays(configs, thumbCache)} days`
-            : undefined}
+          value={thumbCard.value}
+          detail={thumbCard.detail}
+          tone={thumbCard.tone}
         />
         <div className="db-actions">
           <button
@@ -72,9 +78,10 @@ export default function LibraryPage({
                   } else {
                     onFeedback(commandErrorFeedback('Thumbnail cache clear', r));
                   }
-                  loadThumbCache();
                 } catch (e) {
                   onFeedback(commandErrorFeedback('Thumbnail cache clear', e));
+                } finally {
+                  refreshSettingsStatus('thumbnail-clear');
                 }
               },
               true,

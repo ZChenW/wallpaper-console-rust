@@ -6,6 +6,41 @@ test('library renders wallpaper grid', async ({ page }) => {
   await expect(page.locator('.wallpaper-card').first()).toBeVisible();
 });
 
+test('library keeps cards visible after resizing from compact to wide viewport', async ({ page }) => {
+  await page.setViewportSize({ width: 520, height: 800 });
+  await page.goto('/');
+  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible' });
+
+  await page.locator('.wallpaper-grid').evaluate((el) => {
+    el.scrollTop = 800;
+  });
+
+  const anchorPath = await page.evaluate(() => {
+    const cards = Array.from(document.querySelectorAll<HTMLElement>('.wallpaper-card'));
+    const visible = cards.filter((card) => {
+      const r = card.getBoundingClientRect();
+      return r.bottom > 0 && r.top < window.innerHeight;
+    });
+    return visible[0]?.title ?? null;
+  });
+  expect(anchorPath).toBeTruthy();
+
+  await page.setViewportSize({ width: 1920, height: 1000 });
+
+  await expect
+    .poll(async () =>
+      page.evaluate((path) => {
+        const card = Array.from(document.querySelectorAll<HTMLElement>('.wallpaper-card')).find(
+          (c) => c.title === path,
+        );
+        if (!card) return false;
+        const r = card.getBoundingClientRect();
+        return r.bottom > 0 && r.top < window.innerHeight;
+      }, anchorPath!),
+    )
+    .toBe(true);
+});
+
 test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('combobox').first().selectOption('we_web');

@@ -14,6 +14,7 @@ export default function AdvancedPage({
   saving,
   onSet,
   weDebugInfo,
+  weDebugError,
   showRawConfig,
   setShowRawConfig,
 }: AdvancedPageProps) {
@@ -126,6 +127,14 @@ export default function AdvancedPage({
           )}
         </div>
       </PageSection>
+
+      {weDebugError && !weDebugInfo && (
+        <PageSection title="WE Backend Debug Info">
+          <p className="config-desc" style={{ color: 'var(--warning)' }}>
+            Debug info unavailable: {weDebugError}
+          </p>
+        </PageSection>
+      )}
 
       {weDebugInfo && (weDebugInfo.lastStderr || weDebugInfo.lastExitStatus) && (
         <PageSection title="WE Backend Debug Info">

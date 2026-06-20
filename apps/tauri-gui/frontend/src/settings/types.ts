@@ -6,8 +6,14 @@ export type DbAction = 'verify' | 'rebuild' | 'backup' | 'export' | 'restore';
 
 export interface GeneralPageProps {
   libraryStatus: LibrarySourceStatusDTO | null;
+  libraryStatusError: string | null;
+  libraryStatusLoading: boolean;
   weStatus: LinuxWallpaperEngineStatusDTO | null;
+  weStatusError: string | null;
+  weStatusLoading: boolean;
   thumbCache: ThumbnailCacheDTO | null;
+  thumbCacheError: string | null;
+  thumbCacheLoading: boolean;
   configs: Record<string, string>;
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
@@ -21,6 +27,8 @@ export interface WallpaperPageProps {
 
 export interface WallpaperEnginePageProps {
   weStatus: LinuxWallpaperEngineStatusDTO | null;
+  weStatusError: string | null;
+  weStatusLoading: boolean;
   configs: Record<string, string>;
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
@@ -31,15 +39,19 @@ export interface LibraryPageProps {
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
   thumbCache: ThumbnailCacheDTO | null;
+  thumbCacheError: string | null;
+  thumbCacheLoading: boolean;
   onFeedback: (fb: CommandFeedback) => void;
   handleCleanupThumbnails: () => Promise<void>;
-  loadThumbCache: () => void;
+  refreshSettingsStatus: (reason?: string) => void;
   confirmAndRun: (title: string, msg: string, fn: () => Promise<void>, danger?: boolean, action?: DbAction) => void;
   operationLock: boolean;
 }
 
 export interface DatabasePageProps {
   libraryStatus: LibrarySourceStatusDTO | null;
+  libraryStatusError: string | null;
+  libraryStatusLoading: boolean;
   dbAction: DbAction | null;
   operationLock: boolean;
   runDbAction: (action: DbAction, label: string, fn: () => Promise<CommandResult>) => Promise<void>;
@@ -49,6 +61,7 @@ export interface DatabasePageProps {
   restoreInputRef: React.RefObject<HTMLInputElement | null>;
   onRestoreFileSelected: (e: React.ChangeEvent<HTMLInputElement>) => void;
   invalidateLibrary: () => void;
+  refreshSettingsStatus: (reason?: string) => void;
   diagnosticsRunning: boolean;
   runDiagnosticsExport: () => Promise<void>;
 }
@@ -58,6 +71,7 @@ export interface AdvancedPageProps {
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
   weDebugInfo: WeDebugInfoDTO | null;
+  weDebugError: string | null;
   showRawConfig: boolean;
   setShowRawConfig: (v: boolean) => void;
 }

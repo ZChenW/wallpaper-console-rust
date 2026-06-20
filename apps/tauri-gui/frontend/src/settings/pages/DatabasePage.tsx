@@ -5,9 +5,12 @@ import type { DatabasePageProps } from '../types';
 import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
+import { resolveDatabaseStatusCard } from '../statusCards';
 
 export default function DatabasePage({
   libraryStatus,
+  libraryStatusError,
+  libraryStatusLoading,
   dbAction,
   operationLock,
   runDbAction,
@@ -17,10 +20,12 @@ export default function DatabasePage({
   restoreInputRef,
   onRestoreFileSelected,
   invalidateLibrary,
+  refreshSettingsStatus,
   diagnosticsRunning,
   runDiagnosticsExport,
 }: DatabasePageProps) {
   const busy = dbAction !== null || operationLock;
+  const databaseCard = resolveDatabaseStatusCard(libraryStatus, libraryStatusError, libraryStatusLoading);
 
   return (
     <SettingsPageShell
@@ -30,7 +35,9 @@ export default function DatabasePage({
       <PageSection title="Status">
         <StatusCard
           label="SQLite active"
-          value={libraryStatus != null ? `${libraryStatus.sqliteRows} wallpapers indexed` : '...'}
+          value={databaseCard.value}
+          detail={databaseCard.detail}
+          tone={databaseCard.tone}
         />
       </PageSection>
 
@@ -58,12 +65,16 @@ export default function DatabasePage({
               'Rebuild Database',
               'Re-scan all configured source directories and rebuild the library database?',
               async () => {
-                const r = await api.rescan();
-                if (r.success) {
-                  invalidateLibrary();
-                  onFeedback(commandSuccessFeedback('Rebuild', r));
-                } else {
-                  onFeedback(commandErrorFeedback('Rebuild', r));
+                try {
+                  const r = await api.rescan();
+                  if (r.success) {
+                    invalidateLibrary();
+                    onFeedback(commandSuccessFeedback('Rebuild', r));
+                  } else {
+                    onFeedback(commandErrorFeedback('Rebuild', r));
+                  }
+                } finally {
+                  refreshSettingsStatus('db-rebuild');
                 }
               },
               true,
@@ -100,11 +111,15 @@ export default function DatabasePage({
               'Export SQLite back to flat files?',
               async () => {
                 onFeedback({ state: 'running', label: 'Export' });
-                const r = await api.sqliteExportFlat();
-                if (r.success) {
-                  onFeedback(commandSuccessFeedback('Export', r));
-                } else {
-                  onFeedback(commandErrorFeedback('Export', r));
+                try {
+                  const r = await api.sqliteExportFlat();
+                  if (r.success) {
+                    onFeedback(commandSuccessFeedback('Export', r));
+                  } else {
+                    onFeedback(commandErrorFeedback('Export', r));
+                  }
+                } finally {
+                  refreshSettingsStatus('db-export');
                 }
               },
               true,

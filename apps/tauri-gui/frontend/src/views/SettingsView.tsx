@@ -26,9 +26,13 @@ import DatabasePage from '../settings/pages/DatabasePage';
 import AdvancedPage from '../settings/pages/AdvancedPage';
 import type { DbAction } from '../settings/types';
 import { emitConfigChanged } from '../events/appEvents';
+import { refreshSettingsStatusCore, createSettingsStatusRequestSeq } from '../settings/refreshSettingsStatusCore';
+
+const SETTINGS_STATUS_POLL_MS = 3000;
+const STATUS_POLL_CATEGORIES = new Set<SettingsCategory>(['general', 'database', 'library', 'we']);
 
 interface Props {
-  onRefresh: () => void;
+  onRefresh: () => void | Promise<void>;
   onFeedback: (fb: CommandFeedback) => void;
   onClose: () => void;
 }
@@ -56,7 +60,7 @@ function defaultSettingsConfig(): Record<string, string> {
   return out;
 }
 
-export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClose }: Props) {
+export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) {
   const { invalidateLibrary } = useAppState();
   const [activeCategory, setActiveCategory] = useState<SettingsCategory>('general');
   const [configs, setConfigs] = useState<Record<string, string>>(
@@ -67,10 +71,17 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
   const [confirmAction, setConfirmAction] = useState<{ title: string; msg: string; fn: () => Promise<void> } | null>(null);
   const [confirming, setConfirming] = useState(false);
   const [thumbCache, setThumbCache] = useState<ThumbnailCacheDTO | null>(null);
+  const [thumbCacheError, setThumbCacheError] = useState<string | null>(null);
+  const [thumbCacheLoading, setThumbCacheLoading] = useState(true);
   const [dbAction, setDbAction] = useState<DbAction | null>(null);
   const [libraryStatus, setLibraryStatus] = useState<LibrarySourceStatusDTO | null>(null);
+  const [libraryStatusError, setLibraryStatusError] = useState<string | null>(null);
+  const [libraryStatusLoading, setLibraryStatusLoading] = useState(true);
   const [weStatus, setWeStatus] = useState<LinuxWallpaperEngineStatusDTO | null>(null);
+  const [weStatusError, setWeStatusError] = useState<string | null>(null);
+  const [weStatusLoading, setWeStatusLoading] = useState(true);
   const [weDebugInfo, setWeDebugInfo] = useState<WeDebugInfoDTO | null>(null);
+  const [weDebugError, setWeDebugError] = useState<string | null>(null);
   const [showRawConfig, setShowRawConfig] = useState(false);
   const [diagnosticsRunning, setDiagnosticsRunning] = useState(false);
   const [operationLock, setOperationLock] = useState(false);
@@ -78,6 +89,56 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
   const confirmActionRef = useRef(confirmAction);
   confirmActionRef.current = confirmAction;
   const dirtyKeysRef = useRef<Set<string>>(new Set());
+  const libraryStatusRef = useRef(libraryStatus);
+  const libraryStatusErrorRef = useRef(libraryStatusError);
+  const weStatusRef = useRef(weStatus);
+  const weStatusErrorRef = useRef(weStatusError);
+  const thumbCacheRef = useRef(thumbCache);
+  const thumbCacheErrorRef = useRef(thumbCacheError);
+  libraryStatusRef.current = libraryStatus;
+  libraryStatusErrorRef.current = libraryStatusError;
+  weStatusRef.current = weStatus;
+  weStatusErrorRef.current = weStatusError;
+  thumbCacheRef.current = thumbCache;
+  thumbCacheErrorRef.current = thumbCacheError;
+  const statusRequestSeqRef = useRef(createSettingsStatusRequestSeq());
+
+  const applySettingsStatusSnapshot = useCallback((snapshot: Awaited<ReturnType<typeof refreshSettingsStatusCore>>) => {
+    setLibraryStatus(snapshot.libraryStatus);
+    setLibraryStatusError(snapshot.libraryError);
+    setWeStatus(snapshot.weStatus);
+    setWeStatusError(snapshot.weError);
+    setThumbCache(snapshot.thumbCache);
+    setThumbCacheError(snapshot.thumbError);
+    setWeDebugInfo(snapshot.weDebugInfo);
+    setWeDebugError(snapshot.weDebugError);
+  }, []);
+
+  const refreshSettingsStatus = useCallback(async (reason?: string) => {
+    const requestId = statusRequestSeqRef.current.begin();
+    setLibraryStatusLoading(
+      libraryStatusRef.current === null && libraryStatusErrorRef.current === null,
+    );
+    setWeStatusLoading(weStatusRef.current === null && weStatusErrorRef.current === null);
+    setThumbCacheLoading(thumbCacheRef.current === null && thumbCacheErrorRef.current === null);
+
+    const snapshot = await refreshSettingsStatusCore({
+      librarySourceStatus: () => api.librarySourceStatus(),
+      linuxWallpaperEngineStatus: () => api.linuxWallpaperEngineStatus(),
+      thumbnailCacheStatus: () => api.thumbnailCacheStatus(),
+      weDebugInfo: () => api.weDebugInfo(),
+    });
+
+    if (!statusRequestSeqRef.current.isLatest(requestId)) return;
+
+    applySettingsStatusSnapshot(snapshot);
+    setLibraryStatusLoading(false);
+    setWeStatusLoading(false);
+    setThumbCacheLoading(false);
+    if (reason !== 'poll') {
+      void Promise.resolve(onRefresh()).catch(() => {});
+    }
+  }, [applySettingsStatusSnapshot, onRefresh]);
 
   const loadConfigs = useCallback(async () => {
     if (!cachedSettingsConfigs) setLoading(true);
@@ -119,25 +180,18 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     setLoading(false);
   }, []);
 
-  const loadThumbCache = useCallback(async () => {
-    try { setThumbCache(await api.thumbnailCacheStatus()); } catch { /* */ }
-  }, []);
-
-  const loadWeStatus = useCallback(async () => {
-    try { setWeStatus(await api.linuxWallpaperEngineStatus()); } catch { /* */ }
-  }, []);
-
-  const loadWeDebugInfo = useCallback(async () => {
-    try { setWeDebugInfo(await api.weDebugInfo()); } catch { /* */ }
-  }, []);
-
   useEffect(() => {
     loadConfigs();
-    loadThumbCache();
-    loadWeStatus();
-    loadWeDebugInfo();
-    void api.librarySourceStatus().then(setLibraryStatus);
-  }, [loadConfigs, loadThumbCache, loadWeStatus, loadWeDebugInfo]);
+    void refreshSettingsStatus('open');
+  }, [loadConfigs, refreshSettingsStatus]);
+
+  useEffect(() => {
+    if (!STATUS_POLL_CATEGORIES.has(activeCategory)) return;
+    const id = window.setInterval(() => {
+      void refreshSettingsStatus('poll');
+    }, SETTINGS_STATUS_POLL_MS);
+    return () => window.clearInterval(id);
+  }, [activeCategory, refreshSettingsStatus]);
 
   // Esc key handler — respect confirmAction to avoid closing Settings behind ConfirmDialog
   useEffect(() => {
@@ -165,7 +219,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         });
         emitConfigChanged({ key, value: normalized });
         if (key.startsWith('linux_wallpaperengine_')) {
-          void loadWeStatus();
+          void refreshSettingsStatus('we-config');
         }
         onFeedback({ state: 'success', label: 'Setting saved', detail: key });
         return true;
@@ -205,6 +259,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
       setConfirming(false);
       setConfirmAction(null);
       setOperationLock(false);
+      void refreshSettingsStatus('db-action');
     }
   };
 
@@ -239,13 +294,13 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
       const r = await api.thumbnailCacheCleanupOld(days);
       if (r.success) onFeedback(commandSuccessFeedback('Cleanup', r));
       else onFeedback(commandErrorFeedback('Cleanup', r));
-      loadThumbCache();
     } catch (e) {
       onFeedback(commandErrorFeedback('Cleanup', e));
     } finally {
       setOperationLock(false);
+      void refreshSettingsStatus('thumbnail-cleanup');
     }
-  }, [configs, thumbCache, onFeedback, loadThumbCache, operationLock]);
+  }, [configs, thumbCache, onFeedback, refreshSettingsStatus, operationLock]);
 
   const runDiagnosticsExport = useCallback(async () => {
     if (operationLock) return;
@@ -297,6 +352,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
           setConfirming(false);
           setConfirmAction(null);
           setOperationLock(false);
+          void refreshSettingsStatus('db-restore');
         }
       },
     });
@@ -307,8 +363,14 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     general: () => (
       <GeneralPage
         libraryStatus={libraryStatus}
+        libraryStatusError={libraryStatusError}
+        libraryStatusLoading={libraryStatusLoading}
         weStatus={weStatus}
+        weStatusError={weStatusError}
+        weStatusLoading={weStatusLoading}
         thumbCache={thumbCache}
+        thumbCacheError={thumbCacheError}
+        thumbCacheLoading={thumbCacheLoading}
         configs={configs}
         saving={saving}
         onSet={handleSet}
@@ -318,7 +380,14 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
       <WallpaperPage configs={configs} saving={saving} onSet={handleSet} />
     ),
     we: () => (
-      <WallpaperEnginePage weStatus={weStatus} configs={configs} saving={saving} onSet={handleSet} />
+      <WallpaperEnginePage
+        weStatus={weStatus}
+        weStatusError={weStatusError}
+        weStatusLoading={weStatusLoading}
+        configs={configs}
+        saving={saving}
+        onSet={handleSet}
+      />
     ),
     library: () => (
       <LibraryPage
@@ -326,9 +395,11 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         saving={saving}
         onSet={handleSet}
         thumbCache={thumbCache}
+        thumbCacheError={thumbCacheError}
+        thumbCacheLoading={thumbCacheLoading}
         onFeedback={onFeedback}
         handleCleanupThumbnails={handleCleanupThumbnails}
-        loadThumbCache={loadThumbCache}
+        refreshSettingsStatus={refreshSettingsStatus}
         confirmAndRun={confirmAndRun}
         operationLock={operationLock}
       />
@@ -336,6 +407,8 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
     database: () => (
       <DatabasePage
         libraryStatus={libraryStatus}
+        libraryStatusError={libraryStatusError}
+        libraryStatusLoading={libraryStatusLoading}
         dbAction={dbAction}
         operationLock={operationLock}
         runDbAction={runDbAction}
@@ -345,6 +418,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         restoreInputRef={restoreInputRef}
         onRestoreFileSelected={handleRestoreFileSelected}
         invalidateLibrary={invalidateLibrary}
+        refreshSettingsStatus={refreshSettingsStatus}
         diagnosticsRunning={diagnosticsRunning}
         runDiagnosticsExport={runDiagnosticsExport}
       />
@@ -355,6 +429,7 @@ export default function SettingsView({ onRefresh: _onRefresh, onFeedback, onClos
         saving={saving}
         onSet={handleSet}
         weDebugInfo={weDebugInfo}
+        weDebugError={weDebugError}
         showRawConfig={showRawConfig}
         setShowRawConfig={setShowRawConfig}
       />

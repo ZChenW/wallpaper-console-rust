@@ -1,4 +1,4 @@
-import { createContext, ReactNode, useContext, useRef } from 'react';
+import { createContext, ReactNode, useContext, useMemo, useRef } from 'react';
 import { api } from '../api/bridge';
 import { recordMetric } from '../perf/metrics';
 import { ThumbnailStore } from './thumbnailStore';
@@ -10,6 +10,9 @@ interface ThumbnailStoreValue {
   enqueueVisible: (paths: string[], options?: EnqueueOptions) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
+  snapshot: () => { pending: string[]; active: number; cached: number };
+  stats: () => { pending: number; active: number; cached: number };
+  setRevealPaused: (paused: boolean) => void;
 }
 
 const ThumbnailStoreContext = createContext<ThumbnailStoreValue | null>(null);
@@ -24,13 +27,16 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
     });
   }
   const store = storeRef.current;
-  const value: ThumbnailStoreValue = {
+  const value = useMemo<ThumbnailStoreValue>(() => ({
     get: (path: string) => store.get(path),
     subscribe: (path: string, cb: () => void) => store.subscribe(path, cb),
     enqueueVisible: (paths: string[], options?: EnqueueOptions) => store.enqueueVisible(paths, options),
     forget: (paths: string[]) => store.forget(paths),
     reset: () => store.reset(),
-  };
+    snapshot: () => store.snapshot(),
+    stats: () => store.stats(),
+    setRevealPaused: (paused: boolean) => store.setRevealPaused(paused),
+  }), [store]);
   return (
     <ThumbnailStoreContext.Provider value={value}>
       {children}

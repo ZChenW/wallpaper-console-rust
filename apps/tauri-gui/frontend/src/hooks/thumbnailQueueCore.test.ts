@@ -207,6 +207,60 @@ test('thumbnail queue onThumbnail called per-path on completion', async () => {
   });
 });
 
+test('thumbnail queue keeps duplicate checks cheap with a large backlog', async () => {
+  let releaseFirst: (() => void) | undefined;
+  const firstLoad = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const loaded: string[] = [];
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      loaded.push(path);
+      if (path === 'hold') await firstLoad;
+      return thumb(path);
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['hold', ...Array.from({ length: 500 }, (_, i) => `p-${i}`)]);
+  queue.enqueue(Array.from({ length: 500 }, (_, i) => `p-${i}`), { priority: 'front' });
+
+  const snap = queue.stats();
+  assert.equal(snap.pending, 500);
+
+  releaseFirst?.();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(loaded[0], 'hold');
+});
+
+test('thumbnail queue keeps queuedPaths in sync when re-enqueueing forgotten in-flight path', async () => {
+  let releaseX: (() => void) | undefined;
+  const xBlock = new Promise<void>((resolve) => { releaseX = resolve; });
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 2,
+    load: async (path) => {
+      if (path === 'x') await xBlock;
+      return thumb(path);
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['x']);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  queue.forget(['x']);
+  queue.enqueue(['x']);
+  queue.enqueue(['x']);
+
+  assert.equal(queue.stats().pending, 1);
+  assert.deepEqual(queue.snapshot().pending, ['x']);
+
+  releaseX?.();
+  await new Promise((resolve) => setTimeout(resolve, 30));
+});
+
 test('thumbnail queue still emits when completions land in separate frames', async () => {
   const h = makeHandlers();
   let releaseFirst: (() => void) | undefined;
