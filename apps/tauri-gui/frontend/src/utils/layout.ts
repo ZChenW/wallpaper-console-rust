@@ -2,9 +2,13 @@ export const COL_MIN_WIDTH = 220;
 export const GRID_GAP = 10;
 
 export const MAX_SLOW_OVERSCAN_CARDS = 12;
-export const MAX_FAST_OVERSCAN_CARDS = 32;
+export const MAX_FAST_OVERSCAN_CARDS = 8;
 
-export function calculateColumnCount(width: number, minCardWidth = COL_MIN_WIDTH, gap = GRID_GAP): number {
+export function calculateColumnCount(
+  width: number,
+  minCardWidth = COL_MIN_WIDTH,
+  gap = GRID_GAP,
+): number {
   if (!Number.isFinite(width) || width <= 0) return 1;
   const count = Math.floor((width + gap) / (minCardWidth + gap));
   return Math.max(1, count);

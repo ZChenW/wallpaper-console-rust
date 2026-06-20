@@ -18,6 +18,7 @@ export class ThumbnailRequestQueue {
   private readonly onFailure: (path: string, reason?: string) => void;
   private cache = new Map<string, string>();
   private queue: QueueItem[] = [];
+  private queuedPaths = new Set<string>();
   private inFlight = new Map<string, number>();
   private disposed = false;
   private generation = 0;
@@ -32,7 +33,7 @@ export class ThumbnailRequestQueue {
 
   enqueue(paths: string[], options: EnqueueOptions = {}): void {
     const unique = Array.from(new Set(paths)).filter((path) => {
-      if (!path || this.cache.has(path) || this.queue.some((item) => item.path === path)) {
+      if (!path || this.cache.has(path) || this.queuedPaths.has(path)) {
         return false;
       }
       const inFlightVersion = this.inFlight.get(path);
@@ -44,6 +45,9 @@ export class ThumbnailRequestQueue {
       generation: this.generation,
       pathVersion: this.versionFor(path),
     }));
+    for (const item of items) {
+      this.queuedPaths.add(item.path);
+    }
     if (options.priority === 'front') {
       this.queue = [...items, ...this.queue];
     } else {
@@ -56,6 +60,7 @@ export class ThumbnailRequestQueue {
     const set = new Set(paths);
     for (const path of set) {
       this.cache.delete(path);
+      this.queuedPaths.delete(path);
       this.pathVersions.set(path, this.versionFor(path) + 1);
     }
     this.queue = this.queue.filter((item) => !set.has(item.path));
@@ -65,6 +70,7 @@ export class ThumbnailRequestQueue {
     this.generation += 1;
     this.cache.clear();
     this.queue = [];
+    this.queuedPaths.clear();
     this.inFlight.clear();
   }
 
@@ -72,6 +78,7 @@ export class ThumbnailRequestQueue {
     this.disposed = true;
     this.generation += 1;
     this.queue = [];
+    this.queuedPaths.clear();
     this.inFlight.clear();
   }
 
@@ -87,6 +94,14 @@ export class ThumbnailRequestQueue {
     };
   }
 
+  stats(): { pending: number; active: number; cached: number } {
+    return {
+      pending: this.queue.length,
+      active: this.inFlight.size,
+      cached: this.cache.size,
+    };
+  }
+
   private versionFor(path: string): number {
     return this.pathVersions.get(path) ?? 0;
   }
@@ -95,12 +110,19 @@ export class ThumbnailRequestQueue {
     if (this.disposed) return;
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
       const item = this.queue.shift();
-      if (!item || this.cache.has(item.path)) continue;
+      if (!item) continue;
+
+      if (this.cache.has(item.path)) {
+        this.queuedPaths.delete(item.path);
+        continue;
+      }
 
       if (this.inFlight.has(item.path)) {
         this.queue.unshift(item);
         break;
       }
+
+      this.queuedPaths.delete(item.path);
       this.inFlight.set(item.path, item.pathVersion);
       void this.load(item.path)
         .then((thumb) => {

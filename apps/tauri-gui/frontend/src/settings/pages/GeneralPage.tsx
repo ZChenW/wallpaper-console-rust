@@ -4,16 +4,30 @@ import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 import ConfigRow from '../components/ConfigRow';
 import { getSettingsByCategoryAndLevel } from '../configSchema';
+import {
+  resolveDatabaseStatusCard,
+  resolveThumbnailStatusCard,
+  resolveWeStatusCard,
+} from '../statusCards';
 
 export default function GeneralPage({
   libraryStatus,
+  libraryStatusError,
+  libraryStatusLoading,
   weStatus,
+  weStatusError,
+  weStatusLoading,
   thumbCache,
+  thumbCacheError,
+  thumbCacheLoading,
   configs,
   saving,
   onSet,
 }: GeneralPageProps) {
   const preferenceSettings = getSettingsByCategoryAndLevel('general', false);
+  const databaseCard = resolveDatabaseStatusCard(libraryStatus, libraryStatusError, libraryStatusLoading);
+  const weCard = resolveWeStatusCard(weStatus, weStatusError, weStatusLoading);
+  const thumbCard = resolveThumbnailStatusCard(thumbCache, thumbCacheError, thumbCacheLoading);
 
   return (
     <SettingsPageShell
@@ -32,22 +46,9 @@ export default function GeneralPage({
         ))}
       </PageSection>
       <PageSection title="Status">
-        <StatusCard
-          label="Database"
-          value={libraryStatus != null ? `${libraryStatus.sqliteRows} wallpapers indexed` : '...'}
-        />
-        <StatusCard
-          label="Wallpaper Engine Scene"
-          value={weStatus?.available ? `Ready — ${weStatus.path}` : 'Missing'}
-          detail={!weStatus?.available ? (weStatus?.message ?? 'Checking...') : undefined}
-          tone={weStatus?.available ? 'success' : 'warning'}
-        />
-        <StatusCard
-          label="Thumbnail Cache"
-          value={thumbCache
-            ? `${thumbCache.entries} thumbnails, ${thumbCache.size}${thumbCache.failureEntries > 0 ? ` · ${thumbCache.failureEntries} failed` : ''}`
-            : '...'}
-        />
+        <StatusCard label="Database" value={databaseCard.value} detail={databaseCard.detail} tone={databaseCard.tone} />
+        <StatusCard label="Wallpaper Engine Scene" value={weCard.value} detail={weCard.detail} tone={weCard.tone} />
+        <StatusCard label="Thumbnail Cache" value={thumbCard.value} detail={thumbCard.detail} tone={thumbCard.tone} />
       </PageSection>
     </SettingsPageShell>
   );

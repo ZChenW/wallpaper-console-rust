@@ -20,8 +20,8 @@ export function useThumbnailQueue(concurrency = 2) {
     queueRef.current = queue;
 
     const pollTimer = setInterval(() => {
-      const snap = queue.snapshot();
-      recordMetric('thumbnail.queue.pending', snap.pending.length);
+      const snap = queue.stats();
+      recordMetric('thumbnail.queue.pending', snap.pending);
       recordMetric('thumbnail.queue.inFlight', snap.active);
       recordMetric('thumbnail.queue.cached', snap.cached);
     }, 1000);

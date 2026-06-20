@@ -141,3 +141,193 @@
 - 快速 apply 后立即切换/完成时，旧 stage listener 不再更新后续请求的 running feedback。
 - video/scene → image（Awww instant fallback）时，UI 在 fallback 期间显示 `EnsureAwwwDaemon` / `AwwwSocketReady`，而非长时间停在 `ResolveTarget`。
 - 带 `requestId` 的 apply 忽略 `requestId: null` 的 stage event（防泄漏 listener 或 legacy 路径干扰）。
+
+## 2026-06-20 Library 滚动 FPS 硬化
+
+目标：
+- 修复 Tauri GUI Library 大屏浏览时滚动 FPS 低、不跟手的问题。
+- 减少滚动热路径上的缩略图调度与主线程分配。
+
+根因（源码确认）：
+- `WallpaperGrid` 虚拟范围变化时对可见 path 做 front-priority enqueue；宽屏 `calculateColumnCount(1920) === 8`，每次 range 变化覆盖更多卡片。
+- `ThumbnailRequestQueue.enqueue` 原用 `queue.some()` 去重，backlog 大时为 O(incoming × pending)。
+- 缩略图完成时 `ThumbnailStore` 逐 path 同步通知 listener，多 completion 可在一帧内触发多次卡片重渲染。
+- fast scroll 时 `overscan` 随列数膨胀，虚拟化范围抖动加剧 enqueue。
+
+结果：
+- **队列 O(1) 去重**：`thumbnailQueueCore` 增加 `queuedPaths: Set<string>`；enqueue/forget/reset/dispose 与 shift 路径同步维护；新增大 backlog 去重回归测试。
+- **滚动热区暂停 enqueue**：`WallpaperGrid` 用 `thumbnailPaused` + 140ms idle timer（速度阈值 1.5 px/ms）；暂停期间跳过 visible enqueue，停止滚动后再补队列。
+- **稳定 overscan**：`layout.overscanRowsFor` 改为固定行数（慢 2 / 快 1），不再按列数放大卡片数。
+- **通知批处理**：`ThumbnailStore.scheduleNotify` 合并到单 `requestAnimationFrame`；新增 `thumbnailStore.test.ts`。
+- **绘制隔离**：`.wallpaper-card` 增加 `contain: layout paint style`、`content-visibility: auto`；`.wallpaper-thumb img` 增加 `display: block`。
+- **指标**：`ThumbnailStoreContext` 暴露 `snapshot()`；`WallpaperGrid` 记录 `library.visibleThumbnail.paths`、`thumbnail.queue.pending`、`thumbnail.queue.inFlight`。
+
+## 2026-06-20 Library 滚动 FPS — review 修复
+
+结果：
+- P1-1：新增 `stats(): { pending, active, cached }`（`queue.length` 等 O(1) 计数）；`WallpaperGrid` / `useThumbnailQueue` 指标改用 `stats()`，避免 `snapshot()` 在滚动路径上 `queue.map` 分配整段 pending 数组。
+- P1-2：`pump()` 仅在确认发起 load 后 `queuedPaths.delete()`；`inFlight.has(path)` 时 `unshift` 回队列且保持 Set 成员；新增 `enqueue → forget → enqueue ×2`（concurrency 2）回归测试，断言 pending 为 1。
+- P2：`contain-intrinsic-size` 从 `188px 220px` 改为 `auto 188px`，与 `CARD_HEIGHT = 188` 及虚拟行 estimate 对齐，避免 `content-visibility: auto` 跳过卡片预留 220px 块高导致行测量不一致。
+
+验证：
+- `npm run test:unit`（152 pass，含 thumbnailQueueCore / thumbnailStore / layout 测试）、`npm run typecheck`、`git diff --check`：通过。
+- `cargo build --workspace`：通过。
+- `cargo run -p xtask -- verify all` / `npm run smoke`：agent 环境 Playwright Chromium Headless Shell 下载写入失败（`errno -122`），Rust 与前端单元测试段均绿；需本机 `npx playwright install chromium && npm run smoke` 补验。
+
+手工验收项（需在真实 Tauri 全屏 Library 中确认）：
+- 冷/半冷缩略图缓存下快速 touchpad/滚轮滚动：位移跟手，缩略图在停止滚动约 140ms 后出现；占位符稳定、无整格塌陷。
+- Performance Overlay：`thumbnail.queue.pending` 持续滚动时不应无限增长；同可见 path 无重复请求风暴。
+- 缓存预热后再次快滚：FPS 应明显改善且保持稳定。
+
+## 2026-06-20 Settings Status 不实时更新诊断与方案
+
+现象：
+- 打开 Settings -> General -> Status 后，Database / Wallpaper Engine Scene / Thumbnail Cache 有时仍显示初始占位或空状态。
+- 等待数秒后没有自动更新；关闭/重开或触发某些操作后才可能变化。
+
+源码定位：
+- `apps/tauri-gui/frontend/src/views/SettingsView.tsx` 只在 mount 时执行一次 status 加载：
+  - `loadThumbCache()` -> `api.thumbnailCacheStatus()`
+  - `loadWeStatus()` -> `api.linuxWallpaperEngineStatus()`
+  - `api.librarySourceStatus().then(setLibraryStatus)`
+- `loadThumbCache` / `loadWeStatus` 的 `catch` 是空块；失败时状态保持 `null`，StatusCard 只能继续显示初始占位。
+- `librarySourceStatus` 没有 `catch`；失败时 promise rejection 不会写入任何 UI 状态，也不会触发 retry。
+- SettingsView 接收了 `onRefresh`，但当前参数名为 `_onRefresh` 且没有使用；打开 Settings 不会刷新全局 status，也不会驱动 Settings 内部 status 重新拉取。
+- `LibraryPage` 清理/清空 thumbnail cache 后只刷新 `thumbCache`；Database rebuild / verify / restore 等动作没有统一刷新 `libraryStatus` / `thumbCache` / `weStatus`。
+
+根因：
+- Settings Status 目前是“一次性 best-effort fetch”，不是实时状态模型。
+- 前端没有显式区分 `loading / ready / error / stale`，也没有重试/轮询；失败被吞掉后用户只能看到永久占位。
+- 各维护动作各自局部刷新，缺少统一的 `refreshSettingsStatus()`，所以状态容易漂移。
+
+实施方案（交给 Cursor）：
+1. 在 `SettingsView.tsx` 增加统一状态刷新函数：
+   - 新增 `settingsStatusLoading` / `settingsStatusError`，或更细粒度的 `libraryStatusError`、`weStatusError`、`thumbCacheError`。
+   - 实现 `refreshSettingsStatus(reason?: string)`，内部用 `Promise.allSettled` 并行请求：
+     - `api.librarySourceStatus()`
+     - `api.linuxWallpaperEngineStatus()`
+     - `api.thumbnailCacheStatus()`
+     - 可选：`api.weDebugInfo()`
+   - 每个 fulfilled 单独 set 对应状态；每个 rejected 写入对应 error，不要让一个失败阻断其他卡片更新。
+   - 调用传入的 `onRefresh()`，让底部 StatusBar 与 Settings Status 同步刷新。
+
+2. 打开 Settings 后立即刷新，并在 Settings 打开期间轻量轮询：
+   - `useEffect(() => { void refreshSettingsStatus('open'); const id = window.setInterval(..., 3000); return clearInterval; }, [refreshSettingsStatus])`
+   - 轮询只刷新 status 类数据，不重新拉全部 configs，避免覆盖用户正在编辑的设置。
+   - 如果担心成本，可只在 `activeCategory === 'general' || activeCategory === 'database' || activeCategory === 'library' || activeCategory === 'we'` 时轮询。
+
+3. 所有会改变状态的操作完成后统一刷新：
+   - `handleCleanupThumbnails` 成功/失败后调用 `refreshSettingsStatus('thumbnail-cleanup')`，替代单独 `loadThumbCache()`。
+   - Clear Thumbnail Cache 成功/失败后调用 `refreshSettingsStatus('thumbnail-clear')`。
+   - `runDbAction` finally 中调用 `refreshSettingsStatus('db-action')`；rebuild / restore / export / verify 后都能更新 Database 卡片。
+   - `handleSet` 保存 `linux_wallpaperengine_*` 后调用 `refreshSettingsStatus('we-config')`，替代只调用 `loadWeStatus()`。
+
+4. UI 表达要从永久占位改成可诊断状态：
+   - `StatusCard` 可增加 `loading?: boolean` / `error?: string`，或者在页面层把 value/detail/tone 显式传入。
+   - Database：
+     - loading: `Checking...`
+     - ready: `${sqliteRows} wallpapers indexed`
+     - error: `Unavailable` + detail 为错误文本，tone=`warning`
+   - Wallpaper Engine Scene：
+     - unknown/loading 时显示 `Checking...`，不要把 `null` 直接当作 `Missing`
+     - ready/missing/error 区分；只有明确返回 unavailable 才显示 `Missing`
+   - Thumbnail Cache：
+     - loading: `Checking...`
+     - ready: `${entries} thumbnails, ${size}`
+     - error: `Unavailable`
+
+5. 增加最小测试：
+   - 优先抽一个纯函数，例如 `settings/statusCards.ts`：
+     - `resolveDatabaseStatusCard(libraryStatus, error, loading)`
+     - `resolveWeStatusCard(weStatus, error, loading)`
+     - `resolveThumbnailStatusCard(thumbCache, error, loading)`
+   - 单测覆盖：
+     - null + loading -> `Checking...`
+     - rejected/error -> `Unavailable` 且 tone warning
+     - fulfilled -> 展示真实行数/路径/缓存数量
+     - weStatus null 不应显示 `Missing`
+   - 如果实现刷新 orchestration，可加 `refreshSettingsStatusCore(loaders)` 单测，验证一个 loader reject 时其他 fulfilled 仍写入。
+
+验收标准：
+- 打开 Settings 后 0-1 秒内 Status 卡片从 `Checking...` 更新到真实值或明确错误。
+- 单个 status command 失败不会阻止其他卡片更新。
+- 等待数秒会再次刷新 status；不会永久停在 `...` 或空状态。
+- thumbnail clear / cleanup、database rebuild / verify / restore、WE 设置保存后，对应 Status 卡片自动更新。
+- 运行：
+  - `cd apps/tauri-gui/frontend && npm run test:unit`
+  - `cd apps/tauri-gui/frontend && npm run typecheck`
+  - `git diff --check`
+  - 可选本机补验：打开 Tauri GUI，进入 Settings -> General，观察 Status 卡片自动更新与轮询。
+
+## 2026-06-20 Settings Status 实时刷新实现
+
+结果：
+- 新增 `settings/statusCards.ts`（`resolveDatabaseStatusCard` / `resolveWeStatusCard` / `resolveThumbnailStatusCard`）及 `statusCards.test.ts`，三态 UI：loading=`Checking...`、error=`Unavailable`+warning、ready 展示真实数据；`weStatus null` 不显示 `Missing`。
+- 新增 `settings/refreshSettingsStatusCore.ts`：`Promise.allSettled` 并行拉取 library / WE / thumbnail / weDebugInfo；单 loader reject 不阻断其他卡片；`runLoader()` 用 `Promise.resolve().then()` 包装，同步 throw 也记入 error。
+- `SettingsView` 实现 `refreshSettingsStatus()`：打开即刷、3s 轮询（仅 status，不碰 configs）、`onRefresh()` 同步 StatusBar；thumbnail cleanup/clear、db verify/backup/rebuild/restore/export、WE 配置保存后统一刷新。
+- `GeneralPage` / `DatabasePage` / `LibraryPage` / `WallpaperEnginePage` 改用 statusCards 解析结果渲染 StatusCard。
+
+验证：
+- `npm run test:unit`（166 pass）、`npm run typecheck`、`git diff --check`：通过。
+
+## 2026-06-20 Settings Status — review 修复
+
+结果：
+- P1：新增 `createSettingsStatusRequestSeq()`；`refreshSettingsStatus` 每次 `begin()` 递增 request id，`await` 后仅 `isLatest(requestId)` 时 apply snapshot 并清 loading，避免慢 poll 覆盖新操作结果；单测覆盖 stale request 场景。
+- P2：`onRefresh` 改为 `void Promise.resolve(onRefresh()).catch(() => {})`，全局 `api.status()` 失败不拖垮 Settings status 刷新链。
+- P3：`refreshSettingsStatusCore` 全部 loader 经 `runLoader()` 调用；新增同步 throw 单测。
+
+验证：
+- `npm run test:unit`（169 pass）、`npm run typecheck`：通过。
+
+## 2026-06-20 Library 窗口最大化/缩放卡顿修复
+
+目标：
+- 修复窗口最大化、全屏、拖拽缩放后 Library 滚动卡顿（“大屏”指窗口变宽，非 DPI）。
+
+根因：
+- `calculateColumnCount()` 仅按 `width / 220px` 增列，无上限；行虚拟化下宽窗口同 overscan 行数渲染更多卡片（如 16 列 × 10 行 ≈ 160 卡）。
+- `ResizeObserver` 每个 event 直接 `setColCount`，触发 anchor scroll + `virtualizer.measure()`，resize 期间主线程抖动。
+- 滚动虽暂停 enqueue，但已完成 thumbnail 仍批量换 `<img src>`，与 scroll/resize 抢帧。
+
+结果：
+- **列数上限**：`layout.ts` 增加 `MAX_GRID_COLUMNS = 8`；超宽窗口卡片变宽而非无限加列；补 cap 单测。
+- **resize 节流**：`WallpaperGrid` ResizeObserver 经 `requestAnimationFrame` 合并 + 100ms debounce 最终校正；cleanup 时 `cancelAnimationFrame` / `clearTimeout`；记录 `library.grid.resize`。
+- **interaction pause**：`pauseThumbnailInteraction()` 统一暂停 enqueue（200ms idle）与 `ThumbnailStore.setRevealPaused()`，scroll 与 resize 共用；unpause 后批量 flush 积压通知。
+- **稳定 Context**：`ThumbnailStoreProvider` 用 `useMemo` 固定 context value，避免父级 render 牵连全部 `useThumbnailStore()` 消费者。
+- **指标**：`library.grid.containerWidth`、`colCount`、`renderedRows`、`renderedCards` 写入 metrics buffer（PerformanceOverlay `Ctrl+Shift+P`）。
+
+验证：
+- `npm run test:unit`（169 pass）、`npm run typecheck`、`npm run build`、`git diff --check`：通过。
+
+手工验收项：
+- 最大化/全屏后 `library.grid.colCount ≤ 8`，`renderedCards` 不随窗口宽度无限增长。
+- 拖拽缩放窗口时无明显连续抖动；快滚跟手，缩略图可延迟约 200ms 出现。
+
+## 2026-06-20 Library reveal pause — rAF 已排队通知修复
+
+现象：
+- `setRevealPaused(true)` 只能拦住后续 `scheduleNotify()` 新入队路径；若 thumbnail 已完成并把通知排进 `requestAnimationFrame`，滚动/resize 开始后该 rAF 仍会 flush 并触发卡片 `<img src>` 更新，削弱 interaction pause 效果。
+
+结果：
+- `ThumbnailStore.scheduleNotifyFlush()` 的 rAF callback 开头重新检查 `revealPaused`；若已暂停，将 `pendingNotifyPaths` 转入 `pausedNotifyPaths` 后 return，不通知 listener。
+- 新增回归测试：thumbnail 完成并排入 rAF → `setRevealPaused(true)` → 执行 rAF（listener 仍为 0）→ `setRevealPaused(false)` → 下一帧 listener 被调用。
+
+验证：
+- `npm run test:unit`（170 pass）、`npm run typecheck`：通过。
+
+## 2026-06-20 Library 滚动修复 — review follow-up
+
+结果：
+- 保留自然列数（无 `MAX_GRID_COLUMNS`），`overscanRowsFor` 恢复按 `MAX_SLOW_OVERSCAN_CARDS` / `MAX_FAST_OVERSCAN_CARDS` 总卡片上限缩放，超宽屏不再固定 2 行 × N 列。
+- `ThumbnailStore` 暂停期间 completion 不再逐条写 `thumbnail.reveal.pending`；rAF flush 在 batch 通知前二次检查 `revealPaused`。
+- `WallpaperGrid` 程序化 `scrollToIndex` / 列变更 anchor scroll 用 `suppressScrollPauseRef` 跳过 interaction pause；grid 指标改为 500ms `setInterval` 采样。
+- Settings status 轮询仅在 `general|database|library|we` tab 激活；`poll` 不触发 `onRefresh()`；`weDebugError` 接入 Advanced 页。
+
+## 2026-06-20 Library 滚动修复 — review follow-up
+
+结果：
+- 保留自然列数（无 `MAX_GRID_COLUMNS`），`overscanRowsFor` 恢复按 `MAX_SLOW_OVERSCAN_CARDS` / `MAX_FAST_OVERSCAN_CARDS` 总卡片上限缩放，超宽屏不再固定 2 行 × N 列。
+- `ThumbnailStore` 暂停期间 completion 不再逐条写 `thumbnail.reveal.pending`；rAF flush 在 batch 通知前二次检查 `revealPaused`。
+- `WallpaperGrid` 程序化 `scrollToIndex` / 列变更 anchor scroll 用 `suppressScrollPauseRef` 跳过 interaction pause；grid 指标改为 500ms `setInterval` 采样。
+- Settings status 轮询仅在 `general|database|library|we` tab 激活；`poll` 不触发 `onRefresh()`；`weDebugError` 接入 Advanced 页。
