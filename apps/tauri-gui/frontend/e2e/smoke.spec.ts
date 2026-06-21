@@ -45,7 +45,7 @@ test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('combobox').first().selectOption('we_web');
   const card = page.locator('.wallpaper-card').first();
-  await expect(card.getByText('WE Web · Unsupported')).toBeVisible();
+  await expect(card.getByText('Web · browse only')).toBeVisible();
   await expect(card.getByText(/Web wallpaper — unsupported/)).toBeVisible();
   await card.click({ button: 'right' });
   await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
@@ -332,7 +332,7 @@ test('Apply preview GIF completes through explicit preview action', async ({ pag
 test('WE Web double click shows cannot apply warning', async ({ page }) => {
   await page.goto('/');
   await page.getByRole('combobox').first().selectOption('we_web');
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'WE Web' }).first();
+  const card = page.locator('.wallpaper-card').filter({ hasText: 'Web title' }).first();
   await card.dblclick();
   await expect(page.locator('.toast')).toContainText('Cannot apply');
 });
