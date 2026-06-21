@@ -439,10 +439,7 @@ mod tests {
         };
 
         let dto = dto_from_entry(entry);
-        assert_eq!(
-            dto.backend_status.as_deref(),
-            Some("renderer_limitation")
-        );
+        assert_eq!(dto.backend_status.as_deref(), Some("renderer_limitation"));
         assert_eq!(
             dto.backend_error_kind.as_deref(),
             Some("renderer_limitation")

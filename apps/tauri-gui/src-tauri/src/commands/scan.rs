@@ -131,7 +131,9 @@ pub(crate) fn finish_scan_error(err: &str) {
     }
 }
 
-pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<IndexSourcesResult, String> {
+pub(crate) fn index_current_sources(
+    s: &wc_storage::StorageApi,
+) -> Result<IndexSourcesResult, String> {
     update_scan_stage("loading sources");
     let sources = s.sources_list().map_err(|e| e.to_string())?;
 
@@ -524,8 +526,14 @@ mod tests {
         std::fs::remove_dir_all(&project_dir).unwrap();
 
         let second = index_current_sources(&s).unwrap();
-        assert_eq!(second.inserted, 0, "deleted project should not be reindexed");
-        assert_eq!(second.removed, 1, "deleted project should be removed from sqlite");
+        assert_eq!(
+            second.inserted, 0,
+            "deleted project should not be reindexed"
+        );
+        assert_eq!(
+            second.removed, 1,
+            "deleted project should be removed from sqlite"
+        );
         assert_eq!(
             second.removed_we_workshop_ids,
             vec!["3589454154".to_string()]

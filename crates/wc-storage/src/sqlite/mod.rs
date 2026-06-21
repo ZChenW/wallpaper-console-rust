@@ -40,7 +40,9 @@ pub fn library_index_snapshot(cd: &ConfigDir) -> Result<LibraryIndexSnapshot, Wc
         .prepare("SELECT path, workshop_id FROM wallpapers")
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let mut snap = LibraryIndexSnapshot::default();
     for row in rows {
@@ -58,11 +60,7 @@ pub fn library_index_diff_removed(
     before: &LibraryIndexSnapshot,
     after: &LibraryIndexSnapshot,
 ) -> (usize, Vec<String>) {
-    let removed_paths: Vec<String> = before
-        .paths
-        .difference(&after.paths)
-        .cloned()
-        .collect();
+    let removed_paths: Vec<String> = before.paths.difference(&after.paths).cloned().collect();
     let removed = removed_paths.len();
     let mut workshop_ids: Vec<String> = removed_paths
         .iter()
