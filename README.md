@@ -1,71 +1,46 @@
-# wallpaper-console-rust
+# Wallpaper Console Rust
 
-Rust/Tauri wallpaper manager for Arch Linux, Wayland, and niri.
+Rust/Tauri wallpaper manager for Linux Wayland desktops, with niri in mind.
 
-Status: **beta, GUI-first**. The supported user command is
-`wallpaper-console-gui-rust`. The Rust CLI crate stays in the workspace for
-diagnostics and tests, but it is not installed by default.
+It provides a GUI for browsing wallpaper folders, scanning Wallpaper Engine
+Workshop content, applying wallpapers, and managing sources, favorites, history,
+thumbnails, and backend settings.
 
-## What It Does
+## Features
 
-- Browse wallpapers in a fast virtualized React grid.
-- Scan local folders and Wallpaper Engine Workshop folders.
-- Apply images/GIFs with `awww`, videos with `mpvpaper`, and compatible
-  Wallpaper Engine scenes with `linux-wallpaperengine`.
-- Index Wallpaper Engine Web projects for browsing and preview only; live apply
-  is not supported for Web projects.
-- Manage sources, favorites, history, thumbnails, backend settings, SQLite
-  maintenance, and privacy-safe diagnostics from the GUI.
+- Images and GIFs via `awww`
+- Videos via `mpvpaper`
+- Compatible Wallpaper Engine scenes via `linux-wallpaperengine`
+- Wallpaper Engine Web projects are indexed for browsing only; live apply is not
+  supported
+- SQLite storage for library, history, favorites, sources, and thumbnails
 
-Runtime storage is SQLite-only. Legacy flat files can still be imported into
-SQLite, and explicit flat export remains available as a maintenance action.
+## Requirements
+
+Install these before running the installer:
+
+- Rust 1.77+
+- Node.js 22+ and npm
+- `cargo-tauri`
+- Tauri 2 Linux system dependencies, including `webkit2gtk-4.1`
+
+Optional runtime helpers:
+
+- `awww` for images/GIFs
+- `mpvpaper` for videos
+- `linux-wallpaperengine` for Wallpaper Engine scenes
+- `ffmpeg`, `imagemagick`, or `ffmpegthumbnailer` for better thumbnails
 
 ## Install
 
-Prerequisites:
-
-- Rust 1.77+
-- Node.js 22+
-- `webkit2gtk-4.1` for Tauri 2
-- Optional thumbnail helpers: `ffmpeg`, `imagemagick`, `ffmpegthumbnailer`
-- Optional scene backend: `linux-wallpaperengine`
-
-Build and install:
-
 ```bash
+git clone https://github.com/ZChenW/wallpaper-console-rust.git
+cd wallpaper-console-rust
 ./install.sh
 wallpaper-console-gui-rust
 ```
 
-Installed commands:
-
-- `wallpaper-console-gui-rust` opens the Tauri GUI.
-- `wallpaper-console-rust restore` restores the last wallpaper from startup
-  hooks or scripts.
-
-Build without installing:
-
-```bash
-./install.sh --build-only
-./target/release/wallpaper-console-tauri
-```
-
-Install to another prefix:
-
-```bash
-./install.sh --prefix "$HOME/.local"
-```
-
-Uninstall files created by this installer:
-
-```bash
-./install.sh --prefix "$HOME/.local" --uninstall
-```
-
-The installer does not modify the older Bash/Python commands:
-`wallpaper-console` and `wallpaper-console-gui`.
-
-## Niri (Mine)
+## Niri Example
 
 Startup restore:
 
@@ -90,3 +65,6 @@ window-rule {
 }
 ```
 
+## License
+
+MIT
