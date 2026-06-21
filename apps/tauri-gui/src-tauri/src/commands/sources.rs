@@ -1,7 +1,7 @@
 use super::common::{fail, ok, source_label, storage, CommandResult, SourceDto};
 use super::scan::{
-    finish_scan_error, finish_scan_success, index_current_sources, mark_scan_started,
-    update_scan_stage,
+    finish_scan_error, finish_scan_success, format_index_sources_message, index_current_sources,
+    mark_scan_started, update_scan_stage,
 };
 use std::path::Path;
 
@@ -126,12 +126,12 @@ pub async fn scan_steam_workshop() -> CommandResult {
                 }
             }
 
-            let inserted = index_current_sources(&s)?;
+            let index_result = index_current_sources(&s)?;
             Ok(format!(
-                "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s), {} wallpaper(s) indexed.",
+                "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s). {}",
                 roots.len(),
                 added,
-                inserted
+                format_index_sources_message(&index_result)
             ))
         })();
 

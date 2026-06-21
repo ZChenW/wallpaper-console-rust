@@ -90,6 +90,9 @@ if [[ "${WCR_INSTALL_SKIP_BUILD:-}" == "1" ]]; then
   FRONTEND_DIST="${WCR_INSTALL_FRONTEND_DIST:?WCR_INSTALL_FRONTEND_DIST is required when WCR_INSTALL_SKIP_BUILD=1}"
   info "Skipping build; using provided test artifacts."
 else
+  info "Installing frontend dependencies..."
+  cd "$SCRIPT_DIR/apps/tauri-gui/frontend"
+  npm ci
   info "Building Tauri GUI binary..."
   cd "$SCRIPT_DIR/apps/tauri-gui/src-tauri"
   cargo clean --package tauri --package wallpaper-console-tauri

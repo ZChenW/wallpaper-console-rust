@@ -60,6 +60,13 @@ test('weBadge shows Web browse only for we_web', () => {
   assert.equal(weBadge(baseEntry({ type: 'we_web' })), 'Web · browse only');
 });
 
+test('weBadgeClass uses danger class for Web browse only', () => {
+  assert.equal(
+    weBadgeClass(baseEntry({ type: 'we_web' })),
+    'wallpaper-badge wallpaper-badge-danger',
+  );
+});
+
 test('weBadgeClass uses danger class for renderer_limitation', () => {
   assert.equal(
     weBadgeClass(baseEntry({ type: 'we_scene', backendStatus: 'renderer_limitation' })),

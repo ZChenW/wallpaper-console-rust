@@ -8,6 +8,7 @@ export interface ApplyQueueDeps {
   applyAction: (request: ApplyRequestDTO) => Promise<{ success: boolean; stdout: string; stderr: string; error?: { message: string } }>;
   refreshStatus: () => Promise<void>;
   invalidateHistory: () => void;
+  invalidateLibrary: () => void;
   setFeedback: (feedback: CommandFeedback) => void;
   makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
   recordMetric?: (name: string, value: number) => void;
@@ -80,9 +81,11 @@ export class ApplyQueueController {
           });
           this.deps.recordMetric?.('apply.request.ms', performance.now() - requestStart);
         } else {
+          this.deps.invalidateLibrary();
           this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', result));
         }
       } catch (error) {
+        this.deps.invalidateLibrary();
         this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', error));
       } finally {
         unsubscribeStage();
