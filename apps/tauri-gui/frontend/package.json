@@ -7,9 +7,7 @@
     "dev": "vite",
     "build": "tsc -b && vite build",
     "preview": "vite preview",
-    "test:unit": "node --experimental-strip-types --test \"src/**/*.test.ts\"",
-    "typecheck": "tsc --noEmit",
-    "smoke": "playwright test --config e2e/playwright.config.ts"
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.0",
@@ -19,7 +17,6 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.51.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

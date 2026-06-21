@@ -18,3 +18,14 @@ AGENTS.md
 
 # Transient planning docs
 docs/
+
+# Development-only project files (not needed for clone + ./install.sh)
+doc/
+scripts/
+tests/
+xtask/
+apps/tauri-gui/frontend/e2e/
+apps/tauri-gui/frontend/**/*.test.ts
+apps/tauri-gui/frontend/vite.mock.config.ts
+crates/**/tests/
+crates/**/src/**/tests/

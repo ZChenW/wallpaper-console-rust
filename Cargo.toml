@@ -8,7 +8,6 @@ members = [
     "crates/wc-app",
     "crates/wc-cli",
     "crates/wc-preview",
-    "xtask",
     "apps/tauri-gui/src-tauri",
 ]
 exclude = [
