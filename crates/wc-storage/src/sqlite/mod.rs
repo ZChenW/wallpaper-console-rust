@@ -17,9 +17,60 @@ pub use schema::*;
 pub use source_config_state::*;
 
 use rusqlite::{params, Connection};
+use std::collections::{HashMap, HashSet};
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct LibraryIndexSnapshot {
+    pub paths: HashSet<String>,
+    pub workshop_ids_by_path: HashMap<String, String>,
+}
+
+/// Snapshot path and workshop_id columns from the live wallpapers table.
+pub fn library_index_snapshot(cd: &ConfigDir) -> Result<LibraryIndexSnapshot, WcError> {
+    ensure_sqlite_db(cd);
+    let db_path = cd.db_path();
+    if !db_path.exists() {
+        return Ok(LibraryIndexSnapshot::default());
+    }
+    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let mut stmt = conn
+        .prepare("SELECT path, workshop_id FROM wallpapers")
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let mut snap = LibraryIndexSnapshot::default();
+    for row in rows {
+        let (path, workshop_id) = row.map_err(|e| WcError::Sqlite(e.to_string()))?;
+        snap.paths.insert(path.clone());
+        if !workshop_id.is_empty() {
+            snap.workshop_ids_by_path.insert(path, workshop_id);
+        }
+    }
+    Ok(snap)
+}
+
+/// Compare two snapshots and return removed row count plus removed workshop IDs.
+pub fn library_index_diff_removed(
+    before: &LibraryIndexSnapshot,
+    after: &LibraryIndexSnapshot,
+) -> (usize, Vec<String>) {
+    let removed_paths: Vec<String> = before.paths.difference(&after.paths).cloned().collect();
+    let removed = removed_paths.len();
+    let mut workshop_ids: Vec<String> = removed_paths
+        .iter()
+        .filter_map(|path| before.workshop_ids_by_path.get(path))
+        .cloned()
+        .collect();
+    workshop_ids.sort();
+    workshop_ids.dedup();
+    (removed, workshop_ids)
+}
 
 /// Clear the wallpapers table (before rescan rebuilds it).
 pub fn library_clear(cd: &ConfigDir) -> Result<(), WcError> {
@@ -446,6 +497,33 @@ mod tests {
         assert!(row.2.ends_with("preview.gif"));
         assert_eq!(row.3, "3558034522");
         assert_eq!(row.4, "Scene title");
+    }
+
+    #[test]
+    fn library_index_snapshot_and_diff_track_removed_workshop_ids() {
+        let (_tmp, cd) = temp_config_dir();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, workshop_id)
+             VALUES ('/steamapps/workshop/content/431960/3589454154', 'we_scene', 'scene', 'linux-wallpaperengine', 1, 1, 'WE', '3589454154')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/keep.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1')",
+            [],
+        )
+        .unwrap();
+
+        let before = library_index_snapshot(&cd).unwrap();
+        let after = LibraryIndexSnapshot {
+            paths: HashSet::from(["/walls/keep.jpg".into()]),
+            workshop_ids_by_path: HashMap::new(),
+        };
+        let (removed, workshop_ids) = library_index_diff_removed(&before, &after);
+        assert_eq!(removed, 1);
+        assert_eq!(workshop_ids, vec!["3589454154".to_string()]);
     }
 }
 

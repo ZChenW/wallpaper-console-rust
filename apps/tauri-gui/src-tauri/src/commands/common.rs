@@ -388,3 +388,73 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
     }
     dto
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+    use std::sync::Mutex;
+    use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dto_from_entry_maps_renderer_limitation_from_we_compat() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let previous = std::env::var_os("XDG_CONFIG_HOME");
+        let tmp = tempfile::tempdir().unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", tmp.path());
+
+        let project_path = tmp.path().join("431960/3589454154");
+        std::fs::create_dir_all(&project_path).unwrap();
+        std::fs::write(project_path.join("project.json"), "{}").unwrap();
+        let project_path_str = project_path.to_string_lossy().to_string();
+
+        wc_storage::we_compat::record_failure(
+            &project_path_str,
+            "renderer_limitation",
+            "renderer_limitation",
+            "Scene is not compatible with linux-wallpaperengine.",
+            None,
+        )
+        .unwrap();
+
+        let entry = WallpaperEntry {
+            path: Utf8PathBuf::from(&project_path_str),
+            file_type: FileType::WeScene,
+            ext: "scene".into(),
+            backend: Backend::LinuxWallpaperEngine,
+            size: 1,
+            mtime: 1,
+            resolution: "WE".into(),
+            project: Some(WallpaperProject {
+                project_type: "we_scene".into(),
+                preview_path: None,
+                workshop_id: Some("3589454154".into()),
+                title: Some("Test scene".into()),
+                we_file: Some("scene.json".into()),
+                backend: Some("linux-wallpaperengine".into()),
+                unsupported_reason: None,
+            }),
+        };
+
+        let dto = dto_from_entry(entry);
+        assert_eq!(dto.backend_status.as_deref(), Some("renderer_limitation"));
+        assert_eq!(
+            dto.backend_error_kind.as_deref(),
+            Some("renderer_limitation")
+        );
+        assert_eq!(dto.apply_availability.as_deref(), Some("retryable_failure"));
+        assert!(
+            dto.apply_actions
+                .as_ref()
+                .is_some_and(|actions| actions.iter().any(|a| a.kind == "retry_backend_apply")),
+            "renderer limitation should expose retry backend apply"
+        );
+
+        match previous {
+            Some(value) => std::env::set_var("XDG_CONFIG_HOME", value),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+    }
+}

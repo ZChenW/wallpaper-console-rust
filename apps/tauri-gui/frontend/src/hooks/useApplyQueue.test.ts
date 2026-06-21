@@ -29,11 +29,13 @@ function makeDeps(opts: {
   feedback: CommandFeedback[];
   metrics?: string[];
   subscribeApplyStage?: ApplyQueueDeps['subscribeApplyStage'];
+  invalidateLibrary?: () => void;
 }): ApplyQueueDeps {
   return {
     applyAction: opts.applyAction,
     refreshStatus: async () => {},
     invalidateHistory: () => {},
+    invalidateLibrary: opts.invalidateLibrary ?? (() => {}),
     setFeedback: (value) => { opts.feedback.push(value); },
     makeErrorFeedback: (label) => ({ state: 'error', label, detail: 'test error' }),
     recordMetric: (name) => { opts.metrics?.push(name); },
@@ -161,6 +163,23 @@ test('apply queue does not record metric on failure', async () => {
 
   assert.equal(metrics.length, 0, 'no metric recorded for failed apply');
   assert.ok(feedback.some((f) => f.state === 'error'));
+});
+
+test('apply queue invalidates library on failure so cards show retryable state', async () => {
+  const feedback: CommandFeedback[] = [];
+  let libraryInvalidations = 0;
+
+  const deps = makeDeps({
+    applyAction: async () => ({ success: false, stdout: '', stderr: 'renderer failed' }),
+    feedback,
+    invalidateLibrary: () => { libraryInvalidations += 1; },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('a'));
+  await new Promise((resolve) => setTimeout(resolve, 30));
+
+  assert.equal(libraryInvalidations, 1, 'failed apply should refresh library cards immediately');
 });
 
 test('apply queue updates feedback from wc-apply-stage and unsubscribes on success', async () => {

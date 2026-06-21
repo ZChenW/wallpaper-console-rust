@@ -1,13 +1,20 @@
+# Rust build artifacts
 target/
-Cargo.lock
 
-# Tauri / frontend
+# Tauri / frontend build artifacts
 apps/tauri-gui/frontend/node_modules/
 apps/tauri-gui/frontend/dist/
 apps/tauri-gui/frontend/dist-mock/
 apps/tauri-gui/frontend/tsconfig.tsbuildinfo
 apps/tauri-gui/frontend/test-results/
 apps/tauri-gui/frontend/e2e/screenshots/
+apps/tauri-gui/src-tauri/gen/
 
-# Documentation (superpowers plans are transient, not project artifacts)
+# AI / editor local config (not needed for clone + install)
+.agents/
+.claude/
+.codex/
+AGENTS.md
+
+# Transient planning docs
 docs/

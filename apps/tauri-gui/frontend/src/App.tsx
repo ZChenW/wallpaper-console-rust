@@ -56,6 +56,7 @@ function AppShell() {
     refreshStatus,
     setFeedbackWithAutoDismiss,
     clearFeedback,
+    invalidateLibrary,
   } = useAppState();
 
   useFeedbackBridge(setFeedbackWithAutoDismiss);
@@ -90,6 +91,7 @@ function AppShell() {
     refreshStatus,
     setFeedbackWithAutoDismiss,
     invalidateHistory: invalidateHistoryCache,
+    invalidateLibrary,
   });
 
   const handleToolbarAction = useCallback(async (

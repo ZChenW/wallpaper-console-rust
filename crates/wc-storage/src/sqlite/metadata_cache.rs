@@ -133,3 +133,79 @@ pub fn prior_metadata_cache_from_sqlite(cd: &ConfigDir) -> HashMap<String, Wallp
     }
     cache
 }
+
+/// Paths in `prior_cache` that were not seen during a rescan (canonical path keys).
+pub fn removed_from_prior_cache(
+    prior_cache: &HashMap<String, WallpaperEntry>,
+    seen_canonical_paths: &std::collections::HashSet<String>,
+) -> (usize, Vec<String>) {
+    let mut removed = 0usize;
+    let mut workshop_ids = Vec::new();
+    for (canon_path, entry) in prior_cache {
+        if seen_canonical_paths.contains(canon_path) {
+            continue;
+        }
+        removed += 1;
+        if let Some(wid) = entry
+            .project
+            .as_ref()
+            .and_then(|p| p.workshop_id.as_deref())
+            .filter(|wid| !wid.is_empty())
+        {
+            workshop_ids.push(wid.to_string());
+        }
+    }
+    workshop_ids.sort();
+    workshop_ids.dedup();
+    (removed, workshop_ids)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+    use wc_core::types::{Backend, FileType, WallpaperProject};
+
+    #[test]
+    fn removed_from_prior_cache_counts_missing_paths_and_workshop_ids() {
+        let mut prior = HashMap::new();
+        prior.insert(
+            "/steamapps/workshop/content/431960/3589454154".into(),
+            WallpaperEntry {
+                path: Utf8PathBuf::from("/steamapps/workshop/content/431960/3589454154"),
+                file_type: FileType::WeScene,
+                ext: "scene".into(),
+                backend: Backend::LinuxWallpaperEngine,
+                size: 1,
+                mtime: 1,
+                resolution: "WE".into(),
+                project: Some(WallpaperProject {
+                    project_type: "we_scene".into(),
+                    preview_path: None,
+                    workshop_id: Some("3589454154".into()),
+                    title: None,
+                    we_file: None,
+                    backend: None,
+                    unsupported_reason: None,
+                }),
+            },
+        );
+        prior.insert(
+            "/walls/old.jpg".into(),
+            WallpaperEntry {
+                path: Utf8PathBuf::from("/walls/old.jpg"),
+                file_type: FileType::Image,
+                ext: "jpg".into(),
+                backend: Backend::Awww,
+                size: 1,
+                mtime: 1,
+                resolution: "1x1".into(),
+                project: None,
+            },
+        );
+        let seen = std::collections::HashSet::from(["/walls/keep.jpg".into()]);
+        let (removed, workshop_ids) = removed_from_prior_cache(&prior, &seen);
+        assert_eq!(removed, 2);
+        assert_eq!(workshop_ids, vec!["3589454154".to_string()]);
+    }
+}

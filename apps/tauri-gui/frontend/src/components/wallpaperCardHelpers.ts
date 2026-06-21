@@ -29,7 +29,11 @@ export function weBadge(e: WallpaperDTO): string | null {
 }
 
 export function weBadgeClass(e: WallpaperDTO): string {
-  if (e.backendStatus === 'failed' || e.backendStatus === 'renderer_limitation')
+  if (
+    e.type === 'we_web' ||
+    e.backendStatus === 'failed' ||
+    e.backendStatus === 'renderer_limitation'
+  )
     return 'wallpaper-badge wallpaper-badge-danger';
   return 'wallpaper-badge';
 }

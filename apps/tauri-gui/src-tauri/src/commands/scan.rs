@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::sync::{Mutex, OnceLock};
 
 use wc_core::types::WallpaperEntry;
@@ -6,6 +7,35 @@ use super::common::{fail, ok, storage, CommandResult, ScanProgressDto};
 use wc_storage::sqlite::library_session;
 
 static SCAN_STATE: OnceLock<Mutex<ScanProgressDto>> = OnceLock::new();
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct IndexSourcesResult {
+    pub inserted: usize,
+    pub removed: usize,
+    pub removed_we_workshop_ids: Vec<String>,
+}
+
+pub(crate) fn format_index_sources_message(result: &IndexSourcesResult) -> String {
+    let mut msg = format!("Scan complete. {} wallpaper(s) indexed.", result.inserted);
+    if result.removed == 0 {
+        return msg;
+    }
+    if result.removed == 1 && result.removed_we_workshop_ids.len() == 1 {
+        msg.push_str(&format!(
+            " Removed {} missing workshop item ({}).",
+            result.removed, result.removed_we_workshop_ids[0]
+        ));
+    } else if !result.removed_we_workshop_ids.is_empty() {
+        msg.push_str(&format!(
+            " Removed {} missing item(s), including workshop ID(s): {}.",
+            result.removed,
+            result.removed_we_workshop_ids.join(", ")
+        ));
+    } else {
+        msg.push_str(&format!(" Removed {} missing item(s).", result.removed));
+    }
+    msg
+}
 
 fn scan_state() -> &'static Mutex<ScanProgressDto> {
     SCAN_STATE.get_or_init(|| {
@@ -101,7 +131,9 @@ pub(crate) fn finish_scan_error(err: &str) {
     }
 }
 
-pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize, String> {
+pub(crate) fn index_current_sources(
+    s: &wc_storage::StorageApi,
+) -> Result<IndexSourcesResult, String> {
     update_scan_stage("loading sources");
     let sources = s.sources_list().map_err(|e| e.to_string())?;
 
@@ -119,6 +151,7 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
     let mut batch: Vec<WallpaperEntry> = Vec::with_capacity(250);
     let mut scanned: usize = 0;
     let mut cancelled = false;
+    let mut seen_new_paths: HashSet<String> = HashSet::new();
 
     wc_scan::visit_wallpapers_with_callback(
         &sources,
@@ -163,6 +196,10 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
                 }
             }
             if let Some(entry) = entry {
+                let canon = std::fs::canonicalize(&path)
+                    .map(|p| p.to_string_lossy().to_string())
+                    .unwrap_or_else(|_| path.clone());
+                seen_new_paths.insert(canon);
                 batch.push(entry);
                 if let Ok(mut state) = scan_state().lock() {
                     state.staged += 1;
@@ -201,7 +238,13 @@ pub(crate) fn index_current_sources(s: &wc_storage::StorageApi) -> Result<usize,
     if let Ok(mut state) = scan_state().lock() {
         state.inserted_sqlite = inserted;
     }
-    Ok(inserted)
+    let (removed, removed_we_workshop_ids) =
+        wc_storage::sqlite::removed_from_prior_cache(&prior_cache, &seen_new_paths);
+    Ok(IndexSourcesResult {
+        inserted,
+        removed,
+        removed_we_workshop_ids,
+    })
 }
 
 #[tauri::command]
@@ -213,8 +256,8 @@ pub async fn rescan() -> CommandResult {
 
         let result: Result<String, String> = (|| {
             let s = storage()?;
-            let inserted = index_current_sources(&s)?;
-            Ok(format!("Scan complete. {} wallpaper(s) indexed.", inserted))
+            let index_result = index_current_sources(&s)?;
+            Ok(format_index_sources_message(&index_result))
         })();
 
         match result {
@@ -395,8 +438,9 @@ mod tests {
         std::fs::write(src.join("wall.jpg"), b"not a real image").unwrap();
         s.sources_add(&src.to_string_lossy()).unwrap();
 
-        let inserted = index_current_sources(&s).unwrap();
-        assert_eq!(inserted, 1);
+        let result = index_current_sources(&s).unwrap();
+        assert_eq!(result.inserted, 1);
+        assert_eq!(result.removed, 0);
 
         let state = scan_state().lock().unwrap().clone();
         assert_eq!(
@@ -415,6 +459,96 @@ mod tests {
         assert_eq!(
             state.metadata_errors, 0,
             "metadata_errors is always 0 for now"
+        );
+    }
+
+    #[test]
+    fn format_index_sources_message_reports_removed_workshop_item() {
+        let msg = format_index_sources_message(&IndexSourcesResult {
+            inserted: 12,
+            removed: 1,
+            removed_we_workshop_ids: vec!["3589454154".into()],
+        });
+        assert!(msg.contains("12 wallpaper(s) indexed"));
+        assert!(msg.contains("Removed 1 missing workshop item (3589454154)"));
+    }
+
+    #[test]
+    fn format_index_sources_message_uses_plural_wording_for_mixed_removals() {
+        let msg = format_index_sources_message(&IndexSourcesResult {
+            inserted: 10,
+            removed: 3,
+            removed_we_workshop_ids: vec!["3589454154".into()],
+        });
+        assert!(msg.contains("Removed 3 missing item(s), including workshop ID(s): 3589454154"));
+        assert!(
+            !msg.contains("missing workshop item"),
+            "mixed removals must not use singular workshop wording: {msg}"
+        );
+    }
+
+    #[test]
+    fn rescan_removes_deleted_we_workshop_project_from_sqlite() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let s = wc_storage::StorageApi::new(cd);
+
+        let workshop_root = tmp.path().join("steamapps/workshop/content/431960");
+        let project_dir = workshop_root.join("3589454154");
+        std::fs::create_dir_all(&project_dir).unwrap();
+        std::fs::write(
+            project_dir.join("project.json"),
+            r#"{"type":"scene","title":"Deleted Scene Test"}"#,
+        )
+        .unwrap();
+        s.sources_add(&workshop_root.to_string_lossy()).unwrap();
+
+        let first = index_current_sources(&s).unwrap();
+        assert_eq!(first.inserted, 1, "scene project should be indexed");
+        assert_eq!(first.removed, 0);
+
+        let conn = rusqlite::Connection::open(s.cd.db_path()).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers WHERE workshop_id = '3589454154'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "workshop_id should exist after first rescan");
+
+        std::fs::remove_dir_all(&project_dir).unwrap();
+
+        let second = index_current_sources(&s).unwrap();
+        assert_eq!(
+            second.inserted, 0,
+            "deleted project should not be reindexed"
+        );
+        assert_eq!(
+            second.removed, 1,
+            "deleted project should be removed from sqlite"
+        );
+        assert_eq!(
+            second.removed_we_workshop_ids,
+            vec!["3589454154".to_string()]
+        );
+
+        let count_after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers WHERE workshop_id = '3589454154'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count_after, 0,
+            "workshop_id must be gone from sqlite after rescan"
         );
     }
 }
