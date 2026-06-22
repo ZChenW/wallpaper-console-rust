@@ -23,6 +23,7 @@ export interface WallpaperPageProps {
   configs: Record<string, string>;
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
+  onAdvancedCollapse?: () => void;
 }
 
 export interface WallpaperEnginePageProps {
@@ -32,6 +33,7 @@ export interface WallpaperEnginePageProps {
   configs: Record<string, string>;
   saving: string | null;
   onSet: (key: string, value: string) => Promise<boolean>;
+  onAdvancedCollapse?: () => void;
 }
 
 export interface LibraryPageProps {
@@ -46,6 +48,7 @@ export interface LibraryPageProps {
   refreshSettingsStatus: (reason?: string) => void;
   confirmAndRun: (title: string, msg: string, fn: () => Promise<void>, danger?: boolean, action?: DbAction) => void;
   operationLock: boolean;
+  onAdvancedCollapse?: () => void;
 }
 
 export interface DatabasePageProps {

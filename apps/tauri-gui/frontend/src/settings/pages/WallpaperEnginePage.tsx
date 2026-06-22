@@ -5,6 +5,7 @@ import PageSection from '../components/PageSection';
 import InfoCallout from '../components/InfoCallout';
 import StatusCard from '../components/StatusCard';
 import ConfigRow from '../components/ConfigRow';
+import SettingsAdvancedSection from '../components/SettingsAdvancedSection';
 import { resolveWeStatusCard } from '../statusCards';
 
 export default function WallpaperEnginePage({
@@ -14,6 +15,7 @@ export default function WallpaperEnginePage({
   configs,
   saving,
   onSet,
+  onAdvancedCollapse,
 }: WallpaperEnginePageProps) {
   const regular = getSettingsByCategoryAndLevel('we', false);
   const advanced = getSettingsByCategoryAndLevel('we', true);
@@ -32,12 +34,11 @@ export default function WallpaperEnginePage({
       </PageSection>
 
       {advanced.length > 0 && (
-        <details className="settings-advanced">
-          <summary>Advanced</summary>
+        <SettingsAdvancedSection onCollapse={onAdvancedCollapse}>
           {advanced.map((c) => (
             <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
           ))}
-        </details>
+        </SettingsAdvancedSection>
       )}
 
       <InfoCallout tone="warning">

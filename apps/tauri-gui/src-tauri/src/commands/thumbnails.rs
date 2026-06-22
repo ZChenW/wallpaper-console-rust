@@ -6,6 +6,15 @@ use super::common::{
 pub async fn thumbnail_for(path: String) -> Result<ThumbnailDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = storage()?;
+        let mode = s.config_get("gui_thumbnail_mode", "cache");
+        if mode == "icon" {
+            return Ok(ThumbnailDto {
+                path,
+                thumbnail: None,
+                cache_hit: false,
+                failure_reason: None,
+            });
+        }
         let ttl = s
             .config_get("gui_thumbnail_failure_ttl_secs", "900")
             .parse()

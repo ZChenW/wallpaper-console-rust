@@ -6,6 +6,7 @@ import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import StatusCard from '../components/StatusCard';
 import ConfigRow from '../components/ConfigRow';
+import SettingsAdvancedSection from '../components/SettingsAdvancedSection';
 import { resolveThumbnailStatusCard } from '../statusCards';
 
 export default function LibraryPage({
@@ -20,6 +21,7 @@ export default function LibraryPage({
   refreshSettingsStatus,
   confirmAndRun,
   operationLock,
+  onAdvancedCollapse,
 }: LibraryPageProps) {
   const regular = getSettingsByCategoryAndLevel('library', false);
   const advanced = getSettingsByCategoryAndLevel('library', true);
@@ -33,11 +35,11 @@ export default function LibraryPage({
   return (
     <SettingsPageShell
       title="Library"
-      description="Control scan filters, thumbnails, and cache cleanup."
+      description="Control thumbnail behavior and cache cleanup."
     >
       <PageSection
-        title="Scan Filters"
-        description="These filters apply during library scan and database rebuild."
+        title="Thumbnails"
+        description="Choose how Library cards load thumbnails."
       >
         {regular.map((c) => (
           <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
@@ -93,12 +95,11 @@ export default function LibraryPage({
       </PageSection>
 
       {advanced.length > 0 && (
-        <details className="settings-advanced">
-          <summary>Advanced</summary>
+        <SettingsAdvancedSection onCollapse={onAdvancedCollapse}>
           {advanced.map((c) => (
             <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
           ))}
-        </details>
+        </SettingsAdvancedSection>
       )}
     </SettingsPageShell>
   );

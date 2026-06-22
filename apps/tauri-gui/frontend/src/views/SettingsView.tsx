@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useLayoutEffect } from 'react';
 import {
   api,
   CommandResult,
@@ -27,6 +27,10 @@ import AdvancedPage from '../settings/pages/AdvancedPage';
 import type { DbAction } from '../settings/types';
 import { emitConfigChanged } from '../events/appEvents';
 import { refreshSettingsStatusCore, createSettingsStatusRequestSeq } from '../settings/refreshSettingsStatusCore';
+import {
+  resetSettingsContentScroll,
+  scheduleSettingsContentScrollReset,
+} from '../settings/settingsScroll';
 
 const SETTINGS_STATUS_POLL_MS = 3000;
 const STATUS_POLL_CATEGORIES = new Set<SettingsCategory>(['general', 'database', 'library', 'we']);
@@ -102,40 +106,74 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
   thumbCacheRef.current = thumbCache;
   thumbCacheErrorRef.current = thumbCacheError;
   const statusRequestSeqRef = useRef(createSettingsStatusRequestSeq());
+  const settingsContentRef = useRef<HTMLDivElement>(null);
+  const activeCategoryRef = useRef(activeCategory);
+  activeCategoryRef.current = activeCategory;
+  const settingsOpenedRef = useRef(false);
 
   const applySettingsStatusSnapshot = useCallback((snapshot: Awaited<ReturnType<typeof refreshSettingsStatusCore>>) => {
-    setLibraryStatus(snapshot.libraryStatus);
-    setLibraryStatusError(snapshot.libraryError);
-    setWeStatus(snapshot.weStatus);
-    setWeStatusError(snapshot.weError);
-    setThumbCache(snapshot.thumbCache);
-    setThumbCacheError(snapshot.thumbError);
-    setWeDebugInfo(snapshot.weDebugInfo);
-    setWeDebugError(snapshot.weDebugError);
+    if (snapshot.loaded.library) {
+      setLibraryStatus(snapshot.libraryStatus);
+      setLibraryStatusError(snapshot.libraryError);
+    }
+    if (snapshot.loaded.we) {
+      setWeStatus(snapshot.weStatus);
+      setWeStatusError(snapshot.weError);
+    }
+    if (snapshot.loaded.thumb) {
+      setThumbCache(snapshot.thumbCache);
+      setThumbCacheError(snapshot.thumbError);
+    }
+    if (snapshot.loaded.debug) {
+      setWeDebugInfo(snapshot.weDebugInfo);
+      setWeDebugError(snapshot.weDebugError);
+    }
   }, []);
 
   const refreshSettingsStatus = useCallback(async (reason?: string) => {
+    const category = activeCategoryRef.current;
     const requestId = statusRequestSeqRef.current.begin();
-    setLibraryStatusLoading(
-      libraryStatusRef.current === null && libraryStatusErrorRef.current === null,
-    );
-    setWeStatusLoading(weStatusRef.current === null && weStatusErrorRef.current === null);
-    setThumbCacheLoading(thumbCacheRef.current === null && thumbCacheErrorRef.current === null);
 
-    const snapshot = await refreshSettingsStatusCore({
-      librarySourceStatus: () => api.librarySourceStatus(),
-      linuxWallpaperEngineStatus: () => api.linuxWallpaperEngineStatus(),
-      thumbnailCacheStatus: () => api.thumbnailCacheStatus(),
-      weDebugInfo: () => api.weDebugInfo(),
-    });
+    const loaders = {
+      ...(category === 'general' || category === 'database'
+        ? { librarySourceStatus: () => api.librarySourceStatus() }
+        : {}),
+      ...(category === 'general' || category === 'we'
+        ? { linuxWallpaperEngineStatus: () => api.linuxWallpaperEngineStatus() }
+        : {}),
+      ...(category === 'general' || category === 'library'
+        ? { thumbnailCacheStatus: () => api.thumbnailCacheStatus() }
+        : {}),
+      ...(category === 'we' || category === 'advanced'
+        ? { weDebugInfo: () => api.weDebugInfo() }
+        : {}),
+    };
+
+    const willLoadLibrary = loaders.librarySourceStatus !== undefined;
+    const willLoadWe = loaders.linuxWallpaperEngineStatus !== undefined;
+    const willLoadThumb = loaders.thumbnailCacheStatus !== undefined;
+
+    if (willLoadLibrary) {
+      setLibraryStatusLoading(
+        libraryStatusRef.current === null && libraryStatusErrorRef.current === null,
+      );
+    }
+    if (willLoadWe) {
+      setWeStatusLoading(weStatusRef.current === null && weStatusErrorRef.current === null);
+    }
+    if (willLoadThumb) {
+      setThumbCacheLoading(thumbCacheRef.current === null && thumbCacheErrorRef.current === null);
+    }
+
+    const snapshot = await refreshSettingsStatusCore(loaders);
 
     if (!statusRequestSeqRef.current.isLatest(requestId)) return;
 
     applySettingsStatusSnapshot(snapshot);
-    setLibraryStatusLoading(false);
-    setWeStatusLoading(false);
-    setThumbCacheLoading(false);
-    if (reason !== 'poll') {
+    if (willLoadLibrary) setLibraryStatusLoading(false);
+    if (willLoadWe) setWeStatusLoading(false);
+    if (willLoadThumb) setThumbCacheLoading(false);
+    if (reason !== 'poll' && reason !== 'category') {
       void Promise.resolve(onRefresh()).catch(() => {});
     }
   }, [applySettingsStatusSnapshot, onRefresh]);
@@ -181,9 +219,17 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
   }, []);
 
   useEffect(() => {
-    loadConfigs();
-    void refreshSettingsStatus('open');
-  }, [loadConfigs, refreshSettingsStatus]);
+    void loadConfigs();
+  }, [loadConfigs]);
+
+  useEffect(() => {
+    if (!settingsOpenedRef.current) {
+      settingsOpenedRef.current = true;
+      void refreshSettingsStatus('open');
+      return;
+    }
+    void refreshSettingsStatus('category');
+  }, [activeCategory, refreshSettingsStatus]);
 
   useEffect(() => {
     if (!STATUS_POLL_CATEGORIES.has(activeCategory)) return;
@@ -204,6 +250,14 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [onClose]);
+
+  useLayoutEffect(() => {
+    resetSettingsContentScroll(settingsContentRef.current);
+  }, [activeCategory]);
+
+  const handleAdvancedCollapse = useCallback(() => {
+    scheduleSettingsContentScrollReset(settingsContentRef.current);
+  }, []);
 
   const handleSet = async (key: string, value: string): Promise<boolean> => {
     const normalized = normalizeConfigValue(key, value);
@@ -377,7 +431,12 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
       />
     ),
     wallpaper: () => (
-      <WallpaperPage configs={configs} saving={saving} onSet={handleSet} />
+      <WallpaperPage
+        configs={configs}
+        saving={saving}
+        onSet={handleSet}
+        onAdvancedCollapse={handleAdvancedCollapse}
+      />
     ),
     we: () => (
       <WallpaperEnginePage
@@ -387,6 +446,7 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
         configs={configs}
         saving={saving}
         onSet={handleSet}
+        onAdvancedCollapse={handleAdvancedCollapse}
       />
     ),
     library: () => (
@@ -402,6 +462,7 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
         refreshSettingsStatus={refreshSettingsStatus}
         confirmAndRun={confirmAndRun}
         operationLock={operationLock}
+        onAdvancedCollapse={handleAdvancedCollapse}
       />
     ),
     database: () => (
@@ -460,7 +521,7 @@ export default function SettingsView({ onRefresh, onFeedback, onClose }: Props) 
         <div className="settings-layout">
           <SettingsSidebar active={activeCategory} onChange={setActiveCategory} />
 
-          <div className="settings-content">
+          <div className="settings-content" ref={settingsContentRef}>
             {PAGE_MAP[activeCategory]?.()}
           </div>
         </div>

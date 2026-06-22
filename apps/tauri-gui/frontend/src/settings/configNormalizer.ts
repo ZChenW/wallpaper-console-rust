@@ -35,7 +35,10 @@ export function normalizeConfigValue(key: string, value: string): string {
     if (Number.isFinite(parsed) && parsed >= 0 && parsed <= 60 && NUM_RE.test(trimmed)) return trimmed;
     return '1';
   }
-  if (key === 'linux_wallpaperengine_path' || key === 'linux_wallpaperengine_assets_dir') {
+  if (key === 'gui_thumbnail_mode') {
+    return value === 'icon' ? 'icon' : 'cache';
+  }
+  if (key === 'linux_wallpaperengine_path') {
     return value.trim() || 'auto';
   }
   if (key === 'linux_wallpaperengine_target') {

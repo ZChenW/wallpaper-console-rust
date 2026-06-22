@@ -287,9 +287,6 @@ const defaultConfig: Record<string, string> = {
   linux_wallpaperengine_fps: '60',
   linux_wallpaperengine_muted: 'off',
   linux_wallpaperengine_volume: '100',
-  linux_wallpaperengine_assets_dir: 'auto',
-  min_wallpaper_width: '1280',
-  min_wallpaper_height: '720',
   gui_thumbnail_mode: 'cache',
   gui_thumbnail_cleanup_days: '30',
   gui_thumbnail_failure_ttl_secs: '900',
@@ -502,6 +499,10 @@ export const api = {
   thumbnailFor: async (path: string): Promise<ThumbnailDTO> => {
     if (thumbnailFailures.has(path)) {
       return { path, cacheHit: false, failureReason: 'mock thumbnail failure' };
+    }
+    const mode = configStore['gui_thumbnail_mode'] ?? defaultConfig.gui_thumbnail_mode ?? 'cache';
+    if (mode === 'icon') {
+      return { path, cacheHit: false };
     }
     return { path, cacheHit: false };
   },

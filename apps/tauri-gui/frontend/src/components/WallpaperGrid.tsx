@@ -54,7 +54,6 @@ export default function WallpaperGrid({
   const prevResetKeyRef = useRef(resetKey);
   const [gridLayout, setGridLayout] = useState<GridLayout>(INITIAL_GRID_LAYOUT);
   const colCount = gridLayout.colCount;
-  const [thumbnailPaused, setThumbnailPaused] = useState(false);
   const isScrollingRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const pendingScrollTopRef = useRef<number | null>(null);
@@ -65,7 +64,7 @@ export default function WallpaperGrid({
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
 
-  const overscan = overscanRowsFor(colCount, thumbnailPaused);
+  const overscan = overscanRowsFor(colCount, true);
 
   const anchorScrollForColumnChange = useCallback((oldCols: number, newCols: number) => {
     const el = containerRef.current;
@@ -101,7 +100,6 @@ export default function WallpaperGrid({
   const beginScrolling = useCallback(() => {
     if (!isScrollingRef.current) {
       isScrollingRef.current = true;
-      setThumbnailPaused(true);
       setRevealPaused(true);
     }
     if (scrollIdleTimerRef.current !== null) {
@@ -110,7 +108,6 @@ export default function WallpaperGrid({
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
-      setThumbnailPaused(false);
       setRevealPaused(false);
     }, SCROLL_IDLE_MS);
   }, [setRevealPaused]);
@@ -206,7 +203,7 @@ export default function WallpaperGrid({
   }, [active, virtualizer]);
 
   useEffect(() => {
-    if (!active || thumbnailPaused) return;
+    if (!active) return;
     const range = virtualizer.range;
     if (!range) return;
 
@@ -224,7 +221,7 @@ export default function WallpaperGrid({
     lastEnqueueKeyRef.current = key;
 
     enqueueVisible(paths, { priority: 'front' });
-  }, [entries, colCount, virtualizer.range, enqueueVisible, active, thumbnailPaused]);
+  }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
 
   useEffect(() => () => {
     if (scrollIdleTimerRef.current !== null) {

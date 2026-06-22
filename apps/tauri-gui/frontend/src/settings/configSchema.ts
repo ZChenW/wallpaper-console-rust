@@ -109,24 +109,11 @@ export const ALL_SETTINGS: SettingEntry[] = [
     key: 'linux_wallpaperengine_volume', label: 'Volume', type: 'number',
     placeholder: '100', category: 'we', advanced: true,
   },
-  {
-    key: 'linux_wallpaperengine_assets_dir', label: 'Project assets folder', type: 'text',
-    placeholder: 'auto', category: 'we', advanced: true,
-    description: 'Use "auto" unless a scene needs a custom assets directory.',
-  },
 
   // ── Library ──
   {
-    key: 'min_wallpaper_width', label: 'Min width', type: 'number',
-    placeholder: '1280', category: 'library',
-  },
-  {
-    key: 'min_wallpaper_height', label: 'Min height', type: 'number',
-    placeholder: '720', category: 'library',
-  },
-  {
     key: 'gui_thumbnail_mode', label: 'Thumbnail mode', type: 'select',
-    options: ['cache', 'original', 'icon'], category: 'library',
+    options: ['cache', 'icon'], category: 'library',
   },
   {
     key: 'gui_thumbnail_cleanup_days', label: 'Clear thumbnail cache after days', type: 'number',
@@ -137,8 +124,13 @@ export const ALL_SETTINGS: SettingEntry[] = [
     placeholder: '900', category: 'library', advanced: true,
   },
   {
-    key: 'preview_metadata', label: 'fzf preview', type: 'select',
-    options: ['compact', 'visual', 'full'], category: 'library', advanced: true,
+    key: 'preview_metadata',
+    label: 'CLI preview metadata',
+    type: 'select',
+    options: ['compact', 'visual', 'full'],
+    category: 'library',
+    advanced: true,
+    description: 'Controls metadata shown by the terminal/fzf preview, not the GUI Library cards.',
   },
 
   // ── Advanced ──

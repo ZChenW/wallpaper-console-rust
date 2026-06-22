@@ -3,8 +3,14 @@ import type { WallpaperPageProps } from '../types';
 import SettingsPageShell from '../components/SettingsPageShell';
 import PageSection from '../components/PageSection';
 import ConfigRow from '../components/ConfigRow';
+import SettingsAdvancedSection from '../components/SettingsAdvancedSection';
 
-export default function WallpaperPage({ configs, saving, onSet }: WallpaperPageProps) {
+export default function WallpaperPage({
+  configs,
+  saving,
+  onSet,
+  onAdvancedCollapse,
+}: WallpaperPageProps) {
   const regular = getSettingsByCategoryAndLevel('wallpaper', false);
   const advanced = getSettingsByCategoryAndLevel('wallpaper', true);
 
@@ -23,12 +29,11 @@ export default function WallpaperPage({ configs, saving, onSet }: WallpaperPageP
       </PageSection>
 
       {advanced.length > 0 && (
-        <details className="settings-advanced">
-          <summary>Advanced</summary>
+        <SettingsAdvancedSection onCollapse={onAdvancedCollapse}>
           {advanced.map((c) => (
             <ConfigRow key={c.key} setting={c} value={configs[c.key] ?? ''} saving={saving === c.key} onSet={(v) => onSet(c.key, v)} />
           ))}
-        </details>
+        </SettingsAdvancedSection>
       )}
     </SettingsPageShell>
   );
