@@ -1,10 +1,10 @@
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
 
 use super::row_map::wallpaper_entry_from_row;
-use super::schema::{ensure_sqlite_db, ensure_wallpaper_query_indexes};
+use super::schema::open_runtime_connection;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LibraryFilter {
@@ -72,20 +72,28 @@ pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     if !db_path.exists() {
         return Ok(0);
     }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get(0))
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(count as usize)
 }
 
+fn empty_library_page() -> LibraryPage {
+    LibraryPage {
+        total: 0,
+        items: Vec::new(),
+    }
+}
+
 pub fn library_page_sqlite(
     cd: &ConfigDir,
     query: &LibraryPageQuery,
 ) -> Result<LibraryPage, WcError> {
-    ensure_sqlite_db(cd);
-    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    ensure_wallpaper_query_indexes(&conn)?;
+    if !cd.db_path().exists() {
+        return Ok(empty_library_page());
+    }
+    let conn = open_runtime_connection(cd)?;
 
     let filter_cond = library_filter_condition(query.filter);
     let search = query.search.trim();
@@ -196,8 +204,10 @@ pub fn library_page_sqlite(
 }
 
 pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCounts, WcError> {
-    ensure_sqlite_db(cd);
-    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    if !cd.db_path().exists() {
+        return Ok(wc_core::types::LibraryCounts::default());
+    }
+    let conn = open_runtime_connection(cd)?;
     let mut counts = wc_core::types::LibraryCounts {
         total: 0,
         images: 0,
@@ -231,9 +241,10 @@ pub fn favorites_page_sqlite(
     offset: usize,
     limit: usize,
 ) -> Result<LibraryPage, WcError> {
-    ensure_sqlite_db(cd);
-    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    ensure_wallpaper_query_indexes(&conn)?;
+    if !cd.db_path().exists() {
+        return Ok(empty_library_page());
+    }
+    let conn = open_runtime_connection(cd)?;
     let total: i64 = conn
         .query_row(
             "SELECT COUNT(*)
@@ -275,9 +286,10 @@ pub fn history_page_sqlite(
     offset: usize,
     limit: usize,
 ) -> Result<LibraryPage, WcError> {
-    ensure_sqlite_db(cd);
-    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    ensure_wallpaper_query_indexes(&conn)?;
+    if !cd.db_path().exists() {
+        return Ok(empty_library_page());
+    }
+    let conn = open_runtime_connection(cd)?;
     let total: i64 = conn
         .query_row(
             "SELECT COUNT(*)
@@ -368,6 +380,7 @@ fn library_order_by(sort: LibrarySort, table_prefix: Option<&str>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sqlite::ensure_sqlite_db;
     fn insert_wallpaper_for_page_test(
         conn: &rusqlite::Connection,
         path: &str,

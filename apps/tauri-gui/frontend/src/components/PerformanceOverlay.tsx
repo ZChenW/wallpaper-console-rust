@@ -12,12 +12,14 @@ export default function PerformanceOverlay() {
       }
     };
     window.addEventListener('keydown', onKey);
-    const timer = window.setInterval(() => force((v) => v + 1), 1000);
-    return () => {
-      window.removeEventListener('keydown', onKey);
-      window.clearInterval(timer);
-    };
+    return () => window.removeEventListener('keydown', onKey);
   }, []);
+
+  useEffect(() => {
+    if (!visible) return;
+    const timer = window.setInterval(() => force((v) => v + 1), 1000);
+    return () => window.clearInterval(timer);
+  }, [visible]);
 
   if (!visible) return null;
   const recent = getRecentMetrics().slice(-8).reverse();

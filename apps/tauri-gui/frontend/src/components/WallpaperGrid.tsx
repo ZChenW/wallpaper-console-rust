@@ -180,8 +180,12 @@ export default function WallpaperGrid({
     }
   }, [resetKey, active, virtualizer]);
 
+  const shouldSampleGridMetrics =
+    import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
+
   useEffect(() => {
     if (!active) return;
+    if (!shouldSampleGridMetrics) return;
 
     const sampleGridMetrics = () => {
       const cols = colCountRef.current;

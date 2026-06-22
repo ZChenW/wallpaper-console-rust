@@ -1,4 +1,5 @@
 use rusqlite::{params, Connection};
+use std::time::Duration;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -293,18 +294,38 @@ pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
     Ok(())
 }
 
+/// Default busy wait for runtime SQLite connections (milliseconds).
+pub const RUNTIME_BUSY_TIMEOUT_MS: u64 = 5000;
+
 /// Apply runtime PRAGMAs to a connection used for library operations.
 ///
-/// Re-asserts WAL (a persistent DB-level setting baked into the file by
-/// `create_schema`; re-asserting is a harmless no-op once set) and sets a
-/// `busy_timeout` so short-lived concurrent-write contention surfaces as a
-/// bounded wait rather than an immediate `SQLITE_BUSY` error.
+/// Sets `busy_timeout` first so subsequent PRAGMAs (including `journal_mode`)
+/// wait on brief lock contention instead of failing immediately with
+/// `SQLITE_BUSY`.
 pub fn apply_runtime_pragmas(conn: &Connection) -> Result<(), WcError> {
-    conn.execute_batch(
-        "PRAGMA journal_mode = WAL;
-         PRAGMA busy_timeout = 5000;",
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))
+    conn.busy_timeout(Duration::from_millis(RUNTIME_BUSY_TIMEOUT_MS))
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute_batch("PRAGMA journal_mode = WAL;")
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+/// Open a SQLite connection for hot runtime reads/writes.
+///
+/// Does not run schema bootstrap or repair. Callers that need a guaranteed
+/// schema (startup, migration, repair, explicit init) must call
+/// [`ensure_sqlite_db`] separately.
+pub fn open_runtime_connection(cd: &ConfigDir) -> Result<Connection, WcError> {
+    let db_path = cd.db_path();
+    if !db_path.exists() {
+        return Err(WcError::Sqlite(format!(
+            "database not found: {}",
+            db_path.display()
+        )));
+    }
+    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    apply_runtime_pragmas(&conn)?;
+    Ok(conn)
 }
 
 /// Ensure wallpapers.db exists with the full schema.
@@ -433,5 +454,82 @@ mod tests {
             err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn open_runtime_connection_waits_through_exclusive_transaction_lock() {
+        use std::sync::{Arc, Barrier};
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        use rusqlite::ErrorCode;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        ensure_sqlite_db(&cd);
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE;")
+            .expect("switch test db to rollback journal for lock contention");
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/a.png', 'image', 'png', 'awww', 100, 1000, '1x1')",
+            [],
+        )
+        .unwrap();
+
+        let db_path = cd.db_path().to_path_buf();
+        let barrier = Arc::new(Barrier::new(2));
+        let writer_barrier = barrier.clone();
+        let writer_db_path = db_path.clone();
+        let writer = thread::spawn(move || {
+            let conn = Connection::open(&writer_db_path).unwrap();
+            conn.execute("BEGIN EXCLUSIVE", [])
+                .expect("writer should acquire exclusive lock");
+            writer_barrier.wait();
+            thread::sleep(Duration::from_millis(200));
+            conn.execute("COMMIT", []).unwrap();
+        });
+
+        barrier.wait();
+
+        let no_wait = Connection::open(&db_path).unwrap();
+        no_wait
+            .busy_timeout(Duration::from_millis(0))
+            .expect("set zero busy timeout");
+        let started = Instant::now();
+        let no_wait_err = no_wait
+            .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get::<_, i64>(0))
+            .expect_err("read without busy_timeout should fail while exclusive lock is held");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "expected immediate SQLITE_BUSY, waited {:?}",
+            elapsed
+        );
+        match no_wait_err {
+            rusqlite::Error::SqliteFailure(err, _) => {
+                assert_eq!(err.code, ErrorCode::DatabaseBusy, "{no_wait_err}");
+            }
+            other => panic!("expected SQLITE_BUSY, got {other}"),
+        }
+
+        let page = crate::sqlite::library_page_sqlite(
+            &cd,
+            &crate::sqlite::LibraryPageQuery {
+                filter: crate::sqlite::LibraryFilter::All,
+                sort: crate::sqlite::LibrarySort::Newest,
+                search: String::new(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .expect("paged read should wait for exclusive lock instead of SQLITE_BUSY");
+
+        writer.join().unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
     }
 }

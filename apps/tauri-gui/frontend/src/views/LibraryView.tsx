@@ -66,6 +66,7 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     refreshing,
     hasLoadedOnce,
     loadError,
+    loadErrorDetail,
     emptyConfirmed,
     loadMore,
     reload,
@@ -207,6 +208,11 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
           <button className="toolbar-btn" onClick={() => void reload()} style={{ marginLeft: 8 }}>
             Retry
           </button>
+          {loadErrorDetail ? (
+            <div className="load-error-detail" style={{ marginTop: 8, fontSize: '0.85em', opacity: 0.8 }}>
+              {loadErrorDetail}
+            </div>
+          ) : null}
         </div>
       ) : display === 'indexing' ? (
         <div className="loading">Indexing library…</div>

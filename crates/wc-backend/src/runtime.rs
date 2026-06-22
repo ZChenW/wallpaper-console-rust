@@ -62,7 +62,7 @@ pub(crate) fn wait_for_awww_socket_ready(
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| "<unknown>".to_string());
     let wayland = std::env::var("WAYLAND_DISPLAY").unwrap_or_else(|_| "wayland-0".to_string());
-    if crate::is_awww_daemon_running(user) {
+    if crate::awww::is_awww_daemon_running(user) {
         Err(WcError::Other(format!(
             "awww-daemon is running but socket is not ready for WAYLAND_DISPLAY={} \
              (expected {}); last query stderr: {}",
@@ -94,11 +94,11 @@ impl BackendRuntime for SystemBackendRuntime {
     }
 
     fn stop_awww(&mut self) {
-        crate::stop_awww();
+        crate::awww::stop_awww();
     }
 
     fn stop_mpvpaper(&mut self) {
-        crate::stop_mpvpaper();
+        crate::mpvpaper::stop_mpvpaper();
     }
 
     fn stop_lwe(&mut self, s: Option<&StorageApi>) {
@@ -134,7 +134,7 @@ impl BackendRuntime for SystemBackendRuntime {
             return Ok(());
         }
         let user = crate::whoami();
-        let was_running = crate::is_awww_daemon_running(&user);
+        let was_running = crate::awww::is_awww_daemon_running(&user);
         if !was_running {
             let mut cmd = build_awww_daemon_command();
             let status = self.command_status(&mut cmd).map_err(|_| {

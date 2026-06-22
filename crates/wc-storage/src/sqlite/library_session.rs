@@ -3,7 +3,7 @@ use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
 
-use super::schema::{apply_runtime_pragmas, ensure_sqlite_db};
+use super::schema::{ensure_sqlite_db, open_runtime_connection};
 
 pub struct LibraryReplaceSession {
     conn: Connection,
@@ -14,8 +14,7 @@ pub struct LibraryReplaceSession {
 
 pub fn library_replace_session_start(cd: &ConfigDir) -> Result<LibraryReplaceSession, WcError> {
     ensure_sqlite_db(cd);
-    let conn = Connection::open(cd.db_path()).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    apply_runtime_pragmas(&conn)?;
+    let conn = open_runtime_connection(cd)?;
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS wallpapers_stage AS SELECT * FROM wallpapers WHERE 0",
         [],

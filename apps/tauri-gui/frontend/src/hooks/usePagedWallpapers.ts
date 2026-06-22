@@ -56,6 +56,16 @@ export function shouldConfirmEmpty(
   return hasLoadedOnce && consecutiveZeroCount >= 2;
 }
 
+export function formatLoadPageError(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  if (typeof error === 'string' && error) {
+    return error;
+  }
+  return 'Failed to load library page';
+}
+
 export function usePagedWallpapers({
   pageSize,
   loadPage,
@@ -70,6 +80,7 @@ export function usePagedWallpapers({
   const [lastRequestKind, setLastRequestKind] = useState<RequestKind>('initial');
   const [replaceCount, setReplaceCount] = useState(0);
   const [loadError, setLoadError] = useState(false);
+  const [loadErrorDetail, setLoadErrorDetail] = useState<string | null>(null);
   const [emptyConfirmed, setEmptyConfirmed] = useState(false);
   const requestSeq = useRef(0);
   const hasLoadedOnceRef = useRef(false);
@@ -100,6 +111,7 @@ export function usePagedWallpapers({
       if (!isCurrent()) return;
       succeeded = true;
       setLoadError(false);
+      setLoadErrorDetail(null);
       onPage?.(page);
       setTotal(page.total);
       setEntries((prev) => mergePagedWallpaperItems(prev, page.items, append));
@@ -120,9 +132,10 @@ export function usePagedWallpapers({
           setEmptyConfirmed(false);
         }
       }
-    } catch {
+    } catch (error) {
       if (!isCurrent()) return;
       setLoadError(true);
+      setLoadErrorDetail(formatLoadPageError(error));
       if (!append && !hasLoadedOnceRef.current) {
         setEntries([]);
         setTotal(0);
@@ -164,6 +177,7 @@ export function usePagedWallpapers({
     consecutiveZeroCountRef.current = 0;
     setEmptyConfirmed(false);
     setLoadError(false);
+    setLoadErrorDetail(null);
   }, [loadPage]);
 
   const entryByPath = useMemo(
@@ -184,6 +198,7 @@ export function usePagedWallpapers({
     lastRequestKind,
     replaceCount,
     loadError,
+    loadErrorDetail,
     emptyConfirmed,
     load,
     reload,

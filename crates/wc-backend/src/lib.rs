@@ -1,7 +1,6 @@
 //! wc-backend — wallpaper backend process management.
 
 use std::process::{Command, Stdio};
-use std::time::Duration;
 use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
@@ -12,6 +11,20 @@ pub mod linux_wallpaperengine;
 pub mod process_control;
 pub mod runtime;
 pub mod visual_handoff;
+
+mod awww;
+mod debug_log;
+mod mpvpaper;
+mod restore;
+
+pub use restore::{restore, restore_clean};
+
+use awww::{
+    build_awww_img_command, build_awww_instant_command, normalize_awww_resize,
+    normalize_awww_transition_type, stop_awww,
+};
+use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
+use mpvpaper::normalize_mpvpaper_options;
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
@@ -46,82 +59,7 @@ pub fn stop_non_lwe_backends(_s: &StorageApi) {
 
 use lifecycle::StopPlan;
 
-/// Clean restore: stop all backends first, then reapply current wallpaper.
-pub fn restore_clean(s: &StorageApi) -> Result<(), WcError> {
-    let mut runtime = runtime::SystemBackendRuntime;
-    restore_clean_with_runtime(s, &mut runtime)
-}
-
-fn restore_clean_with_runtime(
-    s: &StorageApi,
-    runtime: &mut dyn runtime::BackendRuntime,
-) -> Result<(), WcError> {
-    let current = s
-        .current_read()?
-        .ok_or_else(|| WcError::Other("no previous wallpaper to restore".into()))?;
-    let p = std::path::Path::new(&current);
-    if !p.is_file() && !p.is_dir() {
-        return Err(WcError::WallpaperMissing(p.to_path_buf()));
-    }
-
-    let entry = wc_scan::make_entry(&current)
-        .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
-    let backend = backend_for_restore_entry(s, &entry);
-    let fallback_path = fallback_for_restore_entry(&entry, p);
-
-    execute_stop_plan_with_runtime(s, lifecycle::StopPlan::All, runtime)?;
-    let mut reporter = apply_stage::NoopReporter;
-    apply_wallpaper_with_runtime(
-        s,
-        &current,
-        backend,
-        fallback_path.as_deref(),
-        runtime,
-        &mut reporter,
-        None,
-    )
-}
-
-fn backend_for_restore_entry(s: &StorageApi, entry: &wc_core::types::WallpaperEntry) -> Backend {
-    match entry.file_type {
-        wc_core::types::FileType::Image => {
-            match wc_core::config::normalize_image_backend(&s.config_get("image_backend", "awww")) {
-                "mpvpaper" => Backend::Mpvpaper,
-                _ => Backend::Awww,
-            }
-        }
-        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Video => match s.config_get("video_backend", "mpvpaper").as_str()
-        {
-            "awww" => Backend::Awww,
-            _ => Backend::Mpvpaper,
-        },
-        wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb | wc_core::types::FileType::WeApplication => {
-            Backend::Unsupported
-        }
-    }
-}
-
-fn fallback_for_restore_entry(
-    entry: &wc_core::types::WallpaperEntry,
-    _path: &std::path::Path,
-) -> Option<String> {
-    match entry.file_type {
-        wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
-            Some(entry.path.to_string())
-        }
-        wc_core::types::FileType::Video
-        | wc_core::types::FileType::WeScene
-        | wc_core::types::FileType::WeWeb
-        | wc_core::types::FileType::WeApplication => None,
-    }
-}
-
-fn execute_stop_plan_with_runtime(
+pub(crate) fn execute_stop_plan_with_runtime(
     s: &StorageApi,
     plan: lifecycle::StopPlan,
     runtime: &mut dyn runtime::BackendRuntime,
@@ -152,63 +90,6 @@ fn execute_stop_plan_with_runtime(
         }
         lifecycle::StopPlan::None => Ok(()),
     }
-}
-
-fn stop_awww() {
-    let pc = process_control::RealProcessControl::new();
-    stop_awww_daemon_with_wait(&pc, Duration::from_millis(50));
-    clear_awww_cache();
-}
-
-fn stop_mpvpaper() {
-    let user = whoami();
-    let _ = Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
-        .status();
-}
-
-#[cfg(test)]
-fn build_pkill_exact_command(user: &str, process_name: &str) -> Command {
-    let mut cmd = Command::new("pkill");
-    cmd.args(["-u", user, "-x", process_name]);
-    cmd
-}
-
-fn stop_awww_daemon_with_wait(pc: &dyn process_control::ProcessControl, sleep: Duration) {
-    const AWWW_DAEMON_PATTERN: &str = r"(^|/)awww-daemon\b";
-    const TERM_CHECKS: usize = 20;
-    const KILL_CHECKS: usize = 5;
-
-    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
-        pc.term_process(pid);
-    }
-
-    for _ in 0..TERM_CHECKS {
-        let running = pc.find_processes(AWWW_DAEMON_PATTERN);
-        if running.is_empty() {
-            return;
-        }
-        std::thread::sleep(sleep);
-    }
-
-    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
-        pc.kill_process(pid);
-    }
-
-    for _ in 0..KILL_CHECKS {
-        if pc.find_processes(AWWW_DAEMON_PATTERN).is_empty() {
-            return;
-        }
-        std::thread::sleep(sleep);
-    }
-}
-
-fn clear_awww_cache() {
-    let _ = Command::new("awww")
-        .arg("clear-cache")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
 }
 
 fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Result<(), WcError> {
@@ -260,7 +141,7 @@ pub fn apply_wallpaper_with_reporter(
     )
 }
 
-fn apply_wallpaper_with_runtime(
+pub(crate) fn apply_wallpaper_with_runtime(
     s: &StorageApi,
     path: &str,
     backend: Backend,
@@ -477,82 +358,6 @@ fn apply_wallpaper_with_runtime(
     Ok(())
 }
 
-fn write_apply_stage_timings(
-    s: &StorageApi,
-    pre_stop: std::time::Duration,
-    fallback: std::time::Duration,
-    target: std::time::Duration,
-    settle: std::time::Duration,
-    backend: Backend,
-) {
-    if s.config_get("gui_debug_logs", "off") != "on" {
-        return;
-    }
-    let log = format!(
-        "apply stages: backend={:?} pre_stop={:?} fallback={:?} target={:?} settle={:?}\n",
-        backend, pre_stop, fallback, target, settle
-    );
-    let _ = std::fs::write(s.cd.path.join("backend-apply-timings-last.log"), log);
-}
-
-fn write_debug_handoff_log(
-    s: &StorageApi,
-    lifecycle: &lifecycle::ApplyLifecyclePlan,
-    backend: Backend,
-    fallback_path: Option<&str>,
-    visual: &visual_handoff::VisualHandoffPlan,
-    fallback_error: &str,
-    path: &str,
-) {
-    if s.config_get("gui_debug_logs", "off") != "on" {
-        return;
-    }
-    let log_path = s.cd.path.join("backend-handoff-last.log");
-    let fb_name = fallback_path
-        .and_then(|p| std::path::Path::new(p).file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    let path_name = std::path::Path::new(path)
-        .file_name()
-        .map(|n| n.to_string_lossy())
-        .unwrap_or_default();
-    let log = format!(
-        "previous={:?}\ntarget={:?}\npath={}\nfallback={}\npre_stop={:?}\nfallback_stage={:?}\ntarget_startup_settle_ms={}\npost_success_stop={:?}\nfallback_error={}\n",
-        lifecycle.previous,
-        backend,
-        path_name,
-        fb_name,
-        lifecycle.pre_stop,
-        visual.fallback_stage,
-        visual.target_startup_settle_ms,
-        lifecycle.post_success_stop,
-        fallback_error,
-    );
-    let _ = std::fs::write(&log_path, log);
-}
-
-/// Restore the last wallpaper.
-pub fn restore(s: &StorageApi) -> Result<(), WcError> {
-    restore_clean(s)
-}
-
-pub(crate) fn is_awww_daemon_running(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
-    matches!(
-        std::process::Command::new("pgrep")
-            .arg("-u")
-            .arg(user)
-            .arg("-x")
-            .arg("awww-daemon")
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status(),
-        Ok(s) if s.success()
-    )
-}
-
 fn apply_awww_instant_with_runtime(
     s: &StorageApi,
     path: &str,
@@ -602,23 +407,6 @@ fn apply_awww_instant_with_runtime(
     Ok(())
 }
 
-fn build_awww_instant_command(path: &str, resize: &str, fps: &str) -> Command {
-    let mut cmd = Command::new("awww");
-    cmd.arg("img")
-        .arg(path)
-        .arg("--resize")
-        .arg(resize)
-        .arg("--transition-type")
-        .arg("simple")
-        .arg("--transition-duration")
-        .arg("0")
-        .arg("--transition-fps")
-        .arg(fps)
-        .arg("--filter")
-        .arg("Lanczos3");
-    cmd
-}
-
 fn rollback_visual_fallback_after_target_failure_with_runtime(
     s: &StorageApi,
     previous: lifecycle::RunningBackend,
@@ -658,65 +446,6 @@ fn rollback_visual_fallback_after_target_failure_with_runtime(
         runtime.stop_awww();
         Some("rollback: stopped fallback after non-awww target failure".into())
     }
-}
-
-fn normalize_awww_resize(raw: &str) -> &'static str {
-    match raw {
-        "crop" => "crop",
-        "fit" => "fit",
-        "stretch" => "stretch",
-        _ => "crop",
-    }
-}
-
-fn normalize_awww_transition_type(raw: &str) -> &'static str {
-    match raw.trim() {
-        "simple" => "simple",
-        "fade" => "fade",
-        "left" => "left",
-        "right" => "right",
-        "top" => "top",
-        "bottom" => "bottom",
-        "wipe" => "wipe",
-        "grow" => "grow",
-        "center" => "center",
-        "outer" => "outer",
-        "random" => "random",
-        "wave" => "wave",
-        "slide" => "left",  // legacy GUI value
-        "none" => "simple", // legacy instant value
-        _ => "fade",
-    }
-}
-
-fn normalize_mpvpaper_options(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if trimmed == "no-audio --loop-file=inf" || trimmed == "--loop-file=inf" {
-        "--loop-file=inf --panscan=1.0"
-    } else {
-        trimmed
-    }
-}
-
-fn build_awww_img_command(
-    path: &str,
-    resize: &str,
-    transition_type: &str,
-    duration: &str,
-    fps: &str,
-) -> std::process::Command {
-    let mut cmd = std::process::Command::new("awww");
-    cmd.arg("img")
-        .arg(path)
-        .arg("--resize")
-        .arg(resize)
-        .arg("--transition-type")
-        .arg(transition_type)
-        .arg("--transition-duration")
-        .arg(duration)
-        .arg("--transition-fps")
-        .arg(fps);
-    cmd
 }
 
 pub(crate) fn whoami() -> String {
@@ -826,171 +555,6 @@ mod tests {
             .windows(2)
             .find_map(|pair| (pair[0] == name).then_some(pair[1].as_str()));
         assert_eq!(actual, Some(value), "missing or wrong {name} in {args:?}");
-    }
-
-    #[test]
-    fn awww_command_includes_transition_fps() {
-        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", "1", "60");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert!(args.contains(&"--resize".to_string()));
-        assert!(args.contains(&"crop".to_string()));
-        assert!(args.contains(&"--transition-type".to_string()));
-        assert!(args.contains(&"fade".to_string()));
-        assert!(args.contains(&"--transition-fps".to_string()));
-        assert!(args.contains(&"60".to_string()));
-    }
-
-    #[test]
-    fn normalize_awww_resize_known_values() {
-        assert_eq!(normalize_awww_resize("crop"), "crop");
-        assert_eq!(normalize_awww_resize("fit"), "fit");
-        assert_eq!(normalize_awww_resize("stretch"), "stretch");
-    }
-
-    #[test]
-    fn normalize_awww_resize_unknown_fallback() {
-        assert_eq!(normalize_awww_resize("unknown"), "crop");
-        assert_eq!(normalize_awww_resize(""), "crop");
-        assert_eq!(normalize_awww_resize("center"), "crop");
-    }
-
-    #[test]
-    fn normalize_awww_transition_type_legacy_slide() {
-        assert_eq!(normalize_awww_transition_type("slide"), "left");
-    }
-
-    #[test]
-    fn normalize_awww_transition_type_legacy_none() {
-        assert_eq!(normalize_awww_transition_type("none"), "simple");
-    }
-
-    #[test]
-    fn normalize_awww_transition_type_known_values() {
-        for v in &[
-            "simple", "fade", "left", "right", "top", "bottom", "wipe", "grow", "center", "outer",
-            "random", "wave",
-        ] {
-            assert_eq!(normalize_awww_transition_type(v), *v);
-        }
-    }
-
-    #[test]
-    fn normalize_awww_transition_type_unknown_fallback() {
-        assert_eq!(normalize_awww_transition_type("invalid"), "fade");
-        assert_eq!(normalize_awww_transition_type(""), "fade");
-    }
-
-    #[test]
-    fn build_awww_img_command_normalizes_slide_to_left() {
-        let cmd = build_awww_img_command(
-            "/tmp/test.jpg",
-            "crop",
-            normalize_awww_transition_type("slide"),
-            "1",
-            "60",
-        );
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert!(
-            !args.contains(&"slide".to_string()),
-            "slide must not appear: {:?}",
-            args
-        );
-        assert!(
-            args.contains(&"left".to_string()),
-            "slide should normalize to left"
-        );
-    }
-
-    #[test]
-    fn build_awww_instant_never_uses_none() {
-        let cmd = build_awww_instant_command("/tmp/test.jpg", "crop", "60");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert!(
-            !args.contains(&"none".to_string()),
-            "instant must not use none"
-        );
-        assert!(
-            args.contains(&"simple".to_string()),
-            "instant must use simple"
-        );
-    }
-
-    #[test]
-    fn awww_command_clamps_invalid_fps_and_duration() {
-        let duration = wc_core::config_normalizer::normalize_awww_transition_duration("-1");
-        let fps = wc_core::config_normalizer::normalize_awww_transition_fps("999");
-        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", &duration, &fps);
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-
-        assert!(args.contains(&"1".to_string()));
-        assert!(args.contains(&"240".to_string()));
-        assert!(!args.contains(&"-1".to_string()));
-        assert!(!args.contains(&"999".to_string()));
-    }
-
-    #[test]
-    fn normalize_mpvpaper_options_migrates_legacy_silent_default() {
-        assert_eq!(
-            normalize_mpvpaper_options("no-audio --loop-file=inf"),
-            "--loop-file=inf --panscan=1.0"
-        );
-        assert_eq!(
-            normalize_mpvpaper_options("  no-audio --loop-file=inf  "),
-            "--loop-file=inf --panscan=1.0"
-        );
-        assert_eq!(
-            normalize_mpvpaper_options("no-audio --loop-file=inf --panscan=1"),
-            "no-audio --loop-file=inf --panscan=1"
-        );
-    }
-
-    #[test]
-    fn normalize_mpvpaper_options_migrates_plain_loop_default_to_crop_fill() {
-        assert_eq!(
-            normalize_mpvpaper_options("--loop-file=inf"),
-            "--loop-file=inf --panscan=1.0"
-        );
-        assert_eq!(
-            normalize_mpvpaper_options("  --loop-file=inf  "),
-            "--loop-file=inf --panscan=1.0"
-        );
-    }
-
-    #[test]
-    fn normalize_mpvpaper_options_preserves_custom_args() {
-        assert_eq!(
-            normalize_mpvpaper_options("--loop-file=inf --volume=60"),
-            "--loop-file=inf --volume=60"
-        );
-        assert_eq!(
-            normalize_mpvpaper_options("--loop-file=inf --volume=80 --mute=no"),
-            "--loop-file=inf --volume=80 --mute=no"
-        );
-        assert_eq!(normalize_mpvpaper_options(""), "");
-    }
-
-    #[test]
-    fn awww_resize_unknown_fallback_to_crop() {
-        let cmd = build_awww_img_command("/tmp/test.jpg", "crop", "fade", "1", "60");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert!(args.contains(&"--resize".to_string()));
-        assert!(args.contains(&"crop".to_string()));
-        assert!(!args.contains(&"unknown".to_string()));
     }
 
     #[test]
@@ -1414,17 +978,6 @@ mod tests {
     }
 
     #[test]
-    fn stop_awww_uses_exact_daemon_process_name() {
-        let cmd = build_pkill_exact_command("alice", "awww-daemon");
-        let args: Vec<String> = cmd
-            .get_args()
-            .map(|s| s.to_string_lossy().to_string())
-            .collect();
-        assert_eq!(args, ["-u", "alice", "-x", "awww-daemon"]);
-        assert!(!args.contains(&r"(^|/)awww\b".to_string()));
-    }
-
-    #[test]
     fn cross_backend_image_fallback_emits_awww_readiness_stages() {
         let (tmp, s) = temp_storage();
         let img = tmp.path().join("fallback.jpg");
@@ -1558,44 +1111,6 @@ mod tests {
     }
 
     #[test]
-    fn write_apply_stage_timings_only_writes_when_debug_enabled() {
-        let (_tmp, s) = temp_storage();
-        let log_path = s.cd.path.join("backend-apply-timings-last.log");
-
-        write_apply_stage_timings(
-            &s,
-            std::time::Duration::from_micros(1),
-            std::time::Duration::from_micros(2),
-            std::time::Duration::from_micros(3),
-            std::time::Duration::from_micros(4),
-            Backend::Awww,
-        );
-        assert!(
-            !log_path.exists(),
-            "timings log must not be written when debug off"
-        );
-
-        s.config_set("gui_debug_logs", "on").unwrap();
-        write_apply_stage_timings(
-            &s,
-            std::time::Duration::from_micros(1),
-            std::time::Duration::from_micros(2),
-            std::time::Duration::from_micros(3),
-            std::time::Duration::from_micros(4),
-            Backend::Awww,
-        );
-        assert!(
-            log_path.exists(),
-            "timings log should be written when debug on"
-        );
-        let content = std::fs::read_to_string(&log_path).unwrap();
-        assert!(content.contains("backend=Awww"));
-        assert!(content.contains("pre_stop="));
-        assert!(content.contains("target="));
-        assert!(content.contains("settle="));
-    }
-
-    #[test]
     fn awww_from_none_applies_without_clear_to_avoid_old_image_black_flash() {
         let (tmp, s) = temp_storage();
         let img = tmp.path().join("target.jpg");
@@ -1625,27 +1140,6 @@ mod tests {
     }
 
     #[test]
-    fn stop_awww_waits_until_daemon_is_gone_before_returning() {
-        let pc = SequenceProcessControl::new(vec![vec![42], vec![42], vec![]]);
-
-        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
-
-        assert_eq!(pc.termed(), vec![42]);
-        assert!(pc.killed().is_empty());
-        assert_eq!(pc.find_calls(), 3);
-    }
-
-    #[test]
-    fn stop_awww_kills_daemon_when_term_does_not_exit() {
-        let pc = SequenceProcessControl::new(vec![vec![42], vec![42], vec![42], vec![42]]);
-
-        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
-
-        assert_eq!(pc.termed(), vec![42]);
-        assert_eq!(pc.killed(), vec![42]);
-    }
-
-    #[test]
     fn ensure_awww_daemon_starts_with_no_cache_to_avoid_restoring_old_wallpaper() {
         let cmd = runtime::build_awww_daemon_command();
         let args: Vec<String> = cmd
@@ -1661,63 +1155,6 @@ mod tests {
     // -----------------------------------------------------------------
     // FakeRuntime for testing the backend runtime seam
     // -----------------------------------------------------------------
-
-    struct SequenceProcessControl {
-        results: std::cell::RefCell<Vec<Vec<u32>>>,
-        last: std::cell::RefCell<Vec<u32>>,
-        find_calls: std::cell::Cell<usize>,
-        termed: std::cell::RefCell<Vec<u32>>,
-        killed: std::cell::RefCell<Vec<u32>>,
-    }
-
-    impl SequenceProcessControl {
-        fn new(results: Vec<Vec<u32>>) -> Self {
-            Self {
-                results: std::cell::RefCell::new(results),
-                last: std::cell::RefCell::new(Vec::new()),
-                find_calls: std::cell::Cell::new(0),
-                termed: std::cell::RefCell::new(Vec::new()),
-                killed: std::cell::RefCell::new(Vec::new()),
-            }
-        }
-
-        fn find_calls(&self) -> usize {
-            self.find_calls.get()
-        }
-
-        fn termed(&self) -> Vec<u32> {
-            self.termed.borrow().clone()
-        }
-
-        fn killed(&self) -> Vec<u32> {
-            self.killed.borrow().clone()
-        }
-    }
-
-    impl process_control::ProcessControl for SequenceProcessControl {
-        fn find_processes(&self, _pattern: &str) -> Vec<u32> {
-            self.find_calls.set(self.find_calls.get() + 1);
-            let next = if self.results.borrow().is_empty() {
-                self.last.borrow().clone()
-            } else {
-                self.results.borrow_mut().remove(0)
-            };
-            *self.last.borrow_mut() = next.clone();
-            next
-        }
-
-        fn process_group_of(&self, _pid: u32) -> Option<u32> {
-            None
-        }
-
-        fn term_process(&self, pid: u32) {
-            self.termed.borrow_mut().push(pid);
-        }
-
-        fn kill_process(&self, pid: u32) {
-            self.killed.borrow_mut().push(pid);
-        }
-    }
 
     #[derive(Default)]
     struct FakeRuntime {
@@ -1814,7 +1251,7 @@ mod tests {
                 return Ok(());
             }
             let user = crate::whoami();
-            if !crate::is_awww_daemon_running(&user) {
+            if !crate::awww::is_awww_daemon_running(&user) {
                 let mut cmd = crate::runtime::build_awww_daemon_command();
                 let _ = self.command_status(&mut cmd);
             }
@@ -2100,7 +1537,7 @@ mod tests {
             ..Default::default()
         };
 
-        restore_clean_with_runtime(&s, &mut rt).unwrap();
+        crate::restore::restore_clean_with_runtime(&s, &mut rt).unwrap();
 
         assert_eq!(rt.stop_awww_count, 1, "clean restore must stop awww");
         assert!(
@@ -2135,7 +1572,7 @@ mod tests {
             ..Default::default()
         };
 
-        let err = restore_clean_with_runtime(&s, &mut rt).unwrap_err();
+        let err = crate::restore::restore_clean_with_runtime(&s, &mut rt).unwrap_err();
         assert!(
             err.to_string().contains("awww") || err.to_string().contains("false"),
             "error should mention awww failure: {}",
