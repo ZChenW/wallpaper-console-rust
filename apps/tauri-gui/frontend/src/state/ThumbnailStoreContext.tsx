@@ -6,12 +6,14 @@ import type { EnqueueOptions } from '../hooks/thumbnailQueueCore';
 
 interface ThumbnailStoreValue {
   get: (path: string) => string | undefined;
+  getFailure: (path: string) => string | undefined;
+  failureCount: () => number;
   subscribe: (path: string, cb: () => void) => () => void;
   enqueueVisible: (paths: string[], options?: EnqueueOptions) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
   snapshot: () => { pending: string[]; active: number; cached: number };
-  stats: () => { pending: number; active: number; cached: number };
+  stats: () => { pending: number; active: number; cached: number; failures: number };
   setRevealPaused: (paused: boolean) => void;
 }
 
@@ -29,6 +31,8 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
   const store = storeRef.current;
   const value = useMemo<ThumbnailStoreValue>(() => ({
     get: (path: string) => store.get(path),
+    getFailure: (path: string) => store.getFailure(path),
+    failureCount: () => store.failureCount(),
     subscribe: (path: string, cb: () => void) => store.subscribe(path, cb),
     enqueueVisible: (paths: string[], options?: EnqueueOptions) => store.enqueueVisible(paths, options),
     forget: (paths: string[]) => store.forget(paths),

@@ -3,7 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
-import { shouldResetScroll } from './wallpaperGridHelpers';
+import { shouldResetScroll, visibleThumbnailPaths } from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
 import { COL_MIN_WIDTH, calculateGridLayout, GRID_GAP, overscanRowsFor, type GridLayout } from '../utils/layout';
@@ -205,18 +205,12 @@ export default function WallpaperGrid({
   useEffect(() => {
     if (!active) return;
     const range = virtualizer.range;
-    if (!range) return;
-
-    const startIdx = range.startIndex * colCount;
-    const endIdx = Math.min((range.endIndex + 1) * colCount, entries.length);
-    const paths = entries
-      .slice(startIdx, endIdx)
-      .filter((e) => !e.previewPath)
-      .map((e) => e.path);
+    const paths = visibleThumbnailPaths(entries, colCount, range, 3);
 
     if (paths.length === 0) return;
 
-    const key = `${range.startIndex}:${range.endIndex}:${colCount}:${paths.join('\0')}`;
+    const keyPrefix = range ? `${range.startIndex}:${range.endIndex}` : 'fallback';
+    const key = `${keyPrefix}:${colCount}:${paths.join('\0')}`;
     if (lastEnqueueKeyRef.current === key) return;
     lastEnqueueKeyRef.current = key;
 

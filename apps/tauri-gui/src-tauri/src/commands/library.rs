@@ -175,23 +175,40 @@ pub async fn history_clear() -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
+fn build_library_source_status(s: &wc_storage::StorageApi) -> Result<LibrarySourceStatusDto, String> {
+    let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
+    let sqlite_ready = s.cd.db_path().exists();
+    let sqlite_rows = wc_storage::sqlite::library_count(&s.cd).unwrap_or(0);
+    let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
+        .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+    let stale = source_count > 0 && sqlite_rows == 0 && tsv_rows > 0;
+    let message = if source_count == 0 {
+        "No sources configured. Add a source or scan Wallpaper Engine.".to_string()
+    } else if stale {
+        "Sources exist, but the SQLite library index is empty while legacy library.tsv has rows. Rebuild the SQLite index.".to_string()
+    } else if sqlite_rows == 0 {
+        "Sources exist, but the SQLite library index has no wallpapers. Rescan or repair the library index.".to_string()
+    } else {
+        "SQLite library database is active.".to_string()
+    };
+    Ok(LibrarySourceStatusDto {
+        configured: "sqlite".into(),
+        effective: "sqlite".into(),
+        sqlite_ready,
+        sqlite_rows,
+        tsv_rows,
+        source_count,
+        stale,
+        message,
+    })
+}
+
 #[tauri::command]
 pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let sqlite_rows = wc_storage::sqlite::library_count(&s.cd).unwrap_or(0);
-        let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
-            .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0);
-        Ok(LibrarySourceStatusDto {
-            configured: "sqlite".into(),
-            effective: "sqlite".into(),
-            sqlite_ready: s.cd.db_path().exists(),
-            sqlite_rows,
-            tsv_rows,
-            stale: false,
-            message: "SQLite library database is active.".into(),
-        })
+        build_library_source_status(&s)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -351,5 +368,48 @@ mod tests {
 
         let hist = wc_storage::sqlite::history_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(hist.total, 1);
+    }
+
+    #[test]
+    fn build_library_source_status_reports_stale_when_tsv_has_rows_but_sqlite_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        std::fs::write(cd.library_tsv_path(), "/tmp/a.jpg\n/tmp/b.jpg\n").unwrap();
+
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+        let status = super::build_library_source_status(&s).unwrap();
+
+        assert_eq!(status.source_count, 1);
+        assert_eq!(status.sqlite_rows, 0);
+        assert_eq!(status.tsv_rows, 2);
+        assert!(status.stale);
+        assert!(status.sqlite_ready);
+        assert!(status.message.contains("legacy library.tsv"));
+    }
+
+    #[test]
+    fn build_library_source_status_reports_no_sources_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+
+        let s = wc_storage::StorageApi::new(cd);
+        let status = super::build_library_source_status(&s).unwrap();
+
+        assert_eq!(status.source_count, 0);
+        assert_eq!(status.sqlite_rows, 0);
+        assert!(!status.stale);
+        assert_eq!(
+            status.message,
+            "No sources configured. Add a source or scan Wallpaper Engine."
+        );
     }
 }

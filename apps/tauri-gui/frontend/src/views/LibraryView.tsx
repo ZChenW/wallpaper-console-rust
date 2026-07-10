@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Search } from 'lucide-react';
-import { api, WallpaperDTO, ApplyRequestDTO } from '../api/bridge';
+import { api, WallpaperDTO, ApplyRequestDTO, LibrarySourceStatusDTO } from '../api/bridge';
+import { commandErrorFeedback, commandSuccessFeedback } from '../api/feedback';
 import { measureAsync, recordMetric } from '../perf/metrics';
 import WallpaperGrid from '../components/WallpaperGrid';
 import OpenLocationDialog from '../components/OpenLocationDialog';
@@ -9,7 +10,7 @@ import { usePagedWallpapers, type WallpaperPageDTO } from '../hooks/usePagedWall
 import { useAppState } from '../state/AppStateContext';
 import { invalidateFavoritesCache } from './FavoritesView';
 import { emitFeedback } from '../events/appEvents';
-import { resolveLibraryDisplay } from './libraryDisplay';
+import { resolveLibraryDisplay, resolveLibraryEmptyMessage } from './libraryDisplay';
 
 interface Props {
   onApply: (path: string) => void;
@@ -27,8 +28,10 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
   const [debouncedSearch, setDebouncedSearch] = useState('');
   const [filter, setFilter] = useState<FilterType>('all');
   const [sort, setSort] = useState<SortMode>('newest');
-  const { libraryVersion, invalidateLibrary, scanProgress } = useAppState();
+  const { libraryVersion, invalidateLibrary, scanProgress, beginScanPolling, finishScanPolling } = useAppState();
   const [openLocDialog, setOpenLocDialog] = useState<{ path: string } | null>(null);
+  const [libraryStatus, setLibraryStatus] = useState<LibrarySourceStatusDTO | null>(null);
+  const [emptyAction, setEmptyAction] = useState<'rescan' | 'repair' | null>(null);
   const mountTimeRef = useRef<number | null>(null);
   const firstPageRecordedRef = useRef(false);
   const firstContentRecordedRef = useRef(false);
@@ -86,6 +89,62 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
     loadError,
     emptyConfirmed,
   });
+
+  const refreshLibraryStatus = useCallback(async () => {
+    try {
+      setLibraryStatus(await api.librarySourceStatus());
+    } catch {
+      setLibraryStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (display === 'empty') {
+      void refreshLibraryStatus();
+    }
+  }, [display, refreshLibraryStatus]);
+
+  const handleEmptyRescan = useCallback(async () => {
+    setEmptyAction('rescan');
+    beginScanPolling();
+    emitFeedback({ state: 'running', label: 'Rescan' });
+    try {
+      const r = await api.rescan();
+      if (r.success) {
+        invalidateLibrary();
+        void reload();
+        void refreshLibraryStatus();
+        emitFeedback(commandSuccessFeedback('Rescan', r));
+      } else {
+        emitFeedback(commandErrorFeedback('Rescan', r));
+      }
+    } catch (e) {
+      emitFeedback(commandErrorFeedback('Rescan', e));
+    } finally {
+      finishScanPolling(1000);
+      setEmptyAction(null);
+    }
+  }, [beginScanPolling, finishScanPolling, invalidateLibrary, reload, refreshLibraryStatus]);
+
+  const handleEmptyRepair = useCallback(async () => {
+    setEmptyAction('repair');
+    emitFeedback({ state: 'running', label: 'Repair' });
+    try {
+      const r = await api.sqliteRepair();
+      if (r.success) {
+        invalidateLibrary();
+        void reload();
+        void refreshLibraryStatus();
+        emitFeedback(commandSuccessFeedback('Repair', r));
+      } else {
+        emitFeedback(commandErrorFeedback('Repair', r));
+      }
+    } catch (e) {
+      emitFeedback(commandErrorFeedback('Repair', e));
+    } finally {
+      setEmptyAction(null);
+    }
+  }, [invalidateLibrary, reload, refreshLibraryStatus]);
 
   useEffect(() => {
     if (!firstContentRecordedRef.current && entries.length > 0) {
@@ -201,7 +260,18 @@ export default function LibraryView({ onApply, onApplyAction, applying, active =
           )}
         </>
       ) : display === 'empty' ? (
-        <div className="empty-state">Library is empty. Add sources or scan Wallpaper Engine.</div>
+        <div className="empty-state">
+          {resolveLibraryEmptyMessage(libraryStatus)}
+          <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+            <button className="btn small" onClick={() => void reload()} disabled={emptyAction !== null}>Retry</button>
+            <button className="btn small" onClick={() => void handleEmptyRescan()} disabled={emptyAction !== null}>
+              {emptyAction === 'rescan' ? 'Rescanning…' : 'Rescan'}
+            </button>
+            <button className="btn small" onClick={() => void handleEmptyRepair()} disabled={emptyAction !== null}>
+              {emptyAction === 'repair' ? 'Repairing…' : 'Repair'}
+            </button>
+          </div>
+        </div>
       ) : display === 'error' ? (
         <div className="empty-state">
           Failed to load library.

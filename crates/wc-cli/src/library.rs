@@ -4,7 +4,9 @@ use std::time::Duration;
 use wc_core::types::{Backend, WallpaperEntry};
 use wc_storage::StorageApi;
 
-use crate::output::{json_library_from_sqlite, json_library_from_tsv, json_library_page, write_library_tsv_entry};
+use crate::output::{
+    json_library_from_sqlite, json_library_from_tsv, json_library_page, write_library_tsv_entry,
+};
 use crate::Commands;
 
 const RESCAN_BATCH_SIZE: usize = 250;

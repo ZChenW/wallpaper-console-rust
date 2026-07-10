@@ -34,6 +34,7 @@ export interface LibrarySourceStatusDTO {
   sqliteReady: boolean;
   sqliteRows: number;
   tsvRows: number;
+  sourceCount: number;
   stale: boolean;
   message: string;
 }

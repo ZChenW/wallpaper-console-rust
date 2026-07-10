@@ -501,7 +501,9 @@ mod tests {
             .expect("set zero busy timeout");
         let started = Instant::now();
         let no_wait_err = no_wait
-            .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .expect_err("read without busy_timeout should fail while exclusive lock is held");
         let elapsed = started.elapsed();
         assert!(

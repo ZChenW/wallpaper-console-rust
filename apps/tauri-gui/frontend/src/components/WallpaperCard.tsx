@@ -39,6 +39,10 @@ function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProp
     (cb) => store.subscribe(entry.path, cb),
     () => store.get(entry.path),
   );
+  const thumbnailFailure = useSyncExternalStore(
+    (cb) => store.subscribe(entry.path, cb),
+    () => store.getFailure(entry.path),
+  );
 
   const handleDoubleClick = () => {
     if (!isApplyAvailable(entry)) {
@@ -67,8 +71,9 @@ function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProp
         ) : thumbnail ? (
           <img src={safeFileSrc(thumbnail)} alt="" loading="lazy" decoding="async" />
         ) : (
-          <div className="wallpaper-thumb-placeholder">
+          <div className="wallpaper-thumb-placeholder" title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}>
             <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
+            {thumbnailFailure ? <span className="wallpaper-thumb-error">Preview failed</span> : null}
           </div>
         )}
         {badge && <span className={weBadgeClass(entry)}>{badge}</span>}

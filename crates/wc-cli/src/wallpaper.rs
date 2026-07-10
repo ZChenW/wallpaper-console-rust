@@ -21,9 +21,9 @@ pub(crate) fn inspect(s: &StorageApi, path: String) -> anyhow::Result<()> {
     let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
         path: s.cd.path.clone(),
     });
-    let inspected = service.inspect_path(&path).map_err(|e| {
-        anyhow::anyhow!(serde_json::to_string_pretty(&e).unwrap_or(e.message))
-    })?;
+    let inspected = service
+        .inspect_path(&path)
+        .map_err(|e| anyhow::anyhow!(serde_json::to_string_pretty(&e).unwrap_or(e.message)))?;
     println!("{}", serde_json::to_string_pretty(&inspected)?);
     Ok(())
 }
@@ -401,7 +401,10 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub(crate) fn stop_wallpapers_with<F>(s: &StorageApi, stop_backends: F) -> Result<(), wc_core::error::WcError>
+pub(crate) fn stop_wallpapers_with<F>(
+    s: &StorageApi,
+    stop_backends: F,
+) -> Result<(), wc_core::error::WcError>
 where
     F: FnOnce(Option<&StorageApi>) -> Result<(), wc_core::error::WcError>,
 {

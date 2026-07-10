@@ -6,6 +6,7 @@ export const MAX_REVEAL_PER_FRAME = 12;
 
 export class ThumbnailStore {
   private cache = new Map<string, string>();
+  private failures = new Map<string, string>();
   private listeners = new Map<string, Set<() => void>>();
   private queue: ThumbnailRequestQueue;
   private enqueueScheduled = false;
@@ -22,9 +23,11 @@ export class ThumbnailStore {
       load,
       onThumbnail: (path, thumbnail) => {
         this.cache.set(path, thumbnail);
+        this.failures.delete(path);
         this.scheduleNotify(path);
       },
-      onFailure: (path) => {
+      onFailure: (path, reason) => {
+        this.failures.set(path, reason ?? 'thumbnail_failed');
         this.scheduleNotify(path);
       },
     });
@@ -32,6 +35,14 @@ export class ThumbnailStore {
 
   get(path: string): string | undefined {
     return this.cache.get(path);
+  }
+
+  getFailure(path: string): string | undefined {
+    return this.failures.get(path);
+  }
+
+  failureCount(): number {
+    return this.failures.size;
   }
 
   subscribe(path: string, cb: () => void): () => void {
@@ -66,6 +77,7 @@ export class ThumbnailStore {
   reset(): void {
     this.queue.reset();
     this.cache.clear();
+    this.failures.clear();
     this.listeners.clear();
     this.pendingNotifyPaths.clear();
     this.pausedNotifyPaths.clear();
@@ -77,8 +89,9 @@ export class ThumbnailStore {
     return this.queue.snapshot();
   }
 
-  stats(): { pending: number; active: number; cached: number } {
-    return this.queue.stats();
+  stats(): { pending: number; active: number; cached: number; failures: number } {
+    const base = this.queue.stats();
+    return { ...base, cached: this.cache.size, failures: this.failures.size };
   }
 
   setRevealPaused(paused: boolean): void {

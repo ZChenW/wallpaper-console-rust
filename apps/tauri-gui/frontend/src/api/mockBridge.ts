@@ -412,6 +412,7 @@ export const api = {
     sqliteReady: true,
     sqliteRows: 150,
     tsvRows: 150,
+    sourceCount: 2,
     stale: false,
     message: 'SQLite active (150 entries)',
   }),

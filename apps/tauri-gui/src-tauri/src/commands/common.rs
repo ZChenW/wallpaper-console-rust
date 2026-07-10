@@ -173,6 +173,7 @@ pub struct LibrarySourceStatusDto {
     pub sqlite_ready: bool,
     pub sqlite_rows: usize,
     pub tsv_rows: usize,
+    pub source_count: usize,
     pub stale: bool,
     pub message: String,
 }
