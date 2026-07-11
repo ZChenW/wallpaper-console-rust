@@ -3,6 +3,7 @@ pub mod apply_plan;
 pub mod apply_stage_labels;
 pub mod display_apply;
 pub mod display_plan;
+pub mod display_restore;
 
 use std::path::{Path, PathBuf};
 
@@ -22,6 +23,7 @@ pub use display_plan::{
     plan_display_apply, plan_display_apply_with_capability, DisplayApplyPlan, DisplayApplyRequest,
     DisplayTarget, PlannedAction, RejectionReason, RunningAssignment,
 };
+pub use display_restore::DisplayRestoreRuntimeOpts;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {

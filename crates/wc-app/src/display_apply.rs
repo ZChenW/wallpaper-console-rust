@@ -251,7 +251,7 @@ impl AppService {
         }
     }
 
-    fn handle_exec_failure(
+    pub(crate) fn handle_exec_failure(
         &self,
         failure: DisplayExecFailure,
         previous_rows: &[DisplayStateRow],
@@ -334,7 +334,7 @@ impl AppService {
     }
 }
 
-fn to_exec_action(
+pub(crate) fn to_exec_action(
     action: PlannedAction,
     path: &str,
     target: &DisplayTarget,
@@ -395,7 +395,7 @@ fn stop_scope_for_action(
     }
 }
 
-fn parse_backend(raw: &str) -> Result<Backend, AppError> {
+pub(crate) fn parse_backend(raw: &str) -> Result<Backend, AppError> {
     match raw {
         "awww" => Ok(Backend::Awww),
         "mpvpaper" => Ok(Backend::Mpvpaper),
@@ -636,7 +636,7 @@ fn apply_completed_apply(
     }
 }
 
-fn rejection_to_app_error(reason: RejectionReason) -> AppError {
+pub(crate) fn rejection_to_app_error(reason: RejectionReason) -> AppError {
     let message = match &reason {
         RejectionReason::UnsupportedBackend => "Unsupported wallpaper backend.".into(),
         RejectionReason::EmptyNamedOutput => "Display target name must not be blank.".into(),
