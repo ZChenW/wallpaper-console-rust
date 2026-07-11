@@ -9,6 +9,7 @@ members = [
     "crates/wc-cli",
     "crates/wc-preview",
     "apps/tauri-gui/src-tauri",
+    "xtask",
 ]
 exclude = [
     # Tauri v2 builds — webkit2gtk-4.1 is required.
