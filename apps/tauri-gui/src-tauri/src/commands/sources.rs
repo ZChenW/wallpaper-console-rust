@@ -126,7 +126,7 @@ pub async fn scan_steam_workshop() -> CommandResult {
                 }
             }
 
-            let index_result = index_current_sources(&s)?;
+            let index_result = index_current_sources(s)?;
             Ok(format!(
                 "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s). {}",
                 roots.len(),

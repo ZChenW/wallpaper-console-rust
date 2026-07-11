@@ -1,6 +1,7 @@
 pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
+pub mod display_plan;
 
 use std::path::{Path, PathBuf};
 
@@ -16,6 +17,10 @@ pub use apply_plan::{
     ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan, CompatibilityKind,
 };
 pub use apply_stage_labels::{apply_stage_detail, apply_stage_label, ApplyStageContext};
+pub use display_plan::{
+    plan_display_apply, plan_display_apply_with_capability, DisplayApplyPlan, DisplayApplyRequest,
+    DisplayTarget, PlannedAction, RejectionReason, RunningAssignment,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppError {

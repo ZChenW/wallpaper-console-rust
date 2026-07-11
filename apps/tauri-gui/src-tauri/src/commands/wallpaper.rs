@@ -67,7 +67,7 @@ pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> 
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
         let config =
-            wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(&s);
+            wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(s);
         let st = wc_backend::linux_wallpaperengine::status(&config);
         let mut detail = st.detail;
         if config.target_mode == "auto" {
@@ -277,7 +277,7 @@ fn stop_with_storage(s: &StorageApi) -> CommandResult {
 #[tauri::command]
 pub async fn stop() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => stop_with_storage(&s),
+        Ok(s) => stop_with_storage(s),
         Err(e) => fail(e),
     })
     .await
@@ -287,7 +287,7 @@ pub async fn stop() -> CommandResult {
 #[tauri::command]
 pub async fn restore() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_backend::restore_clean(&s) {
+        Ok(s) => match wc_backend::restore_clean(s) {
             Ok(()) => ok("Restored wallpaper."),
             Err(e) => fail(e.to_string()),
         },

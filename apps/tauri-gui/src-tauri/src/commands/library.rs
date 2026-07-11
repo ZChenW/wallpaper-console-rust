@@ -61,7 +61,7 @@ pub async fn library_page_gui(
             .collect::<Vec<_>>();
         let dto_map_end = t0.elapsed();
         maybe_write_library_page_debug_log(
-            &s,
+            s,
             storage_init,
             query_end - storage_init,
             dto_map_end - query_end,
@@ -208,7 +208,7 @@ fn build_library_source_status(s: &wc_storage::StorageApi) -> Result<LibrarySour
 pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        build_library_source_status(&s)
+        build_library_source_status(s)
     })
     .await
     .map_err(|e| e.to_string())?

@@ -6,6 +6,7 @@ use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod apply_stage;
+pub mod capability;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
@@ -24,7 +25,7 @@ use awww::{
     normalize_awww_transition_type, stop_awww,
 };
 use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
-use mpvpaper::normalize_mpvpaper_options;
+use mpvpaper::{build_launch_command, normalize_mpvpaper_options};
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
@@ -161,6 +162,11 @@ pub(crate) fn apply_wallpaper_with_runtime(
     let previous_backend_raw = s.last_backend_read()?.unwrap_or_default();
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
+    let previous_mpvpaper_pids = if backend == Backend::Mpvpaper {
+        runtime.mpvpaper_pids()?
+    } else {
+        Vec::new()
+    };
 
     let timing_start = std::time::Instant::now();
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
@@ -209,6 +215,8 @@ pub(crate) fn apply_wallpaper_with_runtime(
         }
     }
 
+    let mut mpvpaper_launcher_succeeded = false;
+    let mut launched_mpvpaper_pid = None;
     let target_result = if backend == Backend::Awww && fallback_ok {
         Ok(())
     } else {
@@ -275,15 +283,18 @@ pub(crate) fn apply_wallpaper_with_runtime(
                 let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
                 let opts = normalize_mpvpaper_options(&opts_raw);
                 let output = s.config_get("mpvpaper_output", "*");
-                let mut cmd = Command::new("setsid");
-                cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
+                let mut cmd = build_launch_command(opts, &output, path);
                 let status = runtime
                     .command_status(&mut cmd)
                     .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
                 if !status.success() {
-                    return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
+                    Err(WcError::Other("mpvpaper failed to apply wallpaper".into()))
+                } else {
+                    mpvpaper_launcher_succeeded = true;
+                    runtime
+                        .wait_for_mpvpaper_ready(&previous_mpvpaper_pids)
+                        .map(|pid| launched_mpvpaper_pid = Some(pid))
                 }
-                Ok(())
             }
             Backend::LinuxWallpaperEngine => {
                 let project = linux_wallpaperengine::project_from_path(path)?;
@@ -304,6 +315,9 @@ pub(crate) fn apply_wallpaper_with_runtime(
     let target_elapsed = timing_start.elapsed();
 
     if let Err(e) = target_result {
+        if mpvpaper_launcher_succeeded {
+            runtime.stop_mpvpaper();
+        }
         let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
             s,
             lifecycle.previous,
@@ -326,6 +340,29 @@ pub(crate) fn apply_wallpaper_with_runtime(
         std::thread::sleep(std::time::Duration::from_millis(
             lifecycle.post_success_settle_ms,
         ));
+    }
+
+    if let Some(pid) = launched_mpvpaper_pid {
+        let readiness_error = match runtime.mpvpaper_pid_running(pid) {
+            Ok(true) => None,
+            Ok(false) => Some(WcError::Other(
+                "mpvpaper renderer exited before startup settled".into(),
+            )),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = readiness_error {
+            runtime.stop_mpvpaper();
+            let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
+                s,
+                lifecycle.previous,
+                fallback_ok,
+                runtime,
+            );
+            if let Some(msg) = rollback_msg {
+                write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
+            }
+            return Err(error);
+        }
     }
 
     if fallback_ok && visual.stop_fallback_after_target_settle {
@@ -1171,6 +1208,16 @@ mod tests {
         command_output_args: Vec<Vec<String>>,
         command_status_args: Vec<Vec<String>>,
         awww_readiness_sequence: std::cell::RefCell<Vec<crate::runtime::AwwwReadiness>>,
+        running_mpvpaper_pids: Vec<u32>,
+        mpvpaper_pids_error: Option<String>,
+        mpvpaper_pids_count: usize,
+        mpvpaper_readiness_error: Option<String>,
+        mpvpaper_wait_count: usize,
+        mpvpaper_wait_previous_pids: Vec<Vec<u32>>,
+        mpvpaper_ready_pid: Option<u32>,
+        dead_mpvpaper_pids: Vec<u32>,
+        mpvpaper_pid_running_error: Option<String>,
+        mpvpaper_pid_running_checks: Vec<u32>,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
@@ -1226,6 +1273,7 @@ mod tests {
 
         fn stop_mpvpaper(&mut self) {
             self.stop_mpvpaper_count += 1;
+            self.running_mpvpaper_pids.clear();
         }
 
         fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
@@ -1240,6 +1288,32 @@ mod tests {
                 seq[0].clone()
             } else {
                 crate::runtime::AwwwReadiness::Ready
+            }
+        }
+
+        fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
+            self.mpvpaper_pids_count += 1;
+            match &self.mpvpaper_pids_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(self.running_mpvpaper_pids.clone()),
+            }
+        }
+
+        fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
+            self.mpvpaper_wait_count += 1;
+            self.mpvpaper_wait_previous_pids
+                .push(previous_pids.to_vec());
+            match &self.mpvpaper_readiness_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(self.mpvpaper_ready_pid.unwrap_or(1)),
+            }
+        }
+
+        fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
+            self.mpvpaper_pid_running_checks.push(pid);
+            match &self.mpvpaper_pid_running_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(!self.dead_mpvpaper_pids.contains(&pid)),
             }
         }
 
@@ -1261,6 +1335,250 @@ mod tests {
         fn clear_awww_state_hint(&mut self) {
             self.clear_awww_state_hint_count += 1;
         }
+    }
+
+    #[test]
+    fn mpvpaper_baseline_pid_probe_failure_happens_before_pre_stop() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.png");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("awww").unwrap();
+        s.history_add(&old.to_string_lossy(), "awww").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            mpvpaper_pids_error: Some("mpvpaper baseline PID probe failed".into()),
+            mpvpaper_ready_pid: Some(808),
+            ..Default::default()
+        };
+        let error = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("baseline PID probe failed"));
+        assert!(!error.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(rt.mpvpaper_pids_count, 1);
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 0);
+        assert_eq!(rt.command_status_count, 0);
+        assert_eq!(rt.mpvpaper_wait_count, 0);
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+    }
+
+    #[test]
+    fn mpvpaper_launcher_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: false,
+            running_mpvpaper_pids: vec![101],
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mpvpaper"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(rt.mpvpaper_wait_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+    }
+
+    #[test]
+    fn mpvpaper_readiness_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![202],
+            mpvpaper_readiness_error: Some("mpvpaper did not become ready".into()),
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("did not become ready"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(rt.mpvpaper_wait_count, 1);
+        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![202]]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
+    }
+
+    #[test]
+    fn mpvpaper_readiness_success_writes_success_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![303],
+            mpvpaper_ready_pid: Some(404),
+            ..Default::default()
+        };
+        apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(next.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        let history_after = s.history_list().unwrap();
+        assert_eq!(history_after.len(), history_before.len() + 1);
+        assert_eq!(
+            history_after.first(),
+            Some(&next.to_string_lossy().into_owned())
+        );
+        assert_eq!(rt.mpvpaper_wait_count, 1);
+        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![404]);
+    }
+
+    #[test]
+    fn mpvpaper_exit_after_readiness_before_commit_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![404],
+            mpvpaper_ready_pid: Some(505),
+            dead_mpvpaper_pids: vec![505],
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mpvpaper"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![505]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
+    }
+
+    #[test]
+    fn mpvpaper_post_settle_probe_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
+        let history_before = s.history_list().unwrap();
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![606],
+            mpvpaper_ready_pid: Some(707),
+            mpvpaper_pid_running_error: Some("mpvpaper PID probe failed".into()),
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("probe failed"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![707]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
     }
 
     #[test]

@@ -24,6 +24,9 @@ pub trait BackendRuntime {
         &mut self,
         command: &mut Command,
     ) -> Result<std::process::ExitStatus, WcError>;
+    fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError>;
+    fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError>;
+    fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError>;
     fn stop_awww(&mut self);
     fn stop_mpvpaper(&mut self);
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
@@ -77,6 +80,36 @@ pub(crate) fn wait_for_awww_socket_ready(
     }
 }
 
+pub(crate) fn new_mpvpaper_pid(current_pids: &[u32], previous_pids: &[u32]) -> Option<u32> {
+    current_pids
+        .iter()
+        .copied()
+        .find(|pid| !previous_pids.contains(pid))
+}
+
+pub(crate) fn wait_for_mpvpaper_ready_with<P, S>(
+    previous_pids: &[u32],
+    mut probe: P,
+    mut sleep: S,
+) -> Result<u32, WcError>
+where
+    P: FnMut() -> Result<Vec<u32>, WcError>,
+    S: FnMut(std::time::Duration),
+{
+    for poll in 0..=40 {
+        let current_pids = probe()?;
+        if let Some(pid) = new_mpvpaper_pid(&current_pids, previous_pids) {
+            return Ok(pid);
+        }
+        if poll < 40 {
+            sleep(std::time::Duration::from_millis(50));
+        }
+    }
+    Err(WcError::Other(
+        "mpvpaper failed to become ready: no new mpvpaper process appeared within 2 seconds".into(),
+    ))
+}
+
 impl BackendRuntime for SystemBackendRuntime {
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
         command
@@ -91,6 +124,18 @@ impl BackendRuntime for SystemBackendRuntime {
         command
             .status()
             .map_err(|e| WcError::Other(format!("command failed: {}", e)))
+    }
+
+    fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
+        crate::mpvpaper::running_pids()
+    }
+
+    fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
+        wait_for_mpvpaper_ready_with(previous_pids, || self.mpvpaper_pids(), std::thread::sleep)
+    }
+
+    fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
+        Ok(self.mpvpaper_pids()?.contains(&pid))
     }
 
     fn stop_awww(&mut self) {
@@ -160,5 +205,82 @@ impl BackendRuntime for SystemBackendRuntime {
             .stdout(Stdio::null())
             .stderr(Stdio::null());
         let _ = self.command_status(&mut cmd);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::VecDeque;
+    use std::time::Duration;
+
+    use wc_core::error::WcError;
+
+    use super::{new_mpvpaper_pid, wait_for_mpvpaper_ready_with};
+
+    #[test]
+    fn mpvpaper_wait_returns_new_pid_after_an_immediate_old_only_probe() {
+        let mut probes: VecDeque<Result<Vec<u32>, WcError>> =
+            VecDeque::from([Ok(vec![41]), Ok(vec![41, 52])]);
+        let mut sleeps = Vec::new();
+
+        let pid = wait_for_mpvpaper_ready_with(
+            &[41],
+            || probes.pop_front().expect("unexpected extra PID probe"),
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+
+        assert_eq!(pid, 52);
+        assert_eq!(sleeps, vec![Duration::from_millis(50)]);
+    }
+
+    #[test]
+    fn mpvpaper_wait_times_out_after_two_seconds_of_old_only_probes() {
+        let mut probe_count = 0;
+        let mut sleeps = Vec::new();
+
+        let error = wait_for_mpvpaper_ready_with(
+            &[41],
+            || {
+                probe_count += 1;
+                Ok(vec![41])
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("within 2 seconds"));
+        assert_eq!(probe_count, 41);
+        assert_eq!(sleeps, vec![Duration::from_millis(50); 40]);
+    }
+
+    #[test]
+    fn mpvpaper_wait_propagates_the_first_probe_error_without_sleeping() {
+        let mut probe_count = 0;
+        let mut sleeps = Vec::new();
+
+        let error = wait_for_mpvpaper_ready_with(
+            &[41],
+            || {
+                probe_count += 1;
+                Err(WcError::Other("mpvpaper PID probe failed".into()))
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert_eq!(error.to_string(), "mpvpaper PID probe failed");
+        assert_eq!(probe_count, 1);
+        assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn new_mpvpaper_pid_selects_only_a_pid_absent_from_previous_snapshot() {
+        assert_eq!(new_mpvpaper_pid(&[41, 52, 63], &[41, 63]), Some(52));
+    }
+
+    #[test]
+    fn new_mpvpaper_pid_returns_none_without_a_new_pid() {
+        assert_eq!(new_mpvpaper_pid(&[41, 63], &[41, 63]), None);
     }
 }

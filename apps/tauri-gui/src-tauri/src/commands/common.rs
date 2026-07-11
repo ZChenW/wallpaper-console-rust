@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use wc_core::types::{FileType, WallpaperEntry};
 use wc_storage::StorageApi;
@@ -190,9 +191,47 @@ pub struct WeDebugInfoDto {
 
 pub type CommandResult = CommandResultDto;
 
-pub fn storage() -> Result<StorageApi, String> {
-    let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
-    StorageApi::try_new(cd).map_err(|e| e.to_string())
+struct StorageCell {
+    storage: OnceLock<StorageApi>,
+    initialization_lock: Mutex<()>,
+}
+
+impl StorageCell {
+    const fn new() -> Self {
+        Self {
+            storage: OnceLock::new(),
+            initialization_lock: Mutex::new(()),
+        }
+    }
+
+    fn get_or_init_with(
+        &self,
+        initializer: impl FnOnce() -> Result<StorageApi, String>,
+    ) -> Result<&StorageApi, String> {
+        if let Some(storage) = self.storage.get() {
+            return Ok(storage);
+        }
+
+        let _initialization_guard = self
+            .initialization_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(storage) = self.storage.get() {
+            return Ok(storage);
+        }
+
+        let storage = initializer()?;
+        Ok(self.storage.get_or_init(|| storage))
+    }
+}
+
+static STORAGE: StorageCell = StorageCell::new();
+
+pub fn storage() -> Result<&'static StorageApi, String> {
+    STORAGE.get_or_init_with(|| {
+        let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
+        StorageApi::try_new(cd).map_err(|e| e.to_string())
+    })
 }
 
 pub fn ok(stdout: impl Into<String>) -> CommandResultDto {
@@ -394,10 +433,81 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Barrier,
+    };
     use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn storage_cell_retries_after_initialization_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+
+        let first = cell.get_or_init_with(|| {
+            initializer_calls.fetch_add(1, Ordering::SeqCst);
+            Err("transient initialization error".to_string())
+        });
+        assert_eq!(
+            first.err().as_deref(),
+            Some("transient initialization error")
+        );
+
+        let second = cell
+            .get_or_init_with(|| {
+                initializer_calls.fetch_add(1, Ordering::SeqCst);
+                StorageApi::try_new(wc_core::ConfigDir {
+                    path: tmp.path().join("config"),
+                })
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let third = cell
+            .get_or_init_with(|| panic!("successful initialization should be reused"))
+            .unwrap();
+
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 2);
+        assert!(std::ptr::eq(second, third));
+    }
+
+    #[test]
+    fn storage_cell_initializes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+        let barrier = Barrier::new(16);
+
+        let handles = std::thread::scope(|scope| {
+            let mut threads = Vec::with_capacity(16);
+            for _ in 0..16 {
+                let config_path = tmp.path().join("config");
+                let cell = &cell;
+                let initializer_calls = &initializer_calls;
+                let barrier = &barrier;
+                threads.push(scope.spawn(move || {
+                    barrier.wait();
+                    let storage = cell
+                        .get_or_init_with(|| {
+                            initializer_calls.fetch_add(1, Ordering::SeqCst);
+                            StorageApi::try_new(wc_core::ConfigDir { path: config_path })
+                                .map_err(|e| e.to_string())
+                        })
+                        .unwrap();
+                    storage as *const StorageApi as usize
+                }));
+            }
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 1);
+        assert!(handles.windows(2).all(|pair| pair[0] == pair[1]));
+    }
 
     #[test]
     fn dto_from_entry_maps_renderer_limitation_from_we_compat() {

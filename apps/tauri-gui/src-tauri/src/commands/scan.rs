@@ -256,7 +256,7 @@ pub async fn rescan() -> CommandResult {
 
         let result: Result<String, String> = (|| {
             let s = storage()?;
-            let index_result = index_current_sources(&s)?;
+            let index_result = index_current_sources(s)?;
             Ok(format_index_sources_message(&index_result))
         })();
 

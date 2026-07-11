@@ -644,6 +644,45 @@ pub fn thumbnail_cache_cleanup_all(cache_dir: &Path) -> u64 {
     removed
 }
 
+const TMP_CLEANUP_INTERVAL_SECS: u64 = 3_600;
+
+#[derive(Default)]
+struct TmpCleanupSchedule {
+    last_sweeps: Mutex<HashMap<PathBuf, u64>>,
+}
+
+impl TmpCleanupSchedule {
+    fn should_run(&self, cache_dir: &Path, now: u64, interval_secs: u64) -> bool {
+        let mut last_sweeps = self
+            .last_sweeps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last_sweeps
+            .get(cache_dir)
+            .is_some_and(|last_sweep| {
+                now.checked_sub(*last_sweep)
+                    .is_some_and(|elapsed| elapsed < interval_secs)
+            })
+        {
+            return false;
+        }
+
+        last_sweeps.insert(cache_dir.to_path_buf(), now);
+        true
+    }
+}
+
+static TMP_CLEANUP_SCHEDULE: OnceLock<TmpCleanupSchedule> = OnceLock::new();
+
+fn maybe_cleanup_stale_tmp_thumbnails(cache_dir: &Path, now: u64) -> u64 {
+    let schedule = TMP_CLEANUP_SCHEDULE.get_or_init(TmpCleanupSchedule::default);
+    if schedule.should_run(cache_dir, now, TMP_CLEANUP_INTERVAL_SECS) {
+        cleanup_stale_tmp_thumbnails(cache_dir, TMP_CLEANUP_INTERVAL_SECS)
+    } else {
+        0
+    }
+}
+
 /// Full thumbnail-for API suitable for Tauri commands.
 pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
     thumbnail_for_with_failure_ttl(cache_dir, path, DEFAULT_FAILURE_TTL_SECS)
@@ -673,7 +712,7 @@ pub fn thumbnail_for_with_failure_ttl(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
-    let _ = cleanup_stale_tmp_thumbnails(cache_dir, 3600);
+    let _ = maybe_cleanup_stale_tmp_thumbnails(cache_dir, current_epoch_secs());
     let key = gui_thumb_cache_key_v2(path, mtime, size);
     let marker = failure_marker_path(cache_dir, &key);
     if let Some(failure) = read_failure_marker(&marker) {
@@ -1193,6 +1232,61 @@ mod tests {
         assert!(!old_tmp.exists());
         assert!(fresh_tmp.exists());
         assert!(normal.exists());
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_throttles_each_directory_independently() {
+        let schedule = TmpCleanupSchedule::default();
+
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+        assert!(!schedule.should_run(Path::new("/cache"), 1_001, 3_600));
+        assert!(schedule.should_run(Path::new("/cache"), 4_600, 3_600));
+        assert!(schedule.should_run(Path::new("/other"), 1_001, 3_600));
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_reopens_window_after_clock_rollback() {
+        let schedule = TmpCleanupSchedule::default();
+
+        assert!(schedule.should_run(Path::new("/cache"), 5_000, 3_600));
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_allows_one_concurrent_sweep() {
+        const THREADS: usize = 16;
+
+        let schedule = TmpCleanupSchedule::default();
+        let barrier = std::sync::Barrier::new(THREADS);
+        let winners = std::sync::atomic::AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let schedule = &schedule;
+                let barrier = &barrier;
+                let winners = &winners;
+                scope.spawn(move || {
+                    barrier.wait();
+                    if schedule.should_run(Path::new("/cache"), 1_000, 3_600) {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_recovers_from_poison() {
+        let schedule = TmpCleanupSchedule::default();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = schedule.last_sweeps.lock().unwrap();
+            panic!("poison cleanup schedule for test");
+        }));
+
+        assert!(poisoned.is_err());
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
     }
 
     #[test]
