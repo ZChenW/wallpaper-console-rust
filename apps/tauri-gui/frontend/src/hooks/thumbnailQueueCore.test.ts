@@ -234,6 +234,54 @@ test('thumbnail queue keeps duplicate checks cheap with a large backlog', async 
   assert.equal(loaded[0], 'hold');
 });
 
+test('replacePending discards a large stale backlog and preserves latest order', async () => {
+  let releaseHold: (() => void) | undefined;
+  const hold = new Promise<void>((resolve) => { releaseHold = resolve; });
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      if (path === 'hold') await hold;
+      return thumb(path);
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+  const latest = Array.from({ length: 8 }, (_, index) => `visible-${index}`);
+
+  queue.enqueue(['hold', ...Array.from({ length: 10_000 }, (_, index) => `old-${index}`)]);
+  queue.replacePending(latest);
+
+  assert.deepEqual(queue.snapshot().pending, latest);
+
+  releaseHold?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
+test('replacePending does not duplicate a latest path that is already in flight', async () => {
+  let releaseHold: (() => void) | undefined;
+  const hold = new Promise<void>((resolve) => { releaseHold = resolve; });
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      if (path === 'hold') await hold;
+      return thumb(path);
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['hold', 'old']);
+  queue.replacePending(['hold', 'visible', 'visible']);
+
+  assert.deepEqual(queue.snapshot().pending, ['visible']);
+  assert.equal(queue.snapshot().active, 1);
+
+  releaseHold?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+});
+
 test('thumbnail queue keeps queuedPaths in sync when re-enqueueing forgotten in-flight path', async () => {
   let releaseX: (() => void) | undefined;
   const xBlock = new Promise<void>((resolve) => { releaseX = resolve; });
