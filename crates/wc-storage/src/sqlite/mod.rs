@@ -1,6 +1,7 @@
 //! SQLite storage — schema, migration, verify, resync, backup, restore.
 
 mod backup;
+mod display_state;
 mod library_page;
 pub mod library_session;
 mod metadata_cache;
@@ -9,6 +10,7 @@ mod schema;
 mod source_config_state;
 
 pub use backup::*;
+pub use display_state::*;
 pub use library_page::*;
 pub use library_session::*;
 pub use metadata_cache::*;

@@ -32,7 +32,7 @@ impl StorageApi {
         if !cd.db_path().exists() {
             sqlite::migrate_to_sqlite(&cd)?;
         }
-        sqlite::ensure_sqlite_db(&cd);
+        sqlite::try_ensure_sqlite_db(&cd)?;
         wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
         sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
 
@@ -212,6 +212,42 @@ impl StorageApi {
         sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
         Ok(())
     }
+
+    // ── Per-display wallpaper state ───────────────────────────────────
+
+    pub fn display_state_get(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+    ) -> Result<Option<sqlite::DisplayStateRow>, WcError> {
+        sqlite::display_state_get_cd(&self.cd, target)
+    }
+
+    pub fn display_state_list(&self) -> Result<Vec<sqlite::DisplayStateRow>, WcError> {
+        sqlite::display_state_list_cd(&self.cd)
+    }
+
+    pub fn display_state_upsert(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+        wallpaper_path: &str,
+        backend: &str,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_upsert_cd(&self.cd, target, wallpaper_path, backend)
+    }
+
+    pub fn display_state_delete(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+    ) -> Result<bool, WcError> {
+        sqlite::display_state_delete_cd(&self.cd, target)
+    }
+
+    pub fn display_state_replace_all(
+        &self,
+        rows: &[(sqlite::DisplayStateTarget, String, String)],
+    ) -> Result<(), WcError> {
+        sqlite::display_state_replace_all_cd(&self.cd, rows)
+    }
 }
 
 #[cfg(test)]
@@ -244,6 +280,59 @@ mod tests {
             storage.history_list().unwrap(),
             vec!["/walls/b.jpg".to_string()]
         );
+        assert_eq!(
+            storage.current_read().unwrap().as_deref(),
+            Some("/walls/current.jpg")
+        );
+        assert_eq!(
+            storage.last_backend_read().unwrap().as_deref(),
+            Some("awww")
+        );
+    }
+
+    #[test]
+    fn try_new_surfaces_fallible_sqlite_bootstrap_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute("CREATE TABLE wallpapers_fts(dummy TEXT)", [])
+            .unwrap();
+        drop(conn);
+
+        match StorageApi::try_new(cd) {
+            Ok(_) => panic!("bootstrap errors must surface"),
+            Err(err) => assert!(
+                err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
+                "{err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn storage_api_migrates_legacy_pair_into_all_displays_without_deleting_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = StorageApi::new(cd);
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+
+        // Re-open path that runs ensure_sqlite_db / create_schema migration.
+        let storage = StorageApi::new(ConfigDir {
+            path: storage.cd.path.clone(),
+        });
+
+        let row = storage
+            .display_state_get(&sqlite::DisplayStateTarget::AllDisplays)
+            .unwrap()
+            .expect("All Displays migrated");
+        assert_eq!(row.wallpaper_path, "/walls/current.jpg");
+        assert_eq!(row.backend, "awww");
         assert_eq!(
             storage.current_read().unwrap().as_deref(),
             Some("/walls/current.jpg")

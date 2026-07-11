@@ -106,6 +106,7 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
     ensure_wallpaper_metadata_columns(conn)?;
     ensure_wallpaper_query_indexes(conn)?;
     ensure_wallpapers_fts_rebuilt(conn)?;
+    super::display_state::ensure_display_state(conn)?;
     Ok(())
 }
 
@@ -328,15 +329,23 @@ pub fn open_runtime_connection(cd: &ConfigDir) -> Result<Connection, WcError> {
     Ok(conn)
 }
 
+/// Fallible bootstrap: open/create the DB, apply the full schema, and set
+/// runtime PRAGMAs. Surfaces schema/migration errors to callers that can
+/// propagate them (for example [`crate::StorageApi::try_new`] and display-state
+/// ConfigDir helpers).
+pub fn try_ensure_sqlite_db(cd: &ConfigDir) -> Result<(), WcError> {
+    let db = cd.db_path();
+    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    create_schema(&conn)?;
+    apply_runtime_pragmas(&conn)?;
+    Ok(())
+}
+
 /// Ensure wallpapers.db exists with the full schema.
 /// No-op if the file already exists. Failures are logged and silently ignored
 /// so that callers never get blocked by bootstrap failures.
 pub fn ensure_sqlite_db(cd: &ConfigDir) {
-    let db = cd.db_path();
-    if let Ok(conn) = Connection::open(&db) {
-        create_schema(&conn).ok();
-        apply_runtime_pragmas(&conn).ok();
-    }
+    let _ = try_ensure_sqlite_db(cd);
 }
 
 /// Ensure SQLite exists, importing legacy flat files only when the DB is absent.
@@ -450,6 +459,26 @@ mod tests {
 
         let err = create_schema(&conn).unwrap_err();
 
+        assert!(
+            err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn try_ensure_sqlite_db_surfaces_schema_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        // Regular table occupying the FTS name makes rebuild fail during create_schema.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute("CREATE TABLE wallpapers_fts(dummy TEXT)", [])
+            .unwrap();
+        drop(conn);
+
+        let err = try_ensure_sqlite_db(&cd).expect_err("poisoned FTS must surface");
         assert!(
             err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
             "{err}"
