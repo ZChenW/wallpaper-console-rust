@@ -1,6 +1,7 @@
 pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
+pub mod display_apply;
 pub mod display_plan;
 
 use std::path::{Path, PathBuf};
@@ -70,6 +71,14 @@ impl AppService {
             path: path.to_string(),
             request_id: None,
         })?;
+
+        // Legacy apply(path) is the explicit All Displays default: replace
+        // per-display rows with a single All Displays mapping after success.
+        display_apply::commit_legacy_apply_display_state(
+            self,
+            &result.applied_path,
+            result.backend,
+        )?;
 
         Ok(ApplyTarget {
             input_path: path.to_string(),

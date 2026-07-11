@@ -404,6 +404,15 @@ pub fn display_state_replace_all(
     conn: &Connection,
     rows: &[(DisplayStateTarget, String, String)],
 ) -> Result<(), WcError> {
+    display_state_replace_all_with_seam(conn, rows, None)
+}
+
+/// Atomically replace all rows, with an optional failure-injection seam before commit.
+pub fn display_state_replace_all_with_seam(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    mut before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
     let mut seen = HashSet::new();
     let mut normalized: Vec<(&DisplayStateTarget, &str, &'static str)> =
         Vec::with_capacity(rows.len());
@@ -435,6 +444,99 @@ pub fn display_state_replace_all(
             stmt.execute(params![target.storage_key(), path, backend])
                 .map_err(|e| WcError::Sqlite(e.to_string()))?;
         }
+    }
+    if let Some(seam) = before_commit.as_mut() {
+        seam()?;
+    }
+    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+/// Atomically replace display_state with a single All Displays row (plus any
+/// retained disconnected named rows) and, when requested, write legacy
+/// `current` / `last_backend` in the same transaction.
+///
+/// `before_commit` is an optional seam invoked after all writes and before
+/// `COMMIT`, so tests can inject commit-time failures without touching
+/// renderer processes.
+pub fn display_state_commit_all_displays_with_legacy(
+    conn: &Connection,
+    wallpaper_path: &str,
+    backend: &str,
+    retain_rows: &[(DisplayStateTarget, String, String)],
+    sync_legacy: bool,
+    mut before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    let all = DisplayStateTarget::AllDisplays;
+    all.validate()?;
+    let backend = validate_assignment(wallpaper_path, backend)?;
+
+    let mut seen = HashSet::new();
+    seen.insert(all.storage_key().to_string());
+    let mut retained: Vec<(&DisplayStateTarget, &str, &'static str)> =
+        Vec::with_capacity(retain_rows.len());
+    for (target, path, raw_backend) in retain_rows {
+        if matches!(target, DisplayStateTarget::AllDisplays) {
+            return Err(WcError::Other(
+                "retain_rows must not include AllDisplays (primary row is separate)".into(),
+            ));
+        }
+        target.validate()?;
+        let normalized = validate_assignment(path, raw_backend)?;
+        if !seen.insert(target.storage_key().to_string()) {
+            return Err(WcError::Other(format!(
+                "duplicate display state target: {}",
+                target.storage_key()
+            )));
+        }
+        retained.push((target, path.as_str(), normalized));
+    }
+
+    ensure_display_state_schema(conn)?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute("DELETE FROM display_state", [])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.execute(
+        "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
+         VALUES (?1, ?2, ?3, datetime('now'))",
+        params![all.storage_key(), wallpaper_path, backend],
+    )
+    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    {
+        let mut stmt = tx
+            .prepare(
+                "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
+                 VALUES (?1, ?2, ?3, datetime('now'))",
+            )
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        for (target, path, backend) in retained {
+            stmt.execute(params![target.storage_key(), path, backend])
+                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+    }
+    if sync_legacy {
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );",
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
+            params![wallpaper_path],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        tx.execute(
+            "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
+            params![backend],
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    }
+    if let Some(seam) = before_commit.as_mut() {
+        seam()?;
     }
     tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
@@ -488,6 +590,35 @@ pub fn display_state_replace_all_cd(
     let conn = open_display_state_connection(cd)?;
     ensure_display_state(&conn)?;
     display_state_replace_all(&conn, rows)
+}
+
+pub fn display_state_replace_all_cd_with_seam(
+    cd: &ConfigDir,
+    rows: &[(DisplayStateTarget, String, String)],
+    before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+) -> Result<(), WcError> {
+    let conn = open_runtime_connection(cd)?;
+    display_state_replace_all_with_seam(&conn, rows, Some(before_commit))
+}
+
+pub fn display_state_commit_all_displays_with_legacy_cd(
+    cd: &ConfigDir,
+    wallpaper_path: &str,
+    backend: &str,
+    retain_rows: &[(DisplayStateTarget, String, String)],
+    sync_legacy: bool,
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    let conn = open_display_state_connection(cd)?;
+    ensure_display_state(&conn)?;
+    display_state_commit_all_displays_with_legacy(
+        &conn,
+        wallpaper_path,
+        backend,
+        retain_rows,
+        sync_legacy,
+        before_commit,
+    )
 }
 
 #[cfg(test)]
@@ -1268,5 +1399,86 @@ mod tests {
             .expect("row present");
         writer.join().unwrap();
         assert_eq!(row.wallpaper_path, "/walls/a.jpg");
+    }
+
+    #[test]
+    fn commit_all_displays_with_legacy_writes_atomically() {
+        let conn = open_db();
+        display_state_upsert(
+            &conn,
+            &DisplayStateTarget::Output("eDP-1".into()),
+            "/walls/old.jpg",
+            "awww",
+        )
+        .unwrap();
+
+        display_state_commit_all_displays_with_legacy(
+            &conn,
+            "/walls/new.jpg",
+            "awww",
+            &[],
+            true,
+            None,
+        )
+        .unwrap();
+
+        let rows = display_state_list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
+        assert_eq!(rows[0].wallpaper_path, "/walls/new.jpg");
+        assert_eq!(
+            read_state_value(&conn, "current").unwrap().as_deref(),
+            Some("/walls/new.jpg")
+        );
+        assert_eq!(
+            read_state_value(&conn, "last_backend").unwrap().as_deref(),
+            Some("awww")
+        );
+    }
+
+    #[test]
+    fn commit_all_displays_seam_failure_rolls_back_display_and_legacy() {
+        let conn = open_db();
+        display_state_upsert(
+            &conn,
+            &DisplayStateTarget::AllDisplays,
+            "/walls/old.jpg",
+            "mpvpaper",
+        )
+        .unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS state (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+             INSERT OR REPLACE INTO state (key, value) VALUES ('current', '/walls/old.jpg');
+             INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', 'mpvpaper');",
+        )
+        .unwrap();
+
+        let mut seam = || Err(WcError::Other("injected commit failure".into()));
+        let err = display_state_commit_all_displays_with_legacy(
+            &conn,
+            "/walls/new.jpg",
+            "awww",
+            &[],
+            true,
+            Some(&mut seam),
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("injected commit failure"));
+
+        let rows = display_state_list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wallpaper_path, "/walls/old.jpg");
+        assert_eq!(rows[0].backend, "mpvpaper");
+        assert_eq!(
+            read_state_value(&conn, "current").unwrap().as_deref(),
+            Some("/walls/old.jpg")
+        );
+        assert_eq!(
+            read_state_value(&conn, "last_backend").unwrap().as_deref(),
+            Some("mpvpaper")
+        );
     }
 }

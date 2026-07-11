@@ -30,6 +30,31 @@ pub trait BackendRuntime {
     fn stop_awww(&mut self);
     fn stop_mpvpaper(&mut self);
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
+    /// Stop awww and verify the daemon is gone. Display executor uses this.
+    fn stop_awww_checked(&mut self) -> Result<(), WcError> {
+        self.stop_awww();
+        Ok(())
+    }
+    /// Stop mpvpaper and verify no processes remain. Display executor uses this.
+    fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
+        self.stop_mpvpaper();
+        Ok(())
+    }
+    /// Stop LWE and verify termination. Display executor uses this.
+    fn stop_lwe_checked(&mut self, s: Option<&StorageApi>) -> Result<(), WcError> {
+        self.stop_lwe(s);
+        Ok(())
+    }
+    /// Apply LWE to explicit outputs (readiness + handoff included).
+    ///
+    /// System runtime delegates to the real implementation. Fakes must not
+    /// launch or kill real linux-wallpaperengine processes.
+    fn apply_lwe_to_outputs(
+        &mut self,
+        s: &StorageApi,
+        project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+        outputs: &[String],
+    ) -> Result<(), WcError>;
     fn awww_socket_ready(&mut self) -> AwwwReadiness;
     fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError>;
     fn clear_awww_state_hint(&mut self);
@@ -148,6 +173,61 @@ impl BackendRuntime for SystemBackendRuntime {
 
     fn stop_lwe(&mut self, s: Option<&StorageApi>) {
         crate::linux_wallpaperengine::stop(s);
+    }
+
+    fn stop_awww_checked(&mut self) -> Result<(), WcError> {
+        self.stop_awww();
+        let user = crate::whoami();
+        if crate::awww::is_awww_daemon_running(&user) {
+            return Err(WcError::Other(
+                "awww-daemon still running after stop".into(),
+            ));
+        }
+        // Socket may linger briefly; treat Ready as evidence the daemon survived.
+        if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
+            return Err(WcError::Other(
+                "awww socket still answers query after stop".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
+        self.stop_mpvpaper();
+        let pids = self.mpvpaper_pids()?;
+        if !pids.is_empty() {
+            return Err(WcError::Other(format!(
+                "mpvpaper still running after stop: pids={pids:?}"
+            )));
+        }
+        Ok(())
+    }
+
+    fn stop_lwe_checked(&mut self, s: Option<&StorageApi>) -> Result<(), WcError> {
+        self.stop_lwe(s);
+        if crate::linux_wallpaperengine::is_running_for_current_user() {
+            return Err(WcError::Other(
+                "linux-wallpaperengine still running after stop".into(),
+            ));
+        }
+        if let Some(storage) = s {
+            let pid = storage.config_get("linux_wallpaperengine_pid", "");
+            if !pid.trim().is_empty() {
+                return Err(WcError::Other(format!(
+                    "linux-wallpaperengine pid tracking not cleared after stop: {pid}"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    fn apply_lwe_to_outputs(
+        &mut self,
+        s: &StorageApi,
+        project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+        outputs: &[String],
+    ) -> Result<(), WcError> {
+        crate::linux_wallpaperengine::apply_to_outputs(s, project.clone(), outputs)
     }
 
     fn awww_socket_ready(&mut self) -> AwwwReadiness {

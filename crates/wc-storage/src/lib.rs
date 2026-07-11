@@ -248,6 +248,54 @@ impl StorageApi {
     ) -> Result<(), WcError> {
         sqlite::display_state_replace_all_cd(&self.cd, rows)
     }
+
+    /// Same as [`Self::display_state_replace_all`] with a pre-commit test seam.
+    pub fn display_state_replace_all_seam(
+        &self,
+        rows: &[(sqlite::DisplayStateTarget, String, String)],
+        before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_replace_all_cd_with_seam(&self.cd, rows, before_commit)
+    }
+
+    /// Atomically commit All Displays display_state (plus retained disconnected
+    /// named rows) and optionally legacy `current` / `last_backend` keys.
+    pub fn display_state_commit_all_displays_with_legacy(
+        &self,
+        wallpaper_path: &str,
+        backend: &str,
+        retain_rows: &[(sqlite::DisplayStateTarget, String, String)],
+        sync_legacy: bool,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_commit_all_displays_with_legacy_cd(
+            &self.cd,
+            wallpaper_path,
+            backend,
+            retain_rows,
+            sync_legacy,
+            None,
+        )
+    }
+
+    /// Same as [`Self::display_state_commit_all_displays_with_legacy`] with a
+    /// pre-commit seam for failure-injection tests.
+    pub fn display_state_commit_all_displays_with_legacy_seam(
+        &self,
+        wallpaper_path: &str,
+        backend: &str,
+        retain_rows: &[(sqlite::DisplayStateTarget, String, String)],
+        sync_legacy: bool,
+        before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_commit_all_displays_with_legacy_cd(
+            &self.cd,
+            wallpaper_path,
+            backend,
+            retain_rows,
+            sync_legacy,
+            Some(before_commit),
+        )
+    }
 }
 
 #[cfg(test)]

@@ -125,30 +125,61 @@ pub fn project_from_path(path: &str) -> Result<LinuxWallpaperEngineProject, WcEr
 
 pub fn apply(s: &StorageApi, project: LinuxWallpaperEngineProject) -> Result<(), WcError> {
     let config = LinuxWallpaperEngineConfig::from_storage(s);
-    if !config.enabled {
-        return Err(WcError::Other("linux-wallpaperengine is disabled".into()));
-    }
-    let binary = resolve_binary(&config)?;
-    let target = project
+    let wallpaper_id = project
         .workshop_id
         .clone()
         .unwrap_or_else(|| project.project_path.clone());
-    let mut args = Vec::new();
+    let mut target_args = Vec::new();
     match config.target_mode.as_str() {
         "screen-root" if !config.target.trim().is_empty() => {
-            args.push("--screen-root".to_string());
-            args.push(config.target.clone());
-            args.push("--bg".to_string());
-            args.push(target);
+            target_args.push("--screen-root".to_string());
+            target_args.push(config.target.clone());
+            target_args.push("--bg".to_string());
+            target_args.push(wallpaper_id);
         }
         "screen-span" if !config.target.trim().is_empty() => {
-            args.push("--screen-span".to_string());
-            args.push(config.target.clone());
-            args.push("--bg".to_string());
-            args.push(target);
+            target_args.push("--screen-span".to_string());
+            target_args.push(config.target.clone());
+            target_args.push("--bg".to_string());
+            target_args.push(wallpaper_id);
         }
-        _ => args.push(target),
+        _ => target_args.push(wallpaper_id),
     }
+    apply_with_target_args(s, &config, target_args)
+}
+
+/// Apply a scene to explicit outputs using repeated `--screen-root` / `--bg` pairs.
+///
+/// Used by display-aware apply. The same wallpaper id is paired with every output.
+pub fn apply_to_outputs(
+    s: &StorageApi,
+    project: LinuxWallpaperEngineProject,
+    outputs: &[String],
+) -> Result<(), WcError> {
+    if outputs.is_empty() {
+        return Err(WcError::Other(
+            "linux-wallpaperengine apply_to_outputs requires at least one output".into(),
+        ));
+    }
+    let config = LinuxWallpaperEngineConfig::from_storage(s);
+    let wallpaper_id = project
+        .workshop_id
+        .clone()
+        .unwrap_or_else(|| project.project_path.clone());
+    let target_args = crate::target_commands::build_lwe_screen_root_args(outputs, &wallpaper_id)?;
+    apply_with_target_args(s, &config, target_args)
+}
+
+fn apply_with_target_args(
+    s: &StorageApi,
+    config: &LinuxWallpaperEngineConfig,
+    target_args: Vec<String>,
+) -> Result<(), WcError> {
+    if !config.enabled {
+        return Err(WcError::Other("linux-wallpaperengine is disabled".into()));
+    }
+    let binary = resolve_binary(config)?;
+    let mut args = target_args;
     if config.scaling != "default" {
         args.push("--scaling".into());
         args.push(config.scaling.clone());
@@ -298,6 +329,21 @@ pub fn stop_tracked_processes() {
             .stderr(Stdio::null())
             .status();
     }
+}
+
+/// True when any linux-wallpaperengine process is owned by the current user.
+pub fn is_running_for_current_user() -> bool {
+    let Ok(user) = std::env::var("USER") else {
+        return false;
+    };
+    matches!(
+        Command::new("pgrep")
+            .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status(),
+        Ok(s) if s.success()
+    )
 }
 
 fn resolve_binary(config: &LinuxWallpaperEngineConfig) -> Result<String, WcError> {
@@ -623,5 +669,26 @@ mod tests {
                 .stderr(Stdio::null())
                 .status();
         }
+    }
+
+    #[test]
+    fn apply_to_outputs_rejects_empty_output_list() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("config"),
+        };
+        cd.init().unwrap();
+        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let s = StorageApi::new(cd);
+        let scene = tmp.path().join("scene");
+        std::fs::create_dir_all(&scene).unwrap();
+        std::fs::write(
+            scene.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","workshopid":"1"}"#,
+        )
+        .unwrap();
+        let project = project_from_path(&scene.to_string_lossy()).unwrap();
+        let err = apply_to_outputs(&s, project, &[]).unwrap_err();
+        assert!(err.to_string().contains("at least one output"));
     }
 }

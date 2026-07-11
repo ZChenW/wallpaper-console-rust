@@ -7,10 +7,12 @@ use wc_storage::StorageApi;
 
 pub mod apply_stage;
 pub mod capability;
+pub mod display_executor;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
 pub mod runtime;
+pub mod target_commands;
 pub mod visual_handoff;
 
 mod awww;
@@ -18,7 +20,12 @@ mod debug_log;
 mod mpvpaper;
 mod restore;
 
+pub use display_executor::{
+    execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
+    DisplayExecReport,
+};
 pub use restore::{restore, restore_clean};
+pub use target_commands::ExecutionScope;
 
 use awww::{
     build_awww_img_command, build_awww_instant_command, normalize_awww_resize,
@@ -1278,6 +1285,15 @@ mod tests {
 
         fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
             self.stop_lwe_count += 1;
+        }
+
+        fn apply_lwe_to_outputs(
+            &mut self,
+            _s: &wc_storage::StorageApi,
+            _project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+            _outputs: &[String],
+        ) -> Result<(), WcError> {
+            Ok(())
         }
 
         fn awww_socket_ready(&mut self) -> crate::runtime::AwwwReadiness {
