@@ -5,6 +5,8 @@ pub mod sqlite;
 pub mod tsv;
 pub mod we_compat;
 
+pub use sqlite::{SourceAvailability, SourceKind, SourceRecord};
+
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::StorageBackend;
@@ -83,26 +85,7 @@ impl StorageApi {
     }
 
     pub fn sources_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut stmt = conn
-            .prepare("SELECT path FROM sources ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let normalized: Vec<String> = rows
-            .into_iter()
-            .map(|p| wc_scan::normalize_source_path(&p))
-            .collect();
-        let mut seen = std::collections::HashSet::new();
-        Ok(normalized
-            .into_iter()
-            .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect())
+        sqlite::source_paths_list_compat(&self.cd)
     }
 
     pub fn favorites_list(&self) -> Result<Vec<String>, WcError> {
@@ -173,13 +156,47 @@ impl StorageApi {
     }
 
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
-        let path = wc_scan::normalize_source_path(path);
-        sqlite::sqlite_source_add(&self.cd, &path)
+        sqlite::sqlite_source_add(&self.cd, path)
     }
 
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
-        let path = wc_scan::normalize_source_path(path);
-        sqlite::sqlite_source_remove_canonical(&self.cd, &path)
+        sqlite::sqlite_source_remove_canonical(&self.cd, path)
+    }
+
+    pub fn source_records(&self) -> Result<Vec<sqlite::SourceRecord>, WcError> {
+        sqlite::sources_list_typed(&self.cd)
+    }
+
+    pub fn source_create(&self, path: &str) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_create(&self.cd, path).map(|(source, _)| source)
+    }
+
+    pub fn source_rename(
+        &self,
+        id: i64,
+        display_name: &str,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_rename(&self.cd, id, display_name)
+    }
+
+    pub fn source_set_recursive(
+        &self,
+        id: i64,
+        recursive: bool,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_set_recursive(&self.cd, id, recursive)
+    }
+
+    pub fn source_set_availability(
+        &self,
+        id: i64,
+        availability: sqlite::SourceAvailability,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_set_availability(&self.cd, id, availability)
+    }
+
+    pub fn source_remove_by_id(&self, id: i64) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_remove_by_id(&self.cd, id)
     }
 
     pub fn favorites_add(&self, path: &str) -> Result<bool, WcError> {

@@ -7,56 +7,18 @@ use super::schema::ensure_sqlite_db;
 /// Add a source directly to the SQLite sources table.
 /// Auto-creates the database if it does not exist.
 pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    ensure_sqlite_db(cd);
-    let db = cd.db_path();
-    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let n = conn
-        .execute(
-            "INSERT OR IGNORE INTO sources (path) VALUES (?1)",
-            params![path],
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(n > 0)
+    super::sources::source_create(cd, path).map(|(_, created)| created)
 }
 
 /// Remove a source directly from the SQLite sources table.
 /// Auto-creates the database if it does not exist.
 pub fn sqlite_source_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    ensure_sqlite_db(cd);
-    let db = cd.db_path();
-    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let n = conn
-        .execute("DELETE FROM sources WHERE path = (?1)", params![path])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(n > 0)
+    super::sources::source_remove_exact_path_compat(cd, path)
 }
 
 /// Remove all source rows that normalize to the same WE root or canonical path as `path`.
 pub fn sqlite_source_remove_canonical(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    ensure_sqlite_db(cd);
-    let db = cd.db_path();
-    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let mut stmt = conn
-        .prepare("SELECT path FROM sources")
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let rows: Vec<String> = stmt
-        .query_map([], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let target_norm = wc_scan::normalize_source_path(path);
-    let to_delete: Vec<String> = rows
-        .into_iter()
-        .filter(|r| wc_scan::normalize_source_path(r) == target_norm)
-        .collect();
-    if to_delete.is_empty() {
-        return Ok(false);
-    }
-    for p in &to_delete {
-        conn.execute("DELETE FROM sources WHERE path = (?1)", params![p])
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    }
-    Ok(true)
+    super::sources::source_remove_canonical_compat(cd, path)
 }
 
 pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
