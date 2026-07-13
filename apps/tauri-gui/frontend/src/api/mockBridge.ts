@@ -1,155 +1,26 @@
-interface CommandResult {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-}
-
-interface ApplyRequestDTO {
-  kind: string;
-  path: string;
-  requestId?: string;
-}
+import type {
+  ApplyActionKind,
+  ApplyAvailability,
+  ApplyRequestDTO,
+  CommandResult,
+  DisplayDTO,
+  DisplayListDTO,
+  DisplayStateDTO,
+  LibraryCountDTO,
+  LibraryPageDTO,
+  LinuxWallpaperEngineStatusDTO,
+  ScanProgressDTO,
+  SourceDTO,
+  StatusDTO,
+  TargetedApplyRequestDTO,
+  TargetedRestoreRequestDTO,
+  ThumbnailDTO,
+  WallpaperConsoleApi,
+  WallpaperDTO,
+} from './types';
 
 let lastApplyActionRequest: ApplyRequestDTO | null = null;
 let lastTargetedApplyRequest: TargetedApplyRequestDTO | null = null;
-
-interface LibraryCountDTO {
-  total: number;
-  images: number;
-  gifs: number;
-  videos: number;
-}
-
-interface LibraryPageDTO {
-  total: number;
-  items: WallpaperDTO[];
-}
-
-interface SourceDTO {
-  path: string;
-  exists: boolean;
-  isWE: boolean;
-  label: string;
-}
-
-interface StatusDTO {
-  configDir: string;
-  current: string;
-  lastBackend: string;
-  sourceCount: number;
-}
-
-interface DisplayDTO {
-  name: string;
-}
-
-interface DisplayListDTO {
-  outputs: DisplayDTO[];
-}
-
-type DisplayStateKind = 'allDisplays' | 'output';
-
-interface DisplayStateDTO {
-  targetKey: string;
-  kind: DisplayStateKind;
-  output: string | null;
-  wallpaperPath: string;
-  backend: string;
-  updatedAt: string;
-}
-
-interface TargetedApplyRequestDTO {
-  path: string;
-  target?: string;
-  requestId?: string;
-}
-
-interface TargetedRestoreRequestDTO {
-  outputs?: string[];
-}
-
-interface LinuxWallpaperEngineStatusDTO {
-  available: boolean;
-  path?: string;
-  message: string;
-  detail?: string;
-}
-
-interface ThumbnailCacheDTO {
-  dir: string;
-  size: string;
-  entries: number;
-  oldestMtime?: number;
-  newestMtime?: number;
-  failureEntries: number;
-  cleanupDays: number;
-}
-
-interface ThumbnailDTO {
-  path: string;
-  thumbnail?: string;
-  cacheHit: boolean;
-  failureReason?: string;
-}
-
-interface ScanProgressDTO {
-  running: boolean;
-  stage: string;
-  scanned: number;
-  totalHint?: number;
-  reusedMetadata: number;
-  probedMetadata: number;
-  insertedSqlite: number;
-  staged: number;
-  skipped: number;
-  metadataErrors: number;
-  currentPath?: string;
-  cancelRequested: boolean;
-  error?: string;
-}
-
-type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
-
-type ApplyActionKind =
-  | 'apply'
-  | 'retry_backend_apply'
-  | 'apply_preview'
-  | 'open_folder'
-  | 'copy_workshop_id';
-
-interface ApplyActionDTO {
-  kind: ApplyActionKind;
-  label: string;
-  enabled: boolean;
-  reason?: string;
-}
-
-interface WallpaperDTO {
-  path: string;
-  type: string;
-  ext: string;
-  backend: string;
-  size: number;
-  mtime: number;
-  resolution: string;
-  projectType?: string;
-  previewPath?: string;
-  workshopId?: string;
-  title?: string;
-  weFile?: string;
-  unsupportedReason?: string;
-  backendStatus?: string;
-  backendErrorKind?: string;
-  backendErrorMessage?: string;
-  backendErrorDetail?: string;
-  backendFailedAt?: string;
-  applyAvailability?: ApplyAvailability;
-  applyBackend?: string;
-  applyReason?: string;
-  applyActions?: ApplyActionDTO[];
-  rendererCompatibility?: string;
-}
 
 const MOCK_WE_WALLPAPERS: WallpaperDTO[] = [
   {
@@ -371,7 +242,7 @@ function resetLibraryScenario(): void {
   libraryFirstPageEmptyConsumed = false;
 }
 
-export const api = {
+const mockBridgeAdapter = {
   status: async (): Promise<StatusDTO> => ({
     configDir: '/mock/.config/wallpaper-console',
     current: '/mock/path/wallpaper-001.jpg',
@@ -589,52 +460,54 @@ export const api = {
     await new Promise((resolve) => setTimeout(resolve, 300));
     return commandFailures.has('exportDiagnostics') ? failResult : ok;
   },
+} satisfies WallpaperConsoleApi;
 
-  __mockControl: {
-    setScanProgress: (partial: Partial<ScanProgressDTO>): void => {
-      scanProgressState = { ...scanProgressState, ...partial };
-    },
-    resetScanProgress: (): void => {
-      resetScanProgressState();
-    },
-    setScanAutoAdvance: (enabled: boolean, step = 5): void => {
-      scanAutoAdvance = enabled;
-      scanStep = step;
-    },
-    injectCommandFailure: (cmd: string): void => {
-      commandFailures.add(cmd);
-    },
-    clearCommandFailure: (cmd: string): void => {
-      commandFailures.delete(cmd);
-    },
-    setConfig: (key: string, value: string): void => {
-      configStore[key] = value;
-    },
-    resetConfig: (): void => {
-      resetConfigStore();
-    },
-    setThumbnailFailure: (path: string): void => {
-      thumbnailFailures.add(path);
-    },
-    clearThumbnailFailure: (path: string): void => {
-      thumbnailFailures.delete(path);
-    },
-    setLibraryFirstPageEmpty: (enabled: boolean): void => {
-      libraryFirstPageEmpty = enabled;
-      libraryFirstPageEmptyConsumed = false;
-    },
-    lastTargetedApplyRequest: (): TargetedApplyRequestDTO | null =>
-      lastTargetedApplyRequest ? { ...lastTargetedApplyRequest } : null,
-    resetAll: (): void => {
-      resetScanProgressState();
-      resetConfigStore();
-      resetLibraryScenario();
-      lastTargetedApplyRequest = null;
-      commandFailures.clear();
-      thumbnailFailures.clear();
-    },
+const mockControl = {
+  setScanProgress: (partial: Partial<ScanProgressDTO>): void => {
+    scanProgressState = { ...scanProgressState, ...partial };
+  },
+  resetScanProgress: (): void => {
+    resetScanProgressState();
+  },
+  setScanAutoAdvance: (enabled: boolean, step = 5): void => {
+    scanAutoAdvance = enabled;
+    scanStep = step;
+  },
+  injectCommandFailure: (cmd: string): void => {
+    commandFailures.add(cmd);
+  },
+  clearCommandFailure: (cmd: string): void => {
+    commandFailures.delete(cmd);
+  },
+  setConfig: (key: string, value: string): void => {
+    configStore[key] = value;
+  },
+  resetConfig: (): void => {
+    resetConfigStore();
+  },
+  setThumbnailFailure: (path: string): void => {
+    thumbnailFailures.add(path);
+  },
+  clearThumbnailFailure: (path: string): void => {
+    thumbnailFailures.delete(path);
+  },
+  setLibraryFirstPageEmpty: (enabled: boolean): void => {
+    libraryFirstPageEmpty = enabled;
+    libraryFirstPageEmptyConsumed = false;
+  },
+  lastTargetedApplyRequest: (): TargetedApplyRequestDTO | null =>
+    lastTargetedApplyRequest ? { ...lastTargetedApplyRequest } : null,
+  resetAll: (): void => {
+    resetScanProgressState();
+    resetConfigStore();
+    resetLibraryScenario();
+    lastTargetedApplyRequest = null;
+    commandFailures.clear();
+    thumbnailFailures.clear();
   },
 };
+
+export const api = Object.assign(mockBridgeAdapter, { __mockControl: mockControl });
 
 if (typeof globalThis !== 'undefined') {
   (globalThis as { __mockControl?: typeof api.__mockControl }).__mockControl = api.__mockControl;

@@ -1,195 +1,25 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  ApplyRequestDTO,
+  CommandResult,
+  DisplayListDTO,
+  DisplayStateDTO,
+  LibraryCountDTO,
+  LibraryPageDTO,
+  LibrarySourceStatusDTO,
+  LinuxWallpaperEngineStatusDTO,
+  ScanProgressDTO,
+  SourceDTO,
+  StatusDTO,
+  TargetedApplyRequestDTO,
+  TargetedRestoreRequestDTO,
+  ThumbnailCacheDTO,
+  ThumbnailDTO,
+  WallpaperConsoleApi,
+  WeDebugInfoDTO,
+} from './types';
 
-export interface CommandResult {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  error?: CommandErrorDTO;
-}
-
-export interface CommandErrorDTO {
-  kind: string;
-  message: string;
-  detail?: string;
-  recoverable: boolean;
-  suggestion?: string;
-}
-
-export interface LibraryCountDTO {
-  total: number;
-  images: number;
-  gifs: number;
-  videos: number;
-}
-
-export interface LibraryPageDTO {
-  total: number;
-  items: WallpaperDTO[];
-}
-
-export interface LibrarySourceStatusDTO {
-  configured: string;
-  effective: string;
-  sqliteReady: boolean;
-  sqliteRows: number;
-  tsvRows: number;
-  sourceCount: number;
-  stale: boolean;
-  message: string;
-}
-
-export interface ScanProgressDTO {
-  running: boolean;
-  stage: string;
-  scanned: number;
-  totalHint?: number;
-  reusedMetadata: number;
-  probedMetadata: number;
-  insertedSqlite: number;
-  staged: number;
-  skipped: number;
-  metadataErrors: number;
-  currentPath?: string;
-  cancelRequested: boolean;
-  error?: string;
-}
-
-export interface SourceDTO {
-  path: string;
-  exists: boolean;
-  isWE: boolean;
-  label: string;
-}
-
-export interface StatusDTO {
-  configDir: string;
-  current: string;
-  lastBackend: string;
-  sourceCount: number;
-}
-
-export interface DisplayDTO {
-  name: string;
-}
-
-export interface DisplayListDTO {
-  outputs: DisplayDTO[];
-}
-
-export type DisplayStateKind = 'allDisplays' | 'output';
-
-export interface DisplayStateDTO {
-  targetKey: string;
-  kind: DisplayStateKind;
-  output: string | null;
-  wallpaperPath: string;
-  backend: string;
-  updatedAt: string;
-}
-
-export interface TargetedApplyRequestDTO {
-  path: string;
-  /** Omitted means All Displays for compatibility with legacy apply callers. */
-  target?: string;
-  requestId?: string;
-}
-
-export interface TargetedRestoreRequestDTO {
-  /** Omitted means discover currently connected outputs. */
-  outputs?: string[];
-}
-
-export interface LinuxWallpaperEngineStatusDTO {
-  available: boolean;
-  path?: string;
-  message: string;
-  detail?: string;
-}
-
-export interface WeDebugInfoDTO {
-  lastCommandLine: string;
-  lastTargetConfig: string;
-  lastStderr: string;
-  lastExitStatus: string;
-  logPath: string;
-}
-
-export interface ThumbnailCacheDTO {
-  dir: string;
-  size: string;
-  entries: number;
-  oldestMtime?: number;
-  newestMtime?: number;
-  failureEntries: number;
-  cleanupDays: number;
-}
-
-export interface ThumbnailDTO {
-  path: string;
-  thumbnail?: string;
-  cacheHit: boolean;
-  failureReason?: string;
-}
-
-export type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
-
-export type ApplyActionKind =
-  | 'apply'
-  | 'retry_backend_apply'
-  | 'apply_preview'
-  | 'open_folder'
-  | 'copy_workshop_id';
-
-export type ApplyRequestKind = 'apply' | 'retry_backend_apply' | 'apply_preview';
-
-export interface ApplyRequestDTO {
-  kind: ApplyRequestKind;
-  path: string;
-  requestId?: string;
-}
-
-export interface ApplyResultDTO {
-  requestId?: string;
-  appliedPath: string;
-  statePath: string;
-  backend: string;
-  fileType: string;
-  preview: boolean;
-}
-
-export interface ApplyActionDTO {
-  kind: ApplyActionKind;
-  label: string;
-  enabled: boolean;
-  reason?: string;
-}
-
-export interface WallpaperDTO {
-  path: string;
-  type: string;
-  ext: string;
-  backend: string;
-  size: number;
-  mtime: number;
-  resolution: string;
-  projectType?: string;
-  previewPath?: string;
-  workshopId?: string;
-  title?: string;
-  weFile?: string;
-  unsupportedReason?: string,
-  backendStatus?: string;
-  backendErrorKind?: string;
-  backendErrorMessage?: string;
-  backendErrorDetail?: string;
-  backendFailedAt?: string;
-  applyAvailability?: ApplyAvailability;
-  applyBackend?: string;
-  applyReason?: string;
-  applyActions?: ApplyActionDTO[];
-  rendererCompatibility?: string;
-}
+export type * from './types';
 
 export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
@@ -274,4 +104,4 @@ export const api = {
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),
 
   exportDiagnostics: (): Promise<CommandResult> => invoke<CommandResult>('export_diagnostics'),
-};
+} satisfies WallpaperConsoleApi;
