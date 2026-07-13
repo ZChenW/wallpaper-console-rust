@@ -7,16 +7,21 @@ use super::common::{
 pub async fn library_count() -> Result<LibraryCountDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let counts = wc_storage::sqlite::library_counts_sqlite(&s.cd).map_err(|e| e.to_string())?;
-        Ok(LibraryCountDto {
-            total: counts.total,
-            images: counts.images,
-            gifs: counts.gifs,
-            videos: counts.videos,
-        })
+        library_count_for_storage(s)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn library_count_for_storage(s: &wc_storage::StorageApi) -> Result<LibraryCountDto, String> {
+    let counts = wc_storage::sqlite::source_backed_library_counts_sqlite(&s.cd)
+        .map_err(|e| e.to_string())?;
+    Ok(LibraryCountDto {
+        total: counts.total,
+        images: counts.images,
+        gifs: counts.gifs,
+        videos: counts.videos,
+    })
 }
 
 #[tauri::command]
@@ -51,8 +56,7 @@ pub async fn library_page_gui(
             offset,
             limit,
         };
-        let page =
-            wc_storage::sqlite::library_page_sqlite(&s.cd, &query).map_err(|e| e.to_string())?;
+        let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
         let items = page
             .items
@@ -75,6 +79,13 @@ pub async fn library_page_gui(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn library_page_for_storage(
+    s: &wc_storage::StorageApi,
+    query: &wc_storage::sqlite::LibraryPageQuery,
+) -> Result<wc_storage::sqlite::LibraryPage, String> {
+    wc_storage::sqlite::source_backed_library_page_sqlite(&s.cd, query).map_err(|e| e.to_string())
 }
 
 fn format_library_page_debug_log(
@@ -152,7 +163,7 @@ fn build_library_source_status(
 ) -> Result<LibrarySourceStatusDto, String> {
     let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
     let sqlite_ready = s.cd.db_path().exists();
-    let sqlite_rows = wc_storage::sqlite::library_count(&s.cd).unwrap_or(0);
+    let sqlite_rows = wc_storage::sqlite::source_backed_library_count(&s.cd).unwrap_or(0);
     let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
         .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
         .unwrap_or(0);
@@ -355,6 +366,72 @@ mod tests {
         assert!(status.stale);
         assert!(status.sqlite_ready);
         assert!(status.message.contains("legacy library.tsv"));
+    }
+
+    #[test]
+    fn gui_library_views_exclude_orphans_and_deduplicate_overlapping_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        std::fs::create_dir(&first_root).unwrap();
+        std::fs::create_dir(&second_root).unwrap();
+        let first = storage
+            .source_create(&first_root.to_string_lossy())
+            .unwrap();
+        let second = storage
+            .source_create(&second_root.to_string_lossy())
+            .unwrap();
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/member.jpg', 'image', 'jpg', 'awww', 100, 1000, '1920x1080')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/orphan.gif', 'gif', 'gif', 'awww', 200, 2000, '1920x1080')",
+            [],
+        )
+        .unwrap();
+        for source_id in [first.id, second.id] {
+            conn.execute(
+                "INSERT INTO wallpaper_sources (wallpaper_id, source_id)
+                 SELECT id, ?1 FROM wallpapers WHERE path = '/member.jpg'",
+                [source_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        assert_eq!(wc_storage::sqlite::library_count(&storage.cd).unwrap(), 2);
+        let counts = super::library_count_for_storage(&storage).unwrap();
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.images, 1);
+        assert_eq!(counts.gifs, 0);
+
+        let page = super::library_page_for_storage(
+            &storage,
+            &wc_storage::sqlite::LibraryPageQuery {
+                filter: wc_storage::sqlite::LibraryFilter::All,
+                sort: wc_storage::sqlite::LibrarySort::Name,
+                search: String::new(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path.as_str(), "/member.jpg");
+
+        let status = super::build_library_source_status(&storage).unwrap();
+        assert_eq!(status.source_count, 2);
+        assert_eq!(status.sqlite_rows, 1);
+        assert!(!status.stale);
     }
 
     #[test]

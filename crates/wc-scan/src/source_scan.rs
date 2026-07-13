@@ -260,6 +260,7 @@ where
     let mut stats = ScanStats::default();
     let mut entries = Vec::new();
     let mut seen = HashSet::new();
+    let mut manifest_free_projects = Vec::new();
 
     if is_single_we_project_source(&request.path) {
         let indexed = match index_we_project(&request.path, prior_metadata, on_event, &mut stats) {
@@ -317,6 +318,22 @@ where
             continue;
         }
 
+        match std::fs::symlink_metadata(path.join("project.json")) {
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                manifest_free_projects.push(path);
+                continue;
+            }
+            Err(error) => {
+                return SourceScanOutcome::Incomplete(failure_from_io(
+                    path.join("project.json"),
+                    &error,
+                    ScanFailureKind::InvalidWallpaperEngineProject,
+                    stats,
+                ));
+            }
+            Ok(_) => {}
+        }
+
         let indexed = match index_we_project(&path, prior_metadata, on_event, &mut stats) {
             Ok(indexed) => indexed,
             Err(outcome) => return outcome,
@@ -328,12 +345,116 @@ where
         stats.entries_indexed += 1;
         entries.push(indexed.entry);
     }
+    for project in manifest_free_projects {
+        if let Err(outcome) = scan_manifest_free_workshop_directory(
+            &project,
+            prior_metadata,
+            on_event,
+            reader,
+            &mut stats,
+            &mut entries,
+            &mut seen,
+        ) {
+            return outcome;
+        }
+    }
 
     SourceScanOutcome::Complete(CompleteSourceScan {
         request: request.clone(),
         entries,
         stats,
     })
+}
+
+fn scan_manifest_free_workshop_directory<F, R>(
+    project_directory: &Path,
+    prior_metadata: &HashMap<String, WallpaperEntry>,
+    on_event: &mut F,
+    reader: &mut R,
+    stats: &mut ScanStats,
+    entries: &mut Vec<WallpaperEntry>,
+    seen: &mut HashSet<PathBuf>,
+) -> Result<(), SourceScanOutcome>
+where
+    F: FnMut(&SourceScanEvent) -> ScanControl,
+    R: DirectoryReader,
+{
+    let mut pending = vec![project_directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        let children = reader.read_directory(&directory).map_err(|error| {
+            SourceScanOutcome::Incomplete(failure_from_io(
+                directory.clone(),
+                &error,
+                ScanFailureKind::ReadDirectory,
+                *stats,
+            ))
+        })?;
+        for child in children {
+            let WalkNode { path, kind } = child.map_err(|error| {
+                SourceScanOutcome::Incomplete(failure_from_io(
+                    directory.clone(),
+                    &error,
+                    ScanFailureKind::DirectoryEntry,
+                    *stats,
+                ))
+            })?;
+            stats.entries_visited += 1;
+            if matches!(
+                on_event(&SourceScanEvent::EntryVisited {
+                    path: path.clone(),
+                    stats: *stats,
+                }),
+                ScanControl::Cancel
+            ) {
+                return Err(SourceScanOutcome::Cancelled(*stats));
+            }
+            if kind == WalkNodeKind::Directory {
+                if !should_skip_directory(&path) {
+                    pending.push(path);
+                }
+                continue;
+            }
+            if kind != WalkNodeKind::File || !is_wallpaper_candidate(&path) {
+                continue;
+            }
+
+            let canonical = std::fs::canonicalize(&path).map_err(|error| {
+                SourceScanOutcome::Incomplete(failure_from_io(
+                    path,
+                    &error,
+                    ScanFailureKind::CandidateUnavailable,
+                    *stats,
+                ))
+            })?;
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            stats.candidates_found += 1;
+            if matches!(
+                on_event(&SourceScanEvent::CandidateFound {
+                    path: canonical.clone(),
+                    stats: *stats,
+                }),
+                ScanControl::Cancel
+            ) {
+                return Err(SourceScanOutcome::Cancelled(*stats));
+            }
+            let canonical_text = canonical.to_string_lossy();
+            let (entry, reused) = crate::make_entry_cached(&canonical_text, prior_metadata);
+            let Some(entry) = entry else {
+                return Err(SourceScanOutcome::Incomplete(ScanFailure {
+                    path: canonical,
+                    kind: ScanFailureKind::CandidateUnavailable,
+                    message: "wallpaper candidate could not be indexed".to_string(),
+                    stats: *stats,
+                }));
+            };
+            stats.metadata_reused += usize::from(reused);
+            stats.entries_indexed += 1;
+            entries.push(entry);
+        }
+    }
+    Ok(())
 }
 
 struct IndexedWeProject {
@@ -1035,6 +1156,63 @@ mod tests {
         };
         assert_eq!(failure.kind, ScanFailureKind::InvalidWallpaperEngineProject);
         assert_eq!(failure.path, std::fs::canonicalize(project).unwrap());
+    }
+
+    #[test]
+    fn wallpaper_engine_project_without_manifest_falls_back_to_ordinary_media() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("123");
+        let nested = project.join("assets");
+        std::fs::create_dir_all(&nested).unwrap();
+        let wallpaper = nested.join("wall.jpg");
+        std::fs::write(&wallpaper, b"jpg").unwrap();
+
+        let entries = complete_entries(scan_source(
+            &workshop_request(tmp.path().to_path_buf(), false),
+            |_| ScanControl::Continue,
+        ));
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(
+            entries[0].path.as_std_path(),
+            std::fs::canonicalize(wallpaper).unwrap()
+        );
+        assert!(
+            entries[0].project.is_none(),
+            "manifest-free fallback media must remain an ordinary wallpaper"
+        );
+    }
+
+    #[test]
+    fn cancelling_manifest_free_fallback_exposes_no_partial_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let project = tmp.path().join("123");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("one.jpg"), b"one").unwrap();
+        std::fs::write(project.join("two.jpg"), b"two").unwrap();
+        let mut candidates = 0usize;
+
+        let outcome = scan_source(
+            &workshop_request(tmp.path().to_path_buf(), false),
+            |event| {
+                if matches!(event, SourceScanEvent::CandidateFound { .. }) {
+                    candidates += 1;
+                    if candidates == 2 {
+                        return ScanControl::Cancel;
+                    }
+                }
+                ScanControl::Continue
+            },
+        );
+
+        let SourceScanOutcome::Cancelled(stats) = outcome else {
+            panic!("cancelled fallback must not expose a complete partial snapshot");
+        };
+        assert_eq!(stats.candidates_found, 2);
+        assert_eq!(
+            stats.entries_indexed, 1,
+            "the first candidate may be processed but must remain unpublished"
+        );
     }
 
     #[test]

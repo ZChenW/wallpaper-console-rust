@@ -79,6 +79,31 @@ pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     Ok(count as usize)
 }
 
+/// Count unique wallpaper rows that still belong to at least one configured source.
+///
+/// Unlike [`library_count`], this is a user-visible library view rather than a
+/// count of every physical metadata row retained for recovery or reconciliation.
+pub fn source_backed_library_count(cd: &ConfigDir) -> Result<usize, WcError> {
+    let db_path = cd.db_path();
+    if !db_path.exists() {
+        return Ok(0);
+    }
+    let conn = open_runtime_connection(cd)?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*)
+             FROM wallpapers wallpaper
+             WHERE EXISTS (
+                 SELECT 1 FROM wallpaper_sources membership
+                 WHERE membership.wallpaper_id = wallpaper.id
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(count.max(0) as usize)
+}
+
 fn empty_library_page() -> LibraryPage {
     LibraryPage {
         total: 0,
@@ -90,6 +115,54 @@ pub fn library_page_sqlite(
     cd: &ConfigDir,
     query: &LibraryPageQuery,
 ) -> Result<LibraryPage, WcError> {
+    library_page_sqlite_with_scope(cd, query, LibraryRowScope::AllPhysicalRows)
+}
+
+/// Page unique wallpaper rows that still belong to at least one configured source.
+///
+/// Multiple source memberships are collapsed by the `EXISTS` predicate, while
+/// metadata rows with no membership remain available to lower-level repair and
+/// reconciliation APIs without leaking into user-visible library results.
+pub fn source_backed_library_page_sqlite(
+    cd: &ConfigDir,
+    query: &LibraryPageQuery,
+) -> Result<LibraryPage, WcError> {
+    library_page_sqlite_with_scope(cd, query, LibraryRowScope::SourceBackedRows)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LibraryRowScope {
+    AllPhysicalRows,
+    SourceBackedRows,
+}
+
+impl LibraryRowScope {
+    fn condition(self, wallpaper_alias: &str) -> Option<String> {
+        match self {
+            Self::AllPhysicalRows => None,
+            Self::SourceBackedRows => Some(format!(
+                "EXISTS (
+                     SELECT 1 FROM wallpaper_sources membership
+                     WHERE membership.wallpaper_id = {wallpaper_alias}.id
+                 )"
+            )),
+        }
+    }
+}
+
+fn sql_where_clause(conditions: Vec<String>) -> String {
+    if conditions.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", conditions.join(" AND "))
+    }
+}
+
+fn library_page_sqlite_with_scope(
+    cd: &ConfigDir,
+    query: &LibraryPageQuery,
+    scope: LibraryRowScope,
+) -> Result<LibraryPage, WcError> {
     if !cd.db_path().exists() {
         return Ok(empty_library_page());
     }
@@ -100,11 +173,12 @@ pub fn library_page_sqlite(
 
     if search.is_empty() {
         let order_by = library_order_by(query.sort, None);
-        let where_sql = if filter_cond.is_empty() {
-            String::new()
-        } else {
-            format!("WHERE {filter_cond}")
-        };
+        let mut conditions = Vec::new();
+        if !filter_cond.is_empty() {
+            conditions.push(filter_cond.to_string());
+        }
+        conditions.extend(scope.condition("wallpapers"));
+        let where_sql = sql_where_clause(conditions);
 
         let total: i64 = conn
             .query_row(
@@ -145,21 +219,23 @@ pub fn library_page_sqlite(
         let fts = fts_query(search);
         if fts.is_empty() {
             // All terms were filtered out by sanitizer, fall back to empty search
-            return library_page_sqlite(
+            return library_page_sqlite_with_scope(
                 cd,
                 &LibraryPageQuery {
                     search: String::new(),
                     ..query.clone()
                 },
+                scope,
             );
         }
         let order_by = library_order_by(query.sort, Some("w"));
 
-        let where_sql = if filter_cond.is_empty() {
-            "WHERE wallpapers_fts MATCH ?1".to_string()
-        } else {
-            format!("WHERE wallpapers_fts MATCH ?1 AND {filter_cond}")
-        };
+        let mut conditions = vec!["wallpapers_fts MATCH ?1".to_string()];
+        if !filter_cond.is_empty() {
+            conditions.push(filter_cond.to_string());
+        }
+        conditions.extend(scope.condition("w"));
+        let where_sql = sql_where_clause(conditions);
 
         let total: i64 = conn
             .query_row(
@@ -204,6 +280,20 @@ pub fn library_page_sqlite(
 }
 
 pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCounts, WcError> {
+    library_counts_sqlite_with_scope(cd, LibraryRowScope::AllPhysicalRows)
+}
+
+/// Count user-visible wallpapers by type, excluding metadata rows with no source membership.
+pub fn source_backed_library_counts_sqlite(
+    cd: &ConfigDir,
+) -> Result<wc_core::types::LibraryCounts, WcError> {
+    library_counts_sqlite_with_scope(cd, LibraryRowScope::SourceBackedRows)
+}
+
+fn library_counts_sqlite_with_scope(
+    cd: &ConfigDir,
+    scope: LibraryRowScope,
+) -> Result<wc_core::types::LibraryCounts, WcError> {
     if !cd.db_path().exists() {
         return Ok(wc_core::types::LibraryCounts::default());
     }
@@ -214,8 +304,11 @@ pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCo
         gifs: 0,
         videos: 0,
     };
+    let where_sql = sql_where_clause(scope.condition("wallpapers").into_iter().collect());
     let mut stmt = conn
-        .prepare("SELECT type, COUNT(*) FROM wallpapers GROUP BY type")
+        .prepare(&format!(
+            "SELECT type, COUNT(*) FROM wallpapers {where_sql} GROUP BY type"
+        ))
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let rows = stmt
         .query_map([], |row| {
@@ -397,6 +490,148 @@ mod tests {
             rusqlite::params![path, kind, size, mtime, workshop_id, title],
         )
         .unwrap();
+    }
+
+    fn attach_wallpaper_to_source(
+        conn: &rusqlite::Connection,
+        wallpaper_path: &str,
+        source_id: i64,
+    ) {
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id)
+             SELECT id, ?2 FROM wallpapers WHERE path = ?1",
+            rusqlite::params![wallpaper_path, source_id],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn source_backed_library_excludes_orphans_and_deduplicates_overlapping_memberships() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        ensure_sqlite_db(&cd);
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        std::fs::create_dir(&first_root).unwrap();
+        std::fs::create_dir(&second_root).unwrap();
+        let (first, _) = crate::sqlite::source_create(&cd, &first_root.to_string_lossy()).unwrap();
+        let (second, _) =
+            crate::sqlite::source_create(&cd, &second_root.to_string_lossy()).unwrap();
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        insert_wallpaper_for_page_test(
+            &conn,
+            "/walls/member.jpg",
+            "image",
+            100,
+            1000,
+            "Member",
+            "",
+        );
+        insert_wallpaper_for_page_test(
+            &conn,
+            "/walls/orphan.jpg",
+            "image",
+            200,
+            2000,
+            "Orphan",
+            "",
+        );
+        attach_wallpaper_to_source(&conn, "/walls/member.jpg", first.id);
+        attach_wallpaper_to_source(&conn, "/walls/member.jpg", second.id);
+
+        assert_eq!(
+            library_count(&cd).unwrap(),
+            2,
+            "physical API stays unchanged"
+        );
+        assert_eq!(source_backed_library_count(&cd).unwrap(), 1);
+        let counts = source_backed_library_counts_sqlite(&cd).unwrap();
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.images, 1);
+        assert_eq!(counts.gifs, 0);
+        assert_eq!(counts.videos, 0);
+        let page = source_backed_library_page_sqlite(
+            &cd,
+            &LibraryPageQuery {
+                filter: LibraryFilter::All,
+                sort: LibrarySort::Name,
+                search: String::new(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path.as_str(), "/walls/member.jpg");
+        assert_eq!(
+            library_page_sqlite(
+                &cd,
+                &LibraryPageQuery {
+                    filter: LibraryFilter::All,
+                    sort: LibrarySort::Name,
+                    search: String::new(),
+                    offset: 0,
+                    limit: 10,
+                },
+            )
+            .unwrap()
+            .total,
+            2,
+            "legacy physical page API stays unchanged"
+        );
+    }
+
+    #[test]
+    fn source_backed_library_search_does_not_match_orphans() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        ensure_sqlite_db(&cd);
+        let root = tmp.path().join("walls");
+        std::fs::create_dir(&root).unwrap();
+        let (source, _) = crate::sqlite::source_create(&cd, &root.to_string_lossy()).unwrap();
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        insert_wallpaper_for_page_test(
+            &conn,
+            "/walls/member.jpg",
+            "image",
+            100,
+            1000,
+            "Forest Member",
+            "",
+        );
+        insert_wallpaper_for_page_test(
+            &conn,
+            "/walls/orphan.jpg",
+            "image",
+            200,
+            2000,
+            "Forest Orphan",
+            "",
+        );
+        attach_wallpaper_to_source(&conn, "/walls/member.jpg", source.id);
+
+        let page = source_backed_library_page_sqlite(
+            &cd,
+            &LibraryPageQuery {
+                filter: LibraryFilter::All,
+                sort: LibrarySort::Name,
+                search: "forest".into(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path.as_str(), "/walls/member.jpg");
     }
 
     #[test]
