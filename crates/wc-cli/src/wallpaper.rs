@@ -697,6 +697,26 @@ mod tests {
         (tmp, storage)
     }
 
+    fn insert_history(storage: &StorageApi, path: &str, backend: &str) {
+        let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(storage: &StorageApi) -> Vec<(String, String)> {
+        let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     fn no_op_stop(_s: Option<&StorageApi>) -> Result<(), wc_core::error::WcError> {
         Ok(())
     }
@@ -804,15 +824,15 @@ mod tests {
         let (_tmp, storage) = storage_with_mode("file");
         storage.current_write("/walls/current.jpg").unwrap();
         storage.last_backend_write("awww").unwrap();
-        storage.history_add("/walls/current.jpg", "awww").unwrap();
+        insert_history(&storage, "/walls/current.jpg", "awww");
 
         stop_wallpapers_with(&storage, no_op_stop).unwrap();
 
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/current.jpg".to_string()]
+            history_rows(&storage),
+            vec![("/walls/current.jpg".to_string(), "awww".to_string())]
         );
     }
 
@@ -821,15 +841,15 @@ mod tests {
         let (_tmp, storage) = storage_with_mode("sqlite");
         storage.current_write("/walls/current.jpg").unwrap();
         storage.last_backend_write("awww").unwrap();
-        storage.history_add("/walls/current.jpg", "awww").unwrap();
+        insert_history(&storage, "/walls/current.jpg", "awww");
 
         stop_wallpapers_with(&storage, no_op_stop).unwrap();
 
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/current.jpg".to_string()]
+            history_rows(&storage),
+            vec![("/walls/current.jpg".to_string(), "awww".to_string())]
         );
     }
 }

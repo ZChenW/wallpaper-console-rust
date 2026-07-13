@@ -100,24 +100,6 @@ impl StorageApi {
         Ok(result)
     }
 
-    pub fn history_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::try_ensure_sqlite_db(&self.cd)?;
-        let conn = sqlite::open_runtime_connection(&self.cd)?;
-        let mut stmt = conn
-            .prepare("SELECT path FROM history ORDER BY id DESC")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut seen = std::collections::HashSet::new();
-        Ok(rows
-            .into_iter()
-            .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect())
-    }
-
     pub fn current_read(&self) -> Result<Option<String>, WcError> {
         sqlite::try_ensure_sqlite_db(&self.cd)?;
         let conn = sqlite::open_runtime_connection(&self.cd)?;
@@ -199,15 +181,6 @@ impl StorageApi {
 
     pub fn favorites_remove(&self, path: &str) -> Result<(), WcError> {
         sqlite::sqlite_favorite_remove(&self.cd, path)
-    }
-
-    pub fn history_add(&self, path: &str, backend: &str) -> Result<(), WcError> {
-        let canon = flat::try_canonicalize(path);
-        sqlite::sqlite_history_add(&self.cd, &canon, backend, 100)
-    }
-
-    pub fn history_clear(&self) -> Result<(), WcError> {
-        sqlite::sqlite_history_clear(&self.cd)
     }
 
     pub fn current_write(&self, path: &str) -> Result<(), WcError> {
@@ -313,6 +286,26 @@ impl StorageApi {
 mod tests {
     use super::*;
 
+    fn insert_history(cd: &ConfigDir, path: &str, backend: &str) {
+        let conn = sqlite::open_runtime_connection(cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(cd: &ConfigDir) -> Vec<(String, String)> {
+        let conn = sqlite::open_runtime_connection(cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     #[test]
     fn sqlite_mode_auto_migrates_legacy_flat_state() {
         let tmp = tempfile::tempdir().unwrap();
@@ -336,8 +329,8 @@ mod tests {
             vec!["/walls/a.jpg".to_string()]
         );
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/b.jpg".to_string()]
+            history_rows(&storage.cd),
+            vec![("/walls/b.jpg".to_string(), "unknown".to_string())]
         );
         assert_eq!(
             storage.current_read().unwrap().as_deref(),
@@ -405,7 +398,6 @@ mod tests {
 
         let results = [
             storage.favorites_list().map(|_| ()),
-            storage.history_list().map(|_| ()),
             storage.current_read().map(|_| ()),
             storage.last_backend_read().map(|_| ()),
         ];
@@ -597,15 +589,15 @@ mod tests {
 
         storage.current_write("/walls/current.jpg").unwrap();
         storage.last_backend_write("awww").unwrap();
-        storage.history_add("/walls/current.jpg", "awww").unwrap();
+        insert_history(&storage.cd, "/walls/current.jpg", "awww");
 
         storage.runtime_state_clear().unwrap();
 
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/current.jpg".to_string()]
+            history_rows(&storage.cd),
+            vec![("/walls/current.jpg".to_string(), "awww".to_string())]
         );
     }
 
@@ -734,7 +726,7 @@ mod tests {
         assert!(storage.cd.db_path().exists());
         assert_eq!(storage.sources_list().unwrap(), Vec::<String>::new());
         assert_eq!(storage.favorites_list().unwrap(), Vec::<String>::new());
-        assert_eq!(storage.history_list().unwrap(), Vec::<String>::new());
+        assert!(history_rows(&storage.cd).is_empty());
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
     }

@@ -512,6 +512,26 @@ mod tests {
         (tmp, s)
     }
 
+    fn insert_history(s: &StorageApi, path: &str, backend: &str) {
+        let conn = wc_storage::sqlite::open_runtime_connection(&s.cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(s: &StorageApi) -> Vec<(String, String)> {
+        let conn = wc_storage::sqlite::open_runtime_connection(&s.cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     fn apply_with_fake_runtime(
         s: &StorageApi,
         path: &str,
@@ -541,10 +561,9 @@ mod tests {
         // Simulate a previous session having written a WE Web project as current.
         s.current_write(&project.to_string_lossy()).unwrap();
         s.last_backend_write("unsupported").unwrap();
-        s.history_add(&project.to_string_lossy(), "unsupported")
-            .unwrap();
+        insert_history(&s, &project.to_string_lossy(), "unsupported");
 
-        let history_before = s.history_list().unwrap().len();
+        let history_before = history_rows(&s);
 
         let err = restore(&s).unwrap_err();
         let msg = err.to_string();
@@ -565,7 +584,7 @@ mod tests {
         );
         // No new history entry added by the failed restore.
         assert_eq!(
-            s.history_list().unwrap().len(),
+            history_rows(&s),
             history_before,
             "failed restore should not add history"
         );
@@ -718,8 +737,8 @@ mod tests {
 
         let (tmp, s) = temp_storage();
         s.last_backend_write("awww").unwrap();
-        s.history_add("legacy.jpg", "awww").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, "legacy.jpg", "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-state-write");
         std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
@@ -754,7 +773,7 @@ mod tests {
             s.last_backend_read().unwrap().as_deref(),
             Some(LWE_BACKEND_NAME)
         );
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
 
         let pid = s.config_get("linux_wallpaperengine_pid", "");
         if let Ok(pid) = pid.parse::<i32>() {
@@ -776,8 +795,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&old.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fail-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -811,7 +830,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -824,8 +843,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fallback-fail-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -861,7 +880,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -874,8 +893,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&old.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fallback-awww-previous");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -911,7 +930,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -923,8 +942,8 @@ mod tests {
         let missing = tmp.path().join("missing.jpg");
         s.current_write(&missing.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&missing.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &missing.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-missing-awww-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -960,7 +979,7 @@ mod tests {
             Some(missing.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[test]
@@ -1360,8 +1379,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&old.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: true,
@@ -1391,7 +1410,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[test]
@@ -1403,8 +1422,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: false,
@@ -1427,7 +1446,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 0);
         assert_eq!(rt.stop_mpvpaper_count, 1);
     }
@@ -1441,8 +1460,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: true,
@@ -1466,7 +1485,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
         assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![202]]);
         assert_eq!(rt.stop_mpvpaper_count, 2);
@@ -1481,8 +1500,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: true,
@@ -1504,7 +1523,7 @@ mod tests {
             Some(next.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
         assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![404]);
@@ -1519,8 +1538,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: true,
@@ -1545,7 +1564,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![505]);
         assert_eq!(rt.stop_mpvpaper_count, 2);
     }
@@ -1559,8 +1578,8 @@ mod tests {
         std::fs::write(&next, b"next").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_status_success: true,
@@ -1585,7 +1604,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![707]);
         assert_eq!(rt.stop_mpvpaper_count, 2);
     }
@@ -1890,8 +1909,8 @@ mod tests {
         std::fs::write(&img, b"png").unwrap();
         s.current_write(&img.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&img.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &img.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_output_success: false,
@@ -1910,7 +1929,7 @@ mod tests {
             Some(img.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[test]

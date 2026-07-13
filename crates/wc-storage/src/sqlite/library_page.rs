@@ -374,51 +374,6 @@ pub fn favorites_page_sqlite(
     })
 }
 
-pub fn history_page_sqlite(
-    cd: &ConfigDir,
-    offset: usize,
-    limit: usize,
-) -> Result<LibraryPage, WcError> {
-    if !cd.db_path().exists() {
-        return Ok(empty_library_page());
-    }
-    let conn = open_runtime_connection(cd)?;
-    let total: i64 = conn
-        .query_row(
-            "SELECT COUNT(*)
-             FROM history h
-             INNER JOIN wallpapers w ON w.path = h.path",
-            [],
-            |row| row.get(0),
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let mut stmt = conn
-        .prepare(
-            "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
-                    w.project_type, w.preview_path, w.workshop_id, w.title, w.we_file, w.unsupported_reason
-             FROM history h
-             INNER JOIN wallpapers w ON w.path = h.path
-             ORDER BY h.id DESC
-             LIMIT ?1 OFFSET ?2",
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    let items = stmt
-        .query_map(
-            params![
-                i64::try_from(limit).unwrap_or(i64::MAX),
-                i64::try_from(offset).unwrap_or(i64::MAX)
-            ],
-            wallpaper_entry_from_row,
-        )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(LibraryPage {
-        total: total.max(0) as usize,
-        items,
-    })
-}
-
 fn fts_query(raw: &str) -> String {
     raw.split_whitespace()
         .filter(|part| !part.is_empty())
@@ -698,7 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn favorites_and_history_page_sqlite_join_to_wallpaper_metadata() {
+    fn favorites_page_sqlite_joins_to_wallpaper_metadata() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = wc_core::ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -707,28 +662,12 @@ mod tests {
         ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
         insert_wallpaper_for_page_test(&conn, "/walls/a.jpg", "image", 100, 1000, "A", "");
-        insert_wallpaper_for_page_test(&conn, "/walls/b.jpg", "image", 200, 2000, "B", "");
         conn.execute("INSERT INTO favorites (path) VALUES ('/walls/a.jpg')", [])
             .unwrap();
-        conn.execute(
-            "INSERT INTO history (path, backend) VALUES ('/walls/a.jpg', 'awww')",
-            [],
-        )
-        .unwrap();
-        conn.execute(
-            "INSERT INTO history (path, backend) VALUES ('/walls/b.jpg', 'awww')",
-            [],
-        )
-        .unwrap();
 
         let favs = favorites_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(favs.total, 1);
         assert_eq!(favs.items[0].size, 100);
-
-        let hist = history_page_sqlite(&cd, 0, 1).unwrap();
-        assert_eq!(hist.total, 2);
-        assert_eq!(hist.items.len(), 1);
-        assert_eq!(hist.items[0].path.as_str(), "/walls/b.jpg");
     }
 
     #[test]

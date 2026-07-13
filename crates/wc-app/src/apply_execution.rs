@@ -64,6 +64,28 @@ mod tests {
         (tmp, crate::AppService::from_config_dir(cd))
     }
 
+    fn insert_history(service: &crate::AppService, path: &str, backend: &str) {
+        let cd = &service.storage_for_tests().cd;
+        let conn = wc_storage::sqlite::open_runtime_connection(cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(service: &crate::AppService) -> Vec<(String, String)> {
+        let cd = &service.storage_for_tests().cd;
+        let conn = wc_storage::sqlite::open_runtime_connection(cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     fn web_project(root: &Path) -> std::path::PathBuf {
         let project = root.join("steamapps/workshop/content/431960/3650880224");
         std::fs::create_dir_all(&project).unwrap();
@@ -147,14 +169,15 @@ mod tests {
     fn unsupported_request_does_not_add_history() {
         let (tmp, service) = temp_service();
         let project = web_project(tmp.path());
-        let before = service.storage_for_tests().history_list().unwrap().len();
+        insert_history(&service, "/walls/legacy.jpg", "awww");
+        let before = history_rows(&service);
         let request = ApplyRequest {
             kind: ApplyRequestKind::Apply,
             path: project.to_string_lossy().to_string(),
             request_id: None,
         };
         assert!(service.execute_apply_request(request).is_err());
-        let after = service.storage_for_tests().history_list().unwrap().len();
+        let after = history_rows(&service);
         assert_eq!(before, after);
     }
 

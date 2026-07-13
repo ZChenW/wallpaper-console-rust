@@ -52,41 +52,6 @@ pub fn sqlite_favorite_remove(cd: &ConfigDir, path: &str) -> Result<(), WcError>
     Ok(())
 }
 
-pub fn sqlite_history_add(
-    cd: &ConfigDir,
-    path: &str,
-    backend: &str,
-    max_entries: usize,
-) -> Result<(), WcError> {
-    try_ensure_sqlite_db(cd)?;
-    let conn = open_runtime_connection(cd)?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    tx.execute("DELETE FROM history WHERE path = ?1", params![path])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    tx.execute(
-        "INSERT INTO history (path, backend) VALUES (?1, ?2)",
-        params![path, backend],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    tx.execute(
-        "DELETE FROM history WHERE id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT ?1)",
-        params![max_entries as i64],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(())
-}
-
-pub fn sqlite_history_clear(cd: &ConfigDir) -> Result<(), WcError> {
-    try_ensure_sqlite_db(cd)?;
-    let conn = open_runtime_connection(cd)?;
-    conn.execute("DELETE FROM history", [])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(())
-}
-
 pub fn sqlite_state_write(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
