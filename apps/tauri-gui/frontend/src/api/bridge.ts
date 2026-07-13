@@ -64,10 +64,6 @@ export const api = {
   favoriteAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_add', { path }),
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
 
-  historyPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
-    invoke<LibraryPageDTO>('history_page', { offset, limit }),
-  historyClear: (): Promise<CommandResult> => invoke<CommandResult>('history_clear'),
-
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
   sourceAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_add', { path }),
   sourceRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_remove', { path }),

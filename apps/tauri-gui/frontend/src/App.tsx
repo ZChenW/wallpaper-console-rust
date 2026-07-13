@@ -4,8 +4,7 @@ import { APP_EVENTS } from './events/appEvents';
 import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 import { CommandFeedback, commandErrorFeedback, commandSuccessFeedback } from './api/feedback';
 import LibraryView from './views/LibraryView';
-import FavoritesView, { invalidateFavoritesCache } from './views/FavoritesView';
-import HistoryView, { invalidateHistoryCache } from './views/HistoryView';
+import FavoritesView from './views/FavoritesView';
 import SourcesView from './views/SourcesView';
 import StatusBar from './components/StatusBar';
 import Toolbar from './components/Toolbar';
@@ -17,7 +16,7 @@ import { ThumbnailStoreProvider } from './state/ThumbnailStoreContext';
 import { useApplyQueue } from './hooks/useApplyQueue';
 import { useFeedbackBridge } from './hooks/useFeedbackBridge';
 
-type View = 'library' | 'favorites' | 'history' | 'sources';
+type View = 'library' | 'favorites' | 'sources';
 
 const SettingsView = lazy(() => import('./views/SettingsView'));
 
@@ -90,7 +89,6 @@ function AppShell() {
   const { applying, handleApply, handleApplyAction } = useApplyQueue({
     refreshStatus,
     setFeedbackWithAutoDismiss,
-    invalidateHistory: invalidateHistoryCache,
     invalidateLibrary,
   });
 
@@ -123,7 +121,7 @@ function AppShell() {
     });
   }, []);
 
-  const persistentViews: View[] = ['library', 'favorites', 'history'];
+  const persistentViews: View[] = ['library', 'favorites'];
 
   return (
     <div className="app">
@@ -139,7 +137,6 @@ function AppShell() {
             <div key={v} className="view-shell" style={{ display: view === v ? 'flex' : 'none' }}>
               {v === 'library' && <LibraryView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
               {v === 'favorites' && <FavoritesView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
-              {v === 'history' && <HistoryView onApply={handleApply} onApplyAction={handleApplyAction} applying={applying} active={view === v} />}
             </div>
           ))}
           {view === 'sources' && (

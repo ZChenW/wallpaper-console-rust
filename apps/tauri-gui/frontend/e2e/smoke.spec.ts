@@ -3,6 +3,7 @@ import { expect, test, type Page } from '@playwright/test';
 test('library renders wallpaper grid', async ({ page }) => {
   await page.goto('/');
   await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
   await expect(page.locator('.wallpaper-card').first()).toBeVisible();
 });
 
@@ -83,13 +84,13 @@ test('settings can navigate to all categories', async ({ page }) => {
 
 test('settings modal closes back to previous view', async ({ page }) => {
   await page.goto('/');
-  await page.getByRole('button', { name: 'History' }).click();
-  await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
+  await page.getByRole('button', { name: 'Favorites' }).click();
+  await expect(page.getByRole('heading', { name: 'Favorites' })).toBeVisible();
   await page.getByRole('button', { name: 'Settings' }).click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
   await page.getByRole('button', { name: 'Close settings' }).click();
   await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'History' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Favorites' })).toBeVisible();
 });
 
 test('settings modal closes with escape', async ({ page }) => {
@@ -307,17 +308,6 @@ test('favorites context menu shows WE Scene actions', async ({ page }) => {
   await expect(page.getByText('Open folder')).toBeVisible();
   await expect(page.getByText('Copy Workshop ID')).toBeVisible();
   await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
-});
-
-test('history context menu shows apply and open folder', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'History' }).click();
-  await expect(page.locator('h2').filter({ hasText: 'History' })).toBeVisible({ timeout: 5000 });
-  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
-  const card = page.locator('.wallpaper-card').first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
 });
 
 test('Apply preview GIF completes through explicit preview action', async ({ page }) => {

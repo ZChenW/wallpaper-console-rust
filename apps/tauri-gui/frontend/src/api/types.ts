@@ -220,8 +220,6 @@ export interface WallpaperConsoleApi {
   favoritesPage(offset: number, limit: number): Promise<LibraryPageDTO>;
   favoriteAdd(path: string): Promise<CommandResult>;
   favoriteRemove(path: string): Promise<CommandResult>;
-  historyPage(offset: number, limit: number): Promise<LibraryPageDTO>;
-  historyClear(): Promise<CommandResult>;
 
   sourcesList(): Promise<SourceDTO[]>;
   sourceAdd(path: string): Promise<CommandResult>;

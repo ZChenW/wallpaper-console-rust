@@ -147,35 +147,9 @@ pub async fn favorite_remove(path: String) -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
-#[tauri::command]
-pub async fn history_page(offset: usize, limit: usize) -> Result<LibraryPageDto, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let s = storage()?;
-        let page = wc_storage::sqlite::history_page_sqlite(&s.cd, offset, limit)
-            .map_err(|e| e.to_string())?;
-        Ok(LibraryPageDto {
-            total: page.total,
-            items: page.items.into_iter().map(dto_from_entry).collect(),
-        })
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn history_clear() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match s.history_clear() {
-            Ok(_) => ok("History cleared."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
-}
-
-fn build_library_source_status(s: &wc_storage::StorageApi) -> Result<LibrarySourceStatusDto, String> {
+fn build_library_source_status(
+    s: &wc_storage::StorageApi,
+) -> Result<LibrarySourceStatusDto, String> {
     let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
     let sqlite_ready = s.cd.db_path().exists();
     let sqlite_rows = wc_storage::sqlite::library_count(&s.cd).unwrap_or(0);
@@ -341,7 +315,7 @@ mod tests {
     }
 
     #[test]
-    fn favorites_and_history_use_shared_sql_helpers() {
+    fn favorites_use_shared_sql_helper() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = wc_core::ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -357,17 +331,8 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO favorites (path) VALUES ('/fav.jpg')", [])
             .unwrap();
-        conn.execute(
-            "INSERT INTO history (path, backend) VALUES ('/fav.jpg', 'awww')",
-            [],
-        )
-        .unwrap();
-
         let favs = wc_storage::sqlite::favorites_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(favs.total, 1);
-
-        let hist = wc_storage::sqlite::history_page_sqlite(&cd, 0, 10).unwrap();
-        assert_eq!(hist.total, 1);
     }
 
     #[test]

@@ -34,7 +34,6 @@ function makeDeps(opts: {
   return {
     applyAction: opts.applyAction,
     refreshStatus: async () => {},
-    invalidateHistory: () => {},
     invalidateLibrary: opts.invalidateLibrary ?? (() => {}),
     setFeedback: (value) => { opts.feedback.push(value); },
     makeErrorFeedback: (label) => ({ state: 'error', label, detail: 'test error' }),

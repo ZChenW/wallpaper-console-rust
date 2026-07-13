@@ -9,6 +9,11 @@ beforeEach(() => {
   ctrl.resetAll();
 });
 
+test('history is not exposed by the wallpaper console API', () => {
+  assert.equal('historyPage' in api, false);
+  assert.equal('historyClear' in api, false);
+});
+
 test('setScanProgress changes the returned scanProgress state', async () => {
   ctrl.setScanProgress({ running: true, scanned: 5, totalHint: 100, stage: 'walking files' });
   const p = await api.scanProgress();

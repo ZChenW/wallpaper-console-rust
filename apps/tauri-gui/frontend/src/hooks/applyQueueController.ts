@@ -7,7 +7,6 @@ export type ApplyStage = 'queued' | 'starting backend' | 'settling' | 'applied';
 export interface ApplyQueueDeps {
   applyAction: (request: ApplyRequestDTO) => Promise<{ success: boolean; stdout: string; stderr: string; error?: { message: string } }>;
   refreshStatus: () => Promise<void>;
-  invalidateHistory: () => void;
   invalidateLibrary: () => void;
   setFeedback: (feedback: CommandFeedback) => void;
   makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
@@ -65,7 +64,6 @@ export class ApplyQueueController {
       try {
         const result = await this.deps.applyAction(req);
         if (result.success) {
-          this.deps.invalidateHistory();
           let detail: ApplyResultDTO | undefined;
           try {
             detail = result.stdout ? (JSON.parse(result.stdout) as ApplyResultDTO) : undefined;

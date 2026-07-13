@@ -38,8 +38,6 @@ pub fn run() {
             commands::favorite_add,
             commands::favorite_remove,
             commands::favorites_page,
-            commands::history_clear,
-            commands::history_page,
             commands::library_count,
             commands::library_page,
             commands::library_page_gui,

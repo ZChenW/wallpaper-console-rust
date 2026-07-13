@@ -5,7 +5,6 @@ export const APP_EVENTS = {
   applyStage: 'wc-apply-stage',
   configChanged: 'wc-config-changed',
   favoritesInvalidated: 'favorites-cache-invalidated',
-  historyInvalidated: 'history-cache-invalidated',
 } as const;
 
 export interface ApplyStagePayload {
@@ -39,8 +38,4 @@ export function emitConfigChanged(detail: ConfigChangedEvent): void {
 
 export function emitFavoritesInvalidated(): void {
   window.dispatchEvent(new CustomEvent(APP_EVENTS.favoritesInvalidated));
-}
-
-export function emitHistoryInvalidated(): void {
-  window.dispatchEvent(new CustomEvent(APP_EVENTS.historyInvalidated));
 }

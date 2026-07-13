@@ -1,6 +1,6 @@
-import { LayoutGrid, Star, Clock, FolderCog, Settings } from 'lucide-react';
+import { LayoutGrid, Star, FolderCog, Settings } from 'lucide-react';
 
-type View = 'library' | 'favorites' | 'history' | 'sources';
+type View = 'library' | 'favorites' | 'sources';
 
 interface Props {
   view: View;
@@ -16,7 +16,6 @@ type SidebarItem =
 const items: SidebarItem[] = [
   { id: 'library', label: 'Library', Icon: LayoutGrid, kind: 'view' },
   { id: 'favorites', label: 'Favorites', Icon: Star, kind: 'view' },
-  { id: 'history', label: 'History', Icon: Clock, kind: 'view' },
   { id: 'sources', label: 'Sources', Icon: FolderCog, kind: 'view' },
   { id: 'settings', label: 'Settings', Icon: Settings, kind: 'settings' },
 ];

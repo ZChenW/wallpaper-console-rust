@@ -146,12 +146,6 @@ const MOCK_FAVORITES: string[] = [
   '/mock/Steam/steamapps/workshop/content/431960/3558034522',
 ];
 
-const MOCK_HISTORY: string[] = [
-  '/mock/path/wallpaper-002.jpg',
-  '/mock/path/wallpaper-015.gif',
-  '/mock/path/wallpaper-020.jpg',
-];
-
 const MOCK_DISPLAYS: DisplayDTO[] = [{ name: 'eDP-1' }, { name: 'HDMI-A-1' }];
 
 const DEFAULT_DISPLAY_STATE: DisplayStateDTO[] = [
@@ -378,29 +372,6 @@ const mockBridgeAdapter = {
     return ok;
   },
   favoriteRemove: async (): Promise<CommandResult> => ok,
-
-  historyPage: async (offset: number, limit: number): Promise<LibraryPageDTO> => {
-    const items = MOCK_HISTORY.map((path) =>
-      MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
-        path,
-        type: 'image',
-        ext: 'jpg',
-        backend: 'awww',
-        size: 12345,
-        mtime: 1700000000,
-        resolution: '1920x1080',
-        applyAvailability: 'available' as ApplyAvailability,
-        applyBackend: 'awww',
-        applyActions: [
-          { kind: 'apply' as ApplyActionKind, label: 'Apply', enabled: true },
-          { kind: 'open_folder' as ApplyActionKind, label: 'Open folder', enabled: true },
-        ],
-      },
-    );
-    return { total: items.length, items: items.slice(offset, offset + limit) };
-  },
-
-  historyClear: async (): Promise<CommandResult> => ok,
 
   sourcesList: async (): Promise<SourceDTO[]> => MOCK_SOURCES,
   sourceAdd: async (): Promise<CommandResult> => ok,

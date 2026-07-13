@@ -8,7 +8,6 @@ test('APP_EVENTS preserves public event names', () => {
   assert.equal(APP_EVENTS.applyStage, 'wc-apply-stage');
   assert.equal(APP_EVENTS.configChanged, 'wc-config-changed');
   assert.equal(APP_EVENTS.favoritesInvalidated, 'favorites-cache-invalidated');
-  assert.equal(APP_EVENTS.historyInvalidated, 'history-cache-invalidated');
 });
 
 test('emitFeedback notifies typed feedback listeners', () => {

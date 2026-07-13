@@ -10,7 +10,6 @@ export type { ApplyQueueController, ApplyQueueDeps, ApplyStage } from './applyQu
 export function useApplyQueue(args: {
   refreshStatus: () => Promise<void>;
   setFeedbackWithAutoDismiss: (feedback: CommandFeedback) => void;
-  invalidateHistory: () => void;
   invalidateLibrary: () => void;
 }) {
   const [applying, setApplying] = useState(false);
@@ -21,7 +20,6 @@ export function useApplyQueue(args: {
       {
         applyAction: api.applyAction,
         refreshStatus: args.refreshStatus,
-        invalidateHistory: args.invalidateHistory,
         invalidateLibrary: args.invalidateLibrary,
         setFeedback: args.setFeedbackWithAutoDismiss,
         makeErrorFeedback: (label, error) => commandErrorFeedback(label, error),
