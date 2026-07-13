@@ -133,10 +133,43 @@ const MOCK_REGULAR_WALLPAPERS: WallpaperDTO[] = Array.from({ length: 150 }, (_, 
 
 const MOCK_WALLPAPERS: WallpaperDTO[] = [...MOCK_WE_WALLPAPERS, ...MOCK_REGULAR_WALLPAPERS];
 
-const MOCK_SOURCES: SourceDTO[] = [
-  { path: '/mock/Pictures', exists: true, isWE: false, label: 'Pictures' },
-  { path: '/mock/Wallpapers', exists: true, isWE: false, label: 'Wallpapers' },
-  { path: '/mock/steamapps/workshop/content/431960/12345', exists: true, isWE: true, label: 'Steam Workshop: 12345' },
+const DEFAULT_MOCK_SOURCES: SourceDTO[] = [
+  {
+    id: 1,
+    path: '/mock/Pictures',
+    displayName: 'Pictures',
+    kind: 'directory',
+    recursive: true,
+    availability: 'available',
+    addedAt: '2026-07-01T00:00:00Z',
+    exists: true,
+    isWE: false,
+    label: 'Pictures',
+  },
+  {
+    id: 2,
+    path: '/mock/Wallpapers',
+    displayName: 'Wallpapers',
+    kind: 'directory',
+    recursive: true,
+    availability: 'available',
+    addedAt: '2026-07-02T00:00:00Z',
+    exists: true,
+    isWE: false,
+    label: 'Wallpapers',
+  },
+  {
+    id: 3,
+    path: '/mock/steamapps/workshop/content/431960/12345',
+    displayName: 'Steam Workshop: 12345',
+    kind: 'wallpaper_engine_workshop',
+    recursive: false,
+    availability: 'available',
+    addedAt: '2026-07-03T00:00:00Z',
+    exists: true,
+    isWE: true,
+    label: 'Steam Workshop: 12345',
+  },
 ];
 
 const MOCK_FAVORITES: string[] = [
@@ -220,6 +253,8 @@ const commandFailures = new Set<string>();
 const thumbnailFailures = new Set<string>();
 let libraryFirstPageEmpty = false;
 let libraryFirstPageEmptyConsumed = false;
+let sourceStore: SourceDTO[] = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
+let nextSourceId = 4;
 
 function resetScanProgressState(): void {
   scanProgressState = { ...defaultScanProgress };
@@ -234,6 +269,20 @@ function resetConfigStore(): void {
 function resetLibraryScenario(): void {
   libraryFirstPageEmpty = false;
   libraryFirstPageEmptyConsumed = false;
+}
+
+function resetSourceStore(): void {
+  sourceStore = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
+  nextSourceId = 4;
+}
+
+function normalizeMockSourcePath(path: string): string {
+  const trimmed = path.trim();
+  return trimmed.replace(/\/+$/, '') || '/';
+}
+
+function isMockWallpaperEngineSource(path: string): boolean {
+  return path.includes('/steamapps/workshop/content/431960/');
 }
 
 const mockBridgeAdapter = {
@@ -373,9 +422,56 @@ const mockBridgeAdapter = {
   },
   favoriteRemove: async (): Promise<CommandResult> => ok,
 
-  sourcesList: async (): Promise<SourceDTO[]> => MOCK_SOURCES,
-  sourceAdd: async (): Promise<CommandResult> => ok,
-  sourceRemove: async (): Promise<CommandResult> => ok,
+  sourcesList: async (): Promise<SourceDTO[]> => sourceStore.map((source) => ({ ...source })),
+  sourceAdd: async (path: string): Promise<CommandResult> => {
+    const normalizedPath = normalizeMockSourcePath(path);
+    if (sourceStore.some((source) => normalizeMockSourcePath(source.path) === normalizedPath)) {
+      return ok;
+    }
+    const isWE = isMockWallpaperEngineSource(normalizedPath);
+    const displayName = isWE
+      ? 'Wallpaper Engine'
+      : normalizedPath.split('/').filter(Boolean).at(-1) ?? normalizedPath;
+    const id = nextSourceId;
+    nextSourceId += 1;
+    sourceStore.push({
+      id,
+      path: normalizedPath,
+      displayName,
+      kind: isWE ? 'wallpaper_engine_workshop' : 'directory',
+      recursive: !isWE,
+      availability: 'available',
+      addedAt: '2026-07-14T00:00:00Z',
+      exists: true,
+      isWE,
+      label: displayName,
+    });
+    return ok;
+  },
+  sourceRemove: async (path: string): Promise<CommandResult> => {
+    sourceStore = sourceStore.filter((source) => source.path !== path);
+    return ok;
+  },
+  sourceRename: async (id: number, displayName: string): Promise<CommandResult> => {
+    const source = sourceStore.find((candidate) => candidate.id === id);
+    if (!source || !displayName.trim()) return failResult;
+    source.displayName = displayName.trim();
+    source.label = source.displayName;
+    return ok;
+  },
+  sourceSetRecursive: async (id: number, recursive: boolean): Promise<CommandResult> => {
+    const source = sourceStore.find((candidate) => candidate.id === id);
+    if (!source || source.kind !== 'directory') return failResult;
+    source.recursive = recursive;
+    return ok;
+  },
+  sourceRefresh: async (id: number): Promise<CommandResult> =>
+    sourceStore.some((source) => source.id === id) ? ok : failResult,
+  sourceRemoveById: async (id: number): Promise<CommandResult> => {
+    const before = sourceStore.length;
+    sourceStore = sourceStore.filter((source) => source.id !== id);
+    return sourceStore.length === before ? failResult : ok;
+  },
   validateSources: async (): Promise<CommandResult> => ok,
   removeMissingSources: async (): Promise<CommandResult> => ok,
   scanSteamWorkshop: async (): Promise<CommandResult> => ok,
@@ -472,6 +568,7 @@ const mockControl = {
     resetScanProgressState();
     resetConfigStore();
     resetLibraryScenario();
+    resetSourceStore();
     lastTargetedApplyRequest = null;
     commandFailures.clear();
     thumbnailFailures.clear();

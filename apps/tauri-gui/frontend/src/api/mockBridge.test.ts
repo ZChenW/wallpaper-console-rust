@@ -176,6 +176,103 @@ test('resetAll clears the library first-page-empty scenario', async () => {
   assert.ok(page.total > 0, 'scenario should be cleared after resetAll');
 });
 
+test('sources expose stable rich metadata while preserving legacy fields', async () => {
+  const sources = await api.sourcesList();
+
+  assert.deepEqual(
+    sources.map(({ id, displayName, kind, recursive, availability, addedAt }) => ({
+      id,
+      displayName,
+      kind,
+      recursive,
+      availability,
+      addedAt,
+    })),
+    [
+      {
+        id: 1,
+        displayName: 'Pictures',
+        kind: 'directory',
+        recursive: true,
+        availability: 'available',
+        addedAt: '2026-07-01T00:00:00Z',
+      },
+      {
+        id: 2,
+        displayName: 'Wallpapers',
+        kind: 'directory',
+        recursive: true,
+        availability: 'available',
+        addedAt: '2026-07-02T00:00:00Z',
+      },
+      {
+        id: 3,
+        displayName: 'Steam Workshop: 12345',
+        kind: 'wallpaper_engine_workshop',
+        recursive: false,
+        availability: 'available',
+        addedAt: '2026-07-03T00:00:00Z',
+      },
+    ],
+  );
+  assert.equal(sources[0]?.label, sources[0]?.displayName);
+  assert.equal(sources[2]?.isWE, true);
+});
+
+test('source mutations are stable-id scoped and resettable', async () => {
+  const initial = await api.sourcesList();
+  const first = initial[0]!;
+  const second = initial[1]!;
+
+  assert.equal((await api.sourceRename(first.id, 'Renamed collection')).success, true);
+  assert.equal((await api.sourceSetRecursive(first.id, false)).success, true);
+  assert.equal((await api.sourceRefresh(first.id)).success, true);
+  let changed = await api.sourcesList();
+  assert.equal(changed.find((source) => source.id === first.id)?.displayName, 'Renamed collection');
+  assert.equal(changed.find((source) => source.id === first.id)?.label, 'Renamed collection');
+  assert.equal(changed.find((source) => source.id === first.id)?.recursive, false);
+  assert.equal(changed.find((source) => source.id === second.id)?.displayName, 'Wallpapers');
+
+  assert.equal((await api.sourceRemoveById(first.id)).success, true);
+  changed = await api.sourcesList();
+  assert.equal(changed.some((source) => source.id === first.id), false);
+  assert.equal(changed.some((source) => source.id === second.id), true);
+
+  ctrl.resetAll();
+  const reset = await api.sourcesList();
+  assert.equal(reset.some((source) => source.id === first.id), true);
+  assert.equal(reset.find((source) => source.id === first.id)?.displayName, 'Pictures');
+});
+
+test('sourceAdd never reuses a removed stable ID', async () => {
+  assert.equal((await api.sourceRemoveById(3)).success, true);
+  assert.equal((await api.sourceAdd('/mock/New')).success, true);
+
+  const added = (await api.sourcesList()).find((source) => source.path === '/mock/New');
+  assert.equal(added?.id, 4);
+});
+
+test('sourceAdd recognizes Wallpaper Engine workshop sources', async () => {
+  assert.equal(
+    (await api.sourceAdd('/mock/steamapps/workshop/content/431960/67890/')).success,
+    true,
+  );
+
+  const source = (await api.sourcesList()).find((candidate) => candidate.id === 4);
+  assert.equal(source?.kind, 'wallpaper_engine_workshop');
+  assert.equal(source?.recursive, false);
+  assert.equal(source?.isWE, true);
+});
+
+test('sourceAdd treats paths that differ only by trailing slashes as one identity', async () => {
+  assert.equal((await api.sourceAdd('/mock/New/')).success, true);
+  assert.equal((await api.sourceAdd('/mock/New')).success, true);
+
+  const added = (await api.sourcesList()).filter((source) => source.path === '/mock/New');
+  assert.equal(added.length, 1);
+  assert.equal(added[0]?.id, 4);
+});
+
 test('displaysList returns connected display names', async () => {
   const displays = await api.displaysList();
 

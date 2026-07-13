@@ -1,5 +1,4 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 
 use wc_core::types::{FileType, WallpaperEntry};
@@ -46,8 +45,15 @@ pub struct BackendStatusDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceDto {
+    pub id: i64,
     pub path: String,
+    pub display_name: String,
+    pub kind: String,
+    pub recursive: bool,
+    pub availability: String,
+    pub added_at: String,
     pub exists: bool,
+    #[serde(rename = "isWE")]
     pub is_we: bool,
     pub label: String,
 }
@@ -340,30 +346,6 @@ pub fn format_bytes(bytes: u64) -> String {
     } else {
         format!("{} B", bytes)
     }
-}
-
-pub fn source_label(path: &str) -> String {
-    let p = Path::new(path);
-    if wc_scan::is_wallpaper_engine_source(path) {
-        let has_workshop_id = path
-            .find("/steamapps/workshop/content/431960/")
-            .map(|pos| {
-                let after = &path[pos + "/steamapps/workshop/content/431960/".len()..];
-                let first_seg = after.split('/').next().unwrap_or("");
-                !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit())
-            })
-            .unwrap_or(false);
-        if has_workshop_id {
-            return p
-                .file_name()
-                .map(|s| format!("Wallpaper Engine {}", s.to_string_lossy()))
-                .unwrap_or_else(|| "Wallpaper Engine".into());
-        }
-        return "Wallpaper Engine Workshop".into();
-    }
-    p.file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
 }
 
 pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {

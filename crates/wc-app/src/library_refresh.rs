@@ -163,22 +163,15 @@ fn extend_metadata_cache(cache: &mut HashMap<String, WallpaperEntry>, entries: &
     }
 }
 
-/// Refresh all named sources using one global prior-metadata cache.
-///
-/// Complete scans are reconciled immediately, so a later cancellation does
-/// not roll back valid results from earlier sources. Offline and incomplete
-/// scans only update availability and retain their previous snapshots.
-pub fn refresh_library_sources<F>(
+fn refresh_selected_sources<F>(
     storage: &StorageApi,
+    sources: Vec<SourceRecord>,
     mut callback: F,
 ) -> Result<LibraryRefreshReport, LibraryRefreshError>
 where
     F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
 {
     let mut report = LibraryRefreshReport::default();
-    let sources = storage
-        .source_records()
-        .map_err(|error| storage_error(error, None, &report))?;
     let mut metadata_cache = wc_storage::sqlite::prior_metadata_cache_from_sqlite(&storage.cd);
 
     for source in sources {
@@ -243,6 +236,53 @@ where
     Ok(report)
 }
 
+/// Refresh all named sources using one global prior-metadata cache.
+///
+/// Complete scans are reconciled immediately, so a later cancellation does
+/// not roll back valid results from earlier sources. Offline and incomplete
+/// scans only update availability and retain their previous snapshots.
+pub fn refresh_library_sources<F>(
+    storage: &StorageApi,
+    callback: F,
+) -> Result<LibraryRefreshReport, LibraryRefreshError>
+where
+    F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
+{
+    let empty_report = LibraryRefreshReport::default();
+    let sources = storage
+        .source_records()
+        .map_err(|error| storage_error(error, None, &empty_report))?;
+    refresh_selected_sources(storage, sources, callback)
+}
+
+/// Refresh exactly one configured source selected by its stable database ID.
+///
+/// Unknown IDs are errors. Complete scans only reconcile the selected source;
+/// offline, incomplete, and cancelled scans preserve its previous snapshot.
+pub fn refresh_library_source<F>(
+    storage: &StorageApi,
+    source_id: i64,
+    callback: F,
+) -> Result<LibraryRefreshReport, LibraryRefreshError>
+where
+    F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
+{
+    let empty_report = LibraryRefreshReport::default();
+    let source = storage
+        .source_records()
+        .map_err(|error| storage_error(error, None, &empty_report))?
+        .into_iter()
+        .find(|source| source.id == source_id)
+        .ok_or_else(|| {
+            storage_error(
+                WcError::Other(format!("source id {source_id} not found")),
+                None,
+                &empty_report,
+            )
+        })?;
+    refresh_selected_sources(storage, vec![source], callback)
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -252,7 +292,7 @@ mod tests {
     use wc_scan::{ScanControl, SourceScanEvent};
     use wc_storage::{SourceAvailability, StorageApi};
 
-    use super::{refresh_library_sources, LibraryRefreshError};
+    use super::{refresh_library_source, refresh_library_sources, LibraryRefreshError};
 
     fn storage() -> (tempfile::TempDir, StorageApi) {
         let tmp = tempfile::tempdir().unwrap();
@@ -531,5 +571,114 @@ mod tests {
                 complete_wallpaper.to_string_lossy(),
             ]
         );
+    }
+
+    #[test]
+    fn targeted_refresh_updates_only_the_requested_source() {
+        let (tmp, storage) = storage();
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        fs::create_dir_all(&first_root).unwrap();
+        fs::create_dir_all(&second_root).unwrap();
+        let first_old = first_root.join("old.jpg");
+        let second_old = second_root.join("old.jpg");
+        fs::write(&first_old, b"first old").unwrap();
+        fs::write(&second_old, b"second old").unwrap();
+        let first = add_source(&storage, &first_root);
+        add_source(&storage, &second_root);
+        refresh(&storage);
+
+        let first_new = first_root.join("new.jpg");
+        let second_new = second_root.join("new.jpg");
+        fs::remove_file(&first_old).unwrap();
+        fs::remove_file(&second_old).unwrap();
+        fs::write(&first_new, b"first new").unwrap();
+        fs::write(&second_new, b"second new").unwrap();
+
+        let report = refresh_library_source(&storage, first.id, |_, _| ScanControl::Continue)
+            .expect("targeted refresh should succeed");
+
+        assert_eq!(report.complete_sources, 1);
+        assert_eq!(report.wallpapers_added, 1);
+        assert_eq!(report.wallpapers_removed, 1);
+        assert_eq!(
+            library_paths(&storage),
+            vec![first_new.to_string_lossy(), second_old.to_string_lossy()]
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_preserves_overlapping_source_membership() {
+        let (tmp, storage) = storage();
+        let parent = tmp.path().join("walls");
+        let child = parent.join("nested");
+        fs::create_dir_all(&child).unwrap();
+        let shared = child.join("shared.jpg");
+        fs::write(&shared, b"shared").unwrap();
+        let parent_source = add_source(&storage, &parent);
+        add_source(&storage, &child);
+        refresh(&storage);
+        fs::remove_file(&shared).unwrap();
+
+        let report =
+            refresh_library_source(&storage, parent_source.id, |_, _| ScanControl::Continue)
+                .expect("targeted overlap refresh should succeed");
+
+        assert_eq!(report.memberships_removed, 1);
+        assert_eq!(report.wallpapers_removed, 0);
+        assert_eq!(library_counts(&storage), (1, 1));
+    }
+
+    #[test]
+    fn targeted_offline_and_cancelled_refreshes_preserve_the_snapshot() {
+        let (tmp, storage) = storage();
+        let offline_root = tmp.path().join("offline");
+        let cancelled_root = tmp.path().join("cancelled");
+        fs::create_dir_all(&offline_root).unwrap();
+        fs::create_dir_all(&cancelled_root).unwrap();
+        let offline_old = offline_root.join("old.jpg");
+        let cancelled_old = cancelled_root.join("old.jpg");
+        fs::write(&offline_old, b"offline old").unwrap();
+        fs::write(&cancelled_old, b"cancel old").unwrap();
+        let offline = add_source(&storage, &offline_root);
+        let cancelled = add_source(&storage, &cancelled_root);
+        refresh(&storage);
+
+        fs::remove_dir_all(&offline_root).unwrap();
+        let offline_report =
+            refresh_library_source(&storage, offline.id, |_, _| ScanControl::Continue)
+                .expect("offline is a successful snapshot-preserving outcome");
+        assert_eq!(offline_report.offline_sources, 1);
+
+        fs::remove_file(&cancelled_old).unwrap();
+        fs::write(cancelled_root.join("new.jpg"), b"cancel new").unwrap();
+        let cancelled_result = refresh_library_source(&storage, cancelled.id, |_, event| {
+            if matches!(event, SourceScanEvent::CandidateFound { .. }) {
+                ScanControl::Cancel
+            } else {
+                ScanControl::Continue
+            }
+        });
+        assert!(matches!(
+            cancelled_result,
+            Err(LibraryRefreshError::Cancelled { .. })
+        ));
+        assert_eq!(
+            library_paths(&storage),
+            vec![
+                cancelled_old.to_string_lossy(),
+                offline_old.to_string_lossy()
+            ]
+        );
+    }
+
+    #[test]
+    fn targeted_refresh_rejects_an_unknown_stable_id() {
+        let (_tmp, storage) = storage();
+
+        let error = refresh_library_source(&storage, 4242, |_, _| ScanControl::Continue)
+            .expect_err("unknown source IDs must not silently no-op");
+
+        assert!(error.to_string().contains("source id 4242 not found"));
     }
 }

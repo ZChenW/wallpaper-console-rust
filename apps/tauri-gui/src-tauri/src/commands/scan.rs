@@ -1,6 +1,8 @@
 use std::sync::{Mutex, OnceLock};
 
-use wc_app::library_refresh::{refresh_library_sources, LibraryRefreshError, LibraryRefreshReport};
+use wc_app::library_refresh::{
+    refresh_library_source, refresh_library_sources, LibraryRefreshError, LibraryRefreshReport,
+};
 use wc_scan::{ScanControl, ScanStats, SourceScanEvent};
 use wc_storage::SourceRecord;
 
@@ -8,8 +10,12 @@ use super::common::{fail, ok, storage, CommandResult, ScanProgressDto};
 
 static SCAN_STATE: OnceLock<Mutex<ScanProgressDto>> = OnceLock::new();
 
+#[cfg(test)]
+pub(crate) static TEST_SCAN_LOCK: Mutex<()> = Mutex::new(());
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct IndexSourcesResult {
+    pub indexed: usize,
     pub library_total: usize,
     pub removed: usize,
     pub removed_we_workshop_ids: Vec<String>,
@@ -71,6 +77,27 @@ fn scan_state() -> &'static Mutex<ScanProgressDto> {
     })
 }
 
+#[cfg(test)]
+pub(crate) fn reset_scan_state_for_test() {
+    if let Ok(mut state) = scan_state().lock() {
+        *state = ScanProgressDto {
+            running: false,
+            stage: "idle".into(),
+            scanned: 0,
+            total_hint: None,
+            reused_metadata: 0,
+            probed_metadata: 0,
+            inserted_sqlite: 0,
+            staged: 0,
+            skipped: 0,
+            metadata_errors: 0,
+            current_path: None,
+            cancel_requested: false,
+            error: None,
+        };
+    }
+}
+
 pub(crate) fn current_scan_progress_snapshot() -> ScanProgressDto {
     match scan_state().lock() {
         Ok(state) => state.clone(),
@@ -113,6 +140,17 @@ pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
         error: None,
     };
     Ok(())
+}
+
+pub(crate) fn with_scan_idle_operation<T>(operation: impl FnOnce() -> T) -> Result<T, String> {
+    let state = scan_state().lock().map_err(|error| error.to_string())?;
+    if state.running {
+        return Err(format!(
+            "Cannot modify sources while a scan is running: {}",
+            state.stage
+        ));
+    }
+    Ok(operation())
 }
 
 pub(crate) fn update_scan_stage(stage: &str) {
@@ -264,6 +302,7 @@ fn index_result_from_report(
     unique_library_count: usize,
 ) -> IndexSourcesResult {
     IndexSourcesResult {
+        indexed: report.indexed,
         library_total: unique_library_count,
         removed: report.wallpapers_removed,
         removed_we_workshop_ids: report.removed_we_workshop_ids.clone(),
@@ -279,7 +318,31 @@ fn index_sources_with_event_control<F>(
 where
     F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
 {
-    match refresh_library_sources(storage, |source, event| on_event(source, event)) {
+    finish_refresh(
+        storage,
+        refresh_library_sources(storage, |source, event| on_event(source, event)),
+    )
+}
+
+fn index_source_with_event_control<F>(
+    storage: &wc_storage::StorageApi,
+    source_id: i64,
+    mut on_event: F,
+) -> Result<IndexSourcesResult, String>
+where
+    F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
+{
+    finish_refresh(
+        storage,
+        refresh_library_source(storage, source_id, |source, event| on_event(source, event)),
+    )
+}
+
+fn finish_refresh(
+    storage: &wc_storage::StorageApi,
+    refresh: Result<LibraryRefreshReport, LibraryRefreshError>,
+) -> Result<IndexSourcesResult, String> {
+    match refresh {
         Ok(report) => {
             let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
                 .map_err(|error| error.to_string())?;
@@ -310,6 +373,20 @@ pub(crate) fn index_current_sources(
     }
     let mut progress = LiveScanProgress::default();
     index_sources_with_event_control(s, |source, event| {
+        update_scan_progress(&mut progress, source, event)
+    })
+}
+
+pub(crate) fn index_source_by_id(
+    storage: &wc_storage::StorageApi,
+    source_id: i64,
+) -> Result<IndexSourcesResult, String> {
+    update_scan_stage("loading source");
+    if scan_cancelled()? {
+        return Err("scan cancelled".to_string());
+    }
+    let mut progress = LiveScanProgress::default();
+    index_source_with_event_control(storage, source_id, |source, event| {
         update_scan_progress(&mut progress, source, event)
     })
 }
@@ -349,6 +426,10 @@ pub async fn scan_progress() -> Result<ScanProgressDto, String> {
 
 #[tauri::command]
 pub async fn scan_cancel() -> CommandResult {
+    request_scan_cancel()
+}
+
+pub(crate) fn request_scan_cancel() -> CommandResult {
     match scan_state().lock() {
         Ok(mut state) => {
             if state.running {
@@ -365,29 +446,6 @@ pub async fn scan_cancel() -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static TEST_SCAN_LOCK: Mutex<()> = Mutex::new(());
-
-    fn reset_scan_state_for_test() {
-        if let Ok(mut state) = scan_state().lock() {
-            *state = ScanProgressDto {
-                running: false,
-                stage: "idle".into(),
-                scanned: 0,
-                total_hint: None,
-                reused_metadata: 0,
-                probed_metadata: 0,
-                inserted_sqlite: 0,
-                staged: 0,
-                skipped: 0,
-                metadata_errors: 0,
-                current_path: None,
-                cancel_requested: false,
-                error: None,
-            };
-        }
-    }
 
     #[test]
     fn scan_start_rejects_concurrent_scan() {
@@ -759,6 +817,7 @@ mod tests {
     #[test]
     fn format_index_sources_message_reports_removed_workshop_item() {
         let msg = format_index_sources_message(&IndexSourcesResult {
+            indexed: 12,
             library_total: 12,
             removed: 1,
             removed_we_workshop_ids: vec!["3589454154".into()],
@@ -772,6 +831,7 @@ mod tests {
     #[test]
     fn format_index_sources_message_uses_plural_wording_for_mixed_removals() {
         let msg = format_index_sources_message(&IndexSourcesResult {
+            indexed: 10,
             library_total: 10,
             removed: 3,
             removed_we_workshop_ids: vec!["3589454154".into()],

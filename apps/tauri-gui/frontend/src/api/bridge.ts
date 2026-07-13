@@ -21,6 +21,21 @@ import type {
 
 export type * from './types';
 
+export type InvokeFn = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+export function createSourceMutationApi(invokeFn: InvokeFn = invoke) {
+  return {
+    sourceRename: (id: number, displayName: string): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_rename', { id, displayName }),
+    sourceSetRecursive: (id: number, recursive: boolean): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_set_recursive', { id, recursive }),
+    sourceRefresh: (id: number): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_refresh', { id }),
+    sourceRemoveById: (id: number): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_remove_by_id', { id }),
+  };
+}
+
 export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
   linuxWallpaperEngineStatus: (): Promise<LinuxWallpaperEngineStatusDTO> =>
@@ -67,6 +82,7 @@ export const api = {
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
   sourceAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_add', { path }),
   sourceRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_remove', { path }),
+  ...createSourceMutationApi(),
   validateSources: (): Promise<CommandResult> => invoke<CommandResult>('validate_sources'),
   removeMissingSources: (): Promise<CommandResult> => invoke<CommandResult>('remove_missing_sources'),
   scanSteamWorkshop: (): Promise<CommandResult> => invoke<CommandResult>('scan_steam_workshop'),

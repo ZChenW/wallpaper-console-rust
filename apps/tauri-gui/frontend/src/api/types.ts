@@ -54,7 +54,13 @@ export interface ScanProgressDTO {
 }
 
 export interface SourceDTO {
+  id: number;
   path: string;
+  displayName: string;
+  kind: 'directory' | 'wallpaper_engine_workshop';
+  recursive: boolean;
+  availability: 'unknown' | 'available' | 'offline';
+  addedAt: string;
   exists: boolean;
   isWE: boolean;
   label: string;
@@ -224,6 +230,10 @@ export interface WallpaperConsoleApi {
   sourcesList(): Promise<SourceDTO[]>;
   sourceAdd(path: string): Promise<CommandResult>;
   sourceRemove(path: string): Promise<CommandResult>;
+  sourceRename(id: number, displayName: string): Promise<CommandResult>;
+  sourceSetRecursive(id: number, recursive: boolean): Promise<CommandResult>;
+  sourceRefresh(id: number): Promise<CommandResult>;
+  sourceRemoveById(id: number): Promise<CommandResult>;
   validateSources(): Promise<CommandResult>;
   removeMissingSources(): Promise<CommandResult>;
   scanSteamWorkshop(): Promise<CommandResult>;
