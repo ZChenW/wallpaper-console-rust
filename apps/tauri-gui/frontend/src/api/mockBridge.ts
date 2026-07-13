@@ -259,6 +259,7 @@ let libraryFirstPageEmptyConsumed = false;
 let browserFixtureCopies = 1;
 let sourceStore: SourceDTO[] = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
 let nextSourceId = 4;
+let favoriteStore = new Set(MOCK_FAVORITES);
 
 function resetScanProgressState(): void {
   scanProgressState = { ...defaultScanProgress };
@@ -279,6 +280,10 @@ function resetLibraryScenario(): void {
 function resetSourceStore(): void {
   sourceStore = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
   nextSourceId = 4;
+}
+
+function resetFavoriteStore(): void {
+  favoriteStore = new Set(MOCK_FAVORITES);
 }
 
 function normalizeMockSourcePath(path: string): string {
@@ -311,9 +316,16 @@ function mockWallpaperAuthor(wallpaper: WallpaperDTO): string | null {
   return 'Mock Artist';
 }
 
+function mockFixturePath(path: string, copyIndex: number): string {
+  if (copyIndex === 0) return path;
+  const relativePath = path.startsWith('/mock') ? path.slice('/mock'.length) : path;
+  return `/mock/browser-fixture-${copyIndex}${relativePath}`;
+}
+
 function mockBrowserItems(): LibraryBrowserItemDTO[] {
   return Array.from({ length: browserFixtureCopies }, (_, copyIndex) =>
     MOCK_WALLPAPERS.map((wallpaper, index) => {
+      const path = mockFixturePath(wallpaper.path, copyIndex);
       const sources = mockWallpaperSourceIds(wallpaper)
         .map((sourceId) => sourceStore.find((source) => source.id === sourceId))
         .filter((source): source is SourceDTO => source !== undefined)
@@ -321,9 +333,13 @@ function mockBrowserItems(): LibraryBrowserItemDTO[] {
         .map((source) => ({ id: source.id, displayName: source.displayName }));
       return {
         ...wallpaper,
+        path,
+        previewPath: wallpaper.previewPath
+          ? mockFixturePath(wallpaper.previewPath, copyIndex)
+          : undefined,
         applyActions: wallpaper.applyActions?.map((action) => ({ ...action })),
         wallpaperId: copyIndex * MOCK_WALLPAPERS.length + index + 1,
-        favorite: MOCK_FAVORITES.includes(wallpaper.path),
+        favorite: favoriteStore.has(path),
         author: mockWallpaperAuthor(wallpaper),
         addedAt: new Date(wallpaper.mtime * 1000).toISOString(),
         sources,
@@ -533,8 +549,9 @@ const mockBridgeAdapter = {
   }),
 
   favoritesPage: async (offset: number, limit: number): Promise<LibraryPageDTO> => {
-    const items = MOCK_FAVORITES.map((path) =>
-      MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
+    const browserItems = new Map(mockBrowserItems().map((item) => [item.path, item]));
+    const items = Array.from(favoriteStore, (path) =>
+      browserItems.get(path) ?? MOCK_WALLPAPERS.find((w) => w.path === path) ?? {
         path,
         type: 'image',
         ext: 'jpg',
@@ -556,9 +573,13 @@ const mockBridgeAdapter = {
   favoriteAdd: async (path: string): Promise<CommandResult> => {
     // Simulate failure for the WE Web mock path so smoke tests can verify error feedback
     if (path.includes('3650880224')) return failResult;
+    favoriteStore.add(path);
     return ok;
   },
-  favoriteRemove: async (): Promise<CommandResult> => ok,
+  favoriteRemove: async (path: string): Promise<CommandResult> => {
+    favoriteStore.delete(path);
+    return ok;
+  },
 
   sourcesList: async (): Promise<SourceDTO[]> => sourceStore.map((source) => ({ ...source })),
   sourceAdd: async (path: string): Promise<CommandResult> => {
@@ -712,6 +733,7 @@ const mockControl = {
     resetConfigStore();
     resetLibraryScenario();
     resetSourceStore();
+    resetFavoriteStore();
     lastApplyActionRequest = null;
     lastTargetedApplyRequest = null;
     commandFailures.clear();

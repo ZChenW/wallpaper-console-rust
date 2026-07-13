@@ -483,3 +483,104 @@ test('library browser random returns only a matching candidate and null for no m
   );
   assert.equal(missing, null);
 });
+
+test('favorite mutations immediately update unified page and random results', async () => {
+  const path = '/mock/path/wallpaper-002.jpg';
+  const query = browserQuery({
+    sourceId: 1,
+    typeFilter: 'image',
+    favoritesOnly: true,
+    search: 'wallpaper-002',
+  });
+
+  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal(await api.libraryBrowserRandom(query), null);
+
+  assert.equal((await api.favoriteAdd(path)).success, true);
+  const addedPage = await api.libraryBrowserPage(query);
+  assert.equal(addedPage.total, 1);
+  assert.equal(addedPage.items[0]?.path, path);
+  assert.equal(addedPage.items[0]?.favorite, true);
+  assert.equal((await api.libraryBrowserRandom(query))?.path, path);
+
+  assert.equal((await api.favoriteRemove(path)).success, true);
+  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal(await api.libraryBrowserRandom(query), null);
+});
+
+test('failed favorite additions leave unified browser state unchanged', async () => {
+  const path = '/mock/Steam/steamapps/workshop/content/431960/3650880224';
+  const query = browserQuery({
+    sourceId: 3,
+    typeFilter: 'unsupported',
+    favoritesOnly: true,
+    search: 'web title',
+  });
+
+  assert.equal((await api.favoriteAdd(path)).success, false);
+  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal(await api.libraryBrowserRandom(query), null);
+});
+
+test('resetAll restores initial favorites after add and remove mutations', async () => {
+  const initialFavorite = '/mock/path/wallpaper-001.jpg';
+  const addedFavorite = '/mock/path/wallpaper-002.jpg';
+
+  await api.favoriteRemove(initialFavorite);
+  await api.favoriteAdd(addedFavorite);
+  ctrl.resetAll();
+
+  const favorites = await api.libraryBrowserPage(browserQuery({
+    typeFilter: 'image',
+    favoritesOnly: true,
+    sort: 'nameAsc',
+  }));
+  assert.equal(
+    favorites.items.some((item) => item.path === initialFavorite && item.favorite),
+    true,
+  );
+  assert.equal(favorites.items.some((item) => item.path === addedFavorite), false);
+});
+
+test('large browser fixture has at least 1000 unique paths across stable pages', async () => {
+  ctrl.setBrowserFixtureCopies(7);
+  const query = browserQuery({ limit: 500 });
+  const first = await api.libraryBrowserPage(query);
+  const allItems = [...first.items];
+
+  for (let offset = first.items.length; offset < first.total; offset += 500) {
+    const page = await api.libraryBrowserPage({ ...query, offset });
+    assert.equal(page.total, first.total);
+    allItems.push(...page.items);
+  }
+
+  assert.ok(first.total >= 1_000);
+  assert.equal(allItems.length, first.total);
+  assert.equal(new Set(allItems.map((item) => item.path)).size, first.total);
+  assert.equal(new Set(allItems.map((item) => item.wallpaperId)).size, first.total);
+});
+
+test('large fixture filtering, favorites, and random share the same unique entries', async () => {
+  ctrl.setBrowserFixtureCopies(7);
+  const matchingQuery = browserQuery({
+    sourceId: 1,
+    typeFilter: 'video',
+    search: 'wallpaper-050',
+    sort: 'recentlyAdded',
+  });
+  const matching = await api.libraryBrowserPage(matchingQuery);
+
+  assert.equal(matching.total, 7);
+  assert.equal(new Set(matching.items.map((item) => item.path)).size, 7);
+
+  const initialPath = '/mock/path/wallpaper-050.mp4';
+  const copiedPath = matching.items.find((item) => item.path !== initialPath)?.path;
+  assert.ok(copiedPath);
+  await api.favoriteRemove(initialPath);
+  await api.favoriteAdd(copiedPath);
+
+  const favoriteQuery = { ...matchingQuery, favoritesOnly: true };
+  const favorites = await api.libraryBrowserPage(favoriteQuery);
+  assert.deepEqual(favorites.items.map((item) => item.path), [copiedPath]);
+  assert.equal((await api.libraryBrowserRandom(favoriteQuery))?.path, copiedPath);
+});
