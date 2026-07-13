@@ -7,10 +7,12 @@ pub(crate) fn print_help() {
     println!(concat!(
         "wallpaper-console-rust\n\n",
         "Commands:\n",
-        "  apply FILE           browse              browse-all\n",
+        "  apply FILE [--target OUTPUT|all] [--output OUTPUT]...\n",
+        "                       browse              browse-all\n",
         "  browse-images        browse-gifs         browse-videos\n",
         "  random               random-all          random-image/gif/video\n",
         "  stop                 status               restore\n",
+        "  displays             display-state        restore-displays [--output OUTPUT]...\n",
         "  add DIR              sources             remove (fzf)\n",
         "  remove-source DIR    steam-workshop      validate-sources\n",
         "  remove-missing       dedupe-sources\n",
@@ -226,4 +228,98 @@ fn json_library_page_from_tsv(
         }))?
     );
     Ok(())
+}
+
+pub(crate) fn json_from_display_names(names: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "outputs": names
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect::<Vec<_>>()
+    })
+}
+
+pub(crate) fn json_from_display_state_rows(
+    rows: &[wc_storage::sqlite::DisplayStateRow],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                let (target_key, kind, output) = match &row.target {
+                    wc_storage::sqlite::DisplayStateTarget::AllDisplays => (
+                        wc_storage::sqlite::ALL_DISPLAYS_TARGET_KEY.to_string(),
+                        "allDisplays",
+                        None,
+                    ),
+                    wc_storage::sqlite::DisplayStateTarget::Output(name) => {
+                        (name.clone(), "output", Some(name.clone()))
+                    }
+                };
+                serde_json::json!({
+                    "targetKey": target_key,
+                    "kind": kind,
+                    "output": output,
+                    "wallpaperPath": row.wallpaper_path,
+                    "backend": row.backend,
+                    "updatedAt": row.updated_at,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
+
+    #[test]
+    fn display_list_json_uses_typed_output_objects() {
+        assert_eq!(
+            json_from_display_names(&["eDP-1".into(), "HDMI-A-1".into()]),
+            serde_json::json!({
+                "outputs": [{ "name": "eDP-1" }, { "name": "HDMI-A-1" }]
+            })
+        );
+    }
+
+    #[test]
+    fn display_state_json_preserves_all_and_named_targets() {
+        let rows = vec![
+            DisplayStateRow {
+                target: DisplayStateTarget::AllDisplays,
+                wallpaper_path: "/walls/all.jpg".into(),
+                backend: "awww".into(),
+                updated_at: "2026-07-13T00:00:00Z".into(),
+            },
+            DisplayStateRow {
+                target: DisplayStateTarget::Output("eDP-1".into()),
+                wallpaper_path: "/walls/laptop.mp4".into(),
+                backend: "mpvpaper".into(),
+                updated_at: "2026-07-13T00:01:00Z".into(),
+            },
+        ];
+
+        assert_eq!(
+            json_from_display_state_rows(&rows),
+            serde_json::json!([
+                {
+                    "targetKey": "__all_displays__",
+                    "kind": "allDisplays",
+                    "output": null,
+                    "wallpaperPath": "/walls/all.jpg",
+                    "backend": "awww",
+                    "updatedAt": "2026-07-13T00:00:00Z"
+                },
+                {
+                    "targetKey": "eDP-1",
+                    "kind": "output",
+                    "output": "eDP-1",
+                    "wallpaperPath": "/walls/laptop.mp4",
+                    "backend": "mpvpaper",
+                    "updatedAt": "2026-07-13T00:01:00Z"
+                }
+            ])
+        );
+    }
 }

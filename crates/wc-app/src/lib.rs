@@ -2,8 +2,12 @@ pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
 pub mod display_apply;
+mod display_discovery;
 pub mod display_plan;
 pub mod display_restore;
+
+#[cfg(test)]
+mod display_discovery_tests;
 
 use std::path::{Path, PathBuf};
 
@@ -19,6 +23,7 @@ pub use apply_plan::{
     ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan, CompatibilityKind,
 };
 pub use apply_stage_labels::{apply_stage_detail, apply_stage_label, ApplyStageContext};
+pub use display_discovery::discover_connected_outputs;
 pub use display_plan::{
     plan_display_apply, plan_display_apply_with_capability, DisplayApplyPlan, DisplayApplyRequest,
     DisplayTarget, PlannedAction, RejectionReason, RunningAssignment,
@@ -76,11 +81,7 @@ impl AppService {
 
         // Legacy apply(path) is the explicit All Displays default: replace
         // per-display rows with a single All Displays mapping after success.
-        display_apply::commit_legacy_apply_display_state(
-            self,
-            &result.applied_path,
-            result.backend,
-        )?;
+        self.commit_legacy_apply_display_state(&result.applied_path, result.backend)?;
 
         Ok(ApplyTarget {
             input_path: path.to_string(),
@@ -88,6 +89,34 @@ impl AppService {
             file_type: result.file_type,
             backend: result.backend,
         })
+    }
+
+    /// Finalize a successful compatibility apply as one All Displays mapping.
+    ///
+    /// This also synchronizes legacy runtime keys and reconciles state if the
+    /// atomic commit fails after the renderer has already started.
+    pub fn commit_legacy_apply_display_state(
+        &self,
+        wallpaper_path: &str,
+        backend: Backend,
+    ) -> Result<(), AppError> {
+        display_apply::commit_legacy_apply_display_state(self, wallpaper_path, backend)
+    }
+
+    /// Failure-injection variant of [`Self::commit_legacy_apply_display_state`].
+    #[doc(hidden)]
+    pub fn commit_legacy_apply_display_state_with_seam(
+        &self,
+        wallpaper_path: &str,
+        backend: Backend,
+        before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+    ) -> Result<(), AppError> {
+        display_apply::commit_legacy_apply_display_state_with_seam(
+            self,
+            wallpaper_path,
+            backend,
+            Some(before_commit),
+        )
     }
 
     pub fn execute_apply_request(

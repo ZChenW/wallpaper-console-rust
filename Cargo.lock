@@ -4534,6 +4534,7 @@ version = "0.1.0"
 dependencies = [
  "camino",
  "serde",
+ "serde_json",
  "tempfile",
  "wc-backend",
  "wc-core",

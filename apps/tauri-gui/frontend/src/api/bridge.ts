@@ -69,6 +69,37 @@ export interface StatusDTO {
   sourceCount: number;
 }
 
+export interface DisplayDTO {
+  name: string;
+}
+
+export interface DisplayListDTO {
+  outputs: DisplayDTO[];
+}
+
+export type DisplayStateKind = 'allDisplays' | 'output';
+
+export interface DisplayStateDTO {
+  targetKey: string;
+  kind: DisplayStateKind;
+  output: string | null;
+  wallpaperPath: string;
+  backend: string;
+  updatedAt: string;
+}
+
+export interface TargetedApplyRequestDTO {
+  path: string;
+  /** Omitted means All Displays for compatibility with legacy apply callers. */
+  target?: string;
+  requestId?: string;
+}
+
+export interface TargetedRestoreRequestDTO {
+  /** Omitted means discover currently connected outputs. */
+  outputs?: string[];
+}
+
 export interface LinuxWallpaperEngineStatusDTO {
   available: boolean;
   path?: string;
@@ -168,10 +199,17 @@ export const api = {
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   applyAction: (request: ApplyRequestDTO): Promise<CommandResult> =>
     invoke<CommandResult>('apply_action', { request }),
+  displaysList: (): Promise<DisplayListDTO> => invoke<DisplayListDTO>('displays_list'),
+  displayStateList: (): Promise<DisplayStateDTO[]> =>
+    invoke<DisplayStateDTO[]>('display_state_list'),
+  applyToDisplay: (request: TargetedApplyRequestDTO): Promise<CommandResult> =>
+    invoke<CommandResult>('apply_to_display', { request }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
   weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
+  restoreDisplays: (request?: TargetedRestoreRequestDTO): Promise<CommandResult> =>
+    invoke<CommandResult>('restore_displays', { request }),
 
   libraryCount: (): Promise<LibraryCountDTO> =>
     invoke<LibraryCountDTO>('library_count').catch(() => ({ total: 0, images: 0, gifs: 0, videos: 0 })),

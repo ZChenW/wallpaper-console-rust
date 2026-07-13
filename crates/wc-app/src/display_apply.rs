@@ -696,7 +696,7 @@ pub(crate) fn commit_legacy_apply_display_state(
     commit_legacy_apply_display_state_with_seam(service, wallpaper_path, backend, None)
 }
 
-fn commit_legacy_apply_display_state_with_seam(
+pub(crate) fn commit_legacy_apply_display_state_with_seam(
     service: &AppService,
     wallpaper_path: &str,
     backend: Backend,
@@ -1498,13 +1498,15 @@ mod tests {
     fn legacy_commit_failure_records_live_all_displays_without_stale_named_override() {
         let (tmp, service) = temp_service();
         let img = write_image(tmp.path(), "legacy.jpg");
+        // The renderer success path writes these legacy keys before the
+        // display-state finalization step is attempted.
         service
             .storage_for_tests()
-            .current_write("/walls/prior.jpg")
+            .current_write(&img.to_string_lossy())
             .unwrap();
         service
             .storage_for_tests()
-            .last_backend_write("mpvpaper")
+            .last_backend_write("awww")
             .unwrap();
         service
             .storage_for_tests()
@@ -1534,6 +1536,12 @@ mod tests {
         assert!(service
             .storage_for_tests()
             .current_read()
+            .unwrap()
+            .unwrap_or_default()
+            .is_empty());
+        assert!(service
+            .storage_for_tests()
+            .last_backend_read()
             .unwrap()
             .unwrap_or_default()
             .is_empty());

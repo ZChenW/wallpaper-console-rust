@@ -12,6 +12,7 @@ interface ApplyRequestDTO {
 }
 
 let lastApplyActionRequest: ApplyRequestDTO | null = null;
+let lastTargetedApplyRequest: TargetedApplyRequestDTO | null = null;
 
 interface LibraryCountDTO {
   total: number;
@@ -37,6 +38,35 @@ interface StatusDTO {
   current: string;
   lastBackend: string;
   sourceCount: number;
+}
+
+interface DisplayDTO {
+  name: string;
+}
+
+interface DisplayListDTO {
+  outputs: DisplayDTO[];
+}
+
+type DisplayStateKind = 'allDisplays' | 'output';
+
+interface DisplayStateDTO {
+  targetKey: string;
+  kind: DisplayStateKind;
+  output: string | null;
+  wallpaperPath: string;
+  backend: string;
+  updatedAt: string;
+}
+
+interface TargetedApplyRequestDTO {
+  path: string;
+  target?: string;
+  requestId?: string;
+}
+
+interface TargetedRestoreRequestDTO {
+  outputs?: string[];
 }
 
 interface LinuxWallpaperEngineStatusDTO {
@@ -251,6 +281,19 @@ const MOCK_HISTORY: string[] = [
   '/mock/path/wallpaper-020.jpg',
 ];
 
+const MOCK_DISPLAYS: DisplayDTO[] = [{ name: 'eDP-1' }, { name: 'HDMI-A-1' }];
+
+const DEFAULT_DISPLAY_STATE: DisplayStateDTO[] = [
+  {
+    targetKey: '__all_displays__',
+    kind: 'allDisplays',
+    output: null,
+    wallpaperPath: '/mock/path/wallpaper-001.jpg',
+    backend: 'awww',
+    updatedAt: '2026-07-13T00:00:00Z',
+  },
+];
+
 const ok: CommandResult = { success: true, stdout: 'ok', stderr: '', exitCode: 0 };
 const failResult: CommandResult = { success: false, stdout: '', stderr: 'mock failure', exitCode: 1 };
 
@@ -365,9 +408,29 @@ export const api = {
       }),
     };
   },
+  displaysList: async (): Promise<DisplayListDTO> => ({
+    outputs: MOCK_DISPLAYS.map((display) => ({ ...display })),
+  }),
+  displayStateList: async (): Promise<DisplayStateDTO[]> =>
+    DEFAULT_DISPLAY_STATE.map((row) => ({ ...row })),
+  applyToDisplay: async (request: TargetedApplyRequestDTO): Promise<CommandResult> => {
+    lastTargetedApplyRequest = { ...request };
+    return {
+      ...ok,
+      stdout: JSON.stringify({
+        requestId: request.requestId,
+        appliedPath: request.path,
+        statePath: request.path,
+        backend: 'awww',
+        fileType: 'image',
+        preview: false,
+      }),
+    };
+  },
   stop: async (): Promise<CommandResult> => ok,
   weClearBackendError: async (): Promise<CommandResult> => ok,
   restore: async (): Promise<CommandResult> => ok,
+  restoreDisplays: async (_request?: TargetedRestoreRequestDTO): Promise<CommandResult> => ok,
 
   libraryCount: async (): Promise<LibraryCountDTO> => ({ total: 150, images: 90, gifs: 30, videos: 30 }),
 
@@ -560,10 +623,13 @@ export const api = {
       libraryFirstPageEmpty = enabled;
       libraryFirstPageEmptyConsumed = false;
     },
+    lastTargetedApplyRequest: (): TargetedApplyRequestDTO | null =>
+      lastTargetedApplyRequest ? { ...lastTargetedApplyRequest } : null,
     resetAll: (): void => {
       resetScanProgressState();
       resetConfigStore();
       resetLibraryScenario();
+      lastTargetedApplyRequest = null;
       commandFailures.clear();
       thumbnailFailures.clear();
     },

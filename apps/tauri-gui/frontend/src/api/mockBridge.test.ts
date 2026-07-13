@@ -170,3 +170,71 @@ test('resetAll clears the library first-page-empty scenario', async () => {
   const page = await api.libraryPage('all', 'newest', '', 0, 120);
   assert.ok(page.total > 0, 'scenario should be cleared after resetAll');
 });
+
+test('displaysList returns connected display names', async () => {
+  const displays = await api.displaysList();
+
+  assert.deepEqual(displays, {
+    outputs: [{ name: 'eDP-1' }, { name: 'HDMI-A-1' }],
+  });
+});
+
+test('displayStateList returns typed camelCase display state', async () => {
+  const state = await api.displayStateList();
+
+  assert.deepEqual(state, [
+    {
+      targetKey: '__all_displays__',
+      kind: 'allDisplays',
+      output: null,
+      wallpaperPath: '/mock/path/wallpaper-001.jpg',
+      backend: 'awww',
+      updatedAt: '2026-07-13T00:00:00Z',
+    },
+  ]);
+});
+
+test('applyToDisplay defaults an omitted target to All Displays', async () => {
+  const result = await api.applyToDisplay({
+    path: '/mock/path/new-wallpaper.jpg',
+    requestId: 'req-all',
+  });
+
+  assert.equal(result.success, true);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    requestId: 'req-all',
+    appliedPath: '/mock/path/new-wallpaper.jpg',
+    statePath: '/mock/path/new-wallpaper.jpg',
+    backend: 'awww',
+    fileType: 'image',
+    preview: false,
+  });
+  assert.deepEqual(ctrl.lastTargetedApplyRequest(), {
+    path: '/mock/path/new-wallpaper.jpg',
+    requestId: 'req-all',
+  });
+});
+
+test('applyToDisplay forwards a named display target', async () => {
+  const result = await api.applyToDisplay({
+    path: '/mock/path/targeted.jpg',
+    target: 'eDP-1',
+    requestId: 'req-edp',
+  });
+
+  assert.equal(result.success, true);
+  assert.equal(JSON.parse(result.stdout).requestId, 'req-edp');
+  assert.deepEqual(ctrl.lastTargetedApplyRequest(), {
+    path: '/mock/path/targeted.jpg',
+    target: 'eDP-1',
+    requestId: 'req-edp',
+  });
+});
+
+test('restoreDisplays accepts discovered or explicit connected outputs', async () => {
+  const discovered = await api.restoreDisplays();
+  const explicit = await api.restoreDisplays({ outputs: ['eDP-1', 'HDMI-A-1'] });
+
+  assert.equal(discovered.success, true);
+  assert.equal(explicit.success, true);
+});

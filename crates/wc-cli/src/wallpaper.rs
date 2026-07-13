@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -6,13 +7,120 @@ use wc_storage::StorageApi;
 use crate::library::library_paths;
 use crate::Commands;
 
-pub(crate) fn apply(s: &StorageApi, file: String) -> anyhow::Result<()> {
+fn parse_display_target(raw: &str) -> anyhow::Result<wc_app::DisplayTarget> {
+    let value = raw.trim();
+    if value.is_empty() {
+        anyhow::bail!("display target must not be blank");
+    }
+    if value.eq_ignore_ascii_case("all")
+        || value.eq_ignore_ascii_case("all displays")
+        || value == wc_storage::sqlite::ALL_DISPLAYS_TARGET_KEY
+    {
+        return Ok(wc_app::DisplayTarget::AllDisplays);
+    }
+    Ok(wc_app::DisplayTarget::Output(value.to_string()))
+}
+
+fn discover_connected_outputs() -> anyhow::Result<Vec<String>> {
+    wc_app::discover_connected_outputs().map_err(|error| {
+        let detail = error
+            .detail
+            .map(|detail| format!(" ({detail})"))
+            .unwrap_or_default();
+        anyhow::anyhow!("{}{}", error.message, detail)
+    })
+}
+
+fn apply_to_display_with<F>(
+    path: &str,
+    raw_target: &str,
+    known_outputs: &[String],
+    apply_targeted: F,
+) -> anyhow::Result<wc_app::ApplyTarget>
+where
+    F: FnOnce(
+        &str,
+        wc_app::DisplayTarget,
+        &[String],
+    ) -> Result<wc_app::ApplyTarget, wc_app::AppError>,
+{
+    let target = parse_display_target(raw_target)?;
+    apply_targeted(path, target, known_outputs).map_err(|e| anyhow::anyhow!(e.message))
+}
+
+fn restore_displays_with<F>(known_outputs: &[String], restore: F) -> anyhow::Result<()>
+where
+    F: FnOnce(&[String]) -> Result<(), wc_app::AppError>,
+{
+    restore(known_outputs).map_err(|e| anyhow::anyhow!(e.message))
+}
+
+fn resolve_known_outputs_with<F>(
+    explicit_outputs: &[String],
+    discover: F,
+) -> anyhow::Result<Vec<String>>
+where
+    F: FnOnce() -> anyhow::Result<Vec<String>>,
+{
+    let discovered_outputs = discover()?;
+    validate_known_outputs(&discovered_outputs)?;
+
+    if !explicit_outputs.is_empty() {
+        validate_known_outputs(explicit_outputs)?;
+        let explicit: HashSet<_> = explicit_outputs.iter().map(String::as_str).collect();
+        let discovered: HashSet<_> = discovered_outputs.iter().map(String::as_str).collect();
+        if explicit != discovered {
+            anyhow::bail!(
+                "explicit display outputs must exactly match discovered connected outputs"
+            );
+        }
+    }
+
+    Ok(discovered_outputs)
+}
+
+fn validate_known_outputs(outputs: &[String]) -> anyhow::Result<()> {
+    let mut seen = HashSet::new();
+    for output in outputs {
+        if output.trim().is_empty() {
+            anyhow::bail!("display output must not be blank");
+        }
+        if !seen.insert(output.as_str()) {
+            anyhow::bail!("duplicate display output: {output}");
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn apply(
+    s: &StorageApi,
+    file: String,
+    target: Option<String>,
+    explicit_outputs: Vec<String>,
+) -> anyhow::Result<()> {
     let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
         path: s.cd.path.clone(),
     });
-    let target = service
-        .apply(&file)
-        .map_err(|e| anyhow::anyhow!(e.message))?;
+    let target = match target {
+        None => {
+            if !explicit_outputs.is_empty() {
+                anyhow::bail!("--output requires an explicit --target");
+            }
+            service
+                .apply(&file)
+                .map_err(|e| anyhow::anyhow!(e.message))?
+        }
+        Some(raw_target) => {
+            let known_outputs =
+                resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
+            apply_to_display_with(
+                &file,
+                &raw_target,
+                &known_outputs,
+                |path, target, outputs| service.apply_to_display(path, target, outputs),
+            )?
+        }
+    };
     println!("Applied: {}", target.resolved_path);
     Ok(())
 }
@@ -48,6 +156,37 @@ pub(crate) fn status(s: &StorageApi) -> anyhow::Result<()> {
 pub(crate) fn restore(s: &StorageApi) -> anyhow::Result<()> {
     wc_backend::restore_clean(s)?;
     println!("Wallpaper restored.");
+    Ok(())
+}
+
+pub(crate) fn displays() -> anyhow::Result<()> {
+    let outputs = discover_connected_outputs()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&crate::output::json_from_display_names(&outputs))?
+    );
+    Ok(())
+}
+
+pub(crate) fn display_state(s: &StorageApi) -> anyhow::Result<()> {
+    let rows = s.display_state_list()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&crate::output::json_from_display_state_rows(&rows))?
+    );
+    Ok(())
+}
+
+pub(crate) fn restore_displays(
+    s: &StorageApi,
+    explicit_outputs: Vec<String>,
+) -> anyhow::Result<()> {
+    let known_outputs = resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
+    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+        path: s.cd.path.clone(),
+    });
+    restore_displays_with(&known_outputs, |outputs| service.restore_displays(outputs))?;
+    println!("Display wallpapers restored.");
     Ok(())
 }
 
@@ -588,6 +727,104 @@ mod tests {
 
     fn no_op_stop(_s: Option<&StorageApi>) -> Result<(), wc_core::error::WcError> {
         Ok(())
+    }
+
+    #[test]
+    fn explicit_display_target_parses_all_or_a_named_output() {
+        assert_eq!(
+            parse_display_target("all").unwrap(),
+            wc_app::DisplayTarget::AllDisplays
+        );
+        assert_eq!(
+            parse_display_target("__all_displays__").unwrap(),
+            wc_app::DisplayTarget::AllDisplays
+        );
+        assert_eq!(
+            parse_display_target(" eDP-1 ").unwrap(),
+            wc_app::DisplayTarget::Output("eDP-1".into())
+        );
+        assert!(parse_display_target("  ").is_err());
+    }
+
+    #[test]
+    fn targeted_apply_delegates_target_and_outputs_without_routing_a_backend() {
+        let known_outputs = vec!["eDP-1".to_string(), "HDMI-A-1".to_string()];
+        let result = apply_to_display_with(
+            "/walls/video.mp4",
+            "eDP-1",
+            &known_outputs,
+            |path, target, outputs| {
+                assert_eq!(path, "/walls/video.mp4");
+                assert_eq!(target, wc_app::DisplayTarget::Output("eDP-1".into()));
+                assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
+                Ok(wc_app::ApplyTarget {
+                    input_path: path.to_string(),
+                    resolved_path: path.to_string(),
+                    file_type: wc_core::types::FileType::Video,
+                    backend: wc_core::types::Backend::Mpvpaper,
+                })
+            },
+        )
+        .unwrap();
+
+        assert_eq!(result.backend, wc_core::types::Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn targeted_restore_delegates_the_connected_output_set_to_wc_app() {
+        let known_outputs = vec!["eDP-1".to_string(), "HDMI-A-1".to_string()];
+        restore_displays_with(&known_outputs, |outputs| {
+            assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn explicit_outputs_must_match_discovery_order_independently() {
+        let explicit = vec!["eDP-1".to_string(), "HDMI-A-1".to_string()];
+        let resolved =
+            resolve_known_outputs_with(&explicit, || Ok(vec!["HDMI-A-1".into(), "eDP-1".into()]))
+                .unwrap();
+        assert_eq!(resolved, ["HDMI-A-1", "eDP-1"]);
+
+        let discovered = resolve_known_outputs_with(&[], || Ok(vec!["DP-1".into()])).unwrap();
+        assert_eq!(discovered, ["DP-1"]);
+    }
+
+    #[test]
+    fn explicit_outputs_reject_incomplete_or_extra_sets() {
+        let incomplete = resolve_known_outputs_with(&["eDP-1".into()], || {
+            Ok(vec!["eDP-1".into(), "HDMI-A-1".into()])
+        })
+        .unwrap_err();
+        assert!(incomplete.to_string().contains("match"), "{incomplete}");
+
+        let extra = resolve_known_outputs_with(&["eDP-1".into(), "HDMI-A-1".into()], || {
+            Ok(vec!["eDP-1".into()])
+        })
+        .unwrap_err();
+        assert!(extra.to_string().contains("match"), "{extra}");
+    }
+
+    #[test]
+    fn explicit_outputs_reject_discovery_failure_and_invalid_values() {
+        let discovery_error = resolve_known_outputs_with(&["eDP-1".into()], || {
+            anyhow::bail!("real display discovery failed")
+        })
+        .unwrap_err();
+        assert!(
+            discovery_error.to_string().contains("discovery failed"),
+            "{discovery_error}"
+        );
+
+        assert!(resolve_known_outputs_with(&["  ".into()], || Ok(vec!["eDP-1".into()])).is_err());
+        assert!(
+            resolve_known_outputs_with(&["eDP-1".into(), "eDP-1".into()], || {
+                Ok(vec!["eDP-1".into()])
+            })
+            .is_err()
+        );
     }
 
     #[test]
