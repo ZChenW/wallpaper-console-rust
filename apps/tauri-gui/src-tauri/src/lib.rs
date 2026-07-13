@@ -11,6 +11,7 @@ pub fn run() {
                         .build(),
                 )?;
             }
+            commands::schedule_startup_source_refresh();
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

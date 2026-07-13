@@ -23,6 +23,13 @@ pub(crate) struct IndexSourcesResult {
     pub incomplete_sources: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StartupRefreshOutcome {
+    NoConfiguredSources,
+    ScanAlreadyRunning { stage: String },
+    Refreshed(IndexSourcesResult),
+}
+
 pub(crate) fn format_index_sources_message(result: &IndexSourcesResult) -> String {
     let mut msg = format!(
         "Scan complete. Library contains {} wallpaper(s).",
@@ -119,10 +126,18 @@ pub(crate) fn current_scan_progress_snapshot() -> ScanProgressDto {
     }
 }
 
-pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ScanStartOutcome {
+    Started,
+    AlreadyRunning { stage: String },
+}
+
+fn try_mark_scan_started(stage: &str) -> Result<ScanStartOutcome, String> {
     let mut state = scan_state().lock().map_err(|e| e.to_string())?;
     if state.running {
-        return Err(format!("Scan already running: {}", state.stage));
+        return Ok(ScanStartOutcome::AlreadyRunning {
+            stage: state.stage.clone(),
+        });
     }
     *state = ScanProgressDto {
         running: true,
@@ -139,7 +154,14 @@ pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
         cancel_requested: false,
         error: None,
     };
-    Ok(())
+    Ok(ScanStartOutcome::Started)
+}
+
+pub(crate) fn mark_scan_started(stage: &str) -> Result<(), String> {
+    match try_mark_scan_started(stage)? {
+        ScanStartOutcome::Started => Ok(()),
+        ScanStartOutcome::AlreadyRunning { stage } => Err(format!("Scan already running: {stage}")),
+    }
 }
 
 pub(crate) fn with_scan_idle_operation<T>(operation: impl FnOnce() -> T) -> Result<T, String> {
@@ -391,6 +413,84 @@ pub(crate) fn index_source_by_id(
     })
 }
 
+pub(crate) fn run_startup_source_refresh_with<SourceCount, Refresh>(
+    configured_source_count: SourceCount,
+    refresh: Refresh,
+) -> Result<StartupRefreshOutcome, String>
+where
+    SourceCount: FnOnce() -> Result<usize, String>,
+    Refresh: FnOnce() -> Result<IndexSourcesResult, String>,
+{
+    if configured_source_count()? == 0 {
+        return Ok(StartupRefreshOutcome::NoConfiguredSources);
+    }
+
+    match try_mark_scan_started("starting startup refresh")? {
+        ScanStartOutcome::AlreadyRunning { stage } => {
+            return Ok(StartupRefreshOutcome::ScanAlreadyRunning { stage });
+        }
+        ScanStartOutcome::Started => {}
+    }
+
+    match refresh() {
+        Ok(result) => {
+            finish_scan_success();
+            Ok(StartupRefreshOutcome::Refreshed(result))
+        }
+        Err(error) => {
+            finish_scan_error(&error);
+            Err(error)
+        }
+    }
+}
+
+pub(crate) fn run_configured_source_startup_refresh(
+    storage: &wc_storage::StorageApi,
+) -> Result<StartupRefreshOutcome, String> {
+    run_startup_source_refresh_with(
+        || {
+            storage
+                .source_records()
+                .map(|sources| sources.len())
+                .map_err(|error| error.to_string())
+        },
+        || index_current_sources(storage),
+    )
+}
+
+pub(crate) fn schedule_startup_source_refresh() {
+    tauri::async_runtime::spawn(async {
+        let worker = tauri::async_runtime::spawn_blocking(|| {
+            let storage = storage()?;
+            run_configured_source_startup_refresh(storage)
+        })
+        .await;
+
+        match worker {
+            Ok(Ok(StartupRefreshOutcome::NoConfiguredSources)) => {
+                log::debug!("Startup library refresh skipped: no configured sources");
+            }
+            Ok(Ok(StartupRefreshOutcome::ScanAlreadyRunning { stage })) => {
+                log::info!(
+                    "Startup library refresh skipped because another scan is running: {stage}"
+                );
+            }
+            Ok(Ok(StartupRefreshOutcome::Refreshed(result))) => {
+                log::info!(
+                    "Startup library refresh finished: {}",
+                    format_index_sources_message(&result)
+                );
+            }
+            Ok(Err(error)) => {
+                log::warn!("Startup library refresh failed: {error}");
+            }
+            Err(error) => {
+                log::error!("Startup library refresh worker stopped unexpectedly: {error}");
+            }
+        }
+    });
+}
+
 #[tauri::command]
 pub async fn rescan() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| {
@@ -446,6 +546,139 @@ pub(crate) fn request_scan_cancel() -> CommandResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
+
+    fn startup_refresh_result(indexed: usize) -> IndexSourcesResult {
+        IndexSourcesResult {
+            indexed,
+            library_total: indexed,
+            removed: 0,
+            removed_we_workshop_ids: Vec::new(),
+            offline_sources: 0,
+            incomplete_sources: 0,
+        }
+    }
+
+    #[test]
+    fn startup_refresh_skips_scan_completely_without_configured_sources() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        let refresh_called = Cell::new(false);
+
+        let outcome = run_startup_source_refresh_with(
+            || Ok(0),
+            || {
+                refresh_called.set(true);
+                Ok(startup_refresh_result(0))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome, StartupRefreshOutcome::NoConfiguredSources);
+        assert!(!refresh_called.get(), "zero sources must not enter refresh");
+        assert_eq!(current_scan_progress_snapshot().stage, "idle");
+        assert!(!current_scan_progress_snapshot().running);
+    }
+
+    #[test]
+    fn startup_refresh_runs_existing_refresh_path_for_configured_sources() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        let refresh_called = Cell::new(0);
+
+        let outcome = run_startup_source_refresh_with(
+            || Ok(2),
+            || {
+                refresh_called.set(refresh_called.get() + 1);
+                update_scan_stage("walking files");
+                Ok(startup_refresh_result(7))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            StartupRefreshOutcome::Refreshed(startup_refresh_result(7))
+        );
+        assert_eq!(refresh_called.get(), 1);
+        let progress = current_scan_progress_snapshot();
+        assert!(!progress.running);
+        assert_eq!(progress.stage, "idle");
+        assert_eq!(progress.error, None);
+    }
+
+    #[test]
+    fn startup_refresh_does_not_compete_with_an_active_scan() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        mark_scan_started("manual refresh").unwrap();
+        let refresh_called = Cell::new(false);
+
+        let outcome = run_startup_source_refresh_with(
+            || Ok(1),
+            || {
+                refresh_called.set(true);
+                Ok(startup_refresh_result(1))
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            outcome,
+            StartupRefreshOutcome::ScanAlreadyRunning {
+                stage: "manual refresh".into()
+            }
+        );
+        assert!(!refresh_called.get());
+        let progress = current_scan_progress_snapshot();
+        assert!(progress.running);
+        assert_eq!(progress.stage, "manual refresh");
+        finish_scan_success();
+    }
+
+    #[test]
+    fn startup_refresh_records_refresh_failure_without_panicking() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+
+        let error = run_startup_source_refresh_with(
+            || Ok(1),
+            || Err("database temporarily unavailable".into()),
+        )
+        .unwrap_err();
+
+        assert_eq!(error, "database temporarily unavailable");
+        let progress = current_scan_progress_snapshot();
+        assert!(!progress.running);
+        assert_eq!(progress.error.as_deref(), Some(error.as_str()));
+    }
+
+    #[test]
+    fn configured_source_startup_refresh_reuses_cached_metadata() {
+        let _guard = TEST_SCAN_LOCK.lock().unwrap();
+        reset_scan_state_for_test();
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        let source_path = tmp.path().join("walls");
+        std::fs::create_dir_all(&source_path).unwrap();
+        std::fs::write(source_path.join("cached.jpg"), b"wallpaper").unwrap();
+        storage
+            .source_create(&source_path.to_string_lossy())
+            .unwrap();
+        seed_source_snapshot(&storage);
+
+        let outcome = run_configured_source_startup_refresh(&storage).unwrap();
+
+        assert!(matches!(outcome, StartupRefreshOutcome::Refreshed(_)));
+        let progress = current_scan_progress_snapshot();
+        assert_eq!(progress.reused_metadata, 1);
+        assert_eq!(progress.probed_metadata, 0);
+        assert!(!progress.running);
+    }
 
     #[test]
     fn scan_start_rejects_concurrent_scan() {
