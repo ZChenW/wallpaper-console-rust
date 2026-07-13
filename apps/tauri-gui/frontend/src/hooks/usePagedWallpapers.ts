@@ -1,12 +1,15 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { WallpaperDTO } from '../api/bridge';
 
-export interface WallpaperPageDTO {
+export interface WallpaperPageDTO<T extends WallpaperDTO = WallpaperDTO> {
   total: number;
-  items?: WallpaperDTO[] | null;
+  items?: T[] | null;
 }
 
-export type WallpaperPageLoader = (offset: number, limit: number) => Promise<WallpaperPageDTO>;
+export type WallpaperPageLoader<T extends WallpaperDTO = WallpaperDTO> = (
+  offset: number,
+  limit: number,
+) => Promise<WallpaperPageDTO<T>>;
 
 export type RequestKind = 'initial' | 'refresh' | 'append';
 
@@ -15,20 +18,20 @@ export interface LoadingState {
   refreshing: boolean;
 }
 
-interface UsePagedWallpapersOptions {
+interface UsePagedWallpapersOptions<T extends WallpaperDTO = WallpaperDTO> {
   pageSize: number;
-  loadPage: WallpaperPageLoader;
+  loadPage: WallpaperPageLoader<T>;
   refreshEvent?: string;
-  onPage?: (page: WallpaperPageDTO) => void;
+  onPage?: (page: WallpaperPageDTO<T>) => void;
 }
 
 const CONFIRM_EMPTY_DELAY_MS = 400;
 
-export function mergePagedWallpaperItems(
-  previous: WallpaperDTO[],
-  incoming: WallpaperDTO[] | null | undefined,
+export function mergePagedWallpaperItems<T extends WallpaperDTO = WallpaperDTO>(
+  previous: T[],
+  incoming: T[] | null | undefined,
   append: boolean,
-): WallpaperDTO[] {
+): T[] {
   const items = incoming ?? [];
   return append ? [...previous, ...items] : items;
 }
@@ -66,13 +69,13 @@ export function formatLoadPageError(error: unknown): string {
   return 'Failed to load library page';
 }
 
-export function usePagedWallpapers({
+export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   pageSize,
   loadPage,
   refreshEvent,
   onPage,
-}: UsePagedWallpapersOptions) {
-  const [entries, setEntries] = useState<WallpaperDTO[]>([]);
+}: UsePagedWallpapersOptions<T>) {
+  const [entries, setEntries] = useState<T[]>([]);
   const [total, setTotal] = useState(0);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
