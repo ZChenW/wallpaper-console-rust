@@ -308,15 +308,226 @@ pub async fn reveal_in_file_manager(path: String) -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DirectoryPickerOutput {
+    success: bool,
+    stdout: String,
+    stderr: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DirectoryPickerRunError {
+    NotFound,
+    Failed(String),
+}
+
+fn directory_picker_candidates() -> Vec<(&'static str, Vec<String>)> {
+    let title = "Choose wallpaper folder";
+    let start_dir = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    vec![
+        (
+            "zenity",
+            vec![
+                "--file-selection".into(),
+                "--directory".into(),
+                format!("--title={title}"),
+            ],
+        ),
+        (
+            "kdialog",
+            vec![
+                "--title".into(),
+                title.into(),
+                "--getexistingdirectory".into(),
+                start_dir,
+            ],
+        ),
+        (
+            "yad",
+            vec![
+                "--file-selection".into(),
+                "--directory".into(),
+                format!("--title={title}"),
+            ],
+        ),
+    ]
+}
+
+fn pick_directory_with<R, D>(mut run: R, is_directory: D) -> Result<String, String>
+where
+    R: FnMut(&str, &[String]) -> Result<DirectoryPickerOutput, DirectoryPickerRunError>,
+    D: Fn(&std::path::Path) -> bool,
+{
+    for (program, args) in directory_picker_candidates() {
+        let output = match run(program, &args) {
+            Ok(output) => output,
+            Err(DirectoryPickerRunError::NotFound) => continue,
+            Err(DirectoryPickerRunError::Failed(error)) => {
+                return Err(format!(
+                    "Could not start {program} directory picker: {error}"
+                ));
+            }
+        };
+
+        if !output.success {
+            let detail = output.stderr.trim();
+            return if detail.is_empty() {
+                Ok(String::new())
+            } else {
+                Err(format!("{program} directory picker failed: {detail}"))
+            };
+        }
+
+        let selected = output.stdout.trim();
+        if selected.is_empty() {
+            return Ok(String::new());
+        }
+        let selected_path = std::path::Path::new(selected);
+        if !is_directory(selected_path) {
+            return Err(format!(
+                "Directory picker returned a path that is not an existing directory: {selected}"
+            ));
+        }
+        return Ok(selected.to_string());
+    }
+
+    Err(
+        "No supported directory picker is installed. Install zenity, kdialog, or yad and try again."
+            .into(),
+    )
+}
+
+fn pick_directory() -> Result<String, String> {
+    pick_directory_with(
+        |program, args| {
+            std::process::Command::new(program)
+                .args(args)
+                .output()
+                .map(|output| DirectoryPickerOutput {
+                    success: output.status.success(),
+                    stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+                })
+                .map_err(|error| {
+                    if error.kind() == std::io::ErrorKind::NotFound {
+                        DirectoryPickerRunError::NotFound
+                    } else {
+                        DirectoryPickerRunError::Failed(error.to_string())
+                    }
+                })
+        },
+        std::path::Path::is_dir,
+    )
+}
+
 #[tauri::command]
 pub async fn browse_directory(app: tauri::AppHandle) -> Result<String, String> {
     let _ = app;
-    Err("Directory picker is not available in this build.".into())
+    tauri::async_runtime::spawn_blocking(pick_directory)
+        .await
+        .map_err(|error| error.to_string())?
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn picker_output(success: bool, stdout: &str, stderr: &str) -> DirectoryPickerOutput {
+        DirectoryPickerOutput {
+            success,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    #[test]
+    fn directory_picker_returns_the_first_valid_selection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().to_string_lossy().into_owned();
+        let mut calls = Vec::new();
+
+        let result = pick_directory_with(
+            |program, args| {
+                calls.push((program.to_string(), args.to_vec()));
+                Ok(picker_output(true, &format!("  {selected}\n"), ""))
+            },
+            |path| path.is_dir(),
+        )
+        .unwrap();
+
+        assert_eq!(result, selected);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, "zenity");
+        assert!(calls[0].1.iter().any(|arg| arg == "--directory"));
+    }
+
+    #[test]
+    fn directory_picker_falls_back_when_a_program_is_missing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let selected = tmp.path().to_string_lossy().into_owned();
+        let mut calls = Vec::new();
+
+        let result = pick_directory_with(
+            |program, _args| {
+                calls.push(program.to_string());
+                if program == "zenity" {
+                    Err(DirectoryPickerRunError::NotFound)
+                } else {
+                    Ok(picker_output(true, &selected, ""))
+                }
+            },
+            |path| path.is_dir(),
+        )
+        .unwrap();
+
+        assert_eq!(result, selected);
+        assert_eq!(calls, ["zenity", "kdialog"]);
+    }
+
+    #[test]
+    fn directory_picker_cancel_returns_empty_without_opening_another() {
+        let mut calls = 0;
+
+        let result = pick_directory_with(
+            |_program, _args| {
+                calls += 1;
+                Ok(picker_output(false, "", ""))
+            },
+            |_path| true,
+        )
+        .unwrap();
+
+        assert_eq!(result, "");
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn directory_picker_rejects_a_successful_non_directory_result() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("wallpaper.jpg");
+        std::fs::write(&file, b"wallpaper").unwrap();
+
+        let error = pick_directory_with(
+            |_program, _args| Ok(picker_output(true, &file.to_string_lossy(), "")),
+            |path| path.is_dir(),
+        )
+        .unwrap_err();
+
+        assert!(error.contains("not an existing directory"), "{error}");
+    }
+
+    #[test]
+    fn directory_picker_explains_when_no_supported_program_is_installed() {
+        let error = pick_directory_with(
+            |_program, _args| Err(DirectoryPickerRunError::NotFound),
+            |_path| true,
+        )
+        .unwrap_err();
+
+        assert!(error.contains("zenity"), "{error}");
+        assert!(error.contains("kdialog"), "{error}");
+        assert!(error.contains("yad"), "{error}");
+    }
 
     #[test]
     fn open_location_target_dir_returns_self() {
