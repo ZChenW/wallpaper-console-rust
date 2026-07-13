@@ -31,10 +31,7 @@ impl StorageApi {
     pub fn try_new(cd: ConfigDir) -> Result<Self, WcError> {
         cd.init()?;
 
-        if !cd.db_path().exists() {
-            sqlite::migrate_to_sqlite(&cd)?;
-        }
-        sqlite::try_ensure_sqlite_db(&cd)?;
+        sqlite::ensure_or_import_legacy_flat(&cd)?;
         wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
         sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
 
@@ -56,7 +53,6 @@ impl StorageApi {
         self.mode = StorageBackend::Sqlite;
         wc_core::config::write_config_value(&self.cd.path, "storage_backend", "sqlite").ok();
         sqlite::sqlite_config_set(&self.cd, "storage_backend", "sqlite").ok();
-        sqlite::ensure_sqlite_db(&self.cd);
     }
 
     // ── Reads (always SQLite) ─────────────────────────────────────────
@@ -69,12 +65,14 @@ impl StorageApi {
     }
 
     fn _sqlite_config_get(&self, key: &str, default: &str) -> String {
-        sqlite::ensure_sqlite_db(&self.cd);
+        if sqlite::try_ensure_sqlite_db(&self.cd).is_err() {
+            return default.to_string();
+        }
         let db = self.cd.db_path();
         if !db.exists() {
             return default.to_string();
         }
-        match rusqlite::Connection::open(&db) {
+        match sqlite::open_runtime_connection(&self.cd) {
             Ok(conn) => conn
                 .query_row("SELECT value FROM config WHERE key=?1", [key], |row| {
                     row.get::<_, String>(0)
@@ -89,9 +87,8 @@ impl StorageApi {
     }
 
     pub fn favorites_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM favorites ORDER BY path")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -104,9 +101,8 @@ impl StorageApi {
     }
 
     pub fn history_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM history ORDER BY id DESC")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -123,9 +119,8 @@ impl StorageApi {
     }
 
     pub fn current_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
                 row.get(0)
@@ -134,9 +129,8 @@ impl StorageApi {
     }
 
     pub fn last_backend_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row(
                 "SELECT value FROM state WHERE key='last_backend'",
@@ -374,6 +368,73 @@ mod tests {
                 "{err}"
             ),
         }
+    }
+
+    #[test]
+    fn result_reads_reject_future_schema_without_changing_marker_or_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = sqlite::CURRENT_SCHEMA_VERSION + 1;
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        sqlite::create_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/walls/sentinel.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES ('/walls/sentinel.jpg', 'awww')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO state (key, value) VALUES ('current', '/walls/sentinel.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+        let storage = StorageApi {
+            cd,
+            mode: StorageBackend::Sqlite,
+        };
+
+        let results = [
+            storage.favorites_list().map(|_| ()),
+            storage.history_list().map(|_| ()),
+            storage.current_read().map(|_| ()),
+            storage.last_backend_read().map(|_| ()),
+        ];
+
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let sentinel_rows: i64 = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM favorites WHERE path = '/walls/sentinel.jpg') +
+                    (SELECT COUNT(*) FROM history WHERE path = '/walls/sentinel.jpg') +
+                    (SELECT COUNT(*) FROM state
+                     WHERE key = 'current' AND value = '/walls/sentinel.jpg')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for result in results {
+            let error = result.expect_err("future-schema Result read must be rejected");
+            assert!(
+                error.to_string().contains("newer") || error.to_string().contains("version"),
+                "{error}"
+            );
+        }
+        assert_eq!(version, future_version);
+        assert_eq!(sentinel_rows, 3);
     }
 
     #[test]

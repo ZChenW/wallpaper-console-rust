@@ -1,12 +1,11 @@
 use std::collections::HashMap;
 
 use camino::Utf8PathBuf;
-use rusqlite::Connection;
 use wc_core::config::ConfigDir;
 use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
 use super::row_map::non_empty;
-use super::schema::ensure_wallpaper_metadata_columns;
+use super::schema::{ensure_wallpaper_metadata_columns, open_runtime_connection};
 
 /// Load prior metadata from the SQLite wallpapers table into a HashMap keyed by
 /// canonical path. Returns an empty cache if the database does not exist.
@@ -16,7 +15,7 @@ pub fn prior_metadata_cache_from_sqlite(cd: &ConfigDir) -> HashMap<String, Wallp
     if !db_path.exists() {
         return cache;
     }
-    let conn = match Connection::open(&db_path) {
+    let conn = match open_runtime_connection(cd) {
         Ok(c) => c,
         Err(_) => return cache,
     };

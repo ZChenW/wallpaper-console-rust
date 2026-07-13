@@ -3,11 +3,16 @@ use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::Duration;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
 use crate::flat;
+
+use super::connection::{
+    acquire_maintenance_lock, open_or_create_connection,
+    open_runtime_connection as open_runtime_connection_with_version,
+};
+pub use super::connection::{apply_runtime_pragmas, RuntimeConnection, RUNTIME_BUSY_TIMEOUT_MS};
 
 const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_wallpapers_path ON wallpapers(path);
@@ -19,6 +24,11 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
 pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+
+/// Open a runtime connection that rejects databases created by newer builds.
+pub fn open_runtime_connection(cd: &ConfigDir) -> Result<RuntimeConnection, WcError> {
+    open_runtime_connection_with_version(cd, CURRENT_SCHEMA_VERSION)
+}
 
 /// Create the wallpaper-console SQLite schema.
 pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
@@ -698,6 +708,7 @@ pub fn ensure_wallpaper_query_indexes(conn: &Connection) -> Result<(), WcError> 
 
 /// Migrate flat files into wallpapers.db (one-shot operation).
 pub fn migrate_to_sqlite(cd: &ConfigDir) -> Result<(), WcError> {
+    let _maintenance = acquire_maintenance_lock(cd)?;
     let db_path = cd.db_path();
     if db_path.exists() {
         return Err(WcError::Other(
@@ -896,67 +907,20 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
     Ok(())
 }
 
-/// Default busy wait for runtime SQLite connections (milliseconds).
-pub const RUNTIME_BUSY_TIMEOUT_MS: u64 = 5000;
-
-/// Apply runtime PRAGMAs to a connection used for library operations.
-///
-/// Sets `busy_timeout` first so subsequent PRAGMAs (including `journal_mode`)
-/// wait on brief lock contention instead of failing immediately with
-/// `SQLITE_BUSY`.
-pub fn apply_runtime_pragmas(conn: &Connection) -> Result<(), WcError> {
-    conn.busy_timeout(Duration::from_millis(RUNTIME_BUSY_TIMEOUT_MS))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    conn.execute_batch(
-        "PRAGMA foreign_keys = ON;
-         PRAGMA journal_mode = WAL;",
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    Ok(())
-}
-
-/// Open a SQLite connection for hot runtime reads/writes.
-///
-/// Does not run schema bootstrap or repair. Callers that need a guaranteed
-/// schema (startup, migration, repair, explicit init) must call
-/// [`ensure_sqlite_db`] separately.
-pub fn open_runtime_connection(cd: &ConfigDir) -> Result<Connection, WcError> {
-    let db_path = cd.db_path();
-    if !db_path.exists() {
-        return Err(WcError::Sqlite(format!(
-            "database not found: {}",
-            db_path.display()
-        )));
-    }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
-    apply_runtime_pragmas(&conn)?;
-    #[cfg(test)]
-    RUNTIME_CONNECTION_OPEN_COUNT.with(|count| count.set(count.get() + 1));
-    Ok(conn)
-}
-
-#[cfg(test)]
-thread_local! {
-    static RUNTIME_CONNECTION_OPEN_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn reset_runtime_connection_open_count() {
-    RUNTIME_CONNECTION_OPEN_COUNT.with(|count| count.set(0));
-}
-
-#[cfg(test)]
-pub(crate) fn runtime_connection_open_count() -> usize {
-    RUNTIME_CONNECTION_OPEN_COUNT.with(std::cell::Cell::get)
-}
-
 /// Fallible bootstrap: open/create the DB, apply the full schema, and set
 /// runtime PRAGMAs. Surfaces schema/migration errors to callers that can
 /// propagate them (for example [`crate::StorageApi::try_new`] and display-state
 /// ConfigDir helpers).
 pub fn try_ensure_sqlite_db(cd: &ConfigDir) -> Result<(), WcError> {
-    let db = cd.db_path();
-    let conn = Connection::open(&db).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    try_ensure_sqlite_db_with_seam(cd, || {})
+}
+
+fn try_ensure_sqlite_db_with_seam(
+    cd: &ConfigDir,
+    before_create_schema: impl FnOnce(),
+) -> Result<(), WcError> {
+    let conn = open_or_create_connection(cd)?;
+    before_create_schema();
     create_schema(&conn)?;
     apply_runtime_pragmas(&conn)?;
     Ok(())
@@ -973,18 +937,237 @@ pub fn ensure_sqlite_db(cd: &ConfigDir) {
 /// Returns `true` if legacy flat files were imported into a newly created DB,
 /// `false` if the DB already existed and was only ensured/repaired.
 pub fn ensure_or_import_legacy_flat(cd: &ConfigDir) -> Result<bool, WcError> {
+    ensure_or_import_legacy_flat_with_seam(cd, || {})
+}
+
+fn ensure_or_import_legacy_flat_with_seam(
+    cd: &ConfigDir,
+    before_migrate: impl FnOnce(),
+) -> Result<bool, WcError> {
     if cd.db_path().exists() {
-        ensure_sqlite_db(cd);
+        try_ensure_sqlite_db(cd)?;
         return Ok(false);
     }
-    migrate_to_sqlite(cd)?;
-    ensure_sqlite_db(cd);
-    Ok(true)
+    before_migrate();
+    match migrate_to_sqlite(cd) {
+        Ok(()) => {
+            try_ensure_sqlite_db(cd)?;
+            Ok(true)
+        }
+        Err(_) if cd.db_path().exists() => {
+            // Another normal startup may have published a complete database
+            // while this caller waited for the exclusive migration lock.
+            try_ensure_sqlite_db(cd)?;
+            Ok(false)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn runtime_open_rejects_future_schema_before_changing_journal_mode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute_batch("PRAGMA journal_mode = DELETE;").unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let error = open_runtime_connection(&cd).err();
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let journal_mode = conn
+            .pragma_query_value(None, "journal_mode", |row| row.get::<_, String>(0))
+            .unwrap();
+        let error = error.expect("direct runtime opener must reject a future schema");
+        assert!(
+            error.to_string().contains("newer") || error.to_string().contains("version"),
+            "{error}"
+        );
+        assert_eq!(version, future_version);
+        assert_eq!(journal_mode, "delete");
+    }
+
+    #[test]
+    fn runtime_open_rechecks_version_after_waiting_for_schema_upgrade() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("wallpaper-console");
+        let cd = ConfigDir { path: path.clone() };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+
+        let upgrader_cd = ConfigDir { path: path.clone() };
+        let (upgraded_tx, upgraded_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let upgrader = std::thread::spawn(move || -> Result<(), WcError> {
+            let conn = open_or_create_connection(&upgrader_cd)?;
+            conn.pragma_update(None, "user_version", future_version)
+                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            upgraded_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(())
+        });
+        upgraded_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("schema upgrader must hold the exclusive lock after bumping the version");
+
+        let runtime_cd = ConfigDir { path };
+        let (outcome_tx, outcome_rx) = mpsc::channel();
+        let runtime = std::thread::spawn(move || {
+            let outcome = open_runtime_connection(&runtime_cd)
+                .map(drop)
+                .map_err(|error| error.to_string());
+            outcome_tx.send(outcome).unwrap();
+        });
+
+        let early = outcome_rx.recv_timeout(Duration::from_millis(150));
+        let was_blocked = matches!(&early, Err(RecvTimeoutError::Timeout));
+        release_tx.send(()).unwrap();
+        upgrader.join().unwrap().unwrap();
+        let outcome = match early {
+            Ok(outcome) => outcome,
+            Err(RecvTimeoutError::Timeout) => outcome_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("runtime opener must resume after the schema upgrade unlocks"),
+            Err(RecvTimeoutError::Disconnected) => panic!("runtime opener disconnected"),
+        };
+        runtime.join().unwrap();
+
+        assert!(
+            was_blocked,
+            "runtime opener must wait for the schema-exclusive upgrader"
+        );
+        let error = outcome.expect_err("runtime opener must reject the upgraded future schema");
+        assert!(
+            error.contains("newer") || error.contains("version"),
+            "{error}"
+        );
+        let conn = Connection::open(cd.db_path()).unwrap();
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            future_version
+        );
+    }
+
+    #[test]
+    fn runtime_open_waits_for_bootstrap_and_only_observes_complete_schema() {
+        use std::sync::mpsc::{self, RecvTimeoutError};
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("wallpaper-console");
+        let cd = ConfigDir { path: path.clone() };
+        cd.init().unwrap();
+
+        let bootstrap_cd = ConfigDir { path: path.clone() };
+        let (opened_tx, opened_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let bootstrap = std::thread::spawn(move || -> Result<(), WcError> {
+            try_ensure_sqlite_db_with_seam(&bootstrap_cd, || {
+                opened_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+            })
+        });
+
+        opened_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("bootstrap must pause after opening the main database");
+        assert!(cd.db_path().exists());
+
+        let runtime_cd = ConfigDir { path };
+        let (observed_tx, observed_rx) = mpsc::channel();
+        let runtime = std::thread::spawn(move || -> Result<(), WcError> {
+            let conn = open_runtime_connection(&runtime_cd)?;
+            let version = conn
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            let core_tables: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master
+                     WHERE type = 'table'
+                       AND name IN ('config', 'sources', 'wallpapers', 'wallpaper_sources', 'state')",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            observed_tx.send((version, core_tables)).unwrap();
+            Ok(())
+        });
+
+        let early = observed_rx.recv_timeout(Duration::from_millis(150));
+        let was_blocked = matches!(&early, Err(RecvTimeoutError::Timeout));
+        release_tx.send(()).unwrap();
+        bootstrap.join().unwrap().unwrap();
+        let observed = match early {
+            Ok(observed) => observed,
+            Err(RecvTimeoutError::Timeout) => observed_rx
+                .recv_timeout(Duration::from_secs(2))
+                .expect("runtime open must resume after bootstrap publishes the schema"),
+            Err(RecvTimeoutError::Disconnected) => panic!("runtime opener disconnected"),
+        };
+        runtime.join().unwrap().unwrap();
+
+        assert!(
+            was_blocked,
+            "runtime open must wait while bootstrap holds the exclusive schema lock"
+        );
+        assert_eq!(observed, (CURRENT_SCHEMA_VERSION, 5));
+    }
+
+    #[test]
+    fn concurrent_ensure_or_import_treats_the_winning_migration_as_normal_startup() {
+        use std::sync::{Arc, Barrier};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("wallpaper-console");
+        let cd = ConfigDir { path: path.clone() };
+        cd.init().unwrap();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    let cd = ConfigDir { path };
+                    ensure_or_import_legacy_flat_with_seam(&cd, || {
+                        barrier.wait();
+                    })
+                })
+            })
+            .collect();
+        let results: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+
+        assert!(
+            results.iter().all(Result::is_ok),
+            "both normal startups must succeed: {results:?}"
+        );
+        let mut imported: Vec<bool> = results.into_iter().map(Result::unwrap).collect();
+        imported.sort_unstable();
+        assert_eq!(imported, vec![false, true]);
+        try_ensure_sqlite_db(&cd).unwrap();
+    }
 
     fn create_v1_schema(conn: &Connection) {
         conn.execute_batch(

@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
-use super::schema::{open_runtime_connection, try_ensure_sqlite_db};
+use super::schema::{open_runtime_connection, try_ensure_sqlite_db, RuntimeConnection};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -79,7 +79,7 @@ pub struct SourceRecord {
     pub added_at: String,
 }
 
-fn source_connection(cd: &ConfigDir) -> Result<Connection, WcError> {
+fn source_connection(cd: &ConfigDir) -> Result<RuntimeConnection, WcError> {
     try_ensure_sqlite_db(cd)?;
     open_runtime_connection(cd)
 }

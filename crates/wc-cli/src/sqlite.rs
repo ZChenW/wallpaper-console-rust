@@ -102,10 +102,9 @@ pub(crate) fn migrate_to_sqlite() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn sqlite_connection(cd: &ConfigDir) -> anyhow::Result<rusqlite::Connection> {
-    let db_path = cd.db_path();
-    wc_storage::sqlite::ensure_sqlite_db(cd);
-    rusqlite::Connection::open(&db_path)
+fn sqlite_connection(cd: &ConfigDir) -> anyhow::Result<wc_storage::sqlite::RuntimeConnection> {
+    wc_storage::sqlite::try_ensure_sqlite_db(cd)?;
+    wc_storage::sqlite::open_runtime_connection(cd)
         .map_err(|e| anyhow::anyhow!("failed to open wallpapers.db: {}", e))
 }
 
@@ -156,4 +155,50 @@ fn sqlite_list_table_paths(
         .collect::<Result<Vec<String>, _>>()
         .map_err(|e| anyhow::anyhow!("SQLite {} read failed: {}", table, e))?;
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_sqlite_helper_rejects_future_schema_without_changing_marker_or_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = wc_storage::sqlite::CURRENT_SCHEMA_VERSION + 1;
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        wc_storage::sqlite::create_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO config (key, value) VALUES ('sentinel', 'cli-value')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let error = sqlite_config_get(&cd, "sentinel").err();
+
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let sentinel: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'sentinel'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let error = error.expect("CLI helper must reject a future-schema database");
+        assert!(
+            error.to_string().contains("newer") || error.to_string().contains("version"),
+            "{error}"
+        );
+        assert_eq!(version, future_version);
+        assert_eq!(sentinel, "cli-value");
+    }
 }

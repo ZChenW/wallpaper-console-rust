@@ -97,7 +97,7 @@ pub(crate) fn build_diagnostics_content(
     let integrity = if !db_exists {
         "missing".to_string()
     } else {
-        match rusqlite::Connection::open(&db_path) {
+        match wc_storage::sqlite::open_runtime_connection(&s.cd) {
             Ok(conn) => {
                 match conn.query_row("PRAGMA integrity_check;", [], |row| row.get::<_, String>(0)) {
                     Ok(v) => {

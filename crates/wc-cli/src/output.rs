@@ -108,15 +108,13 @@ pub(crate) fn json_library_from_tsv(s: &StorageApi) -> anyhow::Result<()> {
 }
 
 pub(crate) fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
-    use rusqlite::Connection;
     let db = s.cd.db_path();
     if !db.exists() {
-        let conn = Connection::open(&db)?;
-        wc_storage::sqlite::create_schema(&conn)?;
+        wc_storage::sqlite::try_ensure_sqlite_db(&s.cd)?;
         println!("[]");
         return Ok(());
     }
-    let conn = Connection::open(&db)?;
+    let conn = wc_storage::sqlite::open_runtime_connection(&s.cd)?;
     wc_storage::sqlite::ensure_wallpaper_metadata_columns(&conn)?;
     let mut stmt = conn.prepare(
         "SELECT path, type, ext, backend, size, mtime, resolution,

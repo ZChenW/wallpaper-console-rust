@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
-use super::schema::{open_runtime_connection, try_ensure_sqlite_db};
+use super::schema::{open_runtime_connection, try_ensure_sqlite_db, RuntimeConnection};
 
 /// Reserved storage key for the explicit All Displays target.
 pub const ALL_DISPLAYS_TARGET_KEY: &str = "__all_displays__";
@@ -542,7 +542,7 @@ pub fn display_state_commit_all_displays_with_legacy(
     Ok(())
 }
 
-fn open_display_state_connection(cd: &ConfigDir) -> Result<Connection, WcError> {
+fn open_display_state_connection(cd: &ConfigDir) -> Result<RuntimeConnection, WcError> {
     try_ensure_sqlite_db(cd)?;
     open_runtime_connection(cd)
 }

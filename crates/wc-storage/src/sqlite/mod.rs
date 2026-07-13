@@ -1,6 +1,7 @@
 //! SQLite storage — schema, migration, verify, resync, backup, restore.
 
 mod backup;
+mod connection;
 mod display_state;
 mod library_page;
 pub mod library_session;
@@ -11,6 +12,8 @@ mod source_config_state;
 mod sources;
 
 pub use backup::*;
+#[cfg(test)]
+pub(crate) use connection::{reset_runtime_connection_open_count, runtime_connection_open_count};
 pub use display_state::*;
 pub use library_page::*;
 pub use library_session::*;
@@ -34,7 +37,7 @@ pub struct LibraryIndexSnapshot {
 
 /// Snapshot path and workshop_id columns from the live wallpapers table.
 pub fn library_index_snapshot(cd: &ConfigDir) -> Result<LibraryIndexSnapshot, WcError> {
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Ok(LibraryIndexSnapshot::default());
@@ -172,7 +175,7 @@ pub fn library_replace_batch_atomic(
     cd: &ConfigDir,
     entries: &[(&str, &str, &str, &str, u64, u64, &str)],
 ) -> Result<usize, WcError> {
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
 
     let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
@@ -247,7 +250,7 @@ pub fn library_replace_entries_batch_atomic(
     cd: &ConfigDir,
     entries: &[WallpaperEntry],
 ) -> Result<usize, WcError> {
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
 
     let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
@@ -354,6 +357,48 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn future_schema_rejects_library_ensure_paths_without_replacing_rows() {
+        let (_tmp, cd) = temp_config_dir();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/sentinel.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let results = [
+            library_index_snapshot(&cd).map(|_| ()),
+            library_replace_batch_atomic(
+                &cd,
+                &[("/walls/new.jpg", "image", "jpg", "awww", 2, 2, "2x2")],
+            )
+            .map(|_| ()),
+        ];
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        drop(conn);
+        let paths = wallpaper_paths(&cd);
+
+        for result in results {
+            let error = result.expect_err("future-schema library operation must be rejected");
+            assert!(
+                error.to_string().contains("newer") || error.to_string().contains("version"),
+                "{error}"
+            );
+        }
+        assert_eq!(version, future_version);
+        assert_eq!(paths, vec!["/walls/sentinel.jpg"]);
     }
 
     #[test]
