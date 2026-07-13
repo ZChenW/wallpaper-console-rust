@@ -363,10 +363,32 @@ pub fn source_set_availability(
 }
 
 pub fn source_remove_by_id(cd: &ConfigDir, id: i64) -> Result<SourceRecord, WcError> {
-    let conn = source_connection(cd)?;
-    let source = source_get_from_conn(&conn, id)?;
-    conn.execute("DELETE FROM sources WHERE id = ?1", params![id])
+    source_remove_by_id_with_seam(cd, id, |_| Ok(()))
+}
+
+fn source_remove_by_id_with_seam<F>(
+    cd: &ConfigDir,
+    id: i64,
+    before_commit: F,
+) -> Result<SourceRecord, WcError>
+where
+    F: FnOnce(&Connection) -> Result<(), WcError>,
+{
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let source = source_get_from_conn(&tx, id)?;
+    tx.execute(
+        "UPDATE wallpapers SET source_id = NULL WHERE source_id = ?1",
+        params![id],
+    )
+    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    before_commit(&tx)?;
+    tx.commit()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
     Ok(source)
 }
 
@@ -389,18 +411,32 @@ pub(crate) fn source_paths_list_compat(cd: &ConfigDir) -> Result<Vec<String>, Wc
 }
 
 pub(crate) fn source_remove_exact_path_compat(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    let conn = source_connection(cd)?;
-    let removed = conn
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    tx.execute(
+        "UPDATE wallpapers SET source_id = NULL
+         WHERE source_id IN (SELECT id FROM sources WHERE path = ?1)",
+        params![path],
+    )
+    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let removed = tx
         .execute("DELETE FROM sources WHERE path = ?1", params![path])
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
     Ok(removed > 0)
 }
 
 pub(crate) fn source_remove_canonical_compat(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    let conn = source_connection(cd)?;
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
     let target = wc_scan::normalize_source_path(path);
     let rows = {
-        let mut stmt = conn
+        let mut stmt = tx
             .prepare("SELECT id, path FROM sources")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
         let rows = stmt
@@ -419,9 +455,16 @@ pub(crate) fn source_remove_canonical_compat(cd: &ConfigDir, path: &str) -> Resu
         })
         .collect();
     for id in &ids {
-        conn.execute("DELETE FROM sources WHERE id = ?1", params![id])
+        tx.execute(
+            "UPDATE wallpapers SET source_id = NULL WHERE source_id = ?1",
+            params![id],
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
+    tx.commit()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
     Ok(!ids.is_empty())
 }
 
@@ -595,6 +638,118 @@ mod tests {
             })
             .unwrap();
         assert_eq!(current, wallpaper);
+    }
+
+    #[test]
+    fn source_removal_failure_rolls_back_source_and_membership() {
+        let (tmp, cd) = storage();
+        let path = tmp.path().join("walls");
+        std::fs::create_dir(&path).unwrap();
+        let (source, _) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES (?1, 'image', 'jpg', 'awww')",
+            params![path.join("a.jpg").to_string_lossy()],
+        )
+        .unwrap();
+        let wallpaper_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (?1, ?2)",
+            params![wallpaper_id, source.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        let result = source_remove_by_id_with_seam(&cd, source.id, |_| {
+            Err(WcError::Other("injected before commit".into()))
+        });
+
+        assert!(result.unwrap_err().to_string().contains("injected"));
+        assert_eq!(source_get(&cd, source.id).unwrap(), source);
+        let conn = Connection::open(cd.db_path()).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM wallpaper_sources", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn removing_one_overlapping_source_preserves_the_other_membership() {
+        let (tmp, cd) = storage();
+        let parent = tmp.path().join("walls");
+        let child = parent.join("nested");
+        std::fs::create_dir_all(&child).unwrap();
+        let (parent_source, _) = source_create(&cd, &parent.to_string_lossy()).unwrap();
+        let (child_source, _) = source_create(&cd, &child.to_string_lossy()).unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES (?1, 'image', 'jpg', 'awww')",
+            params![child.join("shared.jpg").to_string_lossy()],
+        )
+        .unwrap();
+        let wallpaper_id = conn.last_insert_rowid();
+        for source_id in [parent_source.id, child_source.id] {
+            conn.execute(
+                "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (?1, ?2)",
+                params![wallpaper_id, source_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
+
+        source_remove_by_id(&cd, parent_source.id).unwrap();
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let remaining_source: i64 = conn
+            .query_row("SELECT source_id FROM wallpaper_sources", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(remaining_source, child_source.id);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn removing_source_clears_legacy_source_id_without_deleting_wallpaper() {
+        let (tmp, cd) = storage();
+        let path = tmp.path().join("walls");
+        std::fs::create_dir(&path).unwrap();
+        let (source, _) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, source_id)
+             VALUES (?1, 'image', 'jpg', 'awww', ?2)",
+            params![path.join("legacy.jpg").to_string_lossy(), source.id],
+        )
+        .unwrap();
+        drop(conn);
+
+        source_remove_by_id(&cd, source.id).unwrap();
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let legacy_source_id: Option<i64> = conn
+            .query_row("SELECT source_id FROM wallpapers", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(legacy_source_id, None);
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 
     #[cfg(unix)]

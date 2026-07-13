@@ -9,6 +9,7 @@ mod metadata_cache;
 mod row_map;
 mod schema;
 mod source_config_state;
+mod source_reconcile;
 mod sources;
 
 pub use backup::*;
@@ -21,6 +22,7 @@ pub use metadata_cache::*;
 pub use row_map::wallpaper_entry_from_row;
 pub use schema::*;
 pub use source_config_state::*;
+pub use source_reconcile::*;
 pub use sources::*;
 
 use rusqlite::{params, Connection};

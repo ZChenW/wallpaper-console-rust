@@ -80,11 +80,17 @@ pub enum SourceScanEvent {
 /// A complete source snapshot. This is the only scan value that exposes entries.
 #[derive(Debug, Clone)]
 pub struct CompleteSourceScan {
+    request: SourceScanRequest,
     entries: Vec<WallpaperEntry>,
     stats: ScanStats,
 }
 
 impl CompleteSourceScan {
+    /// Return the exact source identity and enumeration settings used.
+    pub fn request(&self) -> &SourceScanRequest {
+        &self.request
+    }
+
     /// Borrow all entries in the complete snapshot.
     pub fn entries(&self) -> &[WallpaperEntry] {
         &self.entries
@@ -263,7 +269,11 @@ where
         stats.metadata_reused += usize::from(indexed.metadata_reused);
         stats.entries_indexed += 1;
         entries.push(indexed.entry);
-        return SourceScanOutcome::Complete(CompleteSourceScan { entries, stats });
+        return SourceScanOutcome::Complete(CompleteSourceScan {
+            request: request.clone(),
+            entries,
+            stats,
+        });
     }
 
     let children = match reader.read_directory(&request.path) {
@@ -319,7 +329,11 @@ where
         entries.push(indexed.entry);
     }
 
-    SourceScanOutcome::Complete(CompleteSourceScan { entries, stats })
+    SourceScanOutcome::Complete(CompleteSourceScan {
+        request: request.clone(),
+        entries,
+        stats,
+    })
 }
 
 struct IndexedWeProject {
@@ -513,7 +527,11 @@ where
         }
     }
 
-    SourceScanOutcome::Complete(CompleteSourceScan { entries, stats })
+    SourceScanOutcome::Complete(CompleteSourceScan {
+        request: request.clone(),
+        entries,
+        stats,
+    })
 }
 
 fn should_skip_directory(path: &Path) -> bool {
@@ -608,6 +626,20 @@ mod tests {
                     .to_string()
             })
             .collect()
+    }
+
+    #[test]
+    fn complete_snapshot_retains_the_exact_scan_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("wall.jpg"), b"fixture").unwrap();
+        let request = request(tmp.path().to_path_buf(), false);
+
+        let outcome = scan_source(&request, |_| ScanControl::Continue);
+
+        let SourceScanOutcome::Complete(snapshot) = outcome else {
+            panic!("fixture scan must complete");
+        };
+        assert_eq!(snapshot.request(), &request);
     }
 
     #[test]
