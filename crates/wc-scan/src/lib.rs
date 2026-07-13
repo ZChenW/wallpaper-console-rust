@@ -1,5 +1,8 @@
 //! wc-scan — recursive wallpaper scanning, library index building.
 
+pub mod source_scan;
+pub use source_scan::*;
+
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -641,19 +644,49 @@ fn try_we_project_metadata(file_path: &Path) -> Option<WallpaperProject> {
 }
 
 fn make_we_project_entry(project_dir: &Path) -> Option<WallpaperEntry> {
-    let info = read_we_project_info(project_dir)?;
+    make_we_project_entry_cached(project_dir, &std::collections::HashMap::new()).0
+}
+
+/// Build a Wallpaper Engine project entry while reusing only expensive media
+/// resolution metadata. Project metadata always comes from the latest
+/// project.json parse.
+pub(crate) fn make_we_project_entry_cached(
+    project_dir: &Path,
+    cache: &std::collections::HashMap<String, WallpaperEntry>,
+) -> (Option<WallpaperEntry>, bool) {
+    let canonical_project = match std::fs::canonicalize(project_dir) {
+        Ok(path) => path,
+        Err(_) => return (None, false),
+    };
+    let info = match read_we_project_info(&canonical_project) {
+        Some(info) => info,
+        None => return (None, false),
+    };
 
     if matches!(
         info.entry_type,
         FileType::Image | FileType::Gif | FileType::Video
     ) {
-        let file = info.file.as_ref()?;
-        let media_path = safe_join(project_dir, file).ok()?;
+        let Some(file) = info.file.as_ref() else {
+            return (None, false);
+        };
+        let media_path = match safe_join(&canonical_project, file)
+            .ok()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+        {
+            Some(path) => path,
+            None => return (None, false),
+        };
         if !media_path.is_file() {
-            return None;
+            return (None, false);
         }
-        let ext = formats::get_extension(file)?;
-        let meta = fs::metadata(&media_path).ok()?;
+        let Some(ext) = formats::get_extension(file) else {
+            return (None, false);
+        };
+        let meta = match fs::metadata(&media_path) {
+            Ok(meta) => meta,
+            Err(_) => return (None, false),
+        };
         let size = meta.len();
         let mtime = meta
             .modified()
@@ -662,24 +695,32 @@ fn make_we_project_entry(project_dir: &Path) -> Option<WallpaperEntry> {
             .map(|d| d.as_secs())
             .unwrap_or(0);
         let path = media_path.to_string_lossy().to_string();
-        let resolution = detect_resolution(&path, info.entry_type);
-        return Some(WallpaperEntry {
-            path: Utf8PathBuf::from(path),
-            file_type: info.entry_type,
-            ext,
-            backend: info.backend,
-            size,
-            mtime,
-            resolution,
-            project: Some(info.wallpaper_project()),
-        });
+        let (resolution, reused) = cache
+            .get(&path)
+            .filter(|prior| prior.size == size && prior.mtime == mtime)
+            .map(|prior| (prior.resolution.clone(), true))
+            .unwrap_or_else(|| (detect_resolution(&path, info.entry_type), false));
+        return (
+            Some(WallpaperEntry {
+                path: Utf8PathBuf::from(path),
+                file_type: info.entry_type,
+                ext,
+                backend: info.backend,
+                size,
+                mtime,
+                resolution,
+                project: Some(info.wallpaper_project()),
+            }),
+            reused,
+        );
     }
 
-    let project_json = project_dir.join("project.json");
-    let meta = fs::metadata(&project_json)
-        .or_else(|_| fs::metadata(project_dir))
-        .ok()?;
-    let size = project_entry_size_hint(project_dir, info.preview_path.as_deref());
+    let project_json = canonical_project.join("project.json");
+    let meta = fs::metadata(&project_json).or_else(|_| fs::metadata(&canonical_project));
+    let Ok(meta) = meta else {
+        return (None, false);
+    };
+    let size = project_entry_size_hint(&canonical_project, info.preview_path.as_deref());
     let mtime = meta
         .modified()
         .ok()
@@ -694,16 +735,19 @@ fn make_we_project_entry(project_dir: &Path) -> Option<WallpaperEntry> {
     }
     .to_string();
 
-    Some(WallpaperEntry {
-        path: Utf8PathBuf::from(info.project_entry_path()),
-        file_type: info.entry_type,
-        ext,
-        backend: info.backend,
-        size,
-        mtime,
-        resolution: "WE".to_string(),
-        project: Some(info.wallpaper_project()),
-    })
+    (
+        Some(WallpaperEntry {
+            path: Utf8PathBuf::from(info.project_entry_path()),
+            file_type: info.entry_type,
+            ext,
+            backend: info.backend,
+            size,
+            mtime,
+            resolution: "WE".to_string(),
+            project: Some(info.wallpaper_project()),
+        }),
+        false,
+    )
 }
 
 fn project_entry_size_hint(project_dir: &Path, preview_path: Option<&str>) -> u64 {
@@ -850,7 +894,7 @@ pub fn make_entry_cached(
 ) -> (Option<WallpaperEntry>, bool) {
     let p = Path::new(path);
     if p.is_dir() {
-        return (make_we_project_entry(p), false);
+        return make_we_project_entry_cached(p, cache);
     }
     if !p.is_file() {
         return (None, false);
