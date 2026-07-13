@@ -88,15 +88,6 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             println!("{}", serde_json::to_string_pretty(&favs)?);
             Ok(())
         }
-        Commands::HistoryJson => {
-            let hist: Vec<serde_json::Value> = s
-                .history_list()?
-                .into_iter()
-                .map(|p| serde_json::json!({"path": p}))
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&hist)?);
-            Ok(())
-        }
         _ => unreachable!("library::run called with non-library command"),
     }
 }

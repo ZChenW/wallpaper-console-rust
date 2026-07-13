@@ -67,11 +67,6 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
                 println!("{}", path);
             }
         }
-        Commands::SqliteHistoryList => {
-            for path in sqlite_list_table_paths(&s.cd, "history", "ORDER BY id DESC")? {
-                println!("{}", path);
-            }
-        }
         Commands::SqliteCurrentRead => {
             if let Some(value) = sqlite_state_get(&s.cd, "current")? {
                 println!("{}", value);
@@ -141,7 +136,7 @@ fn sqlite_list_table_paths(
 ) -> anyhow::Result<Vec<String>> {
     let conn = sqlite_connection(cd)?;
     let sql = match table {
-        "sources" | "favorites" | "history" => {
+        "sources" | "favorites" => {
             format!("SELECT path FROM {} {}", table, order_clause)
         }
         _ => anyhow::bail!("unsupported SQLite path table: {}", table),

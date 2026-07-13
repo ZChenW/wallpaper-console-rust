@@ -50,8 +50,7 @@ fn run_remaining(command: Commands, storage: &StorageApi) -> anyhow::Result<()> 
         | Commands::RandomLibrary
         | Commands::LibraryJson { .. }
         | Commands::LibraryPageJson { .. }
-        | Commands::FavoritesJson
-        | Commands::HistoryJson => crate::library::run(command, storage),
+        | Commands::FavoritesJson => crate::library::run(command, storage),
 
         Commands::MigrateToSqlite
         | Commands::SqliteVerify
@@ -62,7 +61,6 @@ fn run_remaining(command: Commands, storage: &StorageApi) -> anyhow::Result<()> 
         | Commands::SqliteConfigGet { .. }
         | Commands::SqliteSourcesList
         | Commands::SqliteFavoritesList
-        | Commands::SqliteHistoryList
         | Commands::SqliteCurrentRead
         | Commands::SqliteLastBackendRead => crate::sqlite::run(command, storage),
 

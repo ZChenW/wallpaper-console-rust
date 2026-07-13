@@ -386,34 +386,6 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
         }
 
-        // ── History ──────────────────────────────────────────────────
-        Commands::History => {
-            let hist = s.history_list()?;
-            if hist.is_empty() {
-                println!("(no history)");
-                return Ok(());
-            }
-            let selection = fzf_select(&hist, "history> ")?;
-            if let Some(path) = selection {
-                apply_selected(s, &path)?;
-            }
-        }
-
-        Commands::HistoryRandom => {
-            let hist = s.history_list()?;
-            if hist.is_empty() {
-                anyhow::bail!("no history entries");
-            }
-            let idx = rand::random::<usize>() % hist.len();
-            let chosen = &hist[idx];
-            apply_selected(s, chosen)?;
-        }
-
-        Commands::HistoryClear => {
-            s.history_clear()?;
-            println!("History cleared.");
-        }
-
         // ── Search / Sort ────────────────────────────────────────────
         Commands::Search { query } => {
             let q = resolve_query(&query, "Search query")?;

@@ -3,7 +3,7 @@
 Rust/Tauri wallpaper manager for Linux Wayland desktops, with niri in mind.
 
 It provides a GUI for browsing wallpaper folders, scanning Wallpaper Engine
-Workshop content, applying wallpapers, and managing sources, favorites, history,
+Workshop content, applying wallpapers, and managing sources, favorites,
 thumbnails, and backend settings.
 
 ## Features
@@ -13,7 +13,7 @@ thumbnails, and backend settings.
 - Compatible Wallpaper Engine scenes via `linux-wallpaperengine`
 - Wallpaper Engine Web projects are indexed for browsing only; live apply is not
   supported
-- SQLite storage for library, history, favorites, sources, and thumbnails
+- SQLite storage for the library, favorites, sources, and thumbnails
 
 ## Requirements
 

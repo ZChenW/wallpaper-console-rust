@@ -98,13 +98,6 @@ pub(crate) enum Commands {
         file: Option<String>,
     },
 
-    // ── History ──────────────────────────────────────────────────────
-    History,
-    #[command(name = "history-random")]
-    HistoryRandom,
-    #[command(name = "history-clear")]
-    HistoryClear,
-
     // ── Search / Sort ────────────────────────────────────────────────
     /// Search wallpapers by filename (fzf interactive).
     Search {
@@ -176,8 +169,6 @@ pub(crate) enum Commands {
     },
     #[command(name = "favorites-json")]
     FavoritesJson,
-    #[command(name = "history-json")]
-    HistoryJson,
 
     // ── SQLite ───────────────────────────────────────────────────────
     #[command(name = "migrate-to-sqlite")]
@@ -202,8 +193,6 @@ pub(crate) enum Commands {
     SqliteSourcesList,
     #[command(name = "sqlite-favorites-list")]
     SqliteFavoritesList,
-    #[command(name = "sqlite-history-list")]
-    SqliteHistoryList,
     #[command(name = "sqlite-current-read")]
     SqliteCurrentRead,
     #[command(name = "sqlite-last-backend-read")]
@@ -319,5 +308,21 @@ mod tests {
         };
         assert_eq!(target.as_deref(), Some("eDP-1"));
         assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
+    }
+
+    #[test]
+    fn removed_history_commands_are_not_user_facing_cli_commands() {
+        for command in [
+            "history",
+            "history-random",
+            "history-clear",
+            "history-json",
+            "sqlite-history-list",
+        ] {
+            assert!(
+                Cli::try_parse_from(["wallpaper-console-rust", command]).is_err(),
+                "{command} must no longer be accepted"
+            );
+        }
     }
 }
