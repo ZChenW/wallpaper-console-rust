@@ -14,6 +14,12 @@ export interface CardPointerInteraction {
   readonly apply: boolean;
 }
 
+export interface CardInteractionVisualState {
+  readonly selected: boolean;
+  readonly pending: boolean;
+  readonly current: boolean;
+}
+
 const NONE: CardPointerInteraction = Object.freeze({ select: false, apply: false });
 
 /**
@@ -45,4 +51,13 @@ export function resolveCardPointerInteraction(
 
 function matchesHandledClick(gesture: ApplyGesture, clickCount: number): boolean {
   return gesture === 'single' ? clickCount === 1 : clickCount === 1 || clickCount === 2;
+}
+
+export function cardInteractionClassName(state: CardInteractionVisualState): string {
+  return [
+    'wallpaper-card',
+    state.selected ? 'selected' : '',
+    state.pending ? 'pending' : '',
+    state.current ? 'current' : '',
+  ].filter(Boolean).join(' ');
 }

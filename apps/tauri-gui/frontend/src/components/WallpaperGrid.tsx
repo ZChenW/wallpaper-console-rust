@@ -18,10 +18,12 @@ import {
   type GridLayout,
   type WallpaperCardSize,
 } from '../utils/layout';
+import type { ApplyGesture } from '../shell/shellPreferences';
 
 interface Props {
   entries: WallpaperDTO[];
   onApply: (path: string) => void;
+  onSelect?: (entry: WallpaperDTO) => void;
   applying: boolean;
   emptyText?: string;
   contextActions?: ContextAction[];
@@ -30,6 +32,10 @@ interface Props {
   refreshing?: boolean;
   resetKey?: string;
   cardSize?: WallpaperCardSize;
+  applyGesture?: ApplyGesture;
+  selectedPath?: string | null;
+  pendingPath?: string | null;
+  currentPath?: string | null;
 }
 
 export interface ContextAction {
@@ -59,6 +65,7 @@ function initialGridLayout(cardSize: WallpaperCardSize): WallpaperGridLayout {
 export default function WallpaperGrid({
   entries,
   onApply,
+  onSelect,
   applying,
   emptyText = 'No wallpapers found',
   contextActions = [],
@@ -67,6 +74,10 @@ export default function WallpaperGrid({
   refreshing = false,
   resetKey,
   cardSize = 'medium',
+  applyGesture = 'single',
+  selectedPath = null,
+  pendingPath = null,
+  currentPath = null,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -321,8 +332,13 @@ export default function WallpaperGrid({
                   entry={e}
                   applying={applying}
                   onApply={onApply}
+                  onSelect={onSelect}
                   onContextMenu={handleContextMenu}
                   cardSize={cardSize}
+                  applyGesture={applyGesture}
+                  selected={selectedPath === e.path}
+                  pending={pendingPath === e.path}
+                  current={currentPath === e.path}
                 />
               ))}
             </div>

@@ -14,6 +14,11 @@ import {
   weBadge,
   weBadgeClass,
 } from './wallpaperCardHelpers';
+import {
+  cardInteractionClassName,
+  resolveCardPointerInteraction,
+} from '../shell/cardInteraction';
+import type { ApplyGesture } from '../shell/shellPreferences';
 
 const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
   try {
@@ -31,16 +36,26 @@ interface CardProps {
   entry: WallpaperDTO;
   applying: boolean;
   onApply: (path: string) => void;
+  onSelect?: (entry: WallpaperDTO) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
   cardSize?: WallpaperCardSize;
+  applyGesture?: ApplyGesture;
+  selected?: boolean;
+  pending?: boolean;
+  current?: boolean;
 }
 
 function WallpaperCardImpl({
   entry,
   applying,
   onApply,
+  onSelect,
   onContextMenu,
   cardSize = 'medium',
+  applyGesture = 'single',
+  selected = false,
+  pending = false,
+  current = false,
 }: CardProps) {
   const store = useThumbnailStore();
   const thumbnail = useSyncExternalStore(
@@ -52,16 +67,37 @@ function WallpaperCardImpl({
     () => store.getFailure(entry.path),
   );
 
-  const handleDoubleClick = () => {
-    if (!isApplyAvailable(entry)) {
+  const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    const target = event.target;
+    const control = target instanceof Element
+      ? target.closest('button, a, input, select, textarea, [role="menuitem"], [data-card-control]')
+      : null;
+    const fromControl = control !== null
+      && control !== event.currentTarget
+      && event.currentTarget.contains(control);
+    const canApply = isApplyAvailable(entry);
+    const interaction = resolveCardPointerInteraction({
+      gesture: applyGesture,
+      clickCount: event.detail,
+      canApply,
+      fromControl,
+    });
+    if (interaction.select) onSelect?.(entry);
+    if (interaction.apply) onApply(entry.path);
+
+    const attemptedUnsupportedApply = !canApply
+      && interaction.select
+      && (
+        (applyGesture === 'single' && event.detail === 1)
+        || (applyGesture === 'double' && event.detail === 2)
+      );
+    if (attemptedUnsupportedApply) {
       emitFeedback({
         state: 'warning',
         label: 'Cannot apply',
-        detail: 'This item cannot be applied as a live wallpaper.',
+        detail: entry.applyReason || entry.unsupportedReason || 'This item cannot be applied as a live wallpaper.',
       });
-      return;
     }
-    onApply(entry.path);
   };
 
   const badge = weBadge(entry);
@@ -71,10 +107,13 @@ function WallpaperCardImpl({
 
   return (
     <div
-      className={`wallpaper-card${applying ? ' disabled' : ''}`}
+      className={`${cardInteractionClassName({ selected, pending, current })}${applying ? ' applying' : ''}`}
       style={cardStyle}
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
-      onDoubleClick={handleDoubleClick}
+      onClick={handleClick}
+      aria-current={current ? 'true' : undefined}
+      aria-selected={selected}
+      data-pending={pending || undefined}
       title={entry.path}
     >
       <div className="wallpaper-thumb">

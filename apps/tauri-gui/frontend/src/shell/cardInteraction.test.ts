@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { resolveCardPointerInteraction } from './cardInteraction.ts';
+import {
+  cardInteractionClassName,
+  resolveCardPointerInteraction,
+} from './cardInteraction.ts';
 
 test('single-click mode selects and applies exactly once across a physical double click', () => {
   assert.deepEqual(resolveCardPointerInteraction({
@@ -68,4 +71,19 @@ test('third and later clicks in one sequence are ignored', () => {
     canApply: true,
     fromControl: false,
   }), { select: false, apply: false });
+});
+
+test('card visual state classes expose selection, pending, and current independently', () => {
+  assert.equal(
+    cardInteractionClassName({ selected: true, pending: true, current: false }),
+    'wallpaper-card selected pending',
+  );
+  assert.equal(
+    cardInteractionClassName({ selected: false, pending: false, current: true }),
+    'wallpaper-card current',
+  );
+  assert.equal(
+    cardInteractionClassName({ selected: false, pending: false, current: false }),
+    'wallpaper-card',
+  );
 });
