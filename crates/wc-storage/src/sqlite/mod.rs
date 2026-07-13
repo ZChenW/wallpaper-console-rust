@@ -333,6 +333,10 @@ pub fn library_replace_entries_batch_atomic(
     Ok(inserted)
 }
 
+// Keep this large legacy test module beside the storage APIs it exercises;
+// moving it below the private timestamp/TSV helpers would create a noisy,
+// behavior-free file-wide diff.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;

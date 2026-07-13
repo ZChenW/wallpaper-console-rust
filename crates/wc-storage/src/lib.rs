@@ -566,7 +566,7 @@ mod tests {
         let root_str = root.to_string_lossy().to_string();
         let proj_str = project.to_string_lossy().to_string();
 
-        flat::write_lines(&cd.sources_path(), &[proj_str.clone()]).unwrap();
+        flat::write_lines(&cd.sources_path(), std::slice::from_ref(&proj_str)).unwrap();
 
         let s = StorageApi::new(cd);
         assert!(s.sources_remove(&root_str).unwrap());
