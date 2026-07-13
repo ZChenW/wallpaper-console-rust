@@ -1,7 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { createSourceMutationApi, type InvokeFn } from './bridge.ts';
+import {
+  createLibraryBrowserApi,
+  createSourceMutationApi,
+  type InvokeFn,
+  type LibraryBrowserQueryDTO,
+} from './bridge.ts';
 
 test('source mutation invokes use camelCase command arguments', async () => {
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
@@ -21,5 +26,31 @@ test('source mutation invokes use camelCase command arguments', async () => {
     { command: 'source_set_recursive', args: { id: 42, recursive: false } },
     { command: 'source_refresh', args: { id: 42 } },
     { command: 'source_remove_by_id', args: { id: 42 } },
+  ]);
+});
+
+test('library browser invokes use one camelCase query object', async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const invoke: InvokeFn = async <T>(command: string, args?: Record<string, unknown>) => {
+    calls.push({ command, args });
+    return (command === 'library_browser_page' ? { total: 0, items: [] } : null) as T;
+  };
+  const api = createLibraryBrowserApi(invoke);
+  const query: LibraryBrowserQueryDTO = {
+    sourceId: 7,
+    typeFilter: 'weScene',
+    favoritesOnly: true,
+    search: 'aurora ada',
+    sort: 'nameDesc',
+    offset: 20,
+    limit: 40,
+  };
+
+  await api.libraryBrowserPage(query);
+  await api.libraryBrowserRandom(query);
+
+  assert.deepEqual(calls, [
+    { command: 'library_browser_page', args: { query } },
+    { command: 'library_browser_random', args: { query } },
   ]);
 });

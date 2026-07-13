@@ -26,6 +26,44 @@ export interface LibraryPageDTO {
   items: WallpaperDTO[];
 }
 
+export type LibraryBrowserType =
+  | 'usable'
+  | 'image'
+  | 'gif'
+  | 'video'
+  | 'weScene'
+  | 'unsupported';
+
+export type LibraryBrowserSort = 'recentlyAdded' | 'nameAsc' | 'nameDesc';
+
+export interface LibraryBrowserQueryDTO {
+  sourceId?: number;
+  typeFilter: LibraryBrowserType;
+  favoritesOnly: boolean;
+  search: string;
+  sort: LibraryBrowserSort;
+  offset: number;
+  limit: number;
+}
+
+export interface LibraryBrowserSourceDTO {
+  id: number;
+  displayName: string;
+}
+
+export interface LibraryBrowserItemDTO extends WallpaperDTO {
+  wallpaperId: number;
+  favorite: boolean;
+  author: string | null;
+  addedAt: string;
+  sources: LibraryBrowserSourceDTO[];
+}
+
+export interface LibraryBrowserPageDTO {
+  total: number;
+  items: LibraryBrowserItemDTO[];
+}
+
 export interface LibrarySourceStatusDTO {
   configured: string;
   effective: string;
@@ -218,6 +256,8 @@ export interface WallpaperConsoleApi {
     offset: number,
     limit: number,
   ): Promise<LibraryPageDTO>;
+  libraryBrowserPage(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO>;
+  libraryBrowserRandom(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserItemDTO | null>;
   rescan(): Promise<CommandResult>;
   scanProgress(): Promise<ScanProgressDTO>;
   scanCancel(): Promise<CommandResult>;

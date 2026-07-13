@@ -2,8 +2,23 @@ import assert from 'node:assert/strict';
 import test, { beforeEach } from 'node:test';
 
 import { api } from './mockBridge.ts';
+import type { LibraryBrowserQueryDTO } from './types.ts';
 
 const ctrl = api.__mockControl;
+
+function browserQuery(
+  overrides: Partial<LibraryBrowserQueryDTO> = {},
+): LibraryBrowserQueryDTO {
+  return {
+    typeFilter: 'usable',
+    favoritesOnly: false,
+    search: '',
+    sort: 'recentlyAdded',
+    offset: 0,
+    limit: 200,
+    ...overrides,
+  };
+}
 
 beforeEach(() => {
   ctrl.resetAll();
@@ -339,4 +354,113 @@ test('restoreDisplays accepts discovered or explicit connected outputs', async (
 
   assert.equal(discovered.success, true);
   assert.equal(explicit.success, true);
+});
+
+test('library browser unsupported category contains only WE Web and unsupported projects', async () => {
+  const page = await api.libraryBrowserPage(
+    browserQuery({ typeFilter: 'unsupported' }),
+  );
+
+  assert.deepEqual(
+    new Set(page.items.map((item) => item.type)),
+    new Set(['we_web', 'unsupported']),
+  );
+  assert.equal(page.total, 2);
+});
+
+test('library browser composes source, type, favorite, and AND search filters', async () => {
+  const page = await api.libraryBrowserPage(
+    browserQuery({
+      sourceId: 1,
+      typeFilter: 'video',
+      favoritesOnly: true,
+      search: 'wallpaper 050 mock',
+    }),
+  );
+
+  assert.equal(page.total, 1);
+  assert.equal(page.items[0]?.path, '/mock/path/wallpaper-050.mp4');
+  assert.equal(page.items[0]?.favorite, true);
+  assert.deepEqual(page.items[0]?.sources.map((source) => source.id), [1]);
+});
+
+test('library browser search uses filename, title, author, and source display name only', async () => {
+  const acrossFields = await api.libraryBrowserPage(
+    browserQuery({
+      typeFilter: 'weScene',
+      search: 'scene ada workshop',
+    }),
+  );
+  assert.deepEqual(
+    acrossFields.items.map((item) => item.title),
+    ['Scene title'],
+  );
+
+  for (const excludedField of ['steamapps', 'linux-wallpaperengine', 'scene.json']) {
+    const excluded = await api.libraryBrowserPage(
+      browserQuery({ typeFilter: 'weScene', search: excludedField }),
+    );
+    assert.equal(excluded.total, 0, `${excludedField} must not be searchable`);
+  }
+});
+
+test('library browser name sorts are stable and pagination uses filtered total', async () => {
+  const asc = await api.libraryBrowserPage(
+    browserQuery({ typeFilter: 'image', sort: 'nameAsc', limit: 2 }),
+  );
+  const desc = await api.libraryBrowserPage(
+    browserQuery({ typeFilter: 'image', sort: 'nameDesc', limit: 2 }),
+  );
+  const second = await api.libraryBrowserPage(
+    browserQuery({ typeFilter: 'image', sort: 'nameAsc', offset: 1, limit: 1 }),
+  );
+
+  assert.equal(asc.items[0]?.path, '/mock/path/wallpaper-001.jpg');
+  assert.equal(desc.items[0]?.path, '/mock/path/wallpaper-149.jpg');
+  assert.equal(second.total, asc.total);
+  assert.equal(second.items[0]?.path, asc.items[1]?.path);
+});
+
+test('library browser recentlyAdded sort uses newest metadata first', async () => {
+  const page = await api.libraryBrowserPage(
+    browserQuery({ sort: 'recentlyAdded', limit: 2 }),
+  );
+
+  assert.deepEqual(
+    page.items.map((item) => item.path),
+    [
+      '/mock/Steam/steamapps/workshop/content/431960/3558034522',
+      '/mock/Steam/steamapps/workshop/content/431960/3589454154',
+    ],
+  );
+});
+
+test('library browser page caps oversized requests at 500 items', async () => {
+  ctrl.setBrowserFixtureCopies(4);
+
+  const page = await api.libraryBrowserPage(browserQuery({ limit: 10_000 }));
+
+  assert.ok(page.total > 500, 'fixture must prove the cap rather than exhaust the result set');
+  assert.equal(page.items.length, 500);
+});
+
+test('library browser random returns only a matching candidate and null for no match', async () => {
+  const match = await api.libraryBrowserRandom(
+    browserQuery({
+      sourceId: 3,
+      typeFilter: 'weScene',
+      favoritesOnly: true,
+      search: 'scene ada',
+      offset: Number.MAX_SAFE_INTEGER,
+      limit: 0,
+    }),
+  );
+  assert.equal(match?.path, '/mock/Steam/steamapps/workshop/content/431960/3558034522');
+  assert.equal(match?.favorite, true);
+  assert.equal(match?.author, 'Ada Lovelace');
+
+  const missing = await api.libraryBrowserRandom(
+    browserQuery({ search: 'definitely-missing-wallpaper' }),
+  );
+  assert.equal(missing, null);
 });

@@ -5,6 +5,9 @@ import type {
   DisplayListDTO,
   DisplayStateDTO,
   LibraryCountDTO,
+  LibraryBrowserItemDTO,
+  LibraryBrowserPageDTO,
+  LibraryBrowserQueryDTO,
   LibraryPageDTO,
   LibrarySourceStatusDTO,
   LinuxWallpaperEngineStatusDTO,
@@ -33,6 +36,17 @@ export function createSourceMutationApi(invokeFn: InvokeFn = invoke) {
       invokeFn<CommandResult>('source_refresh', { id }),
     sourceRemoveById: (id: number): Promise<CommandResult> =>
       invokeFn<CommandResult>('source_remove_by_id', { id }),
+  };
+}
+
+export function createLibraryBrowserApi(invokeFn: InvokeFn = invoke) {
+  return {
+    libraryBrowserPage: (query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO> =>
+      invokeFn<LibraryBrowserPageDTO>('library_browser_page', { query }),
+    libraryBrowserRandom: (
+      query: LibraryBrowserQueryDTO,
+    ): Promise<LibraryBrowserItemDTO | null> =>
+      invokeFn<LibraryBrowserItemDTO | null>('library_browser_random', { query }),
   };
 }
 
@@ -67,6 +81,7 @@ export const api = {
     limit: number,
   ): Promise<LibraryPageDTO> =>
     invoke<LibraryPageDTO>('library_page_gui', { filter, sort, search, offset, limit }),
+  ...createLibraryBrowserApi(),
 
   rescan: (): Promise<CommandResult> => invoke<CommandResult>('rescan'),
   scanProgress: (): Promise<ScanProgressDTO> => invoke<ScanProgressDTO>('scan_progress'),

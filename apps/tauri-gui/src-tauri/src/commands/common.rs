@@ -131,6 +131,44 @@ pub struct LibraryPageDto {
     pub items: Vec<WallpaperDto>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserQueryDto {
+    pub source_id: Option<i64>,
+    pub type_filter: String,
+    pub favorites_only: bool,
+    pub search: String,
+    pub sort: String,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserSourceDto {
+    pub id: i64,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserItemDto {
+    #[serde(flatten)]
+    pub wallpaper: WallpaperDto,
+    pub wallpaper_id: i64,
+    pub favorite: bool,
+    pub author: Option<String>,
+    pub added_at: String,
+    pub sources: Vec<LibraryBrowserSourceDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserPageDto {
+    pub total: usize,
+    pub items: Vec<LibraryBrowserItemDto>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ThumbnailDto {

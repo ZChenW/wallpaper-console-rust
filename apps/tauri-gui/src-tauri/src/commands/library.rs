@@ -1,5 +1,6 @@
 use super::common::{
-    dto_from_entry, fail, ok, storage, CommandResult, LibraryCountDto, LibraryPageDto,
+    dto_from_entry, fail, ok, storage, CommandResult, LibraryBrowserItemDto, LibraryBrowserPageDto,
+    LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryCountDto, LibraryPageDto,
     LibrarySourceStatusDto,
 };
 
@@ -86,6 +87,108 @@ fn library_page_for_storage(
     query: &wc_storage::sqlite::LibraryPageQuery,
 ) -> Result<wc_storage::sqlite::LibraryPage, String> {
     wc_storage::sqlite::source_backed_library_page_sqlite(&s.cd, query).map_err(|e| e.to_string())
+}
+
+fn browser_query_from_dto(
+    query: LibraryBrowserQueryDto,
+) -> Result<wc_storage::sqlite::LibraryBrowserQuery, String> {
+    let type_filter = match query.type_filter.as_str() {
+        "usable" => wc_storage::sqlite::LibraryBrowserType::Usable,
+        "image" => wc_storage::sqlite::LibraryBrowserType::Image,
+        "gif" => wc_storage::sqlite::LibraryBrowserType::Gif,
+        "video" => wc_storage::sqlite::LibraryBrowserType::Video,
+        "weScene" => wc_storage::sqlite::LibraryBrowserType::WeScene,
+        "unsupported" => wc_storage::sqlite::LibraryBrowserType::Unsupported,
+        other => {
+            return Err(format!(
+                "unknown library browser type: {other}; expected usable, image, gif, video, weScene, or unsupported"
+            ))
+        }
+    };
+    let sort = match query.sort.as_str() {
+        "recentlyAdded" => wc_storage::sqlite::LibraryBrowserSort::RecentlyAdded,
+        "nameAsc" => wc_storage::sqlite::LibraryBrowserSort::NameAsc,
+        "nameDesc" => wc_storage::sqlite::LibraryBrowserSort::NameDesc,
+        other => {
+            return Err(format!(
+            "unknown library browser sort: {other}; expected recentlyAdded, nameAsc, or nameDesc"
+        ))
+        }
+    };
+    Ok(wc_storage::sqlite::LibraryBrowserQuery {
+        source_id: query.source_id,
+        type_filter,
+        favorites_only: query.favorites_only,
+        search: query.search,
+        sort,
+        offset: query.offset,
+        limit: query.limit,
+    })
+}
+
+fn browser_item_dto(item: wc_storage::sqlite::LibraryBrowserItem) -> LibraryBrowserItemDto {
+    LibraryBrowserItemDto {
+        wallpaper: dto_from_entry(item.entry),
+        wallpaper_id: item.wallpaper_id,
+        favorite: item.favorite,
+        author: item.author,
+        added_at: item.added_at,
+        sources: item
+            .sources
+            .into_iter()
+            .map(|source| LibraryBrowserSourceDto {
+                id: source.id,
+                display_name: source.display_name,
+            })
+            .collect(),
+    }
+}
+
+fn library_browser_page_for_storage(
+    s: &wc_storage::StorageApi,
+    query: LibraryBrowserQueryDto,
+) -> Result<LibraryBrowserPageDto, String> {
+    let query = browser_query_from_dto(query)?;
+    let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)
+        .map_err(|error| error.to_string())?;
+    Ok(LibraryBrowserPageDto {
+        total: page.total,
+        items: page.items.into_iter().map(browser_item_dto).collect(),
+    })
+}
+
+fn library_browser_random_for_storage(
+    s: &wc_storage::StorageApi,
+    query: LibraryBrowserQueryDto,
+) -> Result<Option<LibraryBrowserItemDto>, String> {
+    let query = browser_query_from_dto(query)?;
+    wc_storage::sqlite::browser_library_random(&s.cd, &query)
+        .map(|item| item.map(browser_item_dto))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn library_browser_page(
+    query: LibraryBrowserQueryDto,
+) -> Result<LibraryBrowserPageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        library_browser_page_for_storage(s, query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_browser_random(
+    query: LibraryBrowserQueryDto,
+) -> Result<Option<LibraryBrowserItemDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        library_browser_random_for_storage(s, query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn format_library_page_debug_log(
@@ -202,6 +305,185 @@ pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
 #[cfg(test)]
 mod tests {
     use wc_core::types::FileType;
+
+    fn browser_fixture() -> (tempfile::TempDir, wc_storage::StorageApi, i64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let root = tmp.path().join("workshop");
+        std::fs::create_dir(&root).unwrap();
+        let source = storage.source_create(&root.to_string_lossy()).unwrap();
+        storage.source_rename(source.id, "Curated Scenes").unwrap();
+
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, size, mtime, resolution,
+              project_type, preview_path, workshop_id, title, we_file,
+              unsupported_reason, author, added_at)
+             VALUES
+             (41, '/wallpapers/scene-41', 'we_scene', 'scene',
+              'linux-wallpaperengine', 4096, 1700000000, 'WE',
+              'scene', '/wallpapers/scene-41/preview.gif', '41',
+              'Aurora Scene', 'scene.json', '', 'Ada Lovelace',
+              '2026-07-14T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (41, ?1)",
+            [source.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/wallpapers/scene-41')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        (tmp, storage, source.id)
+    }
+
+    fn browser_query(source_id: Option<i64>) -> super::LibraryBrowserQueryDto {
+        super::LibraryBrowserQueryDto {
+            source_id,
+            type_filter: "weScene".into(),
+            favorites_only: true,
+            search: "aurora ada curated".into(),
+            sort: "recentlyAdded".into(),
+            offset: 0,
+            limit: 20,
+        }
+    }
+
+    #[test]
+    fn browser_query_maps_every_supported_type_and_sort_and_rejects_unknown_values() {
+        let types = [
+            ("usable", wc_storage::sqlite::LibraryBrowserType::Usable),
+            ("image", wc_storage::sqlite::LibraryBrowserType::Image),
+            ("gif", wc_storage::sqlite::LibraryBrowserType::Gif),
+            ("video", wc_storage::sqlite::LibraryBrowserType::Video),
+            ("weScene", wc_storage::sqlite::LibraryBrowserType::WeScene),
+            (
+                "unsupported",
+                wc_storage::sqlite::LibraryBrowserType::Unsupported,
+            ),
+        ];
+        for (raw, expected) in types {
+            let mut dto = browser_query(None);
+            dto.type_filter = raw.into();
+            let mapped = super::browser_query_from_dto(dto).unwrap();
+            assert_eq!(mapped.type_filter, expected);
+        }
+
+        let sorts = [
+            (
+                "recentlyAdded",
+                wc_storage::sqlite::LibraryBrowserSort::RecentlyAdded,
+            ),
+            ("nameAsc", wc_storage::sqlite::LibraryBrowserSort::NameAsc),
+            ("nameDesc", wc_storage::sqlite::LibraryBrowserSort::NameDesc),
+        ];
+        for (raw, expected) in sorts {
+            let mut dto = browser_query(None);
+            dto.sort = raw.into();
+            let mapped = super::browser_query_from_dto(dto).unwrap();
+            assert_eq!(mapped.sort, expected);
+        }
+
+        let mut unknown_type = browser_query(None);
+        unknown_type.type_filter = "we_scene".into();
+        assert!(super::browser_query_from_dto(unknown_type)
+            .unwrap_err()
+            .contains("unknown library browser type"));
+
+        let mut unknown_sort = browser_query(None);
+        unknown_sort.sort = "recently_added".into();
+        assert!(super::browser_query_from_dto(unknown_sort)
+            .unwrap_err()
+            .contains("unknown library browser sort"));
+    }
+
+    #[test]
+    fn browser_query_deserializes_camel_case_wire_fields() {
+        let dto: super::LibraryBrowserQueryDto = serde_json::from_value(serde_json::json!({
+            "sourceId": 9,
+            "typeFilter": "weScene",
+            "favoritesOnly": true,
+            "search": "aurora",
+            "sort": "nameAsc",
+            "offset": 40,
+            "limit": 20
+        }))
+        .unwrap();
+
+        assert_eq!(dto.source_id, Some(9));
+        assert_eq!(dto.type_filter, "weScene");
+        assert!(dto.favorites_only);
+        assert_eq!(dto.search, "aurora");
+        assert_eq!(dto.sort, "nameAsc");
+        assert_eq!(dto.offset, 40);
+        assert_eq!(dto.limit, 20);
+    }
+
+    #[test]
+    fn browser_page_flattens_wallpaper_dto_and_keeps_browser_metadata() {
+        let (_tmp, storage, source_id) = browser_fixture();
+
+        let page =
+            super::library_browser_page_for_storage(&storage, browser_query(Some(source_id)))
+                .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+
+        let json = serde_json::to_value(&page.items[0]).unwrap();
+        assert_eq!(json["wallpaperId"], 41);
+        assert_eq!(json["path"], "/wallpapers/scene-41");
+        assert_eq!(json["type"], "we_scene");
+        assert_eq!(json["favorite"], true);
+        assert_eq!(json["author"], "Ada Lovelace");
+        assert_eq!(json["addedAt"], "2026-07-14T10:00:00Z");
+        assert_eq!(json["sources"][0]["id"], source_id);
+        assert_eq!(json["sources"][0]["displayName"], "Curated Scenes");
+        assert_eq!(json["applyAvailability"], "available");
+        assert_eq!(json["applyBackend"], "linux-wallpaperengine");
+        assert!(json["applyActions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| { action["kind"] == "apply" && action["enabled"] == true }));
+        assert!(
+            json.get("wallpaper").is_none(),
+            "WallpaperDTO must be flattened"
+        );
+    }
+
+    #[test]
+    fn browser_random_reuses_query_semantics_and_flattened_item_shape() {
+        let (_tmp, storage, source_id) = browser_fixture();
+
+        let item = super::library_browser_random_for_storage(&storage, {
+            let mut query = browser_query(Some(source_id));
+            query.offset = usize::MAX;
+            query.limit = 0;
+            query
+        })
+        .unwrap()
+        .expect("matching item");
+        assert_eq!(item.wallpaper_id, 41);
+        assert_eq!(item.wallpaper.path, "/wallpapers/scene-41");
+        assert_eq!(item.sources[0].display_name, "Curated Scenes");
+
+        let mut no_match = browser_query(Some(source_id));
+        no_match.search = "missing".into();
+        assert!(
+            super::library_browser_random_for_storage(&storage, no_match)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn format_library_page_debug_log_records_all_stages() {

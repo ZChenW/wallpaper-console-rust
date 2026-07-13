@@ -45,6 +45,8 @@ pub fn run() {
             commands::library_count,
             commands::library_page,
             commands::library_page_gui,
+            commands::library_browser_page,
+            commands::library_browser_random,
             commands::rescan,
             commands::migrate_to_sqlite,
             commands::import_legacy_flat_files,

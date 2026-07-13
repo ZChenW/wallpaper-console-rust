@@ -7,6 +7,9 @@ import type {
   DisplayListDTO,
   DisplayStateDTO,
   LibraryCountDTO,
+  LibraryBrowserItemDTO,
+  LibraryBrowserPageDTO,
+  LibraryBrowserQueryDTO,
   LibraryPageDTO,
   LinuxWallpaperEngineStatusDTO,
   ScanProgressDTO,
@@ -253,6 +256,7 @@ const commandFailures = new Set<string>();
 const thumbnailFailures = new Set<string>();
 let libraryFirstPageEmpty = false;
 let libraryFirstPageEmptyConsumed = false;
+let browserFixtureCopies = 1;
 let sourceStore: SourceDTO[] = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
 let nextSourceId = 4;
 
@@ -269,6 +273,7 @@ function resetConfigStore(): void {
 function resetLibraryScenario(): void {
   libraryFirstPageEmpty = false;
   libraryFirstPageEmptyConsumed = false;
+  browserFixtureCopies = 1;
 }
 
 function resetSourceStore(): void {
@@ -283,6 +288,111 @@ function normalizeMockSourcePath(path: string): string {
 
 function isMockWallpaperEngineSource(path: string): boolean {
   return path.includes('/steamapps/workshop/content/431960/');
+}
+
+function mockWallpaperSourceIds(wallpaper: WallpaperDTO): number[] {
+  if (
+    wallpaper.type === 'we_scene'
+    || wallpaper.type === 'we_web'
+    || wallpaper.type === 'unsupported'
+  ) {
+    return [3];
+  }
+  const match = /wallpaper-(\d+)/.exec(wallpaper.path);
+  const index = Number(match?.[1] ?? 0);
+  if (index === 0) return [1, 2];
+  return index % 2 === 0 ? [1] : [2];
+}
+
+function mockWallpaperAuthor(wallpaper: WallpaperDTO): string | null {
+  if (wallpaper.path.includes('3558034522')) return 'Ada Lovelace';
+  if (wallpaper.path.includes('3589454154')) return 'Grace Hopper';
+  if (wallpaper.type.startsWith('we_') || wallpaper.type === 'unsupported') return null;
+  return 'Mock Artist';
+}
+
+function mockBrowserItems(): LibraryBrowserItemDTO[] {
+  return Array.from({ length: browserFixtureCopies }, (_, copyIndex) =>
+    MOCK_WALLPAPERS.map((wallpaper, index) => {
+      const sources = mockWallpaperSourceIds(wallpaper)
+        .map((sourceId) => sourceStore.find((source) => source.id === sourceId))
+        .filter((source): source is SourceDTO => source !== undefined)
+        .sort((left, right) => left.id - right.id)
+        .map((source) => ({ id: source.id, displayName: source.displayName }));
+      return {
+        ...wallpaper,
+        applyActions: wallpaper.applyActions?.map((action) => ({ ...action })),
+        wallpaperId: copyIndex * MOCK_WALLPAPERS.length + index + 1,
+        favorite: MOCK_FAVORITES.includes(wallpaper.path),
+        author: mockWallpaperAuthor(wallpaper),
+        addedAt: new Date(wallpaper.mtime * 1000).toISOString(),
+        sources,
+      };
+    }),
+  )
+    .flat()
+    .filter((item) => item.sources.length > 0);
+}
+
+function browserTypeMatches(item: LibraryBrowserItemDTO, query: LibraryBrowserQueryDTO): boolean {
+  switch (query.typeFilter) {
+    case 'usable':
+      return ['image', 'gif', 'video', 'we_scene'].includes(item.type);
+    case 'weScene':
+      return item.type === 'we_scene';
+    case 'unsupported':
+      return item.type === 'we_web' || item.type === 'unsupported';
+    default:
+      return item.type === query.typeFilter;
+  }
+}
+
+function browserSearchMatches(item: LibraryBrowserItemDTO, search: string): boolean {
+  const terms = search.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (terms.length === 0) return true;
+  const filename = item.path.split('/').at(-1) ?? '';
+  const fields = [
+    filename,
+    item.title ?? '',
+    item.author ?? '',
+    ...item.sources.map((source) => source.displayName),
+  ].map((field) => field.toLowerCase());
+  return terms.every((term) => fields.some((field) => field.includes(term)));
+}
+
+function compareText(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function compareBrowserItems(
+  left: LibraryBrowserItemDTO,
+  right: LibraryBrowserItemDTO,
+  sort: LibraryBrowserQueryDTO['sort'],
+): number {
+  if (sort === 'recentlyAdded') {
+    return compareText(right.addedAt, left.addedAt) || right.wallpaperId - left.wallpaperId;
+  }
+  const leftName = left.title?.trim() || left.path.split('/').at(-1) || '';
+  const rightName = right.title?.trim() || right.path.split('/').at(-1) || '';
+  const nameOrder = compareText(leftName.toLowerCase(), rightName.toLowerCase());
+  const directedNameOrder = sort === 'nameDesc' ? -nameOrder : nameOrder;
+  return directedNameOrder
+    || compareText(left.path, right.path)
+    || left.wallpaperId - right.wallpaperId;
+}
+
+function filterBrowserItems(query: LibraryBrowserQueryDTO): LibraryBrowserItemDTO[] {
+  return mockBrowserItems()
+    .filter((item) => (
+      query.sourceId === undefined
+      || item.sources.some((source) => source.id === query.sourceId)
+    ))
+    .filter((item) => browserTypeMatches(item, query))
+    .filter((item) => !query.favoritesOnly || item.favorite)
+    .filter((item) => browserSearchMatches(item, query.search))
+    .sort((left, right) => compareBrowserItems(left, right, query.sort));
 }
 
 const mockBridgeAdapter = {
@@ -370,6 +480,25 @@ const mockBridgeAdapter = {
     const total = items.length;
     const page = items.slice(offset, offset + limit);
     return { total, items: page };
+  },
+
+  libraryBrowserPage: async (
+    query: LibraryBrowserQueryDTO,
+  ): Promise<LibraryBrowserPageDTO> => {
+    const items = filterBrowserItems(query);
+    const offset = Math.max(0, Math.trunc(query.offset));
+    const limit = Math.min(500, Math.max(0, Math.trunc(query.limit)));
+    return {
+      total: items.length,
+      items: items.slice(offset, offset + limit),
+    };
+  },
+  libraryBrowserRandom: async (
+    query: LibraryBrowserQueryDTO,
+  ): Promise<LibraryBrowserItemDTO | null> => {
+    const items = filterBrowserItems(query);
+    if (items.length === 0) return null;
+    return items[Math.floor(Math.random() * items.length)] ?? null;
   },
 
   rescan: async (): Promise<CommandResult> => ok,
@@ -561,6 +690,9 @@ const mockControl = {
   setLibraryFirstPageEmpty: (enabled: boolean): void => {
     libraryFirstPageEmpty = enabled;
     libraryFirstPageEmptyConsumed = false;
+  },
+  setBrowserFixtureCopies: (copies: number): void => {
+    browserFixtureCopies = Math.max(1, Math.trunc(copies));
   },
   lastTargetedApplyRequest: (): TargetedApplyRequestDTO | null =>
     lastTargetedApplyRequest ? { ...lastTargetedApplyRequest } : null,
