@@ -5,6 +5,7 @@ pub mod display_apply;
 mod display_discovery;
 pub mod display_plan;
 pub mod display_restore;
+pub mod library_refresh;
 
 #[cfg(test)]
 mod display_discovery_tests;
