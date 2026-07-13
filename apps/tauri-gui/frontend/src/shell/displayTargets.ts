@@ -6,12 +6,14 @@ const OUTPUT_SELECT_VALUE_PREFIX = 'output:';
 export interface DisplayTargetOption {
   readonly label: string;
   readonly value: string;
+  readonly disabled: boolean;
 }
 
 export interface DisplayTargetModel {
   readonly hidden: boolean;
   readonly connectedOutputs: readonly string[];
   readonly selectedTarget: DisplayTarget;
+  readonly canApply: boolean;
   readonly options: readonly DisplayTargetOption[];
 }
 
@@ -28,15 +30,10 @@ export function normalizeDisplayOutputs(outputs: readonly string[]): string[] {
   return normalized;
 }
 
-export function resolveConnectedDisplayTarget(
-  target: DisplayTarget,
-  connectedOutputs: readonly string[],
-): DisplayTarget {
+export function normalizeDisplayTarget(target: DisplayTarget): DisplayTarget {
   if (target.kind !== 'output') return { kind: 'allDisplays' };
   const output = target.output.trim();
-  return output.length > 0 && normalizeDisplayOutputs(connectedOutputs).includes(output)
-    ? { kind: 'output', output }
-    : { kind: 'allDisplays' };
+  return output.length > 0 ? { kind: 'output', output } : { kind: 'allDisplays' };
 }
 
 export function displayTargetToSelectValue(target: DisplayTarget): string {
@@ -63,16 +60,34 @@ export function buildDisplayTargetModel(
   savedTarget: DisplayTarget,
 ): DisplayTargetModel {
   const outputs = normalizeDisplayOutputs(connectedOutputs);
+  const selectedTarget = normalizeDisplayTarget(savedTarget);
+  const canApply = outputs.length > 0 && (
+    selectedTarget.kind !== 'output'
+    || outputs.includes(selectedTarget.output)
+  );
+  const disconnectedOutput = selectedTarget.kind === 'output' && !canApply
+    ? selectedTarget.output
+    : null;
+  const options: DisplayTargetOption[] = [
+    { label: 'All Displays', value: ALL_DISPLAYS_SELECT_VALUE, disabled: false },
+    ...outputs.map((output) => ({
+      label: output,
+      value: displayTargetToSelectValue({ kind: 'output', output }),
+      disabled: false,
+    })),
+  ];
+  if (disconnectedOutput !== null) {
+    options.push({
+      label: `${disconnectedOutput} (Disconnected)`,
+      value: displayTargetToSelectValue({ kind: 'output', output: disconnectedOutput }),
+      disabled: true,
+    });
+  }
   return {
-    hidden: outputs.length <= 1,
+    hidden: outputs.length <= 1 && disconnectedOutput === null,
     connectedOutputs: outputs,
-    selectedTarget: resolveConnectedDisplayTarget(savedTarget, outputs),
-    options: [
-      { label: 'All Displays', value: ALL_DISPLAYS_SELECT_VALUE },
-      ...outputs.map((output) => ({
-        label: output,
-        value: displayTargetToSelectValue({ kind: 'output', output }),
-      })),
-    ],
+    selectedTarget,
+    canApply,
+    options,
   };
 }

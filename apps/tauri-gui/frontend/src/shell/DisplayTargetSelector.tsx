@@ -4,7 +4,6 @@ import {
   buildDisplayTargetModel,
   displayTargetFromSelectValue,
   displayTargetToSelectValue,
-  resolveConnectedDisplayTarget,
 } from './displayTargets.ts';
 
 export interface DisplayTargetSelectorProps {
@@ -27,7 +26,7 @@ export default function DisplayTargetSelector({
 
   const handleChange = (event: ChangeEvent<HTMLSelectElement>) => {
     const decoded = displayTargetFromSelectValue(event.currentTarget.value);
-    onChange(resolveConnectedDisplayTarget(decoded, model.connectedOutputs));
+    onChange(decoded);
   };
 
   return (
@@ -38,7 +37,9 @@ export default function DisplayTargetSelector({
       onChange={handleChange}
     >
       {model.options.map((option) => (
-        <option key={option.value} value={option.value}>{option.label}</option>
+        <option key={option.value} value={option.value} disabled={option.disabled}>
+          {option.label}
+        </option>
       ))}
     </select>
   );
