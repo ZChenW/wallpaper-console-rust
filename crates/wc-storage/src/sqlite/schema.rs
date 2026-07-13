@@ -23,7 +23,7 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_type_size ON wallpapers(type, size DESC, path ASC);
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
-pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub const CURRENT_SCHEMA_VERSION: i64 = 3;
 pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "config",
     "sources",
@@ -107,7 +107,11 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             unsupported_reason TEXT NOT NULL DEFAULT '',
             source_id  INTEGER REFERENCES sources(id),
             last_seen  TEXT NOT NULL DEFAULT (datetime('now')),
-            added_at   TEXT NOT NULL DEFAULT (datetime('now'))
+            added_at   TEXT NOT NULL DEFAULT (datetime('now')),
+            author     TEXT NOT NULL DEFAULT '',
+            filename   TEXT GENERATED ALWAYS AS (
+                substr(path, length(rtrim(path, replace(path, '/', ''))) + 1)
+            ) VIRTUAL
         );
         CREATE TABLE IF NOT EXISTS favorites (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -159,13 +163,16 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         drop_wallpapers_fts_triggers(&tx)?;
         ensure_v2_columns(&tx)?;
         ensure_wallpaper_sources_schema(&tx)?;
-        if version < CURRENT_SCHEMA_VERSION {
+        if version < 2 {
             migrate_sources_and_memberships(&tx)?;
             // Alias merging runs with FTS triggers intentionally suspended.
             // Force one rebuild after commit even if the old database already
             // carried the current FTS marker.
             tx.execute("DELETE FROM db_meta WHERE key = 'fts_schema_version'", [])
                 .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        }
+        ensure_v3_columns(&tx)?;
+        if version < CURRENT_SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
                 .map_err(|e| WcError::Sqlite(e.to_string()))?;
         }
@@ -244,6 +251,7 @@ struct ColumnSignature {
     not_null: bool,
     default_value: Option<String>,
     primary_key_position: i64,
+    hidden: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -373,8 +381,8 @@ fn table_column_signatures(
 ) -> Result<Vec<ColumnSignature>, WcError> {
     let mut statement = conn
         .prepare(
-            "SELECT name, type, \"notnull\", dflt_value, pk
-             FROM pragma_table_info(?1)
+            "SELECT name, type, \"notnull\", dflt_value, pk, hidden
+             FROM pragma_table_xinfo(?1)
              ORDER BY name",
         )
         .map_err(|error| WcError::Sqlite(error.to_string()))?;
@@ -388,6 +396,7 @@ fn table_column_signatures(
                     .get::<_, Option<String>>(3)?
                     .map(|value| value.trim().to_string()),
                 primary_key_position: row.get(4)?,
+                hidden: row.get(5)?,
             })
         })
         .map_err(|error| WcError::Sqlite(error.to_string()))?
@@ -558,6 +567,7 @@ fn validate_table_shapes_against_current_schema(conn: &Connection) -> Result<(),
                         && column.not_null == expected.not_null
                         && column.primary_key_position == expected.primary_key_position
                         && column.default_value.as_deref() == Some("''")
+                        && column.hidden == expected.hidden
                 });
             if actual != Some(&expected) && !migrated_wallpaper_added_at_default {
                 return Err(WcError::Other(format!(
@@ -747,16 +757,28 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
             )
             .map_err(|error| WcError::Sqlite(error.to_string()))?;
         let wallpaper_id = transaction.last_insert_rowid();
-        let added_at = transaction
+        let (added_at, author, filename) = transaction
             .query_row(
-                "SELECT added_at FROM wallpapers WHERE id = ?1",
+                "SELECT added_at, author, filename FROM wallpapers WHERE id = ?1",
                 params![wallpaper_id],
-                |row| row.get::<_, String>(0),
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                },
             )
             .map_err(|error| WcError::Sqlite(error.to_string()))?;
         if added_at.is_empty() {
             return Err(WcError::Other(
                 "current schema does not populate wallpapers.added_at".into(),
+            ));
+        }
+        let expected_filename = path.rsplit('/').next().unwrap_or(&path);
+        if !author.is_empty() || filename != expected_filename {
+            return Err(WcError::Other(
+                "current schema does not default author or derive filename".into(),
             ));
         }
         let inserted_fts = transaction
@@ -852,7 +874,7 @@ fn table_columns(
     table: &str,
 ) -> Result<std::collections::HashSet<String>, WcError> {
     let mut stmt = conn
-        .prepare(&format!("PRAGMA table_info({table})"))
+        .prepare(&format!("PRAGMA table_xinfo({table})"))
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))
@@ -903,6 +925,23 @@ fn ensure_v2_columns(conn: &Connection) -> Result<(), WcError> {
          UPDATE wallpapers SET added_at = datetime('now') WHERE added_at = '';",
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    Ok(())
+}
+
+fn ensure_v3_columns(conn: &Connection) -> Result<(), WcError> {
+    let wallpaper_columns = table_columns(conn, "wallpapers")?;
+    if !wallpaper_columns.contains("author") {
+        conn.execute_batch("ALTER TABLE wallpapers ADD COLUMN author TEXT NOT NULL DEFAULT ''; ")
+            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    }
+    if !wallpaper_columns.contains("filename") {
+        conn.execute_batch(
+            "ALTER TABLE wallpapers ADD COLUMN filename TEXT GENERATED ALWAYS AS (
+                 substr(path, length(rtrim(path, replace(path, '/', ''))) + 1)
+             ) VIRTUAL;",
+        )
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -1849,6 +1888,55 @@ mod tests {
         .unwrap();
     }
 
+    fn create_v2_schema(conn: &Connection) {
+        conn.execute_batch(
+            "PRAGMA user_version = 2;
+             CREATE TABLE sources (
+                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                 path         TEXT NOT NULL UNIQUE,
+                 added_at     TEXT NOT NULL DEFAULT (datetime('now')),
+                 display_name TEXT NOT NULL DEFAULT '',
+                 kind         TEXT NOT NULL DEFAULT 'directory'
+                              CHECK (kind IN ('directory', 'wallpaper_engine_workshop')),
+                 recursive    INTEGER NOT NULL DEFAULT 1
+                              CHECK (recursive IN (0, 1)),
+                 availability TEXT NOT NULL DEFAULT 'unknown'
+                              CHECK (availability IN ('unknown', 'available', 'offline'))
+             );
+             CREATE TABLE wallpapers (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 path TEXT NOT NULL,
+                 type TEXT NOT NULL,
+                 ext TEXT NOT NULL,
+                 backend TEXT NOT NULL,
+                 size INTEGER NOT NULL DEFAULT 0,
+                 mtime INTEGER NOT NULL DEFAULT 0,
+                 resolution TEXT NOT NULL DEFAULT '?x?',
+                 project_type TEXT NOT NULL DEFAULT '',
+                 preview_path TEXT NOT NULL DEFAULT '',
+                 workshop_id TEXT NOT NULL DEFAULT '',
+                 title TEXT NOT NULL DEFAULT '',
+                 we_file TEXT NOT NULL DEFAULT '',
+                 unsupported_reason TEXT NOT NULL DEFAULT '',
+                 source_id INTEGER REFERENCES sources(id),
+                 last_seen TEXT NOT NULL DEFAULT (datetime('now')),
+                 added_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );
+             CREATE TABLE wallpaper_sources (
+                 wallpaper_id INTEGER NOT NULL REFERENCES wallpapers(id) ON DELETE CASCADE,
+                 source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+                 last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+                 PRIMARY KEY (wallpaper_id, source_id)
+             );
+             CREATE TABLE favorites (
+                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 path TEXT NOT NULL UNIQUE,
+                 added_at TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .unwrap();
+    }
+
     fn column_names(conn: &Connection, table: &str) -> Vec<String> {
         let mut stmt = conn
             .prepare(&format!("PRAGMA table_info({table})"))
@@ -1870,7 +1958,66 @@ mod tests {
     }
 
     #[test]
-    fn migrates_v1_to_v2_without_changing_source_or_wallpaper_identity() {
+    fn fresh_v3_schema_has_author_and_generated_filename() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            3
+        );
+        let columns = {
+            let mut stmt = conn.prepare("PRAGMA table_xinfo(wallpapers)").unwrap();
+            stmt.query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, i64>(6)?,
+                ))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+        };
+        assert!(columns.contains(&(
+            "author".to_string(),
+            "TEXT".to_string(),
+            1,
+            Some("''".to_string()),
+            0,
+        )));
+        assert!(columns.contains(&("filename".to_string(), "TEXT".to_string(), 0, None, 2,)));
+
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES ('/one/first.jpg', 'image', 'jpg', 'awww')",
+            [],
+        )
+        .unwrap();
+        let inserted: (String, String) = conn
+            .query_row("SELECT author, filename FROM wallpapers", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(inserted, (String::new(), "first.jpg".to_string()));
+
+        conn.execute("UPDATE wallpapers SET path = '/two/renamed.png'", [])
+            .unwrap();
+        assert_eq!(
+            conn.query_row("SELECT filename FROM wallpapers", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap(),
+            "renamed.png"
+        );
+    }
+
+    #[test]
+    fn migrates_v1_to_v3_without_changing_source_or_wallpaper_identity() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("walls");
         std::fs::create_dir(&source).unwrap();
@@ -1895,7 +2042,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            2
+            CURRENT_SCHEMA_VERSION
         );
         let source_row: (i64, String, String, String, i64, String) = conn
             .query_row(
@@ -1919,17 +2066,28 @@ mod tests {
         assert_eq!(source_row.3, "directory");
         assert_eq!(source_row.4, 1);
         assert_eq!(source_row.5, "unknown");
-        let wallpaper_row: (i64, String, Option<i64>, String) = conn
+        let wallpaper_row: (i64, String, Option<i64>, String, String, String) = conn
             .query_row(
-                "SELECT id, path, source_id, added_at FROM wallpapers",
+                "SELECT id, path, source_id, added_at, author, filename FROM wallpapers",
                 [],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                    ))
+                },
             )
             .unwrap();
         assert_eq!(wallpaper_row.0, 11);
         assert_eq!(wallpaper_row.1, wallpaper.to_string_lossy());
         assert_eq!(wallpaper_row.2, None);
         assert!(!wallpaper_row.3.is_empty());
+        assert_eq!(wallpaper_row.4, "");
+        assert_eq!(wallpaper_row.5, "a.jpg");
         let membership: (i64, i64) = conn
             .query_row(
                 "SELECT wallpaper_id, source_id FROM wallpaper_sources",
@@ -1955,9 +2113,92 @@ mod tests {
     }
 
     #[test]
+    fn migrates_v2_to_v3_without_replaying_v1_source_migration() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v2_schema(&conn);
+        conn.execute(
+            "INSERT INTO sources
+             (id, path, display_name, kind, recursive, availability, added_at)
+             VALUES (7, '/walls', 'My walls', 'directory', 0, 'offline', '2025-01-01')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, source_id, added_at)
+             VALUES (11, '/walls/kept.jpg', 'image', 'jpg', 'awww', NULL, '2025-02-03')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id, last_seen_at)
+             VALUES (11, 7, '2025-02-04')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (id, path, added_at)
+             VALUES (13, '/walls/kept.jpg', '2025-02-05')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        let source: (i64, String, i64, String) = conn
+            .query_row(
+                "SELECT id, display_name, recursive, availability FROM sources",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(source, (7, "My walls".into(), 0, "offline".into()));
+        let wallpaper: (i64, String, String, String) = conn
+            .query_row(
+                "SELECT id, added_at, author, filename FROM wallpapers",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            wallpaper,
+            (11, "2025-02-03".into(), String::new(), "kept.jpg".into())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT wallpaper_id, source_id, last_seen_at FROM wallpaper_sources",
+                [],
+                |row| Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?
+                )),
+            )
+            .unwrap(),
+            (11, 7, "2025-02-04".into())
+        );
+        assert_eq!(
+            conn.query_row("SELECT id, path, added_at FROM favorites", [], |row| Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?
+            )),)
+                .unwrap(),
+            (13, "/walls/kept.jpg".into(), "2025-02-05".into())
+        );
+    }
+
+    #[test]
     fn rejects_future_schema_without_modifying_it() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.pragma_update(None, "user_version", 3).unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
 
         let err = create_schema(&conn).unwrap_err();
 
@@ -1965,7 +2206,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            future_version
         );
         let table_count: i64 = conn
             .query_row(
@@ -1978,7 +2219,7 @@ mod tests {
     }
 
     #[test]
-    fn v2_migration_is_idempotent() {
+    fn current_migration_is_idempotent() {
         let tmp = tempfile::tempdir().unwrap();
         let source = tmp.path().join("walls");
         std::fs::create_dir(&source).unwrap();
@@ -2010,7 +2251,7 @@ mod tests {
     }
 
     #[test]
-    fn current_v2_schema_repairs_a_stale_db_meta_marker_without_replaying_migration() {
+    fn current_v3_schema_repairs_a_stale_db_meta_marker_without_replaying_migration() {
         let conn = Connection::open_in_memory().unwrap();
         create_schema(&conn).unwrap();
         conn.execute(
@@ -2302,6 +2543,9 @@ mod tests {
         );
         assert!(!column_names(&conn, "sources").contains(&"display_name".to_string()));
         assert!(!column_names(&conn, "wallpapers").contains(&"added_at".to_string()));
+        let wallpaper_columns = table_columns(&conn, "wallpapers").unwrap();
+        assert!(!wallpaper_columns.contains("author"));
+        assert!(!wallpaper_columns.contains("filename"));
     }
 
     #[test]

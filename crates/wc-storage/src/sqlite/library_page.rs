@@ -1,4 +1,6 @@
-use rusqlite::params;
+use rusqlite::types::Value;
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use std::collections::HashMap;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
@@ -65,6 +67,72 @@ pub struct LibraryPageQuery {
 pub struct LibraryPage {
     pub total: usize,
     pub items: Vec<WallpaperEntry>,
+}
+
+/// User-facing wallpaper categories for the unified library browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryBrowserType {
+    Usable,
+    Image,
+    Gif,
+    Video,
+    WeScene,
+    Unsupported,
+}
+
+/// Stable sort orders supported by the unified library browser.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LibraryBrowserSort {
+    RecentlyAdded,
+    NameAsc,
+    NameDesc,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryBrowserQuery {
+    pub source_id: Option<i64>,
+    pub type_filter: LibraryBrowserType,
+    pub favorites_only: bool,
+    pub search: String,
+    pub sort: LibraryBrowserSort,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+impl Default for LibraryBrowserQuery {
+    fn default() -> Self {
+        Self {
+            source_id: None,
+            type_filter: LibraryBrowserType::Usable,
+            favorites_only: false,
+            search: String::new(),
+            sort: LibraryBrowserSort::RecentlyAdded,
+            offset: 0,
+            limit: 100,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryBrowserSource {
+    pub id: i64,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryBrowserItem {
+    pub wallpaper_id: i64,
+    pub entry: WallpaperEntry,
+    pub favorite: bool,
+    pub author: Option<String>,
+    pub added_at: String,
+    pub sources: Vec<LibraryBrowserSource>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LibraryBrowserPage {
+    pub total: usize,
+    pub items: Vec<LibraryBrowserItem>,
 }
 
 pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
@@ -277,6 +345,325 @@ fn library_page_sqlite_with_scope(
             items,
         })
     }
+}
+
+#[derive(Debug, Clone)]
+struct BrowserPredicate {
+    where_sql: String,
+    params: Vec<Value>,
+}
+
+fn push_browser_param(params: &mut Vec<Value>, value: Value) -> String {
+    params.push(value);
+    format!("?{}", params.len())
+}
+
+fn escape_like_term(term: &str) -> String {
+    let mut escaped = String::with_capacity(term.len());
+    for character in term.chars() {
+        match character {
+            '\\' => escaped.push_str("\\\\"),
+            '%' => escaped.push_str("\\%"),
+            '_' => escaped.push_str("\\_"),
+            _ => escaped.push(character),
+        }
+    }
+    format!("%{escaped}%")
+}
+
+fn browser_type_condition(filter: LibraryBrowserType) -> &'static str {
+    match filter {
+        LibraryBrowserType::Usable => "w.type IN ('image', 'gif', 'video', 'we_scene')",
+        LibraryBrowserType::Image => "w.type = 'image'",
+        LibraryBrowserType::Gif => "w.type = 'gif'",
+        LibraryBrowserType::Video => "w.type = 'video'",
+        LibraryBrowserType::WeScene => "w.type = 'we_scene'",
+        LibraryBrowserType::Unsupported => "w.type IN ('we_web', 'unsupported')",
+    }
+}
+
+/// Build the sole predicate used by browser count, page, and random queries.
+///
+/// Keeping source membership as `EXISTS` prevents overlapping source rows from
+/// multiplying wallpapers. Search deliberately references only user-facing
+/// basename/title/author/source-name fields.
+fn browser_predicate(query: &LibraryBrowserQuery) -> BrowserPredicate {
+    let mut params = Vec::new();
+    let mut conditions = vec![
+        "EXISTS (
+             SELECT 1
+             FROM wallpaper_sources visible_membership
+             WHERE visible_membership.wallpaper_id = w.id
+         )"
+        .to_string(),
+        browser_type_condition(query.type_filter).to_string(),
+    ];
+
+    if let Some(source_id) = query.source_id {
+        let placeholder = push_browser_param(&mut params, Value::Integer(source_id));
+        conditions.push(format!(
+            "EXISTS (
+                 SELECT 1
+                 FROM wallpaper_sources selected_membership
+                 WHERE selected_membership.wallpaper_id = w.id
+                   AND selected_membership.source_id = {placeholder}
+             )"
+        ));
+    }
+    if query.favorites_only {
+        conditions.push(
+            "EXISTS (
+                 SELECT 1
+                 FROM favorites favorite_filter
+                 WHERE favorite_filter.path = w.path
+             )"
+            .to_string(),
+        );
+    }
+
+    for term in query.search.split_whitespace() {
+        let placeholder = push_browser_param(&mut params, Value::Text(escape_like_term(term)));
+        conditions.push(format!(
+            "(
+                 w.filename COLLATE NOCASE LIKE {placeholder} ESCAPE '\\'
+                 OR (w.title <> '' AND w.title COLLATE NOCASE LIKE {placeholder} ESCAPE '\\')
+                 OR (w.author <> '' AND w.author COLLATE NOCASE LIKE {placeholder} ESCAPE '\\')
+                 OR EXISTS (
+                     SELECT 1
+                     FROM wallpaper_sources search_membership
+                     JOIN sources search_source
+                       ON search_source.id = search_membership.source_id
+                     WHERE search_membership.wallpaper_id = w.id
+                       AND search_source.display_name COLLATE NOCASE
+                           LIKE {placeholder} ESCAPE '\\'
+                 )
+             )"
+        ));
+    }
+
+    BrowserPredicate {
+        where_sql: format!("WHERE {}", conditions.join(" AND ")),
+        params,
+    }
+}
+
+fn browser_order_by(sort: LibraryBrowserSort) -> &'static str {
+    match sort {
+        LibraryBrowserSort::RecentlyAdded => "w.added_at DESC, w.id DESC",
+        LibraryBrowserSort::NameAsc => {
+            "COALESCE(NULLIF(w.title, ''), w.filename) COLLATE NOCASE ASC, w.path ASC, w.id ASC"
+        }
+        LibraryBrowserSort::NameDesc => {
+            "COALESCE(NULLIF(w.title, ''), w.filename) COLLATE NOCASE DESC, w.path ASC, w.id ASC"
+        }
+    }
+}
+
+fn browser_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryBrowserItem> {
+    let entry = wallpaper_entry_from_row(row)?;
+    let author = row.get::<_, String>(15)?;
+    Ok(LibraryBrowserItem {
+        wallpaper_id: row.get(13)?,
+        entry,
+        favorite: row.get(14)?,
+        author: if author.is_empty() {
+            None
+        } else {
+            Some(author)
+        },
+        added_at: row.get(16)?,
+        sources: Vec::new(),
+    })
+}
+
+const BROWSER_ITEM_SELECT: &str =
+    "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
+            w.project_type, w.preview_path, w.workshop_id, w.title, w.we_file,
+            w.unsupported_reason, w.id,
+            EXISTS (SELECT 1 FROM favorites item_favorite WHERE item_favorite.path = w.path),
+            w.author, w.added_at
+     FROM wallpapers w";
+
+fn hydrate_browser_sources(
+    conn: &Connection,
+    items: &mut [LibraryBrowserItem],
+) -> Result<(), WcError> {
+    if items.is_empty() {
+        return Ok(());
+    }
+    let ids = items
+        .iter()
+        .map(|item| Value::Integer(item.wallpaper_id))
+        .collect::<Vec<_>>();
+    let placeholders = (1..=ids.len())
+        .map(|index| format!("?{index}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT membership.wallpaper_id, source.id, source.display_name
+         FROM wallpaper_sources membership
+         JOIN sources source ON source.id = membership.source_id
+         WHERE membership.wallpaper_id IN ({placeholders})
+         ORDER BY membership.wallpaper_id ASC, source.id ASC"
+    );
+    let mut statement = conn
+        .prepare(&sql)
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let rows = statement
+        .query_map(params_from_iter(ids.iter()), |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                LibraryBrowserSource {
+                    id: row.get(1)?,
+                    display_name: row.get(2)?,
+                },
+            ))
+        })
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut sources_by_wallpaper = HashMap::<i64, Vec<LibraryBrowserSource>>::new();
+    for row in rows {
+        let (wallpaper_id, source) = row.map_err(|error| WcError::Sqlite(error.to_string()))?;
+        sources_by_wallpaper
+            .entry(wallpaper_id)
+            .or_default()
+            .push(source);
+    }
+    for item in items {
+        item.sources = sources_by_wallpaper
+            .remove(&item.wallpaper_id)
+            .unwrap_or_default();
+    }
+    Ok(())
+}
+
+fn browser_library_page_inner<F>(
+    cd: &ConfigDir,
+    query: &LibraryBrowserQuery,
+    after_count: F,
+) -> Result<LibraryBrowserPage, WcError>
+where
+    F: FnOnce(),
+{
+    if !cd.db_path().exists() {
+        return Ok(LibraryBrowserPage {
+            total: 0,
+            items: Vec::new(),
+        });
+    }
+    let conn = open_runtime_connection(cd)?;
+    // rusqlite's default unchecked transaction is DEFERRED. The count is the
+    // first read and pins the snapshot used by row selection and source hydration.
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let predicate = browser_predicate(query);
+    let total = transaction
+        .query_row(
+            &format!("SELECT COUNT(*) FROM wallpapers w {}", predicate.where_sql),
+            params_from_iter(predicate.params.iter()),
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+
+    after_count();
+
+    const MAX_BROWSER_PAGE_SIZE: usize = 500;
+    let page_limit = query.limit.min(MAX_BROWSER_PAGE_SIZE);
+    let mut page_params = predicate.params.clone();
+    let limit = push_browser_param(
+        &mut page_params,
+        Value::Integer(i64::try_from(page_limit).unwrap_or(500)),
+    );
+    let offset = push_browser_param(
+        &mut page_params,
+        Value::Integer(i64::try_from(query.offset).unwrap_or(i64::MAX)),
+    );
+    let sql = format!(
+        "{BROWSER_ITEM_SELECT}
+         {}
+         ORDER BY {}
+         LIMIT {limit} OFFSET {offset}",
+        predicate.where_sql,
+        browser_order_by(query.sort)
+    );
+    let mut items = {
+        let mut statement = transaction
+            .prepare(&sql)
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let items = statement
+            .query_map(params_from_iter(page_params.iter()), browser_item_from_row)
+            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        items
+    };
+    hydrate_browser_sources(&transaction, &mut items)?;
+    transaction
+        .commit()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+
+    Ok(LibraryBrowserPage {
+        total: total.max(0) as usize,
+        items,
+    })
+}
+
+/// Query the unified, source-backed library without materializing the full table.
+pub fn browser_library_page(
+    cd: &ConfigDir,
+    query: &LibraryBrowserQuery,
+) -> Result<LibraryBrowserPage, WcError> {
+    browser_library_page_inner(cd, query, || {})
+}
+
+#[cfg(test)]
+fn browser_library_page_with_after_count<F>(
+    cd: &ConfigDir,
+    query: &LibraryBrowserQuery,
+    after_count: F,
+) -> Result<LibraryBrowserPage, WcError>
+where
+    F: FnOnce(),
+{
+    browser_library_page_inner(cd, query, after_count)
+}
+
+/// Pick one random wallpaper using exactly the same membership and filter
+/// predicate as [`browser_library_page`]. Paging fields are intentionally ignored.
+pub fn browser_library_random(
+    cd: &ConfigDir,
+    query: &LibraryBrowserQuery,
+) -> Result<Option<LibraryBrowserItem>, WcError> {
+    if !cd.db_path().exists() {
+        return Ok(None);
+    }
+    let conn = open_runtime_connection(cd)?;
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let predicate = browser_predicate(query);
+    let sql = format!(
+        "{BROWSER_ITEM_SELECT}
+         {}
+         ORDER BY RANDOM()
+         LIMIT 1",
+        predicate.where_sql
+    );
+    let mut item = transaction
+        .query_row(
+            &sql,
+            params_from_iter(predicate.params.iter()),
+            browser_item_from_row,
+        )
+        .optional()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    if let Some(item) = item.as_mut() {
+        hydrate_browser_sources(&transaction, std::slice::from_mut(item))?;
+    }
+    transaction
+        .commit()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    Ok(item)
 }
 
 pub fn library_counts_sqlite(cd: &ConfigDir) -> Result<wc_core::types::LibraryCounts, WcError> {
@@ -717,6 +1104,645 @@ mod tests {
                 .as_ref()
                 .and_then(|p| p.title.as_deref()),
             Some("Blue Forest")
+        );
+    }
+}
+
+#[cfg(test)]
+mod browser_tests {
+    use super::*;
+    use crate::sqlite::ensure_sqlite_db;
+    use rusqlite::{params, Connection};
+    use std::collections::BTreeSet;
+
+    fn fixture() -> (tempfile::TempDir, ConfigDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        ensure_sqlite_db(&cd);
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch(
+            "INSERT INTO sources
+                 (id, path, display_name, kind, recursive, availability)
+             VALUES
+                 (1, '/private/secret-root', 'Alpha Catalog', 'directory', 1, 'available'),
+                 (2, '/mnt/other-place', 'City Vault', 'directory', 1, 'available');",
+        )
+        .unwrap();
+        (tmp, cd)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn insert_browser_wallpaper(
+        conn: &Connection,
+        id: i64,
+        path: &str,
+        kind: &str,
+        title: &str,
+        author: &str,
+        added_at: &str,
+        workshop_id: &str,
+        project_type: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, size, mtime, resolution,
+              project_type, preview_path, workshop_id, title, we_file,
+              unsupported_reason, added_at, author)
+             VALUES (?1, ?2, ?3, 'dat', 'awww', ?1 * 10, ?1 * 100,
+                     '1920x1080', ?8, '', ?7, ?4, '', '', ?6, ?5)",
+            params![
+                id,
+                path,
+                kind,
+                title,
+                author,
+                added_at,
+                workshop_id,
+                project_type
+            ],
+        )
+        .unwrap();
+    }
+
+    fn attach(conn: &Connection, wallpaper_id: i64, source_id: i64) {
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id)
+             VALUES (?1, ?2)",
+            params![wallpaper_id, source_id],
+        )
+        .unwrap();
+    }
+
+    fn query(
+        source_id: Option<i64>,
+        type_filter: LibraryBrowserType,
+        favorites_only: bool,
+        search: &str,
+        sort: LibraryBrowserSort,
+        offset: usize,
+        limit: usize,
+    ) -> LibraryBrowserQuery {
+        LibraryBrowserQuery {
+            source_id,
+            type_filter,
+            favorites_only,
+            search: search.into(),
+            sort,
+            offset,
+            limit,
+        }
+    }
+
+    #[test]
+    fn browser_query_composes_source_type_favorite_and_search_terms() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        insert_browser_wallpaper(
+            &conn,
+            10,
+            "/private/nebula_scene.jpg",
+            "image",
+            "Blue Forest",
+            "Ada Lovelace",
+            "2025-03-01",
+            "123456",
+            "scene",
+        );
+        insert_browser_wallpaper(
+            &conn,
+            11,
+            "/private/not-favorite.jpg",
+            "image",
+            "Blue Forest",
+            "Ada Lovelace",
+            "2025-03-02",
+            "",
+            "",
+        );
+        insert_browser_wallpaper(
+            &conn,
+            12,
+            "/private/nebula_scene.mp4",
+            "video",
+            "Blue Forest",
+            "Ada Lovelace",
+            "2025-03-03",
+            "",
+            "",
+        );
+        attach(&conn, 10, 1);
+        attach(&conn, 10, 2);
+        attach(&conn, 11, 1);
+        attach(&conn, 12, 1);
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/private/nebula_scene.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/private/not-favorite.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/private/nebula_scene.mp4')",
+            [],
+        )
+        .unwrap();
+
+        let page = browser_library_page(
+            &cd,
+            &query(
+                Some(1),
+                LibraryBrowserType::Image,
+                true,
+                "Blue Ada City nebula_scene.jpg",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        let item = &page.items[0];
+        assert_eq!(item.wallpaper_id, 10);
+        assert_eq!(item.entry.path.as_str(), "/private/nebula_scene.jpg");
+        assert!(item.favorite);
+        assert_eq!(item.author.as_deref(), Some("Ada Lovelace"));
+        assert_eq!(item.added_at, "2025-03-01");
+        assert_eq!(
+            item.sources,
+            vec![
+                LibraryBrowserSource {
+                    id: 1,
+                    display_name: "Alpha Catalog".into(),
+                },
+                LibraryBrowserSource {
+                    id: 2,
+                    display_name: "City Vault".into(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn browser_type_groups_require_membership_and_exclude_private_metadata_fields() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for (id, kind) in [
+            (1, "image"),
+            (2, "gif"),
+            (3, "video"),
+            (4, "we_scene"),
+            (5, "we_web"),
+            (6, "unsupported"),
+            (7, "we_application"),
+        ] {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/private/secret-root/{kind}-{id}.dat"),
+                kind,
+                "Public title",
+                "",
+                &format!("2025-01-{id:02}"),
+                "777777",
+                "hidden-project-kind",
+            );
+            attach(&conn, id, 1);
+        }
+        insert_browser_wallpaper(
+            &conn,
+            8,
+            "/private/orphan.jpg",
+            "image",
+            "Orphan",
+            "",
+            "2025-01-08",
+            "",
+            "",
+        );
+
+        let usable = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Usable,
+                false,
+                "",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(usable.total, 4);
+        assert_eq!(
+            usable
+                .items
+                .iter()
+                .map(|item| item.entry.file_type.as_str())
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from(["gif", "image", "video", "we_scene"])
+        );
+        let unsupported = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Unsupported,
+                false,
+                "",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(unsupported.total, 2);
+        assert_eq!(
+            unsupported
+                .items
+                .iter()
+                .map(|item| item.wallpaper_id)
+                .collect::<BTreeSet<_>>(),
+            BTreeSet::from([5, 6])
+        );
+        for (filter, expected_id) in [
+            (LibraryBrowserType::Image, 1),
+            (LibraryBrowserType::Gif, 2),
+            (LibraryBrowserType::Video, 3),
+            (LibraryBrowserType::WeScene, 4),
+        ] {
+            let page = browser_library_page(
+                &cd,
+                &query(
+                    None,
+                    filter,
+                    false,
+                    "",
+                    LibraryBrowserSort::RecentlyAdded,
+                    0,
+                    20,
+                ),
+            )
+            .unwrap();
+            assert_eq!(page.total, 1);
+            assert_eq!(page.items[0].wallpaper_id, expected_id);
+            assert_eq!(page.items[0].author, None);
+            assert!(!page.items[0].favorite);
+        }
+        for private_term in ["secret-root", "/private", "777777", "hidden-project-kind"] {
+            let page = browser_library_page(
+                &cd,
+                &query(
+                    None,
+                    LibraryBrowserType::Usable,
+                    false,
+                    private_term,
+                    LibraryBrowserSort::RecentlyAdded,
+                    0,
+                    20,
+                ),
+            )
+            .unwrap();
+            assert_eq!(page.total, 0, "private search term leaked: {private_term}");
+        }
+    }
+
+    #[test]
+    fn browser_search_treats_like_metacharacters_and_backslash_literally() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for (id, filename) in [
+            (1, "literal%_back\\slash.jpg"),
+            (2, "literalXXbackslash.jpg"),
+            (3, "plain_percent.jpg"),
+            (4, "artist's-choice.jpg"),
+        ] {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/walls/{filename}"),
+                "image",
+                "",
+                "",
+                "2025-01-01",
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+
+        let page = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "%_back\\slash",
+                LibraryBrowserSort::NameAsc,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].wallpaper_id, 1);
+
+        let apostrophe = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "artist's",
+                LibraryBrowserSort::NameAsc,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(apostrophe.total, 1);
+        assert_eq!(apostrophe.items[0].wallpaper_id, 4);
+    }
+
+    #[test]
+    fn browser_sorts_by_added_at_or_title_fallback_and_pages_stably() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for (id, filename, title, added_at) in [
+            (10, "zulu.jpg", "Bravo", "2025-04-01"),
+            (11, "alpha", "", "2025-04-01"),
+            (12, "other.jpg", "ALPHA", "2025-05-01"),
+            (13, "charlie.jpg", "charlie", "2025-03-01"),
+        ] {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/walls/{filename}"),
+                "image",
+                title,
+                "",
+                added_at,
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+
+        let recent = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Usable,
+                false,
+                "",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            recent
+                .items
+                .iter()
+                .map(|item| item.wallpaper_id)
+                .collect::<Vec<_>>(),
+            vec![12, 11, 10, 13]
+        );
+
+        let name_page = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "",
+                LibraryBrowserSort::NameAsc,
+                1,
+                2,
+            ),
+        )
+        .unwrap();
+        assert_eq!(name_page.total, 4);
+        assert_eq!(
+            name_page
+                .items
+                .iter()
+                .map(|item| item.wallpaper_id)
+                .collect::<Vec<_>>(),
+            vec![12, 10]
+        );
+
+        let descending = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "",
+                LibraryBrowserSort::NameDesc,
+                0,
+                20,
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            descending
+                .items
+                .iter()
+                .map(|item| item.wallpaper_id)
+                .collect::<Vec<_>>(),
+            vec![13, 10, 11, 12]
+        );
+
+        let count_only = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "",
+                LibraryBrowserSort::NameAsc,
+                0,
+                0,
+            ),
+        )
+        .unwrap();
+        assert_eq!(count_only.total, 4);
+        assert!(count_only.items.is_empty());
+    }
+
+    #[test]
+    fn browser_random_reuses_the_page_predicate_and_returns_none_for_no_match() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        insert_browser_wallpaper(
+            &conn,
+            1,
+            "/walls/only-video.mp4",
+            "video",
+            "Ocean Motion",
+            "Mira",
+            "2025-01-01",
+            "",
+            "",
+        );
+        insert_browser_wallpaper(
+            &conn,
+            2,
+            "/walls/non-favorite-video.mp4",
+            "video",
+            "Ocean Motion",
+            "Mira",
+            "2025-01-02",
+            "",
+            "",
+        );
+        attach(&conn, 1, 1);
+        attach(&conn, 2, 1);
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/walls/only-video.mp4')",
+            [],
+        )
+        .unwrap();
+
+        let matching = query(
+            Some(1),
+            LibraryBrowserType::Video,
+            true,
+            "Ocean Mira Alpha",
+            LibraryBrowserSort::NameAsc,
+            999,
+            0,
+        );
+        for _ in 0..8 {
+            assert_eq!(
+                browser_library_random(&cd, &matching)
+                    .unwrap()
+                    .unwrap()
+                    .wallpaper_id,
+                1
+            );
+        }
+        let impossible = query(
+            Some(999),
+            LibraryBrowserType::Video,
+            false,
+            "",
+            LibraryBrowserSort::RecentlyAdded,
+            0,
+            20,
+        );
+        assert!(browser_library_random(&cd, &impossible).unwrap().is_none());
+    }
+
+    #[test]
+    fn browser_page_caps_source_hydration_to_a_bound_parameter_safe_size() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let transaction = conn.unchecked_transaction().unwrap();
+        for id in 1..=510_i64 {
+            insert_browser_wallpaper(
+                &transaction,
+                id,
+                &format!("/walls/{id}.jpg"),
+                "image",
+                "",
+                "",
+                "2025-01-01",
+                "",
+                "",
+            );
+            attach(&transaction, id, 1);
+        }
+        transaction.commit().unwrap();
+
+        let page = browser_library_page(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Image,
+                false,
+                "",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                usize::MAX,
+            ),
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 510);
+        assert_eq!(page.items.len(), 500);
+        assert!(page.items.iter().all(|item| item.sources.len() == 1));
+    }
+
+    #[test]
+    fn browser_page_count_rows_and_sources_share_one_read_snapshot() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        insert_browser_wallpaper(
+            &conn,
+            1,
+            "/walls/kept.jpg",
+            "image",
+            "Kept",
+            "",
+            "2025-01-01",
+            "",
+            "",
+        );
+        attach(&conn, 1, 1);
+        drop(conn);
+        let writer_path = cd.db_path();
+        crate::sqlite::reset_runtime_connection_open_count();
+
+        let page = browser_library_page_with_after_count(
+            &cd,
+            &query(
+                None,
+                LibraryBrowserType::Usable,
+                false,
+                "",
+                LibraryBrowserSort::RecentlyAdded,
+                0,
+                20,
+            ),
+            move || {
+                let writer = Connection::open(writer_path).unwrap();
+                writer
+                    .execute("DELETE FROM wallpaper_sources WHERE wallpaper_id = 1", [])
+                    .unwrap();
+            },
+        )
+        .unwrap();
+
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].sources.len(), 1);
+        assert_eq!(crate::sqlite::runtime_connection_open_count(), 1);
+        assert_eq!(
+            browser_library_page(
+                &cd,
+                &query(
+                    None,
+                    LibraryBrowserType::Usable,
+                    false,
+                    "",
+                    LibraryBrowserSort::RecentlyAdded,
+                    0,
+                    20,
+                ),
+            )
+            .unwrap()
+            .total,
+            0
         );
     }
 }

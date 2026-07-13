@@ -382,6 +382,9 @@ fn table_columns(
     schema: &str,
     table: &str,
 ) -> Result<Vec<String>, WcError> {
+    // Deliberately use table_info rather than table_xinfo: repair copies stored
+    // columns such as author, while generated columns such as filename must be
+    // omitted so the fresh target schema can recompute them from path.
     let sql = format!(
         "PRAGMA {}.table_info({})",
         quote_identifier(schema),
@@ -965,7 +968,10 @@ mod tests {
     fn assert_malformed_restore_rejected(cd: &ConfigDir, backup_path: &Path) {
         let result = restore(cd, backup_path);
 
-        assert!(result.is_err(), "malformed v2 backup must be rejected");
+        assert!(
+            result.is_err(),
+            "malformed current-version backup must be rejected"
+        );
         let current = rusqlite::Connection::open(cd.db_path()).unwrap();
         assert_eq!(
             current
@@ -978,6 +984,73 @@ mod tests {
             "live-current"
         );
     }
+
+    fn rewrite_wallpapers_table_sql(path: &Path, rewrite: fn(&str) -> String) {
+        let connection = rusqlite::Connection::open(path).unwrap();
+        let original = connection
+            .query_row(
+                "SELECT sql FROM sqlite_master
+                 WHERE type = 'table' AND name = 'wallpapers'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap();
+        let rewritten = rewrite(&original);
+        assert_ne!(rewritten, original, "test mutation must change table SQL");
+        connection
+            .execute_batch("PRAGMA writable_schema = ON;")
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE sqlite_master SET sql = ?1
+                 WHERE type = 'table' AND name = 'wallpapers'",
+                [rewritten],
+            )
+            .unwrap();
+        connection
+            .execute_batch("PRAGMA writable_schema = OFF;")
+            .unwrap();
+        let schema_version = connection
+            .pragma_query_value(None, "schema_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        connection
+            .pragma_update(None, "schema_version", schema_version + 1)
+            .unwrap();
+    }
+
+    fn ordinary_filename_column(sql: &str) -> String {
+        replace_generated_filename_definition(sql, "filename TEXT")
+    }
+
+    fn stored_filename_column(sql: &str) -> String {
+        sql.replacen(") VIRTUAL", ") STORED", 1)
+    }
+
+    fn wrong_filename_expression(sql: &str) -> String {
+        sql.replacen(
+            "substr(path, length(rtrim(path, replace(path, '/', ''))) + 1)",
+            "path",
+            1,
+        )
+    }
+
+    fn replace_generated_filename_definition(sql: &str, replacement: &str) -> String {
+        let start = sql.find("filename").expect("filename definition");
+        let relative_end = sql[start..]
+            .find(") VIRTUAL")
+            .expect("virtual filename suffix");
+        let end = start + relative_end + ") VIRTUAL".len();
+        let mut rewritten = sql.to_string();
+        rewritten.replace_range(start..end, replacement);
+        rewritten
+    }
+
+    type FilenameSchemaMutation = fn(&str) -> String;
+    const MALFORMED_FILENAME_MUTATIONS: [(&str, FilenameSchemaMutation); 3] = [
+        ("ordinary", ordinary_filename_column),
+        ("stored", stored_filename_column),
+        ("wrong-expression", wrong_filename_expression),
+    ];
 
     fn query_rows(
         conn: &rusqlite::Connection,
@@ -1018,9 +1091,9 @@ mod tests {
                     conn,
                     "SELECT id, path, type, ext, backend, size, mtime, resolution,
                             project_type, preview_path, workshop_id, title, we_file,
-                            unsupported_reason, source_id, last_seen, added_at
+                            unsupported_reason, source_id, last_seen, added_at, author
                      FROM wallpapers ORDER BY id",
-                    17,
+                    18,
                 ),
             ),
             (
@@ -1195,7 +1268,7 @@ mod tests {
 
         // Add a path to SQLite history that is NOT in flat
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
                 rusqlite::params!["/walls/extra.jpg"],
@@ -1223,7 +1296,7 @@ mod tests {
 
         // Insert a wallpaper so there is a real mismatch with corrupted FTS
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution, title, workshop_id)
                  VALUES ('/walls/test.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1', 'Test', '111')",
@@ -1260,7 +1333,7 @@ mod tests {
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
         // Corrupt the schema by dropping the config table.
-        let conn = rusqlite::Connection::open(&cd.db_path()).expect("should open db");
+        let conn = rusqlite::Connection::open(cd.db_path()).expect("should open db");
         conn.execute("DROP TABLE config", [])
             .expect("should drop config table");
 
@@ -1406,7 +1479,7 @@ mod tests {
 
         // INSERT the duplicate into SQLite history as well
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
                 rusqlite::params![a],
@@ -1439,7 +1512,7 @@ mod tests {
         let sym_str = sym.to_string_lossy().to_string();
 
         // Flat history has the symlink path
-        flat::write_lines(&cd.history_path(), &[sym_str.clone()]).unwrap();
+        flat::write_lines(&cd.history_path(), std::slice::from_ref(&sym_str)).unwrap();
         flat::favorites_add(&cd, "/walls/fav.jpg").unwrap();
         flat::sources_add(&cd, "/walls").unwrap();
 
@@ -1447,7 +1520,7 @@ mod tests {
 
         // SQLite history has the real path (different string, same canonical)
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
                 rusqlite::params![real_str],
@@ -1479,7 +1552,7 @@ mod tests {
 
         // Insert a duplicate canonical path directly into SQLite history
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'test', 0)",
                 rusqlite::params!["/walls/a.jpg"],
@@ -1512,7 +1585,7 @@ mod tests {
 
         // Write data directly to SQLite
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO favorites (path, added_at) VALUES ('/sqlite-only-fav.jpg', '2024-01-01T00:00:00')",
                 [],
@@ -1550,7 +1623,7 @@ mod tests {
         crate::sqlite::ensure_sqlite_db(&cd);
 
         {
-            let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+            let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
             conn.execute(
                 "INSERT INTO sources (path, added_at) VALUES ('/src', '2024-01-01T00:00:00')",
                 [],
@@ -1570,7 +1643,7 @@ mod tests {
 
         crate::sqlite::repair(&cd).unwrap();
 
-        let conn = rusqlite::Connection::open(&cd.db_path()).unwrap();
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
         let src_count: i64 = conn
             .query_row("SELECT COUNT(*) FROM sources", [], |r| r.get(0))
             .unwrap();
@@ -1782,7 +1855,7 @@ mod tests {
     }
 
     #[test]
-    fn repair_preserves_v2_fields_ids_memberships_and_sequence_high_water() {
+    fn repair_preserves_v3_fields_ids_memberships_and_sequence_high_water() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -1807,12 +1880,13 @@ mod tests {
             "INSERT INTO wallpapers
              (id, path, type, ext, backend, size, mtime, resolution,
               project_type, preview_path, workshop_id, title, we_file,
-              unsupported_reason, source_id, last_seen, added_at)
+              unsupported_reason, source_id, last_seen, added_at, author)
              VALUES (73, '/sources/workshop/123', 'we_scene', 'scene',
                      'linux-wallpaperengine', 12345, 67890, 'WE', 'we_scene',
                      '/sources/workshop/123/preview.gif', '123', 'Scene Title',
                      'scene.json', 'renderer-limit', 41,
-                     '2025-02-03T04:05:06Z', '2025-02-01T01:02:03Z')",
+                     '2025-02-03T04:05:06Z', '2025-02-01T01:02:03Z',
+                     'Scene Studio')",
             [],
         )
         .unwrap();
@@ -1880,6 +1954,15 @@ mod tests {
         let after = persistent_snapshot(&conn);
         assert_eq!(after, before);
         assert_eq!(
+            conn.query_row(
+                "SELECT author, filename FROM wallpapers WHERE id = 73",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+            ("Scene Studio".into(), "123".into())
+        );
+        assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
             crate::sqlite::CURRENT_SCHEMA_VERSION
@@ -1898,6 +1981,54 @@ mod tests {
             wallpapers_fts_count(&conn).unwrap()
         );
         check_wallpapers_fts_integrity(&conn).unwrap();
+    }
+
+    #[test]
+    fn repair_rebuilds_malformed_filename_columns_and_preserves_author() {
+        for (label, mutation) in MALFORMED_FILENAME_MUTATIONS {
+            let tmp = tempfile::tempdir().unwrap();
+            let cd = ConfigDir {
+                path: tmp.path().join(format!("wallpaper-console-{label}")),
+            };
+            cd.init().unwrap();
+            crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+            let connection = rusqlite::Connection::open(cd.db_path()).unwrap();
+            connection
+                .execute(
+                    "INSERT INTO wallpapers
+                     (id, path, type, ext, backend, author)
+                     VALUES (9, '/walls/repaired.jpg', 'image', 'jpg', 'awww',
+                             'Repair Studio')",
+                    [],
+                )
+                .unwrap();
+            drop(connection);
+            rewrite_wallpapers_table_sql(&cd.db_path(), mutation);
+
+            repair(&cd).unwrap_or_else(|error| panic!("{label} repair failed: {error}"));
+
+            let repaired = rusqlite::Connection::open(cd.db_path()).unwrap();
+            assert_eq!(
+                repaired
+                    .query_row(
+                        "SELECT author, filename FROM wallpapers WHERE id = 9",
+                        [],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+                    )
+                    .unwrap(),
+                ("Repair Studio".into(), "repaired.jpg".into()),
+                "{label}"
+            );
+            let hidden: i64 = repaired
+                .query_row(
+                    "SELECT hidden FROM pragma_table_xinfo('wallpapers')
+                     WHERE name = 'filename'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(hidden, 2, "{label}");
+        }
     }
 
     #[test]
@@ -2280,7 +2411,10 @@ mod tests {
 
         let result = restore(&cd, &backup_path);
 
-        assert!(result.is_err(), "malformed v2 backup must be rejected");
+        assert!(
+            result.is_err(),
+            "malformed current-version backup must be rejected"
+        );
         let current = rusqlite::Connection::open(cd.db_path()).unwrap();
         assert_eq!(
             current
@@ -2660,7 +2794,10 @@ mod tests {
 
         let result = restore(&cd, &backup_path);
 
-        assert!(result.is_err(), "malformed v2 backup must be rejected");
+        assert!(
+            result.is_err(),
+            "malformed current-version backup must be rejected"
+        );
         let current = rusqlite::Connection::open(cd.db_path()).unwrap();
         assert_eq!(
             current
@@ -2723,7 +2860,10 @@ mod tests {
 
         let result = restore(&cd, &backup_path);
 
-        assert!(result.is_err(), "malformed v2 backup must be rejected");
+        assert!(
+            result.is_err(),
+            "malformed current-version backup must be rejected"
+        );
         let current = rusqlite::Connection::open(cd.db_path()).unwrap();
         assert_eq!(
             current
@@ -2763,7 +2903,146 @@ mod tests {
     }
 
     #[test]
-    fn backup_and_restore_round_trip_complete_v2_state() {
+    fn restore_rejects_malformed_current_filename_column_without_replacing_live_database() {
+        for (label, mutation) in MALFORMED_FILENAME_MUTATIONS {
+            let (_tmp, cd, backup_path) = restore_validation_fixture();
+            rewrite_wallpapers_table_sql(&backup_path, mutation);
+
+            let result = restore(&cd, &backup_path);
+
+            assert!(result.is_err(), "{label} filename column was accepted");
+            let current = rusqlite::Connection::open(cd.db_path()).unwrap();
+            assert_eq!(
+                current
+                    .query_row(
+                        "SELECT value FROM config WHERE key = 'restore-sentinel'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .unwrap(),
+                "live-current",
+                "{label}"
+            );
+        }
+    }
+
+    #[test]
+    fn restore_migrates_valid_v2_data_to_v3_without_replaying_source_defaults() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_path = tmp.path().join("valid-v2.db");
+        let old = rusqlite::Connection::open(&old_path).unwrap();
+        create_schema(&old).unwrap();
+        old.execute(
+            "INSERT INTO sources
+             (id, path, display_name, kind, recursive, availability, added_at)
+             VALUES (7, '/old/walls', 'Old walls', 'directory', 0, 'offline',
+                     '2024-01-01')",
+            [],
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, added_at)
+             VALUES (11, '/old/walls/migrated.jpg', 'image', 'jpg', 'awww',
+                     '2024-02-02')",
+            [],
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id, last_seen_at)
+             VALUES (11, 7, '2024-03-03')",
+            [],
+        )
+        .unwrap();
+        old.execute(
+            "INSERT INTO favorites (id, path, added_at)
+             VALUES (13, '/old/walls/migrated.jpg', '2024-04-04')",
+            [],
+        )
+        .unwrap();
+        old.execute_batch(
+            "ALTER TABLE wallpapers DROP COLUMN filename;
+             ALTER TABLE wallpapers DROP COLUMN author;
+             PRAGMA user_version = 2;
+             UPDATE db_meta SET value = '2' WHERE key = 'schema_version';",
+        )
+        .unwrap();
+        drop(old);
+
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+
+        restore(&cd, &old_path).unwrap();
+
+        let restored = rusqlite::Connection::open(cd.db_path()).unwrap();
+        assert_eq!(
+            restored
+                .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(
+            restored
+                .query_row(
+                    "SELECT id, display_name, recursive, availability FROM sources",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, i64>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (7, "Old walls".into(), 0, "offline".into())
+        );
+        assert_eq!(
+            restored
+                .query_row(
+                    "SELECT id, added_at, author, filename FROM wallpapers",
+                    [],
+                    |row| {
+                        Ok((
+                            row.get::<_, i64>(0)?,
+                            row.get::<_, String>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, String>(3)?,
+                        ))
+                    },
+                )
+                .unwrap(),
+            (
+                11,
+                "2024-02-02".into(),
+                String::new(),
+                "migrated.jpg".into()
+            )
+        );
+        assert_eq!(
+            restored
+                .query_row("SELECT COUNT(*) FROM wallpaper_sources", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            restored
+                .query_row("SELECT COUNT(*) FROM favorites", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn backup_and_restore_round_trip_complete_v3_state() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -2788,12 +3067,13 @@ mod tests {
             "INSERT INTO wallpapers
              (id, path, type, ext, backend, size, mtime, resolution,
               project_type, preview_path, workshop_id, title, we_file,
-              unsupported_reason, source_id, last_seen, added_at)
+              unsupported_reason, source_id, last_seen, added_at, author)
              VALUES (73, '/workshop/content/431960/123', 'scene', 'json',
                      'linux-wallpaperengine', 987, 654, '2560x1440', 'scene',
                      '/workshop/content/431960/123/preview.jpg', '123', 'Round Trip',
                      '/workshop/content/431960/123/project.json', '', 41,
-                     '2025-04-02T00:00:00Z', '2025-04-03T00:00:00Z')",
+                     '2025-04-02T00:00:00Z', '2025-04-03T00:00:00Z',
+                     'Round Trip Studio')",
             [],
         )
         .unwrap();
@@ -2864,6 +3144,15 @@ mod tests {
 
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
         assert_eq!(persistent_snapshot(&conn), before);
+        assert_eq!(
+            conn.query_row(
+                "SELECT author, filename FROM wallpapers WHERE id = 73",
+                [],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+            ("Round Trip Studio".into(), "123".into())
+        );
         assert_eq!(
             wallpapers_count(&conn).unwrap(),
             wallpapers_fts_count(&conn).unwrap()
