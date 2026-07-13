@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -24,6 +24,17 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
 pub const CURRENT_SCHEMA_VERSION: i64 = 2;
+pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
+    "config",
+    "sources",
+    "wallpapers",
+    "wallpaper_sources",
+    "favorites",
+    "history",
+    "state",
+    "display_state",
+    "db_meta",
+];
 
 /// Open a runtime connection that rejects databases created by newer builds.
 pub fn open_runtime_connection(cd: &ConfigDir) -> Result<RuntimeConnection, WcError> {
@@ -212,6 +223,628 @@ fn ensure_wallpapers_fts_triggers(conn: &Connection) -> Result<(), WcError> {
     )
     .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
+}
+
+const REQUIRED_CURRENT_INDEXES: &[&str] = &[
+    "idx_wallpapers_path",
+    "idx_wallpapers_type",
+    "idx_wallpapers_mtime",
+    "idx_wallpapers_size",
+    "idx_wallpapers_type_mtime",
+    "idx_wallpapers_type_size",
+    "idx_wallpaper_sources_source",
+];
+
+static SCHEMA_VALIDATION_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ColumnSignature {
+    name: String,
+    declared_type: String,
+    not_null: bool,
+    default_value: Option<String>,
+    primary_key_position: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct ForeignKeySignature {
+    target_table: String,
+    from_column: String,
+    to_column: String,
+    on_update: String,
+    on_delete: String,
+    match_mode: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct TriggerSignature {
+    name: String,
+    table_name: String,
+    normalized_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexColumnSignature {
+    column_id: i64,
+    name: Option<String>,
+    descending: bool,
+    collation: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct IndexSignature {
+    table_name: String,
+    unique: bool,
+    origin: String,
+    partial: bool,
+    columns: Vec<IndexColumnSignature>,
+}
+
+fn normalize_schema_fragment(fragment: &str) -> String {
+    let chars = fragment.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+
+    while index < chars.len() {
+        let current = chars[index];
+        if current.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if current == '-' && chars.get(index + 1) == Some(&'-') {
+            index += 2;
+            while index < chars.len() && chars[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if current == '/' && chars.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                index += 1;
+            }
+            index = usize::min(index + 2, chars.len());
+            continue;
+        }
+        if matches!(current, '\'' | '"' | '`') {
+            let quote = current;
+            let start = index;
+            index += 1;
+            while index < chars.len() {
+                if chars[index] == quote {
+                    if chars.get(index + 1) == Some(&quote) {
+                        index += 2;
+                        continue;
+                    }
+                    index += 1;
+                    break;
+                }
+                index += 1;
+            }
+            tokens.push(chars[start..index].iter().collect::<String>());
+            continue;
+        }
+        if current == '[' {
+            let start = index;
+            index += 1;
+            while index < chars.len() && chars[index] != ']' {
+                index += 1;
+            }
+            index = usize::min(index + 1, chars.len());
+            tokens.push(chars[start..index].iter().collect::<String>());
+            continue;
+        }
+        if current.is_alphanumeric() || matches!(current, '_' | '$') {
+            let start = index;
+            index += 1;
+            while index < chars.len()
+                && (chars[index].is_alphanumeric() || matches!(chars[index], '_' | '$'))
+            {
+                index += 1;
+            }
+            tokens.push(
+                chars[start..index]
+                    .iter()
+                    .collect::<String>()
+                    .to_ascii_lowercase(),
+            );
+            continue;
+        }
+        tokens.push(current.to_string());
+        index += 1;
+    }
+
+    tokens.join(" ")
+}
+
+fn schema_object_sql(conn: &Connection, object_type: &str, name: &str) -> Result<String, WcError> {
+    conn.query_row(
+        "SELECT sql FROM sqlite_master WHERE type = ?1 AND name = ?2",
+        params![object_type, name],
+        |row| row.get::<_, String>(0),
+    )
+    .map(|sql| normalize_schema_fragment(&sql))
+    .map_err(|error| WcError::Sqlite(error.to_string()))
+}
+
+fn table_column_signatures(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<ColumnSignature>, WcError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT name, type, \"notnull\", dflt_value, pk
+             FROM pragma_table_info(?1)
+             ORDER BY name",
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let signatures = statement
+        .query_map([table], |row| {
+            Ok(ColumnSignature {
+                name: row.get(0)?,
+                declared_type: row.get::<_, String>(1)?.trim().to_ascii_uppercase(),
+                not_null: row.get::<_, i64>(2)? != 0,
+                default_value: row
+                    .get::<_, Option<String>>(3)?
+                    .map(|value| value.trim().to_string()),
+                primary_key_position: row.get(4)?,
+            })
+        })
+        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    Ok(signatures)
+}
+
+fn table_foreign_key_signatures(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<ForeignKeySignature>, WcError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT \"table\", \"from\", \"to\", on_update, on_delete, \"match\"
+             FROM pragma_foreign_key_list(?1)",
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut signatures = statement
+        .query_map([table], |row| {
+            Ok(ForeignKeySignature {
+                target_table: row.get(0)?,
+                from_column: row.get(1)?,
+                to_column: row.get(2)?,
+                on_update: row.get(3)?,
+                on_delete: row.get(4)?,
+                match_mode: row.get(5)?,
+            })
+        })
+        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    signatures.sort();
+    Ok(signatures)
+}
+
+fn table_unique_index_signatures(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<IndexSignature>, WcError> {
+    let index_names = {
+        let mut statement = conn
+            .prepare("SELECT name FROM pragma_index_list(?1) WHERE \"unique\" = 1")
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let names = statement
+            .query_map([table], |row| row.get::<_, String>(0))
+            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        names
+    };
+    let mut signatures = Vec::with_capacity(index_names.len());
+    for index_name in index_names {
+        let signature = named_index_signature(conn, &index_name)?.ok_or_else(|| {
+            WcError::Other(format!(
+                "current schema index {index_name} disappeared during validation"
+            ))
+        })?;
+        signatures.push(signature);
+    }
+    signatures.sort();
+    Ok(signatures)
+}
+
+fn trigger_signatures(conn: &Connection) -> Result<Vec<TriggerSignature>, WcError> {
+    let mut statement = conn
+        .prepare(
+            "SELECT name, tbl_name, sql
+             FROM sqlite_master
+             WHERE type = 'trigger'
+             ORDER BY name",
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let signatures = statement
+        .query_map([], |row| {
+            let sql = row.get::<_, String>(2)?;
+            Ok(TriggerSignature {
+                name: row.get(0)?,
+                table_name: row.get(1)?,
+                normalized_sql: sql.split_whitespace().collect::<Vec<_>>().join(" "),
+            })
+        })
+        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    Ok(signatures)
+}
+
+fn named_index_signature(
+    conn: &Connection,
+    index_name: &str,
+) -> Result<Option<IndexSignature>, WcError> {
+    let table_name = conn
+        .query_row(
+            "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            [index_name],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let Some(table_name) = table_name else {
+        return Ok(None);
+    };
+    let (unique, origin, partial) = conn
+        .query_row(
+            "SELECT \"unique\", origin, partial
+             FROM pragma_index_list(?1)
+             WHERE name = ?2",
+            params![table_name, index_name],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)? != 0,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)? != 0,
+                ))
+            },
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut statement = conn
+        .prepare(
+            "SELECT cid, name, \"desc\", coll
+             FROM pragma_index_xinfo(?1)
+             WHERE key = 1
+             ORDER BY seqno",
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let columns = statement
+        .query_map([index_name], |row| {
+            Ok(IndexColumnSignature {
+                column_id: row.get(0)?,
+                name: row.get(1)?,
+                descending: row.get::<_, i64>(2)? != 0,
+                collation: row.get(3)?,
+            })
+        })
+        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    Ok(Some(IndexSignature {
+        table_name,
+        unique,
+        origin,
+        partial,
+        columns,
+    }))
+}
+
+fn validate_table_shapes_against_current_schema(conn: &Connection) -> Result<(), WcError> {
+    let reference =
+        Connection::open_in_memory().map_err(|error| WcError::Sqlite(error.to_string()))?;
+    create_schema(&reference)?;
+    for table in CURRENT_PERSISTENT_TABLES {
+        let expected_columns = table_column_signatures(&reference, table)?;
+        let actual_columns = table_column_signatures(conn, table)?;
+        if actual_columns.len() != expected_columns.len() {
+            return Err(WcError::Other(format!(
+                "current schema table {table} has unexpected columns"
+            )));
+        }
+        for expected in expected_columns {
+            let actual = actual_columns
+                .iter()
+                .find(|column| column.name == expected.name);
+            let migrated_wallpaper_added_at_default = table == &"wallpapers"
+                && expected.name == "added_at"
+                && actual.is_some_and(|column| {
+                    column.declared_type == expected.declared_type
+                        && column.not_null == expected.not_null
+                        && column.primary_key_position == expected.primary_key_position
+                        && column.default_value.as_deref() == Some("''")
+                });
+            if actual != Some(&expected) && !migrated_wallpaper_added_at_default {
+                return Err(WcError::Other(format!(
+                    "current schema table {table} is missing or changes required column {}",
+                    expected.name
+                )));
+            }
+        }
+
+        let expected_table_sql = schema_object_sql(&reference, "table", table)?;
+        let actual_table_sql = schema_object_sql(conn, "table", table)?;
+        let migrated_wallpapers_sql = table == &"wallpapers"
+            && actual_table_sql
+                == expected_table_sql.replace(
+                    &normalize_schema_fragment("added_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+                    &normalize_schema_fragment("added_at TEXT NOT NULL DEFAULT ''"),
+                );
+        if actual_table_sql != expected_table_sql && !migrated_wallpapers_sql {
+            return Err(WcError::Other(format!(
+                "current schema table {table} definition differs from the current schema"
+            )));
+        }
+
+        let expected_foreign_keys = table_foreign_key_signatures(&reference, table)?;
+        let actual_foreign_keys = table_foreign_key_signatures(conn, table)?;
+        if actual_foreign_keys != expected_foreign_keys {
+            return Err(WcError::Other(format!(
+                "current schema table {table} has invalid foreign keys"
+            )));
+        }
+
+        let expected_unique_indexes = table_unique_index_signatures(&reference, table)?;
+        let actual_unique_indexes = table_unique_index_signatures(conn, table)?;
+        if actual_unique_indexes != expected_unique_indexes {
+            return Err(WcError::Other(format!(
+                "current schema table {table} has invalid unique indexes"
+            )));
+        }
+    }
+
+    let expected_triggers = trigger_signatures(&reference)?;
+    let actual_triggers = trigger_signatures(conn)?;
+    if actual_triggers != expected_triggers {
+        return Err(WcError::Other(
+            "current schema has invalid or unexpected trigger definitions".into(),
+        ));
+    }
+    for index_name in REQUIRED_CURRENT_INDEXES {
+        let expected = named_index_signature(&reference, index_name)?;
+        let actual = named_index_signature(conn, index_name)?;
+        if actual != expected {
+            return Err(WcError::Other(format!(
+                "current schema has a missing or invalid required index {index_name}"
+            )));
+        }
+    }
+    let expected_fts = schema_object_sql(&reference, "table", "wallpapers_fts")?;
+    let actual_fts = schema_object_sql(conn, "table", "wallpapers_fts")?;
+    if actual_fts != expected_fts {
+        return Err(WcError::Other(
+            "current schema has an invalid wallpapers_fts virtual table definition".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Validate the non-table objects and write-time invariants required by the
+/// current schema without replaying migrations or leaving test rows behind.
+pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), WcError> {
+    validate_table_shapes_against_current_schema(conn)?;
+
+    let (counter, path, source_path) = loop {
+        let counter = SCHEMA_VALIDATION_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = format!(
+            "/__wc_schema_validation_{}_{}.jpg",
+            std::process::id(),
+            counter
+        );
+        let source_path = format!(
+            "/__wc_schema_validation_source_{}_{}",
+            std::process::id(),
+            counter
+        );
+        let collision = conn
+            .query_row(
+                "SELECT
+                     EXISTS(SELECT 1 FROM wallpapers WHERE path IN (?1, ?1 || '-next')),
+                     EXISTS(SELECT 1 FROM sources WHERE path IN (?2, ?2 || '-next'))",
+                params![path, source_path],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if !collision.0 && !collision.1 {
+            break (counter, path, source_path);
+        }
+    };
+    let inserted_token = format!("wcschemainsert{}{}", std::process::id(), counter);
+    let updated_token = format!("wcschemaupdate{}{}", std::process::id(), counter);
+    let transaction = conn
+        .unchecked_transaction()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let validation = (|| {
+        let invalid_sources = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM sources
+                 WHERE kind NOT IN ('directory', 'wallpaper_engine_workshop')
+                    OR recursive NOT IN (0, 1)
+                    OR availability NOT IN ('unknown', 'available', 'offline')",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if invalid_sources != 0 {
+            return Err(WcError::Other(
+                "current schema contains invalid typed source values".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO sources
+                 (path, display_name, kind, recursive, availability)
+                 VALUES (?1, 'schema validation', 'directory', 1, 'unknown')",
+                params![source_path],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let source_id = transaction.last_insert_rowid();
+        for kind in ["directory", "wallpaper_engine_workshop"] {
+            for recursive in [0_i64, 1_i64] {
+                for availability in ["unknown", "available", "offline"] {
+                    transaction
+                        .execute(
+                            "UPDATE sources
+                             SET kind = ?2, recursive = ?3, availability = ?4
+                             WHERE id = ?1",
+                            params![source_id, kind, recursive, availability],
+                        )
+                        .map_err(|error| {
+                            WcError::Other(format!(
+                                "current schema rejects a supported source value combination: {error}"
+                            ))
+                        })?;
+                }
+            }
+        }
+        for (column, sql) in [
+            (
+                "kind",
+                "UPDATE sources SET kind = '__invalid__' WHERE id = ?1",
+            ),
+            (
+                "recursive",
+                "UPDATE sources SET recursive = 2 WHERE id = ?1",
+            ),
+            (
+                "availability",
+                "UPDATE sources SET availability = '__invalid__' WHERE id = ?1",
+            ),
+        ] {
+            if transaction.execute(sql, params![source_id]).is_ok() {
+                return Err(WcError::Other(format!(
+                    "current schema does not enforce the sources.{column} value domain"
+                )));
+            }
+        }
+        transaction
+            .execute("DELETE FROM sources WHERE id = ?1", params![source_id])
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        transaction
+            .execute(
+                "INSERT INTO sources
+                 (path, display_name, kind, recursive, availability)
+                 VALUES (?1 || '-next', 'schema validation', 'directory', 1, 'unknown')",
+                params![source_path],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if transaction.last_insert_rowid() <= source_id {
+            return Err(WcError::Other(
+                "current schema does not preserve monotonic source identities".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO wallpapers
+                 (path, type, ext, backend, title)
+                 VALUES (?1, 'image', 'jpg', 'awww', ?2)",
+                params![path, inserted_token],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let wallpaper_id = transaction.last_insert_rowid();
+        let added_at = transaction
+            .query_row(
+                "SELECT added_at FROM wallpapers WHERE id = ?1",
+                params![wallpaper_id],
+                |row| row.get::<_, String>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if added_at.is_empty() {
+            return Err(WcError::Other(
+                "current schema does not populate wallpapers.added_at".into(),
+            ));
+        }
+        let inserted_fts = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
+                params![inserted_token],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if inserted_fts != 1 {
+            return Err(WcError::Other(
+                "current schema does not index inserted wallpapers".into(),
+            ));
+        }
+        if transaction
+            .execute(
+                "INSERT INTO wallpapers (path, type, ext, backend)
+                 VALUES (?1, 'image', 'jpg', 'awww')",
+                params![path],
+            )
+            .is_ok()
+        {
+            return Err(WcError::Other(
+                "current schema does not enforce unique wallpaper paths".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "UPDATE wallpapers SET title = ?1 WHERE id = ?2",
+                params![updated_token, wallpaper_id],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let old_fts = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
+                params![inserted_token],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let updated_fts = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
+                params![updated_token],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if old_fts != 0 || updated_fts != 1 {
+            return Err(WcError::Other(
+                "current schema does not update wallpaper search rows".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "DELETE FROM wallpapers WHERE id = ?1",
+                params![wallpaper_id],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let deleted_fts = transaction
+            .query_row(
+                "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
+                params![updated_token],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if deleted_fts != 0 {
+            return Err(WcError::Other(
+                "current schema does not remove deleted wallpaper search rows".into(),
+            ));
+        }
+        transaction
+            .execute(
+                "INSERT INTO wallpapers
+                 (path, type, ext, backend)
+                 VALUES (?1 || '-next', 'image', 'jpg', 'awww')",
+                params![path],
+            )
+            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        if transaction.last_insert_rowid() <= wallpaper_id {
+            return Err(WcError::Other(
+                "current schema does not preserve monotonic wallpaper identities".into(),
+            ));
+        }
+        Ok(())
+    })();
+    transaction
+        .rollback()
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    validation
 }
 
 fn table_columns(
@@ -967,6 +1600,23 @@ fn ensure_or_import_legacy_flat_with_seam(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn schema_normalization_ignores_formatting_and_comments_but_not_constraint_tokens() {
+        let canonical = "CREATE TABLE sample (type TEXT CHECK (type IN ('image', 'video')))";
+        let formatted =
+            "create table sample(type text CHECK/**/(type IN ('image','video'))) -- harmless\n";
+        let narrowed = "create table sample(type text CHECK/**/(type = 'image'))";
+
+        assert_eq!(
+            normalize_schema_fragment(canonical),
+            normalize_schema_fragment(formatted)
+        );
+        assert_ne!(
+            normalize_schema_fragment(canonical),
+            normalize_schema_fragment(narrowed)
+        );
+    }
 
     #[test]
     fn runtime_open_rejects_future_schema_before_changing_journal_mode() {
