@@ -79,6 +79,57 @@ test('apply handlers preserve legacy actions and construct targeted requests', (
   ]);
 });
 
+test('target-aware action handler keeps preview and retry on targeted transport', () => {
+  const actionRequests: ApplyRequestDTO[] = [];
+  const targetedRequests: Array<{
+    kind?: string;
+    path: string;
+    target?: string;
+    requestId?: string;
+  }> = [];
+  const handlers = createApplyQueueHandlers(
+    {
+      enqueue: (request) => { actionRequests.push(request); },
+      enqueueTargeted: (request) => { targetedRequests.push(request); },
+    },
+    () => 'generated-request',
+  );
+  const targetAware = (handlers as unknown as {
+    handleApplyActionToDisplay?: (request: ApplyRequestDTO, target?: string) => void;
+  }).handleApplyActionToDisplay;
+
+  assert.equal(
+    typeof targetAware,
+    'function',
+    'preview/retry need a first-class targeted handler instead of legacy applyAction',
+  );
+  targetAware?.({
+    kind: 'apply_preview',
+    path: '/wall/scene',
+    requestId: 'preview',
+  }, 'HDMI-A-1');
+  targetAware?.({
+    kind: 'retry_backend_apply',
+    path: '/wall/retry-scene',
+  }, 'eDP-1');
+
+  assert.deepEqual(actionRequests, [], 'target-aware actions must never use applyAction');
+  assert.deepEqual(targetedRequests, [
+    {
+      kind: 'apply_preview',
+      path: '/wall/scene',
+      target: 'HDMI-A-1',
+      requestId: 'preview',
+    },
+    {
+      kind: 'retry_backend_apply',
+      path: '/wall/retry-scene',
+      target: 'eDP-1',
+      requestId: 'generated-request',
+    },
+  ]);
+});
+
 test('targeted apply sends omitted and named targets only through applyToDisplay', async () => {
   const actionCalls: ApplyRequestDTO[] = [];
   const targetedCalls: Array<{ path: string; target?: string; requestId?: string }> = [];
@@ -173,6 +224,7 @@ test('successful apply reports its original request and parsed result', async ()
     backend: 'awww',
     fileType: 'image',
     preview: false,
+    appliedOutputs: ['eDP-1'],
   };
   const deps = makeDeps({
     applyAction: async () => ({ success: false, stdout: '', stderr: 'unexpected' }),
@@ -204,6 +256,58 @@ test('successful apply reports undefined result for malformed stdout', async () 
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.deepEqual(applied, [undefined]);
+});
+
+test('targeted apply with a request id rejects missing or mismatched response ids as evidence', async () => {
+  const feedback: CommandFeedback[] = [];
+  const applied: unknown[] = [];
+  const responses = [
+    {
+      appliedPath: '/wall/missing.jpg',
+      statePath: '/wall/missing.jpg',
+      backend: 'awww',
+      fileType: 'image',
+      preview: false,
+      appliedOutputs: ['eDP-1'],
+    },
+    {
+      requestId: 'different-request',
+      appliedPath: '/wall/mismatch.jpg',
+      statePath: '/wall/mismatch.jpg',
+      backend: 'awww',
+      fileType: 'image',
+      preview: false,
+      appliedOutputs: ['eDP-1'],
+    },
+    {
+      appliedPath: '/wall/blank-id.jpg',
+      statePath: '/wall/blank-id.jpg',
+      backend: 'awww',
+      fileType: 'image',
+      preview: false,
+      appliedOutputs: ['eDP-1'],
+    },
+  ];
+  const deps = makeDeps({
+    applyAction: async () => ({ success: false, stdout: '', stderr: 'unexpected' }),
+    applyToDisplay: async () => ({
+      success: true,
+      stdout: JSON.stringify(responses.shift()),
+      stderr: '',
+    }),
+    feedback,
+    onApplied: (_request, result) => { applied.push(result); },
+  });
+  const controller = new ApplyQueueController(deps, () => {});
+
+  controller.enqueueTargeted({ path: '/wall/missing.jpg', target: 'eDP-1', requestId: 'missing' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.enqueueTargeted({ path: '/wall/mismatch.jpg', target: 'eDP-1', requestId: 'mismatch' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  controller.enqueueTargeted({ path: '/wall/blank-id.jpg', target: 'eDP-1', requestId: '' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  assert.deepEqual(applied, [undefined, undefined, undefined]);
 });
 
 test('successful apply accepts backend null requestId as a valid result', async () => {
@@ -422,6 +526,41 @@ test('apply queue invalidates library on failure so cards show retryable state',
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.equal(libraryInvalidations, 1, 'failed apply should refresh library cards immediately');
+});
+
+test('successful retry invalidates library only after backend confirmation', async () => {
+  const feedback: CommandFeedback[] = [];
+  let libraryInvalidations = 0;
+  const deps = makeDeps({
+    applyAction: async (request) => ({
+      success: true,
+      stdout: JSON.stringify({
+        requestId: request.requestId,
+        appliedPath: request.path,
+        statePath: request.path,
+        backend: 'linux-wallpaperengine',
+        fileType: request.kind === 'retry_backend_apply' ? 'we_scene' : 'image',
+        preview: false,
+      }),
+      stderr: '',
+    }),
+    feedback,
+    invalidateLibrary: () => { libraryInvalidations += 1; },
+  });
+  const controller = new ApplyQueueController(deps, () => {});
+
+  controller.enqueue({ kind: 'apply', path: '/wall/ordinary.jpg', requestId: 'ordinary' });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(libraryInvalidations, 0, 'ordinary success does not change compatibility state');
+
+  controller.enqueue({
+    kind: 'retry_backend_apply',
+    path: '/wall/retry-scene',
+    requestId: 'retry',
+  });
+  assert.equal(libraryInvalidations, 0, 'dispatching retry must not refresh before it succeeds');
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(libraryInvalidations, 1, 'confirmed retry success refreshes the cleared failure badge');
 });
 
 test('apply queue updates feedback from wc-apply-stage and unsubscribes on success', async () => {

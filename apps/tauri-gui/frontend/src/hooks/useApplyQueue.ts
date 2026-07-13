@@ -5,7 +5,7 @@ import { commandErrorFeedback } from '../api/feedback';
 import type { CommandFeedback } from '../api/feedback';
 import { recordMetric } from '../perf/metrics';
 import { ApplyQueueController, createApplyQueueHandlers } from './applyQueueController';
-import type { AppliedRequest, ApplyQueueState } from './applyQueueController';
+import type { AppliedRequest, ApplyQueueState, ApplyTransport } from './applyQueueController';
 import { createSubscribeApplyStage } from './subscribeApplyStage';
 
 export type {
@@ -14,13 +14,18 @@ export type {
   ApplyQueueDeps,
   ApplyQueueState,
   ApplyStage,
+  ApplyTransport,
 } from './applyQueueController';
 
 export function useApplyQueue(args: {
   refreshStatus: () => Promise<void>;
   setFeedbackWithAutoDismiss: (feedback: CommandFeedback) => void;
   invalidateLibrary: () => void;
-  onApplied?: (request: AppliedRequest, result: ApplyResultDTO | undefined) => void;
+  onApplied?: (
+    request: AppliedRequest,
+    result: ApplyResultDTO | undefined,
+    transport: ApplyTransport,
+  ) => void;
 }) {
   const [applying, setApplying] = useState(false);
   const [queueState, setQueueState] = useState<ApplyQueueState>({
@@ -44,7 +49,8 @@ export function useApplyQueue(args: {
         makeErrorFeedback: (label, error) => commandErrorFeedback(label, error),
         recordMetric,
         subscribeApplyStage: createSubscribeApplyStage(),
-        onApplied: (request, result) => onAppliedRef.current?.(request, result),
+        onApplied: (request, result, transport) =>
+          onAppliedRef.current?.(request, result, transport),
       },
       setApplying,
       setQueueState,

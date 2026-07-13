@@ -113,6 +113,8 @@ pub struct ApplyResultDto {
     pub backend: String,
     pub file_type: String,
     pub preview: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_outputs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]

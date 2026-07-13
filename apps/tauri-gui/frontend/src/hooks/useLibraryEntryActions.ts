@@ -1,10 +1,9 @@
 import { useCallback } from 'react';
-import { api, WallpaperDTO } from '../api/bridge';
-import type { ApplyRequestDTO } from '../api/bridge';
-import { normalizeApplyActions } from '../domain/applyActions';
-import { buildApplyRequest } from '../domain/applyRequests';
-import type { ContextAction } from '../components/WallpaperGrid';
-import { emitFeedback } from '../events/appEvents';
+import type { ApplyRequestDTO, WallpaperDTO } from '../api/bridge.ts';
+import { normalizeApplyActions } from '../domain/applyActions.ts';
+import { buildApplyRequest } from '../domain/applyRequests.ts';
+import type { ContextAction } from '../components/WallpaperGrid.tsx';
+import { emitFeedback } from '../events/appEvents.ts';
 
 interface UseLibraryEntryActionsCallbacks {
   onApplyAction: (request: ApplyRequestDTO) => void;
@@ -14,7 +13,7 @@ interface UseLibraryEntryActionsCallbacks {
 }
 
 export function useLibraryEntryActions(callbacks: UseLibraryEntryActionsCallbacks) {
-  const { onApplyAction, invalidate, openFolder } = callbacks;
+  const { onApplyAction, openFolder } = callbacks;
 
   const buildContextActions = useCallback(
     (entry: WallpaperDTO): ContextAction[] => {
@@ -36,34 +35,10 @@ export function useLibraryEntryActions(callbacks: UseLibraryEntryActionsCallback
           case 'retry_backend_apply':
             actions.push({
               label: a.label,
-              action: async () => {
-                let clearOk = true;
-                try {
-                  const result = await api.weClearBackendError(entry.path);
-                  if (!result.success) {
-                    clearOk = false;
-                    emitFeedback({
-                      state: 'error',
-                      label: 'Clear backend error',
-                      detail:
-                        result.error?.message ||
-                        result.stderr ||
-                        'Failed to clear backend error before retry.',
-                    });
-                  }
-                } catch {
-                  clearOk = false;
-                  emitFeedback({
-                    state: 'error',
-                    label: 'Clear backend error',
-                    detail: 'Failed to clear backend error before retry.',
-                  });
-                }
+              action: () => {
                 onApplyAction(
                   buildApplyRequest(entry, 'retry_backend_apply'),
                 );
-                if (clearOk && invalidate)
-                  setTimeout(() => invalidate(), 500);
               },
             });
             break;
@@ -106,7 +81,7 @@ export function useLibraryEntryActions(callbacks: UseLibraryEntryActionsCallback
 
       return actions;
     },
-    [onApplyAction, invalidate, openFolder],
+    [onApplyAction, openFolder],
   );
 
   return { buildContextActions };

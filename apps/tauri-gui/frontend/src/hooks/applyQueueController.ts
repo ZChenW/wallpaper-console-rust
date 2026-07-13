@@ -16,6 +16,7 @@ interface ApplyCommandResult {
 }
 
 export type AppliedRequest = ApplyRequestDTO | TargetedApplyRequestDTO;
+export type ApplyTransport = 'action' | 'targeted';
 
 export interface ApplyQueueState {
   applying: boolean;
@@ -32,7 +33,11 @@ export interface ApplyQueueDeps {
   makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
   recordMetric?: (name: string, value: number) => void;
   subscribeApplyStage?: (handler: (event: ApplyStagePayload) => void) => () => void;
-  onApplied?: (request: AppliedRequest, result: ApplyResultDTO | undefined) => void;
+  onApplied?: (
+    request: AppliedRequest,
+    result: ApplyResultDTO | undefined,
+    transport: ApplyTransport,
+  ) => void;
 }
 
 type QueuedApply =
@@ -63,6 +68,15 @@ export function createApplyQueueHandlers(
       };
       controller.enqueueTargeted(request);
     },
+    handleApplyActionToDisplay(request: ApplyRequestDTO, target?: string): void {
+      const targeted: TargetedApplyRequestDTO = {
+        kind: request.kind,
+        path: request.path,
+        requestId: request.requestId ?? makeRequestId(),
+        ...(target === undefined ? {} : { target }),
+      };
+      controller.enqueueTargeted(targeted);
+    },
   };
 }
 
@@ -79,6 +93,13 @@ function parseApplyResult(stdout: string): ApplyResultDTO | undefined {
       || typeof value.fileType !== 'string'
       || typeof value.preview !== 'boolean'
       || (
+        value.appliedOutputs !== undefined
+        && (
+          !Array.isArray(value.appliedOutputs)
+          || !value.appliedOutputs.every((output) => typeof output === 'string')
+        )
+      )
+      || (
         value.requestId !== undefined
         && value.requestId !== null
         && typeof value.requestId !== 'string'
@@ -93,6 +114,9 @@ function parseApplyResult(stdout: string): ApplyResultDTO | undefined {
       backend: value.backend,
       fileType: value.fileType,
       preview: value.preview,
+      ...(Array.isArray(value.appliedOutputs)
+        ? { appliedOutputs: value.appliedOutputs as string[] }
+        : {}),
     };
   } catch {
     return undefined;
@@ -203,10 +227,16 @@ export class ApplyQueueController {
       }
 
       const detail = parseApplyResult(result.stdout);
+      const evidence = request.requestId !== undefined
+        ? detail?.requestId === request.requestId ? detail : undefined
+        : detail;
       try {
-        this.deps.onApplied?.(request, detail);
+        this.deps.onApplied?.(request, evidence, item.transport);
       } catch {
         // A UI observer cannot turn a confirmed backend success into an apply failure.
+      }
+      if (request.kind === 'retry_backend_apply') {
+        this.deps.invalidateLibrary();
       }
 
       this.emitStage('settling', false);

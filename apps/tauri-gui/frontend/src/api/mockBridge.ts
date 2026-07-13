@@ -439,15 +439,24 @@ const mockBridgeAdapter = {
     DEFAULT_DISPLAY_STATE.map((row) => ({ ...row })),
   applyToDisplay: async (request: TargetedApplyRequestDTO): Promise<CommandResult> => {
     lastTargetedApplyRequest = { ...request };
+    const kind = request.kind ?? 'apply';
+    const entry = MOCK_WALLPAPERS.find((candidate) => candidate.path === request.path);
+    const appliedPath = kind === 'apply_preview'
+      ? entry?.previewPath ?? request.path
+      : request.path;
+    const appliedOutputs = request.target
+      ? [request.target]
+      : MOCK_DISPLAYS.map((display) => display.name);
     return {
       ...ok,
       stdout: JSON.stringify({
         requestId: request.requestId,
-        appliedPath: request.path,
-        statePath: request.path,
+        appliedPath,
+        statePath: appliedPath,
         backend: 'awww',
-        fileType: 'image',
-        preview: false,
+        fileType: kind === 'apply_preview' ? 'gif' : entry?.type ?? 'image',
+        preview: kind === 'apply_preview',
+        appliedOutputs,
       }),
     };
   },
@@ -694,6 +703,8 @@ const mockControl = {
   setBrowserFixtureCopies: (copies: number): void => {
     browserFixtureCopies = Math.max(1, Math.trunc(copies));
   },
+  lastApplyActionRequest: (): ApplyRequestDTO | null =>
+    lastApplyActionRequest ? { ...lastApplyActionRequest } : null,
   lastTargetedApplyRequest: (): TargetedApplyRequestDTO | null =>
     lastTargetedApplyRequest ? { ...lastTargetedApplyRequest } : null,
   resetAll: (): void => {
@@ -701,6 +712,7 @@ const mockControl = {
     resetConfigStore();
     resetLibraryScenario();
     resetSourceStore();
+    lastApplyActionRequest = null;
     lastTargetedApplyRequest = null;
     commandFailures.clear();
     thumbnailFailures.clear();

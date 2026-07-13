@@ -131,6 +131,8 @@ export interface DisplayStateDTO {
 }
 
 export interface TargetedApplyRequestDTO {
+  /** Omitted by legacy callers and interpreted as a normal apply. */
+  kind?: ApplyRequestKind;
   path: string;
   /** Omitted means All Displays for compatibility with legacy apply callers. */
   target?: string;
@@ -198,6 +200,8 @@ export interface ApplyResultDTO {
   backend: string;
   fileType: string;
   preview: boolean;
+  /** Present for display-aware applies; omitted when the legacy transport cannot prove outputs. */
+  appliedOutputs?: string[];
 }
 
 export interface ApplyActionDTO {

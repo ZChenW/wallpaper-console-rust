@@ -325,6 +325,7 @@ test('applyToDisplay defaults an omitted target to All Displays', async () => {
     backend: 'awww',
     fileType: 'image',
     preview: false,
+    appliedOutputs: ['eDP-1', 'HDMI-A-1'],
   });
   assert.deepEqual(ctrl.lastTargetedApplyRequest(), {
     path: '/mock/path/new-wallpaper.jpg',
@@ -340,12 +341,30 @@ test('applyToDisplay forwards a named display target', async () => {
   });
 
   assert.equal(result.success, true);
-  assert.equal(JSON.parse(result.stdout).requestId, 'req-edp');
+  assert.deepEqual(JSON.parse(result.stdout).appliedOutputs, ['eDP-1']);
   assert.deepEqual(ctrl.lastTargetedApplyRequest(), {
     path: '/mock/path/targeted.jpg',
     target: 'eDP-1',
     requestId: 'req-edp',
   });
+});
+
+test('applyToDisplay preserves preview kind on targeted transport', async () => {
+  const request = {
+    kind: 'apply_preview' as const,
+    path: '/mock/Steam/steamapps/workshop/content/431960/3558034522',
+    target: 'HDMI-A-1',
+    requestId: 'req-preview',
+  };
+
+  const result = await api.applyToDisplay(request);
+  const parsed = JSON.parse(result.stdout);
+
+  assert.equal(parsed.preview, true);
+  assert.equal(parsed.fileType, 'gif');
+  assert.deepEqual(parsed.appliedOutputs, ['HDMI-A-1']);
+  assert.deepEqual(ctrl.lastTargetedApplyRequest(), request);
+  assert.equal(ctrl.lastApplyActionRequest(), null, 'targeted preview must not use applyAction');
 });
 
 test('restoreDisplays accepts discovered or explicit connected outputs', async () => {

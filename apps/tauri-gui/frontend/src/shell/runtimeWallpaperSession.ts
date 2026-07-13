@@ -23,6 +23,7 @@ export type RuntimeWallpaperSessionAction =
   }
   | {
     readonly type: 'applySucceeded';
+    readonly transport: 'action' | 'targeted';
     readonly request: ApplyRequestDTO | TargetedApplyRequestDTO;
     readonly result: ApplyResultDTO | undefined;
   };
@@ -44,12 +45,27 @@ function targetedRequestTarget(
   request: ApplyRequestDTO | TargetedApplyRequestDTO,
 ): TargetedRequestTarget | null {
   const candidate = request as unknown as Record<string, unknown>;
-  if ('kind' in candidate) return null;
   if (typeof candidate.path !== 'string' || candidate.path.trim().length === 0) return null;
   if (candidate.target === undefined) return { kind: 'allDisplays' };
   if (typeof candidate.target !== 'string') return null;
   const output = candidate.target.trim();
   return output.length > 0 ? { kind: 'output', output } : null;
+}
+
+function confirmedAppliedOutputs(result: ApplyResultDTO | undefined): string[] | null {
+  const candidate = result as unknown as Record<string, unknown> | undefined;
+  if (!candidate || !Array.isArray(candidate.appliedOutputs)) return null;
+  if (!candidate.appliedOutputs.every((output) => typeof output === 'string')) return null;
+  const outputs = normalizeDisplayOutputs(candidate.appliedOutputs as string[]);
+  return outputs.length > 0 ? outputs : null;
+}
+
+function responseMatchesRequest(
+  request: ApplyRequestDTO | TargetedApplyRequestDTO,
+  result: ApplyResultDTO | undefined,
+): boolean {
+  if (request.requestId === undefined) return true;
+  return result?.requestId === request.requestId;
 }
 
 function confirmedStatePath(result: ApplyResultDTO | undefined): string | null {
@@ -94,22 +110,26 @@ export function reduceRuntimeWallpaperSession(
     };
   }
 
-  const target = targetedRequestTarget(action.request);
-  const wallpaperPath = confirmedStatePath(action.result);
-  if (target === null || wallpaperPath === null) return state;
-
-  if (target.kind === 'allDisplays') {
-    return {
-      ...state,
-      confirmations: state.connectedOutputs.map((output) => ({ output, wallpaperPath })),
-    };
+  if (action.transport !== 'targeted' || !responseMatchesRequest(action.request, action.result)) {
+    return state;
   }
 
-  if (!state.connectedOutputs.includes(target.output)) return state;
+  const target = targetedRequestTarget(action.request);
+  const wallpaperPath = confirmedStatePath(action.result);
+  const appliedOutputs = confirmedAppliedOutputs(action.result);
+  if (target === null || wallpaperPath === null || appliedOutputs === null) return state;
+
+  const affectedOutputs = target.kind === 'allDisplays'
+    ? appliedOutputs.filter((output) => state.connectedOutputs.includes(output))
+    : appliedOutputs.includes(target.output) && state.connectedOutputs.includes(target.output)
+      ? [target.output]
+      : [];
+  if (affectedOutputs.length === 0) return state;
+
   const paths = new Map(
     state.confirmations.map(({ output, wallpaperPath: confirmedPath }) => [output, confirmedPath]),
   );
-  paths.set(target.output, wallpaperPath);
+  for (const output of affectedOutputs) paths.set(output, wallpaperPath);
   return {
     ...state,
     confirmations: state.connectedOutputs.flatMap((output) => {

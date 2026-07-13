@@ -12,20 +12,47 @@ use wc_backend::display_executor::{
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
-use wc_core::types::Backend;
+use wc_core::types::{Backend, FileType};
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
+use crate::apply_execution::ApplyExecutionTarget;
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RejectionReason,
     RunningAssignment,
 };
-use crate::{AppError, AppService, ApplyTarget};
+use crate::{AppError, AppService, ApplyRequest, ApplyRequestKind, ApplyStageContext, ApplyTarget};
+
+/// Confirmed result of one display-aware apply after renderer execution and
+/// display-state persistence both succeed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisplayApplyExecutionResult {
+    pub request_id: Option<String>,
+    pub input_path: String,
+    pub applied_path: String,
+    pub state_path: String,
+    pub backend: Backend,
+    pub file_type: FileType,
+    pub preview: bool,
+    pub applied_outputs: Vec<String>,
+}
+
+impl DisplayApplyExecutionResult {
+    fn into_apply_target(self) -> ApplyTarget {
+        ApplyTarget {
+            input_path: self.input_path,
+            resolved_path: self.applied_path,
+            file_type: self.file_type,
+            backend: self.backend,
+        }
+    }
+}
 
 /// Optional knobs for [`AppService::apply_to_display_with_runtime`].
 #[derive(Default)]
 pub struct DisplayApplyRuntimeOpts {
     pub request_id: Option<String>,
     pub capability: Option<wc_backend::capability::BackendCapability>,
+    pub on_target_resolved: Option<Box<dyn FnMut(ApplyStageContext) + Send>>,
 }
 
 impl AppService {
@@ -58,8 +85,38 @@ impl AppService {
         reporter: &mut dyn ApplyStageReporter,
         opts: DisplayApplyRuntimeOpts,
     ) -> Result<ApplyTarget, AppError> {
-        self.apply_to_display_with_runtime_and_commit_seam(
-            path,
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::Apply,
+            path: path.to_string(),
+            request_id: opts.request_id.clone(),
+        };
+        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
+            request,
+            target,
+            known_outputs,
+            runtime,
+            reporter,
+            opts,
+            None,
+        )
+        .map(DisplayApplyExecutionResult::into_apply_target)
+    }
+
+    /// Execute a complete apply action against an explicit display target.
+    /// Unlike the compatibility path-only wrapper, this preserves preview and
+    /// retry semantics through planning, execution, and persisted state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_apply_request_to_display_with_runtime(
+        &self,
+        request: ApplyRequest,
+        target: DisplayTarget,
+        known_outputs: &[String],
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+        opts: DisplayApplyRuntimeOpts,
+    ) -> Result<DisplayApplyExecutionResult, AppError> {
+        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
+            request,
             target,
             known_outputs,
             runtime,
@@ -81,10 +138,45 @@ impl AppService {
         opts: DisplayApplyRuntimeOpts,
         before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
     ) -> Result<ApplyTarget, AppError> {
-        let request_id = opts.request_id.as_deref();
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::Apply,
+            path: path.to_string(),
+            request_id: opts.request_id.clone(),
+        };
+        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
+            request,
+            target,
+            known_outputs,
+            runtime,
+            reporter,
+            opts,
+            before_state_commit,
+        )
+        .map(DisplayApplyExecutionResult::into_apply_target)
+    }
+
+    #[doc(hidden)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_apply_request_to_display_with_runtime_and_commit_seam(
+        &self,
+        request: ApplyRequest,
+        target: DisplayTarget,
+        known_outputs: &[String],
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+        mut opts: DisplayApplyRuntimeOpts,
+        before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
+    ) -> Result<DisplayApplyExecutionResult, AppError> {
+        let request_id = request.request_id.as_deref();
         apply_stage::report_stage(reporter, apply_stage::ApplyStage::ResolveTarget, request_id);
 
-        let apply_target = self.resolve_apply_target(path)?;
+        let apply_target = self.resolve_apply_request_target(&request)?;
+        if let Some(on_resolved) = opts.on_target_resolved.as_mut() {
+            on_resolved(ApplyStageContext {
+                preview: apply_target.preview,
+                backend: apply_target.backend,
+            });
+        }
         let previous_rows = self
             .storage
             .display_state_list()
@@ -94,17 +186,20 @@ impl AppService {
             .iter()
             .any(|assignment| assignment.backend == apply_target.backend);
 
-        let request = DisplayApplyRequest {
+        let plan_request = DisplayApplyRequest {
             target: target.clone(),
             backend: apply_target.backend,
             known_outputs: known_outputs.to_vec(),
             running,
         };
         let plan = match opts.capability {
-            Some(cap) => crate::display_plan::plan_display_apply_with_capability(&request, cap),
-            None => plan_display_apply(&request),
+            Some(cap) => {
+                crate::display_plan::plan_display_apply_with_capability(&plan_request, cap)
+            }
+            None => plan_display_apply(&plan_request),
         }
         .map_err(rejection_to_app_error)?;
+        let applied_outputs = planned_apply_outputs(&plan.actions);
 
         let plan_has_stop = plan
             .actions
@@ -140,7 +235,7 @@ impl AppService {
                     &previous_rows,
                     known_outputs,
                     &target,
-                    &apply_target.resolved_path,
+                    &apply_target.state_path,
                     apply_target.backend,
                 );
                 if let Err(error) = self.commit_successful_display_state(
@@ -157,14 +252,34 @@ impl AppService {
                         &apply_target,
                     ));
                 }
-                Ok(apply_target)
+                if let Some(path) = compat_failure_path_after_success(&request.kind, &apply_target)
+                {
+                    let _ = wc_storage::we_compat::clear_failure(path);
+                }
+                Ok(DisplayApplyExecutionResult {
+                    request_id: request.request_id,
+                    input_path: apply_target.input_path,
+                    applied_path: apply_target.resolved_path,
+                    state_path: apply_target.state_path,
+                    backend: apply_target.backend,
+                    file_type: apply_target.file_type,
+                    preview: apply_target.preview,
+                    applied_outputs,
+                })
             }
-            Err(failure) => Err(self.handle_exec_failure(
-                failure,
-                &previous_rows,
-                known_outputs,
-                before_state_commit,
-            )?),
+            Err(failure) => {
+                let compat_error = compat_failure_error(&apply_target, &failure.error);
+                let error = self.handle_exec_failure(
+                    failure,
+                    &previous_rows,
+                    known_outputs,
+                    before_state_commit,
+                )?;
+                if let Some(compat_error) = compat_error {
+                    record_compat_failure(&apply_target, &compat_error);
+                }
+                Err(error)
+            }
         }
     }
 
@@ -172,7 +287,7 @@ impl AppService {
         &self,
         target: &DisplayTarget,
         intended: &[(DisplayStateTarget, String, String)],
-        apply_target: &ApplyTarget,
+        apply_target: &ApplyExecutionTarget,
         before_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
     ) -> Result<(), wc_core::error::WcError> {
         match target {
@@ -186,14 +301,14 @@ impl AppService {
                     Some(seam) => self
                         .storage
                         .display_state_commit_all_displays_with_legacy_seam(
-                            &apply_target.resolved_path,
+                            &apply_target.state_path,
                             apply_target.backend.as_str(),
                             &retain,
                             true,
                             seam,
                         ),
                     None => self.storage.display_state_commit_all_displays_with_legacy(
-                        &apply_target.resolved_path,
+                        &apply_target.state_path,
                         apply_target.backend.as_str(),
                         &retain,
                         true,
@@ -217,7 +332,7 @@ impl AppService {
         previous_rows: &[DisplayStateRow],
         report: &DisplayExecReport,
         known_outputs: &[String],
-        apply_target: &ApplyTarget,
+        apply_target: &ApplyExecutionTarget,
     ) -> AppError {
         let reconciled = reconcile_display_state_from_report(previous_rows, report, known_outputs);
         let _ = self.storage.runtime_state_clear();
@@ -332,6 +447,76 @@ impl AppService {
         }
         Ok(app_err)
     }
+}
+
+fn planned_apply_outputs(actions: &[PlannedAction]) -> Vec<String> {
+    let mut outputs = Vec::new();
+    for action in actions {
+        let PlannedAction::Apply {
+            outputs: planned, ..
+        } = action
+        else {
+            continue;
+        };
+        for output in planned {
+            if !outputs.contains(output) {
+                outputs.push(output.clone());
+            }
+        }
+    }
+    outputs
+}
+
+fn compat_failure_path_after_success<'a>(
+    kind: &ApplyRequestKind,
+    target: &'a ApplyExecutionTarget,
+) -> Option<&'a str> {
+    if target.file_type == FileType::WeScene
+        && matches!(
+            kind,
+            ApplyRequestKind::Apply | ApplyRequestKind::RetryBackendApply
+        )
+    {
+        Some(target.state_path.as_str())
+    } else {
+        None
+    }
+}
+
+fn record_compat_failure(target: &ApplyExecutionTarget, error: &AppError) {
+    if target.file_type != FileType::WeScene {
+        return;
+    }
+    let backend_status = if error.code == "renderer_limitation" {
+        "renderer_limitation"
+    } else {
+        "failed"
+    };
+    let _ = wc_storage::we_compat::record_failure(
+        &target.state_path,
+        backend_status,
+        &error.code,
+        &error.message,
+        error.detail.clone(),
+    );
+}
+
+fn compat_failure_error(
+    target: &ApplyExecutionTarget,
+    error: &wc_core::error::WcError,
+) -> Option<AppError> {
+    if target.file_type != FileType::WeScene || target.backend != Backend::LinuxWallpaperEngine {
+        return None;
+    }
+    let wc_core::error::WcError::LinuxWallpaperEngine { kind, detail } = error else {
+        return None;
+    };
+    Some(AppError::from_wc_error(
+        wc_core::error::WcError::LinuxWallpaperEngine {
+            kind: kind.clone(),
+            detail: detail.clone(),
+        },
+    ))
 }
 
 pub(crate) fn to_exec_action(
@@ -933,6 +1118,146 @@ mod tests {
         let path = root.join(name);
         std::fs::write(&path, b"vid").unwrap();
         path
+    }
+
+    fn write_scene_with_preview(root: &Path, name: &str) -> std::path::PathBuf {
+        let path = root.join(name);
+        std::fs::create_dir_all(&path).unwrap();
+        std::fs::write(path.join("scene.pkg"), b"scene").unwrap();
+        std::fs::write(path.join("preview.gif"), b"gif").unwrap();
+        std::fs::write(
+            path.join("project.json"),
+            r#"{"type":"scene","file":"scene.pkg","preview":"preview.gif","workshopid":"42"}"#,
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn targeted_preview_executes_and_persists_preview_state_path() {
+        let (tmp, service) = temp_service();
+        let scene = write_scene_with_preview(tmp.path(), "scene-preview");
+        let request = crate::ApplyRequest {
+            kind: crate::ApplyRequestKind::ApplyPreview,
+            path: scene.to_string_lossy().to_string(),
+            request_id: Some("preview-targeted".into()),
+        };
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let result = service
+            .execute_apply_request_to_display_with_runtime(
+                request,
+                DisplayTarget::Output("eDP-1".into()),
+                &["eDP-1".into(), "HDMI-A-1".into()],
+                &mut rt,
+                &mut reporter,
+                DisplayApplyRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert!(result.applied_path.ends_with("preview.gif"));
+        assert_eq!(result.state_path, result.applied_path);
+        assert!(result.preview);
+        assert_eq!(result.file_type, wc_core::types::FileType::Gif);
+        assert_eq!(result.applied_outputs, ["eDP-1"]);
+        let args = &rt.command_output_args[0];
+        assert!(args.iter().any(|arg| arg.ends_with("preview.gif")));
+        let output_flag = args.iter().position(|arg| arg == "--outputs").unwrap();
+        assert_eq!(args[output_flag + 1], "eDP-1");
+
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::Output("eDP-1".into()));
+        assert_eq!(rows[0].wallpaper_path, result.state_path);
+        assert_eq!(rows[0].backend, "awww");
+    }
+
+    #[test]
+    fn all_displays_result_reports_planned_output_snapshot() {
+        let (tmp, service) = temp_service();
+        let image = write_image(tmp.path(), "snapshot.jpg");
+        let request = crate::ApplyRequest {
+            kind: crate::ApplyRequestKind::Apply,
+            path: image.to_string_lossy().to_string(),
+            request_id: Some("all-snapshot".into()),
+        };
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let result = service
+            .execute_apply_request_to_display_with_runtime(
+                request,
+                DisplayTarget::AllDisplays,
+                &["eDP-1".into(), "HDMI-A-1".into()],
+                &mut rt,
+                &mut reporter,
+                DisplayApplyRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert_eq!(result.applied_outputs, ["eDP-1", "HDMI-A-1"]);
+    }
+
+    #[test]
+    fn only_successful_scene_retry_selects_compat_failure_for_clearing() {
+        let retry_target = crate::apply_execution::ApplyExecutionTarget {
+            input_path: "/scene".into(),
+            resolved_path: "/scene".into(),
+            state_path: "/scene".into(),
+            file_type: wc_core::types::FileType::WeScene,
+            backend: Backend::LinuxWallpaperEngine,
+            preview: false,
+            fallback_path: None,
+        };
+        let preview_target = crate::apply_execution::ApplyExecutionTarget {
+            file_type: wc_core::types::FileType::Gif,
+            preview: true,
+            ..retry_target.clone()
+        };
+
+        assert_eq!(
+            compat_failure_path_after_success(
+                &crate::ApplyRequestKind::RetryBackendApply,
+                &retry_target,
+            ),
+            Some("/scene")
+        );
+        assert_eq!(
+            compat_failure_path_after_success(
+                &crate::ApplyRequestKind::ApplyPreview,
+                &preview_target,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn compat_failure_preserves_original_renderer_classification() {
+        let scene_target = crate::apply_execution::ApplyExecutionTarget {
+            input_path: "/scene".into(),
+            resolved_path: "/scene".into(),
+            state_path: "/scene".into(),
+            file_type: wc_core::types::FileType::WeScene,
+            backend: Backend::LinuxWallpaperEngine,
+            preview: false,
+            fallback_path: None,
+        };
+        let stop_error = wc_core::error::WcError::Other("old backend stop failed".into());
+        let renderer_error = wc_core::error::WcError::LinuxWallpaperEngine {
+            kind: wc_core::error::BackendErrorKind::RendererLimitation,
+            detail: "renderer failed".into(),
+        };
+
+        assert!(compat_failure_error(&scene_target, &stop_error).is_none());
+        let compat_error = compat_failure_error(&scene_target, &renderer_error).unwrap();
+        assert_eq!(compat_error.code, "renderer_limitation");
     }
 
     #[test]

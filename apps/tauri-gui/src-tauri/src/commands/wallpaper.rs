@@ -38,9 +38,15 @@ pub struct DisplayStateDto {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TargetedApplyRequestDto {
+    #[serde(default = "default_targeted_apply_kind")]
+    pub kind: String,
     pub path: String,
     pub target: Option<String>,
     pub request_id: Option<String>,
+}
+
+fn default_targeted_apply_kind() -> String {
+    "apply".into()
 }
 
 /// Targeted restore request. Omitting `outputs` discovers connected displays.
@@ -248,6 +254,7 @@ fn execute_and_format_result(
                 backend: result.backend.as_str().to_string(),
                 file_type: result.file_type.as_str().to_string(),
                 preview: result.preview,
+                applied_outputs: None,
             };
             match serde_json::to_string(&dto) {
                 Ok(json) => ok(json),
@@ -277,7 +284,15 @@ fn stale_apply_result() -> CommandResult {
 fn apply_request_from_dto(
     dto: super::common::ApplyRequestDto,
 ) -> Result<wc_app::ApplyRequest, wc_app::AppError> {
-    let kind = match dto.kind.as_str() {
+    apply_request_from_parts(&dto.kind, dto.path, dto.request_id)
+}
+
+fn apply_request_from_parts(
+    raw_kind: &str,
+    path: String,
+    request_id: Option<String>,
+) -> Result<wc_app::ApplyRequest, wc_app::AppError> {
+    let kind = match raw_kind {
         "apply" => wc_app::ApplyRequestKind::Apply,
         "retry_backend_apply" => wc_app::ApplyRequestKind::RetryBackendApply,
         "apply_preview" => wc_app::ApplyRequestKind::ApplyPreview,
@@ -293,8 +308,8 @@ fn apply_request_from_dto(
     };
     Ok(wc_app::ApplyRequest {
         kind,
-        path: dto.path,
-        request_id: dto.request_id,
+        path,
+        request_id,
     })
 }
 
@@ -410,6 +425,14 @@ pub async fn apply_to_display(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
+            let apply_request = match apply_request_from_parts(
+                &request.kind,
+                request.path.clone(),
+                request.request_id.clone(),
+            ) {
+                Ok(value) => value,
+                Err(err) => return command_error_from_app_error(err),
+            };
             let target = match parse_display_target(request.target.as_deref()) {
                 Ok(t) => t,
                 Err(err) => {
@@ -445,10 +468,9 @@ pub async fn apply_to_display(
             execute_display_apply_and_format(
                 &app,
                 &service,
-                &request.path,
+                apply_request,
                 target,
                 &known_outputs,
-                request.request_id,
                 seq,
             )
         }
@@ -540,10 +562,9 @@ fn validate_known_outputs(outputs: &[String]) -> Result<(), String> {
 fn execute_display_apply_and_format(
     app: &tauri::AppHandle,
     service: &wc_app::AppService,
-    path: &str,
+    request: wc_app::ApplyRequest,
     target: wc_app::DisplayTarget,
     known_outputs: &[String],
-    request_id: Option<String>,
     seq: u64,
 ) -> CommandResult {
     let _guard = match APPLY_LOCK.lock() {
@@ -571,14 +592,17 @@ fn execute_display_apply_and_format(
     }
 
     let mut stage_reporter = TauriStageReporter::new(app.clone());
+    let stage_context = stage_reporter.context_handle();
     let mut runtime = wc_backend::runtime::SystemBackendRuntime;
     let opts = wc_app::display_apply::DisplayApplyRuntimeOpts {
-        request_id: request_id.clone(),
+        on_target_resolved: Some(Box::new(move |context| {
+            *stage_context.lock().unwrap() = context;
+        })),
         ..Default::default()
     };
 
-    match service.apply_to_display_with_runtime(
-        path,
+    match service.execute_apply_request_to_display_with_runtime(
+        request,
         target,
         known_outputs,
         &mut runtime,
@@ -587,12 +611,13 @@ fn execute_display_apply_and_format(
     ) {
         Ok(result) => {
             let dto = super::common::ApplyResultDto {
-                request_id,
-                applied_path: result.resolved_path.clone(),
-                state_path: result.resolved_path,
+                request_id: result.request_id,
+                applied_path: result.applied_path,
+                state_path: result.state_path,
                 backend: result.backend.as_str().to_string(),
                 file_type: result.file_type.as_str().to_string(),
-                preview: false,
+                preview: result.preview,
+                applied_outputs: Some(result.applied_outputs),
             };
             match serde_json::to_string(&dto) {
                 Ok(json) => ok(json),
@@ -922,6 +947,7 @@ mod tests {
     #[test]
     fn targeted_apply_request_deserializes_camel_case() {
         let dto: TargetedApplyRequestDto = serde_json::from_value(serde_json::json!({
+            "kind": "apply_preview",
             "path": "/walls/a.jpg",
             "target": "eDP-1",
             "requestId": "req-9"
@@ -930,12 +956,56 @@ mod tests {
         assert_eq!(dto.path, "/walls/a.jpg");
         assert_eq!(dto.target.as_deref(), Some("eDP-1"));
         assert_eq!(dto.request_id.as_deref(), Some("req-9"));
+        assert_eq!(dto.kind, "apply_preview");
 
         let all: TargetedApplyRequestDto = serde_json::from_value(serde_json::json!({
             "path": "/walls/a.jpg"
         }))
         .unwrap();
         assert!(all.target.is_none());
+        assert_eq!(all.kind, "apply");
+    }
+
+    #[test]
+    fn targeted_apply_kind_maps_every_supported_action_and_rejects_unknown() {
+        let cases = [
+            ("apply", wc_app::ApplyRequestKind::Apply),
+            (
+                "retry_backend_apply",
+                wc_app::ApplyRequestKind::RetryBackendApply,
+            ),
+            ("apply_preview", wc_app::ApplyRequestKind::ApplyPreview),
+        ];
+        for (raw, expected) in cases {
+            let request =
+                apply_request_from_parts(raw, "/walls/a.jpg".into(), Some("req".into())).unwrap();
+            assert_eq!(request.kind, expected);
+            assert_eq!(request.path, "/walls/a.jpg");
+            assert_eq!(request.request_id.as_deref(), Some("req"));
+        }
+
+        let error =
+            apply_request_from_parts("open_folder", "/walls/a.jpg".into(), None).unwrap_err();
+        assert_eq!(error.code, "invalid_apply_action");
+    }
+
+    #[test]
+    fn targeted_apply_result_serializes_applied_outputs() {
+        let dto = super::super::common::ApplyResultDto {
+            request_id: Some("req-outputs".into()),
+            applied_path: "/walls/a.jpg".into(),
+            state_path: "/walls/a.jpg".into(),
+            backend: "awww".into(),
+            file_type: "image".into(),
+            preview: false,
+            applied_outputs: Some(vec!["eDP-1".into(), "HDMI-A-1".into()]),
+        };
+
+        let json = serde_json::to_value(dto).unwrap();
+        assert_eq!(
+            json["appliedOutputs"],
+            serde_json::json!(["eDP-1", "HDMI-A-1"])
+        );
     }
 
     #[test]

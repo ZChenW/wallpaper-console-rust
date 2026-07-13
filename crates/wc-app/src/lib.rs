@@ -24,6 +24,7 @@ pub use apply_plan::{
     ApplyAction, ApplyActionKind, ApplyAvailability, ApplyPlan, CompatibilityKind,
 };
 pub use apply_stage_labels::{apply_stage_detail, apply_stage_label, ApplyStageContext};
+pub use display_apply::DisplayApplyExecutionResult;
 pub use display_discovery::discover_connected_outputs;
 pub use display_plan::{
     plan_display_apply, plan_display_apply_with_capability, DisplayApplyPlan, DisplayApplyRequest,
