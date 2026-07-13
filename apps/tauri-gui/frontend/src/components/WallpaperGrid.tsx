@@ -3,10 +3,21 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
-import { shouldResetScroll, visibleThumbnailPaths } from './wallpaperGridHelpers';
+import {
+  anchoredScrollTopForLayoutChange,
+  shouldResetScroll,
+  visibleThumbnailPaths,
+} from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
-import { COL_MIN_WIDTH, calculateGridLayout, GRID_GAP, overscanRowsFor, type GridLayout } from '../utils/layout';
+import {
+  calculateWallpaperGridLayout,
+  GRID_GAP,
+  overscanRowsFor,
+  wallpaperCardMetrics,
+  type GridLayout,
+  type WallpaperCardSize,
+} from '../utils/layout';
 
 interface Props {
   entries: WallpaperDTO[];
@@ -18,6 +29,7 @@ interface Props {
   active?: boolean;
   refreshing?: boolean;
   resetKey?: string;
+  cardSize?: WallpaperCardSize;
 }
 
 export interface ContextAction {
@@ -27,14 +39,22 @@ export interface ContextAction {
   visible?: (entry: WallpaperDTO) => boolean;
 }
 
-const CARD_HEIGHT = 188;
 const SCROLL_IDLE_MS = 180;
 const METRICS_SAMPLE_MS = 500;
-const INITIAL_GRID_LAYOUT: GridLayout = {
-  colCount: 4,
-  columnWidth: COL_MIN_WIDTH,
-  rowWidth: COL_MIN_WIDTH * 4 + GRID_GAP * 3,
-};
+
+interface WallpaperGridLayout extends GridLayout {
+  rowHeight: number;
+}
+
+function initialGridLayout(cardSize: WallpaperCardSize): WallpaperGridLayout {
+  const metrics = wallpaperCardMetrics(cardSize);
+  return {
+    colCount: 4,
+    columnWidth: metrics.minWidth,
+    rowWidth: metrics.minWidth * 4 + GRID_GAP * 3,
+    rowHeight: metrics.rowHeight,
+  };
+}
 
 export default function WallpaperGrid({
   entries,
@@ -46,13 +66,15 @@ export default function WallpaperGrid({
   active = true,
   refreshing = false,
   resetKey,
+  cardSize = 'medium',
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
-  const [gridLayout, setGridLayout] = useState<GridLayout>(INITIAL_GRID_LAYOUT);
+  const cardMetrics = wallpaperCardMetrics(cardSize);
+  const [gridLayout, setGridLayout] = useState<WallpaperGridLayout>(() => initialGridLayout(cardSize));
   const colCount = gridLayout.colCount;
   const isScrollingRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
@@ -66,35 +88,55 @@ export default function WallpaperGrid({
 
   const overscan = overscanRowsFor(colCount, true);
 
-  const anchorScrollForColumnChange = useCallback((oldCols: number, newCols: number) => {
-    const el = containerRef.current;
-    if (!el || oldCols === newCols) return;
+  const anchorScrollForLayoutChange = useCallback(
+    (
+      previousColumns: number,
+      previousRowHeight: number,
+      nextColumns: number,
+      nextRowHeight: number,
+    ) => {
+      const el = containerRef.current;
+      if (!el) return;
 
-    const firstVisibleRow = Math.floor(el.scrollTop / CARD_HEIGHT);
-    const firstVisibleItem = firstVisibleRow * oldCols;
-    const nextRow = Math.floor(firstVisibleItem / newCols);
-    pendingScrollTopRef.current = nextRow * CARD_HEIGHT;
-  }, []);
+      pendingScrollTopRef.current = anchoredScrollTopForLayoutChange({
+        scrollTop: el.scrollTop,
+        previousColumns,
+        previousRowHeight,
+        nextColumns,
+        nextRowHeight,
+      });
+    },
+    [],
+  );
 
-  const updateColCountFromWidth = useCallback(
+  const updateGridLayoutFromWidth = useCallback(
     (w: number) => {
       if (w <= 0) return;
       setGridLayout((prev) => {
-        const next = calculateGridLayout(w);
-        if (next.colCount !== prev.colCount) {
-          anchorScrollForColumnChange(prev.colCount, next.colCount);
+        const next = {
+          ...calculateWallpaperGridLayout(w, cardSize),
+          rowHeight: cardMetrics.rowHeight,
+        };
+        if (next.colCount !== prev.colCount || next.rowHeight !== prev.rowHeight) {
+          anchorScrollForLayoutChange(
+            prev.colCount,
+            prev.rowHeight,
+            next.colCount,
+            next.rowHeight,
+          );
         }
         if (
           next.colCount === prev.colCount &&
           next.columnWidth === prev.columnWidth &&
-          next.rowWidth === prev.rowWidth
+          next.rowWidth === prev.rowWidth &&
+          next.rowHeight === prev.rowHeight
         ) {
           return prev;
         }
         return next;
       });
     },
-    [anchorScrollForColumnChange],
+    [anchorScrollForLayoutChange, cardMetrics.rowHeight, cardSize],
   );
 
   const beginScrolling = useCallback(() => {
@@ -117,20 +159,20 @@ export default function WallpaperGrid({
     if (!el) return;
     const w = el.clientWidth;
     if (w > 0) {
-      updateColCountFromWidth(w);
+      updateGridLayoutFromWidth(w);
     }
-  }, [updateColCountFromWidth]);
+  }, [updateGridLayoutFromWidth]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const obs = new ResizeObserver(([entry]) => {
       if (!active) return;
-      updateColCountFromWidth(entry.contentRect.width);
+      updateGridLayoutFromWidth(entry.contentRect.width);
     });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [active, updateColCountFromWidth]);
+  }, [active, updateGridLayoutFromWidth]);
 
   useEffect(() => {
     if (!active) return;
@@ -142,9 +184,13 @@ export default function WallpaperGrid({
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => containerRef.current,
-    estimateSize: () => CARD_HEIGHT,
+    estimateSize: () => cardMetrics.rowHeight,
     overscan,
   });
+
+  useEffect(() => {
+    virtualizer.measure();
+  }, [cardSize, virtualizer]);
 
   useEffect(() => {
     const nextTop = pendingScrollTopRef.current;
@@ -162,7 +208,7 @@ export default function WallpaperGrid({
         suppressScrollPauseRef.current = false;
       });
     });
-  }, [colCount, virtualizer]);
+  }, [colCount, gridLayout.rowHeight, virtualizer]);
 
   useEffect(() => {
     if (shouldResetScroll(prevResetKeyRef.current, resetKey)) {
@@ -276,6 +322,7 @@ export default function WallpaperGrid({
                   applying={applying}
                   onApply={onApply}
                   onContextMenu={handleContextMenu}
+                  cardSize={cardSize}
                 />
               ))}
             </div>

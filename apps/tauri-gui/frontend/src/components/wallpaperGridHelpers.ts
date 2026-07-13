@@ -5,6 +5,27 @@ export interface GridRange {
   endIndex: number;
 }
 
+export interface GridLayoutChange {
+  scrollTop: number;
+  previousColumns: number;
+  previousRowHeight: number;
+  nextColumns: number;
+  nextRowHeight: number;
+}
+
+export function anchoredScrollTopForLayoutChange({
+  scrollTop,
+  previousColumns,
+  previousRowHeight,
+  nextColumns,
+  nextRowHeight,
+}: GridLayoutChange): number {
+  const firstVisibleRow = Math.floor(Math.max(0, scrollTop) / previousRowHeight);
+  const firstVisibleItem = firstVisibleRow * previousColumns;
+  const nextRow = Math.floor(firstVisibleItem / nextColumns);
+  return nextRow * nextRowHeight;
+}
+
 export function visibleThumbnailPaths(
   entries: WallpaperDTO[],
   colCount: number,

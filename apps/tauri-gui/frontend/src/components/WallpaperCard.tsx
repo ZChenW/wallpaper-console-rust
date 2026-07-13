@@ -1,10 +1,11 @@
-import { memo, useSyncExternalStore } from 'react';
+import { memo, useSyncExternalStore, type CSSProperties } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
 import { BoundedFileSrcCache } from './fileSrcCache';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
+import { wallpaperCardMetrics, type WallpaperCardSize } from '../utils/layout';
 import {
   displayName,
   formatSize,
@@ -31,9 +32,16 @@ interface CardProps {
   applying: boolean;
   onApply: (path: string) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
+  cardSize?: WallpaperCardSize;
 }
 
-function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProps) {
+function WallpaperCardImpl({
+  entry,
+  applying,
+  onApply,
+  onContextMenu,
+  cardSize = 'medium',
+}: CardProps) {
   const store = useThumbnailStore();
   const thumbnail = useSyncExternalStore(
     (cb) => store.subscribe(entry.path, cb),
@@ -57,10 +65,14 @@ function WallpaperCardImpl({ entry, applying, onApply, onContextMenu }: CardProp
   };
 
   const badge = weBadge(entry);
+  const cardStyle = {
+    '--wallpaper-thumbnail-height': `${wallpaperCardMetrics(cardSize).thumbnailHeight}px`,
+  } as CSSProperties;
 
   return (
     <div
       className={`wallpaper-card${applying ? ' disabled' : ''}`}
+      style={cardStyle}
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
       onDoubleClick={handleDoubleClick}
       title={entry.path}

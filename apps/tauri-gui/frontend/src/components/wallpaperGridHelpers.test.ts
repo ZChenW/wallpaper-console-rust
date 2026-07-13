@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { visibleThumbnailPaths } from './wallpaperGridHelpers.ts';
+import {
+  anchoredScrollTopForLayoutChange,
+  visibleThumbnailPaths,
+} from './wallpaperGridHelpers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
 
 const entry = (path: string, previewPath?: string): WallpaperDTO => ({
@@ -34,4 +37,43 @@ test('visibleThumbnailPaths uses virtual range when available', () => {
 test('visibleThumbnailPaths excludes entries with previewPath', () => {
   const entries = [entry('a'), entry('b', '/preview.gif'), entry('c')];
   assert.deepEqual(visibleThumbnailPaths(entries, 3, null, 1), ['a', 'c']);
+});
+
+test('anchoredScrollTopForLayoutChange preserves the first visible item when columns change', () => {
+  assert.equal(
+    anchoredScrollTopForLayoutChange({
+      scrollTop: 408,
+      previousColumns: 4,
+      previousRowHeight: 188,
+      nextColumns: 5,
+      nextRowHeight: 188,
+    }),
+    188,
+  );
+});
+
+test('anchoredScrollTopForLayoutChange preserves the first visible item when card size changes', () => {
+  assert.equal(
+    anchoredScrollTopForLayoutChange({
+      scrollTop: 408,
+      previousColumns: 4,
+      previousRowHeight: 188,
+      nextColumns: 4,
+      nextRowHeight: 164,
+    }),
+    328,
+  );
+});
+
+test('anchoredScrollTopForLayoutChange handles simultaneous size and column changes', () => {
+  assert.equal(
+    anchoredScrollTopForLayoutChange({
+      scrollTop: 408,
+      previousColumns: 4,
+      previousRowHeight: 188,
+      nextColumns: 3,
+      nextRowHeight: 232,
+    }),
+    464,
+  );
 });

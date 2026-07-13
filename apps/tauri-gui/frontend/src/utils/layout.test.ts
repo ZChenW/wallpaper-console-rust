@@ -2,10 +2,36 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  calculateWallpaperGridLayout,
   calculateGridLayout,
   calculateColumnCount,
   overscanRowsFor,
+  wallpaperCardMetrics,
 } from './layout.ts';
+
+test('wallpaperCardMetrics defines distinct small, medium, and large geometry', () => {
+  assert.deepEqual(wallpaperCardMetrics('small'), {
+    minWidth: 176,
+    rowHeight: 164,
+    thumbnailHeight: 96,
+  });
+  assert.deepEqual(wallpaperCardMetrics('medium'), {
+    minWidth: 220,
+    rowHeight: 188,
+    thumbnailHeight: 120,
+  });
+  assert.deepEqual(wallpaperCardMetrics('large'), {
+    minWidth: 288,
+    rowHeight: 232,
+    thumbnailHeight: 160,
+  });
+});
+
+test('calculateWallpaperGridLayout uses the selected card minimum width', () => {
+  assert.equal(calculateWallpaperGridLayout(1200, 'small').colCount, 6);
+  assert.equal(calculateWallpaperGridLayout(1200, 'medium').colCount, 5);
+  assert.equal(calculateWallpaperGridLayout(1200, 'large').colCount, 4);
+});
 
 test('calculateColumnCount keeps invalid widths at one column', () => {
   assert.equal(calculateColumnCount(0), 1);
