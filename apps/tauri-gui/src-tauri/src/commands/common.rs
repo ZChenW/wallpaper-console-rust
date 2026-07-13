@@ -388,7 +388,15 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
+#[cfg(test)]
 pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
+    dto_from_entry_with_routing(entry, &wc_core::backend_routing::BackendRouting::default())
+}
+
+pub fn dto_from_entry_with_routing(
+    entry: WallpaperEntry,
+    routing: &wc_core::backend_routing::BackendRouting,
+) -> WallpaperDto {
     let project = entry.project.clone();
 
     let cached_failure = if entry.file_type == FileType::WeScene {
@@ -401,16 +409,22 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
 
     let backend_failed = cached_failure.is_some();
     let error_kind = cached_failure.as_ref().map(|f| f.error_kind.as_str());
-    let plan = wc_app::apply_plan::plan_for_entry_with_kind(&entry, backend_failed, error_kind);
+    let plan = wc_app::apply_plan::plan_for_entry_with_kind_and_routing(
+        &entry,
+        backend_failed,
+        error_kind,
+        routing,
+    );
     let renderer_compatibility = plan.compatibility.as_ref().map(|c| match c {
         wc_app::apply_plan::CompatibilityKind::NativeScene { disclaimer } => disclaimer.clone(),
     });
+    let effective_backend = plan.backend.unwrap_or(entry.backend);
 
     let mut dto = WallpaperDto {
         path: entry.path.to_string(),
         file_type: entry.file_type.as_str().to_string(),
         ext: entry.ext,
-        backend: entry.backend.as_str().to_string(),
+        backend: effective_backend.as_str().to_string(),
         size: entry.size,
         mtime: entry.mtime,
         resolution: entry.resolution,
@@ -462,6 +476,27 @@ mod tests {
     use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dto_apply_plan_uses_normalized_runtime_routing() {
+        let entry = WallpaperEntry {
+            path: Utf8PathBuf::from("/walls/still.jpg"),
+            file_type: FileType::Image,
+            ext: "jpg".into(),
+            backend: Backend::Awww,
+            size: 1,
+            mtime: 1,
+            resolution: "1920x1080".into(),
+            project: None,
+        };
+        let routing =
+            wc_core::backend_routing::BackendRouting::from_raw("mpvpaper", "awww", "mpvpaper");
+
+        let dto = dto_from_entry_with_routing(entry, &routing);
+
+        assert_eq!(dto.backend, "mpvpaper");
+        assert_eq!(dto.apply_backend.as_deref(), Some("mpvpaper"));
+    }
 
     #[test]
     fn storage_cell_retries_after_initialization_error() {

@@ -131,6 +131,17 @@ pub fn execute_display_actions(
     request_id: Option<&str>,
 ) -> Result<DisplayExecReport, DisplayExecFailure> {
     let mut report = DisplayExecReport::default();
+    for action in actions {
+        if let DisplayExecAction::Apply { backend, .. } = action {
+            if let Err(error) = runtime.ensure_backend_available(*backend, s) {
+                return Err(DisplayExecFailure {
+                    report,
+                    error,
+                    uncertain_stop: None,
+                });
+            }
+        }
+    }
     let mut saw_stop = false;
     for action in actions {
         match action {
@@ -464,6 +475,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeRuntime {
+        missing_backend: Option<Backend>,
         stop_awww_count: usize,
         stop_mpvpaper_count: usize,
         stop_lwe_count: usize,
@@ -481,6 +493,18 @@ mod tests {
     }
 
     impl BackendRuntime for FakeRuntime {
+        fn ensure_backend_available(
+            &mut self,
+            backend: Backend,
+            _storage: &StorageApi,
+        ) -> Result<(), WcError> {
+            if self.missing_backend == Some(backend) {
+                Err(WcError::BackendNotFound(backend.as_str().into()))
+            } else {
+                Ok(())
+            }
+        }
+
         fn command_output(
             &mut self,
             command: &mut Command,
@@ -634,6 +658,50 @@ mod tests {
         assert_eq!(rt.stop_awww_count, 0);
         assert_eq!(rt.stop_mpvpaper_count, 0);
         assert_eq!(rt.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn missing_renderer_is_rejected_before_any_destructive_stop() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("missing-renderer.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        let known = vec!["eDP-1".into()];
+        let actions = vec![
+            DisplayExecAction::Stop {
+                backend: Backend::Awww,
+                scope: ExecutionScope::AllDisplays,
+            },
+            DisplayExecAction::Apply {
+                backend: Backend::Mpvpaper,
+                path: video.to_string_lossy().into(),
+                scope: ExecutionScope::named(known.clone()).unwrap(),
+                use_instant: true,
+            },
+        ];
+        let mut runtime = FakeRuntime {
+            missing_backend: Some(Backend::Mpvpaper),
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let error = execute_display_actions(
+            &storage,
+            &actions,
+            &ctx(&known),
+            &mut runtime,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error.error,
+            WcError::BackendNotFound(ref backend) if backend == "mpvpaper"
+        ));
+        assert_eq!(runtime.stop_awww_count, 0);
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert_eq!(runtime.stop_lwe_count, 0);
     }
 
     #[test]

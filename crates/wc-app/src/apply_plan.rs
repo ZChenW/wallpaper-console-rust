@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use wc_core::backend_routing::BackendRouting;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -69,7 +70,15 @@ pub struct ApplyPlan {
 }
 
 pub fn plan_for_entry(entry: &WallpaperEntry, backend_failed: bool) -> ApplyPlan {
-    plan_for_entry_with_kind(entry, backend_failed, None)
+    plan_for_entry_with_routing(entry, backend_failed, &BackendRouting::default())
+}
+
+pub fn plan_for_entry_with_routing(
+    entry: &WallpaperEntry,
+    backend_failed: bool,
+    routing: &BackendRouting,
+) -> ApplyPlan {
+    plan_for_entry_with_kind_and_routing(entry, backend_failed, None, routing)
 }
 
 pub fn plan_for_entry_with_kind(
@@ -77,18 +86,34 @@ pub fn plan_for_entry_with_kind(
     backend_failed: bool,
     error_kind: Option<&str>,
 ) -> ApplyPlan {
+    plan_for_entry_with_kind_and_routing(
+        entry,
+        backend_failed,
+        error_kind,
+        &BackendRouting::default(),
+    )
+}
+
+pub fn plan_for_entry_with_kind_and_routing(
+    entry: &WallpaperEntry,
+    backend_failed: bool,
+    error_kind: Option<&str>,
+    routing: &BackendRouting,
+) -> ApplyPlan {
     match entry.file_type {
-        FileType::Image | FileType::Gif | FileType::Video => plan_image(entry),
+        FileType::Image | FileType::Gif | FileType::Video => {
+            plan_image(entry, routing.backend_for(entry.file_type))
+        }
         FileType::WeScene => plan_we_scene(entry, backend_failed, error_kind),
         FileType::WeWeb => plan_we_web(entry),
         FileType::WeApplication => plan_we_application(entry),
     }
 }
 
-fn plan_image(entry: &WallpaperEntry) -> ApplyPlan {
+fn plan_image(entry: &WallpaperEntry, backend: Backend) -> ApplyPlan {
     ApplyPlan {
         availability: ApplyAvailability::Available,
-        backend: Some(entry.backend),
+        backend: Some(backend),
         apply_path: Some(entry.path.to_string()),
         current_state_path: Some(entry.path.to_string()),
         reason: None,
@@ -290,7 +315,7 @@ fn plan_we_application(entry: &WallpaperEntry) -> ApplyPlan {
         backend: None,
         apply_path: None,
         current_state_path: None,
-        reason: None,
+        reason: Some("Wallpaper Engine Application projects are indexed for browsing only.".into()),
         actions,
         compatibility: None,
     }
@@ -300,6 +325,7 @@ fn plan_we_application(entry: &WallpaperEntry) -> ApplyPlan {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
+    use wc_core::backend_routing::BackendRouting;
     use wc_core::types::WallpaperProject;
 
     fn image_entry() -> WallpaperEntry {
@@ -431,6 +457,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_plan_reports_the_same_configured_backend_used_by_execution() {
+        let routing = BackendRouting::from_raw("mpvpaper", "awww", "mpvpaper");
+
+        let plan = plan_for_entry_with_routing(&image_entry(), false, &routing);
+
+        assert_eq!(plan.availability, ApplyAvailability::Available);
+        assert_eq!(plan.backend, Some(Backend::Mpvpaper));
+    }
+
+    #[test]
+    fn apply_plan_clamps_an_incompatible_video_preference() {
+        let routing = BackendRouting::from_raw("awww", "awww", "awww");
+
+        let plan = plan_for_entry_with_routing(&video_entry(), false, &routing);
+
+        assert_eq!(plan.backend, Some(Backend::Mpvpaper));
+    }
+
+    #[test]
     fn apply_plan_video_is_available() {
         let plan = plan_for_entry(&video_entry(), false);
         assert_eq!(plan.availability, ApplyAvailability::Available);
@@ -518,6 +563,10 @@ mod tests {
         let plan = plan_for_entry(&we_application_entry(), false);
         assert_eq!(plan.availability, ApplyAvailability::Unsupported);
         assert_eq!(plan.backend, None);
+        assert!(plan
+            .reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("Application")));
         assert!(!action_kind(&plan, ApplyActionKind::Apply));
         assert!(action_kind(&plan, ApplyActionKind::OpenFolder));
         assert!(action_kind(&plan, ApplyActionKind::CopyWorkshopId));

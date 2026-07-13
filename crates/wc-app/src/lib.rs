@@ -287,12 +287,13 @@ impl AppService {
     }
 
     fn backend_for_entry(&self, entry: &WallpaperEntry) -> Result<Backend, AppError> {
-        match entry.backend {
+        let backend = self.storage.backend_routing().backend_for(entry.file_type);
+        match backend {
             Backend::Unsupported => Err(AppError::unsupported_backend(
                 entry.file_type,
                 entry.path.as_str(),
             )),
-            Backend::Awww | Backend::Mpvpaper | Backend::LinuxWallpaperEngine => Ok(entry.backend),
+            Backend::Awww | Backend::Mpvpaper | Backend::LinuxWallpaperEngine => Ok(backend),
         }
     }
 }
@@ -332,6 +333,23 @@ pub fn resolve_wallpaper_path(path: &str) -> Result<String, WcError> {
 impl AppError {
     pub fn from_wc_error(err: WcError) -> Self {
         match &err {
+            WcError::BackendNotFound(backend) => AppError {
+                code: "backend_dependency_missing".into(),
+                message: format!("Required wallpaper renderer is not installed: {backend}."),
+                detail: Some(err.to_string()),
+                recoverable: true,
+                suggestion: Some(match backend.as_str() {
+                    "awww" | "awww-daemon" =>
+                        "Install the awww package (it provides both awww and awww-daemon), ensure its executables are available in PATH, then retry."
+                            .into(),
+                    "mpvpaper" =>
+                        "Install mpvpaper, ensure its executable is available in PATH, then retry."
+                            .into(),
+                    other => format!(
+                        "Install {other}, ensure its executable is available in PATH, then retry."
+                    ),
+                }),
+            },
             WcError::LinuxWallpaperEngine { kind, detail } => {
                 let (code, message, suggestion) = match kind {
                     wc_core::error::BackendErrorKind::RendererLimitation => (
@@ -408,6 +426,9 @@ impl AppError {
         if file_type == FileType::WeWeb {
             return AppError::we_web_unsupported();
         }
+        if file_type == FileType::WeApplication {
+            return AppError::we_application_unsupported();
+        }
         AppError {
             code: "unsupported_backend".into(),
             message: format!("No backend is available for this wallpaper: {}", path),
@@ -425,6 +446,22 @@ impl AppError {
             recoverable: true,
             suggestion: Some(
                 "Use Apply preview GIF if the project has one, or choose a WE Scene/image/video wallpaper.".into(),
+            ),
+        }
+    }
+
+    fn we_application_unsupported() -> Self {
+        AppError {
+            code: "we_application_unsupported".into(),
+            message: "Wallpaper Engine Application wallpapers are unsupported.".into(),
+            detail: Some(
+                "Application projects require executing project-specific programs and are kept in the library for browsing only."
+                    .into(),
+            ),
+            recoverable: true,
+            suggestion: Some(
+                "Choose an image, GIF, video, or supported Wallpaper Engine Scene wallpaper."
+                    .into(),
             ),
         }
     }
@@ -467,6 +504,18 @@ mod tests {
         project
     }
 
+    fn application_project(root: &Path) -> PathBuf {
+        let project = root.join("steamapps/workshop/content/431960/3650880225");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("app.bin"), b"application").unwrap();
+        std::fs::write(
+            project.join("project.json"),
+            r#"{"type":"application","file":"app.bin"}"#,
+        )
+        .unwrap();
+        project
+    }
+
     #[test]
     fn we_web_apply_returns_unsupported() {
         let (tmp, service) = temp_service();
@@ -475,5 +524,37 @@ mod tests {
             .resolve_apply_target(&project.to_string_lossy())
             .unwrap_err();
         assert_eq!(err.code, "we_web_unsupported");
+    }
+
+    #[test]
+    fn we_application_apply_returns_an_explicit_limitation() {
+        let (tmp, service) = temp_service();
+        let project = application_project(tmp.path());
+
+        let err = service
+            .resolve_apply_target(&project.to_string_lossy())
+            .unwrap_err();
+
+        assert_eq!(err.code, "we_application_unsupported");
+        assert!(err.message.contains("Application"));
+        assert!(err.suggestion.is_some());
+    }
+
+    #[test]
+    fn missing_renderer_error_includes_actionable_install_guidance() {
+        let error = AppError::from_wc_error(WcError::BackendNotFound("mpvpaper".into()));
+
+        assert_eq!(error.code, "backend_dependency_missing");
+        assert!(error.message.contains("mpvpaper"));
+        assert!(error
+            .suggestion
+            .as_deref()
+            .is_some_and(|suggestion| suggestion.to_lowercase().contains("install")));
+
+        let daemon = AppError::from_wc_error(WcError::BackendNotFound("awww-daemon".into()));
+        assert!(daemon
+            .suggestion
+            .as_deref()
+            .is_some_and(|suggestion| suggestion.starts_with("Install the awww package")));
     }
 }

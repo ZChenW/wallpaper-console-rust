@@ -19,6 +19,15 @@ pub fn awww_socket_path() -> Result<std::path::PathBuf, WcError> {
 }
 
 pub trait BackendRuntime {
+    /// Preflight external renderer availability before any destructive handoff.
+    /// Test runtimes default to available; the system runtime probes PATH.
+    fn ensure_backend_available(
+        &mut self,
+        _backend: wc_core::types::Backend,
+        _storage: &StorageApi,
+    ) -> Result<(), WcError> {
+        Ok(())
+    }
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError>;
     fn command_status(
         &mut self,
@@ -136,6 +145,36 @@ where
 }
 
 impl BackendRuntime for SystemBackendRuntime {
+    fn ensure_backend_available(
+        &mut self,
+        backend: wc_core::types::Backend,
+        storage: &StorageApi,
+    ) -> Result<(), WcError> {
+        let required = match backend {
+            wc_core::types::Backend::Awww => &["awww", "awww-daemon"][..],
+            wc_core::types::Backend::Mpvpaper => &["mpvpaper"][..],
+            wc_core::types::Backend::LinuxWallpaperEngine
+            | wc_core::types::Backend::Unsupported => &[][..],
+        };
+        for command in required {
+            if which::which(command).is_err() {
+                return Err(WcError::BackendNotFound((*command).to_string()));
+            }
+        }
+        if backend == wc_core::types::Backend::LinuxWallpaperEngine {
+            let config =
+                crate::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(storage);
+            if !config.enabled {
+                return Err(WcError::Other(
+                    "linux-wallpaperengine is disabled; enable it in Wallpaper settings before applying a scene"
+                        .into(),
+                ));
+            }
+            crate::linux_wallpaperengine::ensure_binary_available(&config)?;
+        }
+        Ok(())
+    }
+
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
         command
             .output()

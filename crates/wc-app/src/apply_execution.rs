@@ -144,6 +144,79 @@ mod tests {
     }
 
     #[test]
+    fn image_apply_uses_configured_compatible_renderer_instead_of_scan_default() {
+        let (tmp, service) = temp_service();
+        let image = tmp.path().join("wall.jpg");
+        std::fs::write(&image, b"jpg").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "mpvpaper")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&image.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.file_type, FileType::Image);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn preview_uses_the_configured_gif_renderer() {
+        let (tmp, service) = temp_service();
+        let project = scene_project_with_preview(tmp.path());
+        service
+            .storage_for_tests()
+            .config_set("gif_backend", "mpvpaper")
+            .unwrap();
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::ApplyPreview,
+            path: project.to_string_lossy().to_string(),
+            request_id: Some("preview-config".into()),
+        };
+
+        let target = service.resolve_apply_request_target(&request).unwrap();
+
+        assert_eq!(target.file_type, FileType::Gif);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn video_apply_clamps_legacy_awww_preference_to_mpvpaper() {
+        let (tmp, service) = temp_service();
+        let video = tmp.path().join("wall.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("video_backend", "awww")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&video.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.file_type, FileType::Video);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn invalid_image_renderer_preference_falls_back_to_awww() {
+        let (tmp, service) = temp_service();
+        let image = tmp.path().join("wall.png");
+        std::fs::write(&image, b"png").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "linux-wallpaperengine")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&image.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.backend, Backend::Awww);
+    }
+
+    #[test]
     fn apply_preview_without_preview_is_structured_error() {
         let (tmp, service) = temp_service();
         let project = tmp.path().join("steamapps/workshop/content/431960/1");

@@ -2,9 +2,9 @@
 //!
 //! Recreates persisted connected display assignments via the same capability
 //! planner and display executor used by apply. Disconnected rows stay as
-//! preferences. Successful restore leaves the preference map unchanged;
-//! failures after destructive progress reconcile live truth without claiming
-//! overall success.
+//! preferences. Successful restore keeps wallpaper mappings intact while
+//! updating connected rows to the renderer that actually started; failures
+//! after destructive progress reconcile live truth without claiming success.
 
 use std::path::Path;
 
@@ -17,7 +17,7 @@ use wc_backend::ExecutionScope;
 use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
-use crate::display_apply::{parse_backend, rejection_to_app_error, to_exec_action};
+use crate::display_apply::{rejection_to_app_error, to_exec_action};
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
 };
@@ -64,14 +64,18 @@ impl AppService {
             .storage
             .display_state_list()
             .map_err(AppError::from_wc_error)?;
-        let steps = build_restore_steps(&previous_rows, known_outputs)?;
+        let mut steps = build_restore_steps(&previous_rows, known_outputs);
         if steps.is_empty() {
             return Ok(());
         }
 
-        for step in &steps {
+        for step in &mut steps {
             ensure_wallpaper_present(&step.path)?;
+            let target = self.resolve_apply_target(&step.path)?;
+            step.path = target.resolved_path;
+            step.backend = target.backend;
         }
+        let restored_state = restored_display_state(&previous_rows, known_outputs, &steps);
 
         // Preflight the full sequence with accumulating live assignments so a
         // later coexistence/capability rejection never partially executes.
@@ -128,19 +132,69 @@ impl AppService {
         if let Err(failure) = exec_result {
             return Err(self.handle_exec_failure(failure, &previous_rows, known_outputs, None)?);
         }
+        self.storage
+            .display_state_replace_all(&restored_state)
+            .map_err(|error| AppError {
+                code: "display_restore_state_commit_failed".into(),
+                message: "Wallpapers were restored, but their display state could not be updated."
+                    .into(),
+                detail: Some(error.to_string()),
+                recoverable: true,
+                suggestion: Some(
+                    "Refresh display status, then retry restore before applying another wallpaper."
+                        .into(),
+                ),
+            })?;
         Ok(())
     }
 }
 
-fn build_restore_steps(
+fn restored_display_state(
     rows: &[DisplayStateRow],
     known_outputs: &[String],
-) -> Result<Vec<RestoreStep>, AppError> {
+    steps: &[RestoreStep],
+) -> Vec<(DisplayStateTarget, String, String)> {
+    let all_path = rows.iter().find_map(|row| {
+        matches!(row.target, DisplayStateTarget::AllDisplays).then_some(row.wallpaper_path.as_str())
+    });
+    let all_backend = steps
+        .iter()
+        .find_map(|step| matches!(step.target, DisplayTarget::AllDisplays).then_some(step.backend));
+
+    rows.iter()
+        .map(|row| {
+            let restored_backend = match &row.target {
+                DisplayStateTarget::AllDisplays => all_backend,
+                DisplayStateTarget::Output(output) if known_outputs.contains(output) => steps
+                    .iter()
+                    .find_map(|step| match &step.target {
+                        DisplayTarget::Output(target) if target == output => Some(step.backend),
+                        _ => None,
+                    })
+                    .or_else(|| {
+                        (all_path == Some(row.wallpaper_path.as_str()))
+                            .then_some(all_backend)
+                            .flatten()
+                    }),
+                DisplayStateTarget::Output(_) => None,
+            };
+            (
+                row.target.clone(),
+                row.wallpaper_path.clone(),
+                restored_backend
+                    .map(|backend| backend.as_str().to_string())
+                    .unwrap_or_else(|| row.backend.clone()),
+            )
+        })
+        .collect()
+}
+
+fn build_restore_steps(rows: &[DisplayStateRow], known_outputs: &[String]) -> Vec<RestoreStep> {
     let all_row = rows
         .iter()
         .find(|row| matches!(row.target, DisplayStateTarget::AllDisplays));
 
-    let mut connected_overrides: Vec<(String, String, Backend)> = Vec::new();
+    let mut connected_overrides: Vec<(String, String)> = Vec::new();
     for row in rows {
         let DisplayStateTarget::Output(name) = &row.target else {
             continue;
@@ -148,32 +202,28 @@ fn build_restore_steps(
         if !known_outputs.iter().any(|known| known == name) {
             continue;
         }
-        let backend = parse_backend(&row.backend)?;
         if let Some(existing) = connected_overrides
             .iter_mut()
-            .find(|(output, _, _)| output == name)
+            .find(|(output, _)| output == name)
         {
             existing.1 = row.wallpaper_path.clone();
-            existing.2 = backend;
         } else {
-            connected_overrides.push((name.clone(), row.wallpaper_path.clone(), backend));
+            connected_overrides.push((name.clone(), row.wallpaper_path.clone()));
         }
     }
 
     let mut steps = Vec::new();
     if let Some(all) = all_row {
-        let backend = parse_backend(&all.backend)?;
         steps.push(RestoreStep {
             target: DisplayTarget::AllDisplays,
             path: all.wallpaper_path.clone(),
-            backend,
+            backend: Backend::Unsupported,
         });
     }
 
-    for (output, path, backend) in connected_overrides {
+    for (output, path) in connected_overrides {
         if let Some(all) = all_row {
-            let all_backend = parse_backend(&all.backend)?;
-            if path == all.wallpaper_path && backend == all_backend {
+            if path == all.wallpaper_path {
                 // Covered by the AllDisplays step; named row is redundant.
                 continue;
             }
@@ -181,11 +231,11 @@ fn build_restore_steps(
         steps.push(RestoreStep {
             target: DisplayTarget::Output(output),
             path,
-            backend,
+            backend: Backend::Unsupported,
         });
     }
 
-    Ok(steps)
+    steps
 }
 
 fn ensure_wallpaper_present(path: &str) -> Result<(), AppError> {
@@ -459,6 +509,89 @@ mod tests {
         assert_eq!(rt.stop_mpvpaper_count, 1);
         assert_eq!(rt.stop_lwe_count, 1);
         assert_eq!(rt.lwe_apply_calls, 0);
+    }
+
+    #[test]
+    fn display_restore_re_resolves_backend_from_current_safe_settings() {
+        let (tmp, service) = temp_service();
+        let image = write_image(tmp.path(), "configured.jpg");
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "mpvpaper")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::Output("eDP-1".into()),
+                &image.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut runtime,
+                &mut reporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert!(runtime.command_output_args.is_empty());
+        assert!(runtime
+            .command_status_args
+            .iter()
+            .flatten()
+            .any(|arg| arg == "mpvpaper"));
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].backend, "mpvpaper");
+    }
+
+    #[test]
+    fn display_restore_clamps_legacy_video_awww_state_to_mpvpaper() {
+        let (tmp, service) = temp_service();
+        let video = write_video(tmp.path(), "legacy.mp4");
+        service
+            .storage_for_tests()
+            .config_set("video_backend", "awww")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::Output("eDP-1".into()),
+                &video.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut runtime,
+                &mut reporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert!(runtime.command_output_args.is_empty());
+        assert!(runtime
+            .command_status_args
+            .iter()
+            .flatten()
+            .any(|arg| arg == "mpvpaper"));
     }
 
     #[test]

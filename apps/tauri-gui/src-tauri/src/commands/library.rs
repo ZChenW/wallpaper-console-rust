@@ -1,7 +1,7 @@
 use super::common::{
-    dto_from_entry, fail, ok, storage, CommandResult, LibraryBrowserItemDto, LibraryBrowserPageDto,
-    LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryCountDto, LibraryPageDto,
-    LibrarySourceStatusDto,
+    dto_from_entry_with_routing, fail, ok, storage, CommandResult, LibraryBrowserItemDto,
+    LibraryBrowserPageDto, LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryCountDto,
+    LibraryPageDto, LibrarySourceStatusDto,
 };
 
 #[tauri::command]
@@ -59,10 +59,11 @@ pub async fn library_page_gui(
         };
         let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
+        let routing = s.backend_routing();
         let items = page
             .items
             .into_iter()
-            .map(dto_from_entry)
+            .map(|entry| dto_from_entry_with_routing(entry, &routing))
             .collect::<Vec<_>>();
         let dto_map_end = t0.elapsed();
         maybe_write_library_page_debug_log(
@@ -126,9 +127,12 @@ fn browser_query_from_dto(
     })
 }
 
-fn browser_item_dto(item: wc_storage::sqlite::LibraryBrowserItem) -> LibraryBrowserItemDto {
+fn browser_item_dto(
+    item: wc_storage::sqlite::LibraryBrowserItem,
+    routing: &wc_core::backend_routing::BackendRouting,
+) -> LibraryBrowserItemDto {
     LibraryBrowserItemDto {
-        wallpaper: dto_from_entry(item.entry),
+        wallpaper: dto_from_entry_with_routing(item.entry, routing),
         wallpaper_id: item.wallpaper_id,
         favorite: item.favorite,
         author: item.author,
@@ -151,9 +155,14 @@ fn library_browser_page_for_storage(
     let query = browser_query_from_dto(query)?;
     let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)
         .map_err(|error| error.to_string())?;
+    let routing = s.backend_routing();
     Ok(LibraryBrowserPageDto {
         total: page.total,
-        items: page.items.into_iter().map(browser_item_dto).collect(),
+        items: page
+            .items
+            .into_iter()
+            .map(|item| browser_item_dto(item, &routing))
+            .collect(),
     })
 }
 
@@ -162,8 +171,9 @@ fn library_browser_random_for_storage(
     query: LibraryBrowserQueryDto,
 ) -> Result<Option<LibraryBrowserItemDto>, String> {
     let query = browser_query_from_dto(query)?;
+    let routing = s.backend_routing();
     wc_storage::sqlite::browser_library_random(&s.cd, &query)
-        .map(|item| item.map(browser_item_dto))
+        .map(|item| item.map(|item| browser_item_dto(item, &routing)))
         .map_err(|error| error.to_string())
 }
 
@@ -226,9 +236,14 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
         let s = storage()?;
         let page = wc_storage::sqlite::favorites_page_sqlite(&s.cd, offset, limit)
             .map_err(|e| e.to_string())?;
+        let routing = s.backend_routing();
         Ok(LibraryPageDto {
             total: page.total,
-            items: page.items.into_iter().map(dto_from_entry).collect(),
+            items: page
+                .items
+                .into_iter()
+                .map(|entry| dto_from_entry_with_routing(entry, &routing))
+                .collect(),
         })
     })
     .await
@@ -457,6 +472,41 @@ mod tests {
         assert!(
             json.get("wallpaper").is_none(),
             "WallpaperDTO must be flattened"
+        );
+    }
+
+    #[test]
+    fn browser_page_exposes_the_renderer_that_apply_will_use() {
+        let (_tmp, storage, source_id) = browser_fixture();
+        storage.config_set("image_backend", "mpvpaper").unwrap();
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, size, mtime, resolution, added_at)
+             VALUES
+             (42, '/wallpapers/still.jpg', 'image', 'jpg', 'awww', 1024,
+              1700000001, '1920x1080', '2026-07-14T11:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (42, ?1)",
+            [source_id],
+        )
+        .unwrap();
+        drop(conn);
+        let mut query = browser_query(Some(source_id));
+        query.type_filter = "image".into();
+        query.favorites_only = false;
+        query.search.clear();
+
+        let page = super::library_browser_page_for_storage(&storage, query).unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].wallpaper.backend, "mpvpaper");
+        assert_eq!(
+            page.items[0].wallpaper.apply_backend.as_deref(),
+            Some("mpvpaper")
         );
     }
 

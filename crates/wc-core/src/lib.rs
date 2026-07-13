@@ -1,5 +1,6 @@
 //! wc-core — domain types, config resolution, formats, backend routing, errors.
 
+pub mod backend_routing;
 pub mod config;
 pub mod config_normalizer;
 pub mod error;

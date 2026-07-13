@@ -64,6 +64,15 @@ impl StorageApi {
         self._sqlite_config_get(key, default)
     }
 
+    /// Load renderer preferences once and clamp them to the compatibility
+    /// matrix defined by `wc-core`.
+    pub fn backend_routing(&self) -> wc_core::backend_routing::BackendRouting {
+        let image = self.config_get("image_backend", "awww");
+        let gif = self.config_get("gif_backend", "awww");
+        let video = self.config_get("video_backend", "mpvpaper");
+        wc_core::backend_routing::BackendRouting::from_raw(&image, &gif, &video)
+    }
+
     fn _sqlite_config_get(&self, key: &str, default: &str) -> String {
         if sqlite::try_ensure_sqlite_db(&self.cd).is_err() {
             return default.to_string();
@@ -807,6 +816,32 @@ mod tests {
         assert_eq!(
             storage.config_get("linux_wallpaperengine_target_mode", "missing"),
             "auto"
+        );
+    }
+
+    #[test]
+    fn backend_routing_reads_and_safely_normalizes_all_renderer_preferences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageApi::new(ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage.config_set("image_backend", "mpvpaper").unwrap();
+        storage.config_set("gif_backend", "invalid").unwrap();
+        storage.config_set("video_backend", "awww").unwrap();
+
+        let routing = storage.backend_routing();
+
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Image),
+            wc_core::types::Backend::Mpvpaper
+        );
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Gif),
+            wc_core::types::Backend::Awww
+        );
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Video),
+            wc_core::types::Backend::Mpvpaper
         );
     }
 

@@ -346,6 +346,10 @@ pub fn is_running_for_current_user() -> bool {
     )
 }
 
+pub(crate) fn ensure_binary_available(config: &LinuxWallpaperEngineConfig) -> Result<(), WcError> {
+    resolve_binary(config).map(|_| ())
+}
+
 fn resolve_binary(config: &LinuxWallpaperEngineConfig) -> Result<String, WcError> {
     if config.path != "auto" && !config.path.trim().is_empty() {
         let p = Path::new(&config.path);
@@ -490,6 +494,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let err = resolve_binary(&config_with_path(tmp.path().to_path_buf())).unwrap_err();
         assert!(err.to_string().contains("not a file"));
+    }
+
+    #[test]
+    fn availability_preflight_reuses_configured_path_validation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing = tmp.path().join("missing-linux-wallpaperengine");
+
+        let error = ensure_binary_available(&config_with_path(missing)).unwrap_err();
+
+        assert!(error.to_string().contains("configured path"));
     }
 
     #[cfg(unix)]

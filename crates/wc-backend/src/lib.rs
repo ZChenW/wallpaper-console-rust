@@ -165,9 +165,14 @@ pub(crate) fn apply_wallpaper_with_runtime(
         return Err(WcError::NotRegularFile(p.to_path_buf()));
     }
 
+    runtime.ensure_backend_available(backend, s)?;
+
     let previous_backend_raw = s.last_backend_read()?.unwrap_or_default();
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
+    if visual.fallback_stage != visual_handoff::FallbackStage::None {
+        runtime.ensure_backend_available(Backend::Awww, s)?;
+    }
     let previous_mpvpaper_pids = if backend == Backend::Mpvpaper {
         runtime.mpvpaper_pids()?
     } else {
