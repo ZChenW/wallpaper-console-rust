@@ -103,7 +103,6 @@ pub(crate) fn execute_stop_plan_with_runtime(
 fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Result<(), WcError> {
     s.current_write(state_path)?;
     s.last_backend_write(backend.as_str())?;
-    s.history_add(state_path, backend.as_str())?;
     Ok(())
 }
 
@@ -714,11 +713,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn apply_wallpaper_lwe_writes_state_after_renderer_survives() {
+    fn apply_wallpaper_lwe_updates_state_without_appending_history() {
         use std::os::unix::fs::PermissionsExt;
 
         let (tmp, s) = temp_storage();
         s.last_backend_write("awww").unwrap();
+        s.history_add("legacy.jpg", "awww").unwrap();
+        let history_before = s.history_list().unwrap();
 
         let bin = tmp.path().join("test-lwe-state-write");
         std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
@@ -753,10 +754,7 @@ mod tests {
             s.last_backend_read().unwrap().as_deref(),
             Some(LWE_BACKEND_NAME)
         );
-        assert_eq!(
-            s.history_list().unwrap().last().cloned(),
-            Some(scene.to_string_lossy().to_string())
-        );
+        assert_eq!(s.history_list().unwrap(), history_before);
 
         let pid = s.config_get("linux_wallpaperengine_pid", "");
         if let Ok(pid) = pid.parse::<i32>() {
@@ -1475,7 +1473,7 @@ mod tests {
     }
 
     #[test]
-    fn mpvpaper_readiness_success_writes_success_state() {
+    fn mpvpaper_readiness_success_updates_state_without_appending_history() {
         let (tmp, s) = temp_storage();
         let old = tmp.path().join("old.mp4");
         let next = tmp.path().join("next.mp4");
@@ -1506,12 +1504,7 @@ mod tests {
             Some(next.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        let history_after = s.history_list().unwrap();
-        assert_eq!(history_after.len(), history_before.len() + 1);
-        assert_eq!(
-            history_after.first(),
-            Some(&next.to_string_lossy().into_owned())
-        );
+        assert_eq!(s.history_list().unwrap(), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
         assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![404]);
