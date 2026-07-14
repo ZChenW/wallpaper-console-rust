@@ -22,6 +22,14 @@ export interface NextPageRequestState {
 
 const NEXT_PAGE_PREFETCH_ROWS = 2;
 
+export function shouldPauseThumbnailReveal(active: boolean, scrolling: boolean): boolean {
+  return !active || scrolling;
+}
+
+export function shouldStartAnimatedHover(scrolling: boolean): boolean {
+  return !scrolling;
+}
+
 export function previewAssetPath(entry: WallpaperDTO): string {
   return entry.previewPath || entry.path;
 }

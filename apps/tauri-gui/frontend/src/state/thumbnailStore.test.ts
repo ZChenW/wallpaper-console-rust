@@ -41,6 +41,25 @@ test('thumbnail store only loads the latest range and does not retain earlier op
   assert.deepEqual(loaded, ['new-a', 'new-b']);
 });
 
+test('thumbnail reveal waits while paused and resumes once', async () => {
+  const store = new ThumbnailStore(1, async (path) => ({
+    path,
+    cacheHit: false,
+    thumbnail: `thumb:${path}`,
+  }));
+  let notified = 0;
+  store.subscribe('a', () => { notified += 1; });
+
+  store.setRevealPaused(true);
+  store.enqueueVisible(['a']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(notified, 0);
+
+  store.setRevealPaused(false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(notified, 1);
+});
+
 test('thumbnail store removes a path after its last listener unsubscribes', () => {
   const store = new ThumbnailStore(1, async (path) => ({
     path,

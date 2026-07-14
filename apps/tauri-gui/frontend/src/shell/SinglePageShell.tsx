@@ -126,6 +126,7 @@ export default function SinglePageShell() {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [sourcesMounted, setSourcesMounted] = useState(false);
   const [sourcesReturnToSettings, setSourcesReturnToSettings] = useState(false);
+  const [restoreSourceCardFocus, setRestoreSourceCardFocus] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<LibraryBrowserItemDTO | null>(null);
   const [detailsEntry, setDetailsEntry] = useState<LibraryBrowserItemDTO | null>(null);
   const [favoritePendingPaths, setFavoritePendingPaths] = useState<ReadonlySet<string>>(
@@ -138,6 +139,7 @@ export default function SinglePageShell() {
   const [libraryRepairFault, setLibraryRepairFault] = useState<LibraryRepairFault | null>(null);
   const [libraryRepairPending, setLibraryRepairPending] = useState(false);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
+  const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -149,10 +151,17 @@ export default function SinglePageShell() {
     window.requestAnimationFrame(() => trigger.focus());
   }, []);
   const openSources = useCallback((returnToSettings = false) => {
+    setRestoreSourceCardFocus(false);
     setSourcesReturnToSettings(returnToSettings);
     setSourcesMounted(true);
     setSourcesOpen(true);
   }, []);
+
+  useEffect(() => {
+    if (!restoreSourceCardFocus || sourcesOpen || !settingsOpen) return;
+    sourcePanelReturnFocusRef.current?.focus();
+    setRestoreSourceCardFocus(false);
+  }, [restoreSourceCardFocus, settingsOpen, sourcesOpen]);
 
   const {
     preferences,
@@ -409,6 +418,13 @@ export default function SinglePageShell() {
     const entry = browser.entryByPath.get(path);
     if (entry) applyEntry(entry);
   }, [applyEntry, browser.entryByPath]);
+  const selectLibraryEntry = useCallback((entry: WallpaperDTO) => {
+    setSelectedEntry(entry as LibraryBrowserItemDTO);
+  }, []);
+  const isLibraryEntryApplicable = useCallback(
+    (entry: WallpaperDTO) => primaryApplyKind(entry) !== null,
+    [],
+  );
 
   useEffect(() => {
     if (!catalog.ready || catalog.errors.sources) return;
@@ -700,12 +716,12 @@ export default function SinglePageShell() {
           <WallpaperGrid
             entries={browser.entries}
             onApply={applyPath}
-            onSelect={(entry) => setSelectedEntry(entry as LibraryBrowserItemDTO)}
+            onSelect={selectLibraryEntry}
             onToggleFavorite={toggleFavorite}
             applying={applyQueue.applying}
             favoritePendingPaths={favoritePendingPaths}
             buildContextActions={buildContextActions}
-            active={true}
+            active={!settingsOpen && !sourcesOpen}
             refreshing={browser.refreshing || scanRunning}
             resetKey={resetKey}
             cardSize={preferences.cardSize}
@@ -713,7 +729,7 @@ export default function SinglePageShell() {
             selectedPath={selectedEntry?.path ?? null}
             pendingPath={applyQueue.pendingPath ?? applyQueue.activePath ?? null}
             currentPath={currentPath}
-            isEntryApplicable={(entry) => primaryApplyKind(entry) !== null}
+            isEntryApplicable={isLibraryEntryApplicable}
             hasMore={browser.entries.length < browser.total && !browser.automaticAppendPaused}
             loadingMore={browser.appending}
             onLoadMore={browser.loadMore}
@@ -934,6 +950,7 @@ export default function SinglePageShell() {
 
       <CompactSettingsPanel
         open={settingsOpen}
+        obscured={sourcesOpen && sourcesReturnToSettings}
         preferences={preferences}
         updatePreferences={updatePreferences}
         behaviorSettings={behavior.settings}
@@ -942,8 +959,8 @@ export default function SinglePageShell() {
         loadError={behavior.loadError}
         saveError={behavior.saveError}
         rendererStatuses={rendererStatuses.statuses}
-        onOpenSources={() => {
-          setSettingsOpen(false);
+        onOpenSources={(trigger) => {
+          sourcePanelReturnFocusRef.current = trigger;
           openSources(true);
         }}
         onClose={() => {
@@ -958,12 +975,16 @@ export default function SinglePageShell() {
             onBack: () => {
               setSourcesOpen(false);
               setSourcesReturnToSettings(false);
-              setSettingsOpen(true);
+              setRestoreSourceCardFocus(true);
             },
           } : {})}
           onClose={() => {
+            const closesSettings = sourcesReturnToSettings;
             setSourcesOpen(false);
             setSourcesReturnToSettings(false);
+            setRestoreSourceCardFocus(false);
+            sourcePanelReturnFocusRef.current = null;
+            if (closesSettings) setSettingsOpen(false);
             restoreOverlayFocus();
           }}
           onNotice={handleSourceNotice}

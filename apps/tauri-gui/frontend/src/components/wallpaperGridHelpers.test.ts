@@ -5,6 +5,8 @@ import {
   animatedPreviewPath,
   anchoredScrollTopForLayoutChange,
   previewAssetPath,
+  shouldPauseThumbnailReveal,
+  shouldStartAnimatedHover,
   shouldRequestNextPage,
   visibleThumbnailPaths,
 } from './wallpaperGridHelpers.ts';
@@ -53,6 +55,17 @@ test('animated preview is exposed only for a hovered GIF while scrolling is idle
   assert.equal(animatedPreviewPath(gif, false, false), null);
   assert.equal(animatedPreviewPath(gif, true, true), null);
   assert.equal(animatedPreviewPath(entry('/project', '/project/preview.jpg'), true, false), null);
+});
+
+test('thumbnail reveal pauses while the grid is inactive or scrolling', () => {
+  assert.equal(shouldPauseThumbnailReveal(false, false), true);
+  assert.equal(shouldPauseThumbnailReveal(true, true), true);
+  assert.equal(shouldPauseThumbnailReveal(true, false), false);
+});
+
+test('hover starts an animated preview only while scrolling is idle', () => {
+  assert.equal(shouldStartAnimatedHover(false), true);
+  assert.equal(shouldStartAnimatedHover(true), false);
 });
 
 test('anchoredScrollTopForLayoutChange preserves the first visible item when columns change', () => {

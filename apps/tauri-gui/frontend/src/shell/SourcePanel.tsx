@@ -6,6 +6,7 @@ import {
   type CSSProperties,
   type FormEvent,
   type KeyboardEvent,
+  type MouseEvent,
 } from 'react';
 import { ArrowLeft, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 
@@ -27,6 +28,24 @@ export type SourcePanelVisibility = {
   readonly open: boolean;
   readonly hasOpened: boolean;
 };
+
+export type SourcePanelPresentationPhase = 'open' | 'exiting';
+
+export function beginSourcePanelExit(
+  phase: SourcePanelPresentationPhase,
+  reducedMotion: boolean,
+): {
+  readonly accepted: boolean;
+  readonly next: SourcePanelPresentationPhase;
+  readonly delayMs: number;
+} {
+  if (phase === 'exiting') return { accepted: false, next: 'exiting', delayMs: 0 };
+  return {
+    accepted: true,
+    next: 'exiting',
+    delayMs: reducedMotion ? 0 : 160,
+  };
+}
 
 type RenameEditor = { readonly sourceId: number; readonly draft: string };
 
@@ -62,6 +81,7 @@ export interface SourcePanelProps extends UseWallpaperSourcesOptions {
 
 export interface SourcePanelViewProps {
   readonly open: boolean;
+  readonly presentationPhase?: SourcePanelPresentationPhase;
   readonly sources: readonly SourceDTO[];
   readonly loading: boolean;
   readonly loadError: string | null;
@@ -97,22 +117,15 @@ type RunCommandOptions = {
 const backdropStyle: CSSProperties = {
   position: 'fixed',
   inset: 0,
-  zIndex: 800,
   display: 'flex',
   justifyContent: 'flex-end',
-  background: 'rgb(0 0 0 / 30%)',
 };
 
 const panelStyle: CSSProperties = {
   display: 'flex',
-  width: 'min(34rem, 100vw)',
   height: '100%',
   flexDirection: 'column',
   overflow: 'hidden',
-  borderInlineStart: '1px solid color-mix(in srgb, currentColor 16%, transparent)',
-  background: 'Canvas',
-  color: 'CanvasText',
-  boxShadow: '-1rem 0 3rem rgb(0 0 0 / 22%)',
 };
 
 const headerStyle: CSSProperties = {
@@ -664,6 +677,7 @@ function SourceRow({
 
 export function SourcePanelView({
   open,
+  presentationPhase = 'open',
   sources,
   loading,
   loadError,
@@ -692,17 +706,29 @@ export function SourcePanelView({
   const busy = pendingOperation !== null;
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Escape') return;
+    event.preventDefault();
     if (removeCandidateId !== null) onCancelRemove();
     else onClose();
   };
+  const handleBackdropMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget) onClose();
+  };
 
   return (
-    <div className="source-panel__backdrop" style={backdropStyle}>
+    <div
+      className={`source-panel__backdrop${onBack ? ' source-panel__backdrop--layered' : ''}`}
+      data-layered={onBack ? true : undefined}
+      onMouseDown={handleBackdropMouseDown}
+      style={backdropStyle}
+    >
       <aside
         aria-busy={busy}
+        aria-hidden={presentationPhase === 'exiting' ? true : undefined}
         aria-label="Wallpaper sources"
         aria-modal="true"
         className="source-panel"
+        data-presentation-phase={presentationPhase}
+        inert={presentationPhase === 'exiting'}
         onKeyDown={handleKeyDown}
         role="dialog"
         style={panelStyle}
@@ -710,13 +736,26 @@ export function SourcePanelView({
         <header style={headerStyle}>
           <div style={headerTitleStyle}>
             {onBack ? (
-              <button aria-label="Back to settings" onClick={onBack} style={closeStyle} type="button">
+              <button
+                aria-label="Back to settings"
+                disabled={presentationPhase === 'exiting' ? true : undefined}
+                onClick={onBack}
+                style={closeStyle}
+                type="button"
+              >
                 <ArrowLeft aria-hidden="true" size={17} />
               </button>
             ) : null}
             <h2 style={titleStyle}>Wallpaper sources</h2>
           </div>
-          <button autoFocus aria-label="Close wallpaper sources" onClick={onClose} style={closeStyle} type="button">
+          <button
+            autoFocus
+            aria-label="Close wallpaper sources"
+            disabled={presentationPhase === 'exiting' ? true : undefined}
+            onClick={onClose}
+            style={closeStyle}
+            type="button"
+          >
             <span aria-hidden="true">×</span>
           </button>
         </header>
@@ -839,13 +878,43 @@ export function SourcePanel({
   });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
   const [renameEditor, setRenameEditor] = useState<RenameEditor | null>(null);
+  const [presentationPhase, setPresentationPhase] = useState<SourcePanelPresentationPhase>('open');
+  const presentationPhaseRef = useRef<SourcePanelPresentationPhase>('open');
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
 
   useEffect(() => {
+    const wasOpen = visibility.current.open;
     const transition = transitionSourcePanelVisibility(visibility.current, open);
     visibility.current = transition.next;
+    if (open && !wasOpen) {
+      presentationPhaseRef.current = 'open';
+      setPresentationPhase('open');
+    }
     if (transition.reload) void reload();
   }, [open, reload]);
+
+  useEffect(() => () => {
+    if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+  }, []);
+
+  const requestExit = useCallback((destination: () => void) => {
+    const reducedMotion = typeof window !== 'undefined'
+      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+    const transition = beginSourcePanelExit(presentationPhaseRef.current, reducedMotion);
+    if (!transition.accepted) return;
+
+    presentationPhaseRef.current = transition.next;
+    setPresentationPhase(transition.next);
+    if (transition.delayMs === 0) {
+      destination();
+      return;
+    }
+    exitTimerRef.current = setTimeout(() => {
+      exitTimerRef.current = null;
+      destination();
+    }, transition.delayMs);
+  }, []);
 
   useEffect(() => {
     if (removeCandidateId !== null && !sources.some((source) => source.id === removeCandidateId)) {
@@ -929,7 +998,7 @@ export function SourcePanel({
       loadError={loadError}
       loading={loading}
       editingSourceId={renameEditor?.sourceId ?? null}
-      onBack={onBack}
+      onBack={onBack ? () => requestExit(onBack) : undefined}
       onAdd={handleAdd}
       onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
@@ -946,6 +1015,7 @@ export function SourcePanel({
       onStartRename={(source) => setRenameEditor({ sourceId: source.id, draft: source.displayName })}
       open={open}
       pendingOperation={pendingOperation}
+      presentationPhase={presentationPhase}
       renameDraft={renameEditor?.draft ?? ''}
       removeCandidateId={removeCandidateId}
       sources={sources}

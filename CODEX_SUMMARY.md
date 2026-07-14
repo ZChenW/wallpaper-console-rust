@@ -32,6 +32,16 @@ Status: the agreed Simple Wallpaper Console MVP and the 2026-07-14 usability fol
 - Modernized Settings as the highest modal side sheet with an icon close action, Escape/backdrop close, body scroll locking, and stacking above the library scrollbar and feedback layer.
 - Fixed large-window scrolling pressure by generating static WebP thumbnails for Wallpaper Engine preview assets. Only one hovered GIF may animate, and scrolling immediately returns cards to static thumbnails; the details dialog keeps the original animated preview.
 
+## Library and overlay performance follow-up completed
+
+- Identified two independent release-path causes of maximized-window jank: the installed launcher disabled WebKitGTK's DMABUF renderer by default, and animated GIF fallbacks could preserve every frame inside cached WebP thumbnails.
+- Made WebKitGTK's accelerated DMABUF path the default. Blank-window compatibility remains opt-in through `WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1`, while an explicitly supplied `WEBKIT_DISABLE_DMABUF_RENDERER` value is preserved.
+- Introduced v3 GUI thumbnail cache keys and a strict single-frame contract for animated image sources. Rust now decodes GIFs directly; ImageMagick fallback explicitly selects frame zero.
+- Removed grid-wide React state updates at scroll start/idle, stabilized card thumbnail subscriptions and shell callbacks, and memoized the grid boundary.
+- Paused thumbnail reveal notifications while Settings or Sources overlays obscure the library, then releases completed results once the library becomes active again.
+- Kept the Settings-to-Sources transition mounted and transform-only, while making Sources Close immediate, backdrop-dismissible, and keyboard/focus safe.
+- Measured the new release binary in a 1797x1080 niri window. During repeated Page Up/Page Down input, the main and WebKit processes used about 1-7% combined CPU in the observed samples. Fifty-four newly generated v3 WebPs were all static; none contained an animated WebP marker. This replaces the earlier observed sustained WebKit load of roughly 43-88% CPU with animated cache entries.
+
 ## Final verification
 
 All commands below were run on the final code and exited successfully:
@@ -42,17 +52,20 @@ All commands below were run on the final code and exited successfully:
   - `cargo clippy --workspace -- -D warnings`
   - `cargo test --workspace`
   - frontend type checking
-  - frontend unit tests: 344 assertions/tests passed, 0 failed
+  - frontend unit tests: 352 tests passed, 0 failed
   - production frontend build
-  - Playwright smoke: 38 passed across desktop and compact layouts, 0 failed
+  - Playwright smoke: 40 passed across desktop and compact layouts, 0 failed
   - runtime/config drift check
 - `cargo build --workspace`
+- `bash scripts/test_install_contract.sh`
+- `./install.sh --build-only`
 - `git diff --check`
 
 The final specification review found no unmet P0/P1/P2 product goals. The final standards review found no remaining P0/P1/P2 issue after the settings-persistence and runtime-observation fixes.
 
 ## Remaining limitations
 
+- The maximized release measurement still showed about 1.17 GiB combined RSS for the Tauri and WebKit processes after thumbnail generation. CPU and interaction pressure improved substantially, but memory residency remains a separate profiling target.
 - Wallpaper Engine Web and Application projects are indexed for browsing but cannot be applied. Scene rendering uses linux-wallpaperengine compatibility and does not promise full Wallpaper Engine parity.
 - Multi-display combinations without verified renderer coexistence or output-scoped stopping are deliberately rejected. This favors correct visual state and protection of other displays over pretending unsupported parity.
 - The `restore-at-login` command and opt-in setting are implemented, but the application does not create a desktop-environment/systemd autostart entry automatically.
@@ -64,5 +77,7 @@ The final specification review found no unmet P0/P1/P2 product goals. The final 
 1. Perform a manual acceptance pass on the target Wayland session with the installed awww, mpvpaper, and linux-wallpaperengine binaries. Specifically switch repeatedly between image/video/scene wallpapers, confirm Settings backdrop closing, rename a source alias, and compare maximized-grid scrolling with a small window. Repeat with multiple physical displays because automated tests intentionally use fake runtimes and the development host capability probe had one connected display.
 2. Add an optional packaging-time autostart installer if login restoration should become one-click setup.
 3. Split `SinglePageShell.tsx` and the source drawer into smaller internal modules only when the next feature requires those seams; no broad refactor is needed for this release.
+
+The release artifacts were rebuilt for verification but not installed over the user's current `~/.local` installation. Run `./install.sh` from the repository when ready to replace the installed executable.
 
 No remote push was performed.

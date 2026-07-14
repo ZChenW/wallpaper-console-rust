@@ -377,13 +377,28 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
 
   await dialog.getByRole('button', { name: 'Manage wallpaper sources' }).click();
   const sourcesDialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
-  await expect(dialog).toBeHidden();
+  const settingsOverlay = page.locator('[data-settings-overlay]');
+  const settingsDrawer = settingsOverlay.locator('[aria-label="Settings"]');
+  await expect(settingsOverlay).toBeAttached();
+  await expect(settingsOverlay).toHaveAttribute('data-obscured', 'true');
   await expect(sourcesDialog).toBeVisible();
+  const sourcePanel = page.locator('.source-panel');
+  await expect(sourcePanel).toHaveAttribute('data-presentation-phase', 'open');
+  expect((await sourcesDialog.boundingBox())?.width)
+    .toBeCloseTo((await settingsDrawer.boundingBox())?.width ?? 0, 2);
   await sourcesDialog.getByRole('button', { name: 'Back to settings' }).click();
-  await expect(sourcesDialog).toBeHidden();
+  await expect(sourcePanel).toHaveAttribute('data-presentation-phase', 'exiting');
+  await expect(sourcePanel).toBeHidden({ timeout: 1_000 });
   await expect(dialog).toBeVisible();
+  await expect(sourceManagement).toBeFocused();
 
-  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await sourceManagement.click();
+  await expect(sourcesDialog).toBeVisible();
+  await sourcesDialog.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  expect(await sourcePanel.count()).toBe(0);
+  await expect(settingsOverlay).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Open settings' })).toBeFocused();
+
   await expect(grid).toHaveCSS('overflow-y', 'auto');
 });
 

@@ -24,6 +24,7 @@ import type { WallpaperCardSize } from '../utils/layout.ts';
 
 export interface CompactSettingsPanelProps {
   readonly open: boolean;
+  readonly obscured?: boolean;
   readonly preferences: ShellPreferences;
   readonly updatePreferences: (update: ShellPreferencesUpdate) => void;
   readonly behaviorSettings: WallpaperBehaviorSettings;
@@ -32,7 +33,7 @@ export interface CompactSettingsPanelProps {
   readonly loadError: Error | null;
   readonly saveError: Error | null;
   readonly rendererStatuses: RendererStatusesDTO | null;
-  readonly onOpenSources: () => void;
+  readonly onOpenSources: (trigger: HTMLButtonElement) => void;
   readonly onClose: () => void;
 }
 
@@ -50,6 +51,7 @@ export function lockBodyScroll(body: { style: { overflow: string } }): () => voi
 
 export function CompactSettingsPanelView({
   open,
+  obscured = false,
   preferences,
   updatePreferences,
   behaviorSettings,
@@ -154,6 +156,7 @@ export function CompactSettingsPanelView({
   return (
     <div
       className="settings-overlay"
+      data-obscured={obscured}
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
@@ -161,7 +164,9 @@ export function CompactSettingsPanelView({
     >
       <aside
         aria-label="Settings"
+        aria-hidden={obscured ? true : undefined}
         aria-modal="true"
+        inert={obscured}
         role="dialog"
         className="settings-panel"
       >
@@ -489,7 +494,7 @@ export function CompactSettingsPanelView({
             aria-label="Manage wallpaper sources"
             className="settings-navigation-card"
             data-source-management-action={true}
-            onClick={onOpenSources}
+            onClick={(event) => onOpenSources(event.currentTarget)}
           >
             <span className="settings-navigation-card__icon" aria-hidden="true">
               <FolderCog size={17} />
@@ -516,6 +521,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
 
     const unlockBodyScroll = lockBodyScroll(document.body);
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (props.obscured) return;
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
       props.onClose();
@@ -525,7 +531,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       unlockBodyScroll();
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [props.open, props.onClose]);
+  }, [props.obscured, props.open, props.onClose]);
 
   return CompactSettingsPanelView(props);
 }

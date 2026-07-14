@@ -1,4 +1,4 @@
-import { memo, useState, useSyncExternalStore, type CSSProperties } from 'react';
+import { memo, useCallback, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
@@ -21,7 +21,11 @@ import {
   resolveCardPointerInteraction,
 } from '../shell/cardInteraction';
 import type { ApplyGesture } from '../shell/shellPreferences';
-import { animatedPreviewPath, previewAssetPath } from './wallpaperGridHelpers';
+import {
+  animatedPreviewPath,
+  previewAssetPath,
+  shouldStartAnimatedHover,
+} from './wallpaperGridHelpers';
 
 const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
   try {
@@ -50,8 +54,10 @@ interface CardProps {
   favoritePending?: boolean;
   current?: boolean;
   applyAvailable?: boolean;
-  scrolling?: boolean;
+  isScrolling?: () => boolean;
 }
+
+const neverScrolling = () => false;
 
 function WallpaperCardImpl({
   entry,
@@ -68,20 +74,32 @@ function WallpaperCardImpl({
   favoritePending = false,
   current = false,
   applyAvailable,
-  scrolling = false,
+  isScrolling = neverScrolling,
 }: CardProps) {
   const store = useThumbnailStore();
   const [hovered, setHovered] = useState(false);
   const thumbnailPath = previewAssetPath(entry);
-  const thumbnail = useSyncExternalStore(
-    (cb) => store.subscribe(thumbnailPath, cb),
+  const subscribeThumbnail = useCallback(
+    (callback: () => void) => store.subscribe(thumbnailPath, callback),
+    [store, thumbnailPath],
+  );
+  const getThumbnail = useCallback(
     () => store.get(thumbnailPath),
+    [store, thumbnailPath],
+  );
+  const getThumbnailFailure = useCallback(
+    () => store.getFailure(thumbnailPath),
+    [store, thumbnailPath],
+  );
+  const thumbnail = useSyncExternalStore(
+    subscribeThumbnail,
+    getThumbnail,
   );
   const thumbnailFailure = useSyncExternalStore(
-    (cb) => store.subscribe(thumbnailPath, cb),
-    () => store.getFailure(thumbnailPath),
+    subscribeThumbnail,
+    getThumbnailFailure,
   );
-  const animatedPreview = animatedPreviewPath(entry, hovered, scrolling);
+  const animatedPreview = animatedPreviewPath(entry, hovered, isScrolling());
 
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -155,7 +173,7 @@ function WallpaperCardImpl({
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
-      onMouseEnter={() => setHovered(true)}
+      onMouseEnter={() => setHovered(shouldStartAnimatedHover(isScrolling()))}
       onMouseLeave={() => setHovered(false)}
       aria-current={current ? 'true' : undefined}
       aria-selected={selected}

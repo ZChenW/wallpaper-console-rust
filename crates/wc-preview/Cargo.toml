@@ -7,7 +7,7 @@ edition.workspace = true
 wc-core.workspace = true
 anyhow.workspace = true
 serde_json.workspace = true
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
 
 [dev-dependencies]
 tempfile.workspace = true

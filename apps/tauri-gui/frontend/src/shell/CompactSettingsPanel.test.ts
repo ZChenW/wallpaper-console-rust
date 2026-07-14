@@ -142,6 +142,27 @@ test('settings body scroll lock restores the previous overflow value', async () 
   assert.equal(body.style.overflow, 'auto');
 });
 
+test('settings stays mounted but becomes obscured under a child drawer', async () => {
+  const { CompactSettingsPanelView } = await importTsxModule();
+  const regularTree = CompactSettingsPanelView(viewProps());
+  const obscuredTree = CompactSettingsPanelView({ ...viewProps(), obscured: true });
+  const [regularOverlay] = findElements(
+    regularTree,
+    (element) => element.props['data-settings-overlay'] === true,
+  );
+  const [obscuredOverlay] = findElements(
+    obscuredTree,
+    (element) => element.props['data-settings-overlay'] === true,
+  );
+  const [regularDialog] = findElements(regularTree, (element) => element.props.role === 'dialog');
+  const [obscuredDialog] = findElements(obscuredTree, (element) => element.props.role === 'dialog');
+
+  assert.equal(regularOverlay.props['data-obscured'], false);
+  assert.equal(regularDialog.props['aria-hidden'], undefined);
+  assert.equal(obscuredOverlay.props['data-obscured'], true);
+  assert.equal(obscuredDialog.props['aria-hidden'], true);
+});
+
 test('renders exactly the three compact groups and excludes legacy diagnostics', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView(viewProps());
@@ -480,7 +501,7 @@ test('sources group has one entry point without a redundant availability summary
   assert.match(sourceActionMarkup, /Add, rename, refresh, or remove folders\./);
   assert.equal(sourceActionMarkup.match(/<svg/g)?.length, 2);
   assert.equal(findElements(tree, (element) => element.props['data-source-management-action'] === true).length, 1);
-  (sources.props.onClick as () => void)();
+  (sources.props.onClick as (event: unknown) => void)({ currentTarget: {} });
   (close.props.onClick as () => void)();
   assert.equal(opened, 1);
   assert.equal(closed, 1);

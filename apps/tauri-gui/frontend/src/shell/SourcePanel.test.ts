@@ -138,6 +138,47 @@ test('source panel reloads only when an already-opened drawer is reopened', asyn
   assert.equal(transition.reload, false, 'ordinary rerenders while open do not reload');
 });
 
+test('source panel exit accepts one request and respects reduced motion', async () => {
+  const { beginSourcePanelExit } = await importTsxModule();
+
+  assert.deepEqual(beginSourcePanelExit('open', false), {
+    accepted: true,
+    next: 'exiting',
+    delayMs: 160,
+  });
+  assert.deepEqual(beginSourcePanelExit('exiting', false), {
+    accepted: false,
+    next: 'exiting',
+    delayMs: 0,
+  });
+  assert.deepEqual(beginSourcePanelExit('open', true), {
+    accepted: true,
+    next: 'exiting',
+    delayMs: 0,
+  });
+});
+
+test('source drawer backdrop closes only when the backdrop itself is pressed', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    onClose: () => calls.push('close'),
+  });
+  const [backdrop] = findElements(
+    tree,
+    (element) => element.props.className === 'source-panel__backdrop',
+  );
+  const onMouseDown = backdrop.props.onMouseDown as (event: unknown) => void;
+  const backdropTarget = {};
+
+  onMouseDown({ currentTarget: backdropTarget, target: {} });
+  assert.deepEqual(calls, [], 'presses inside the drawer must not close it');
+
+  onMouseDown({ currentTarget: backdropTarget, target: backdropTarget });
+  assert.deepEqual(calls, ['close']);
+});
+
 test('source drawer autofocuses close and Escape closes or dismisses removal first', async () => {
   const { SourcePanelView } = await importTsxModule();
   const calls: string[] = [];
@@ -148,7 +189,10 @@ test('source drawer autofocuses close and Escape closes or dismisses removal fir
   const [dialog] = findElements(tree, (element) => element.props.role === 'dialog');
   const [close] = findElements(tree, (element) => element.props['aria-label'] === 'Close wallpaper sources');
   assert.equal(close.props.autoFocus, true);
-  (dialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  (dialog.props.onKeyDown as (event: unknown) => void)({
+    key: 'Escape',
+    preventDefault: () => undefined,
+  });
   assert.deepEqual(calls, ['close']);
 
   const confirmTree = SourcePanelView({
@@ -158,7 +202,10 @@ test('source drawer autofocuses close and Escape closes or dismisses removal fir
     onCancelRemove: () => calls.push('cancel-remove'),
   });
   const [confirmDialog] = findElements(confirmTree, (element) => element.props.role === 'dialog');
-  (confirmDialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  (confirmDialog.props.onKeyDown as (event: unknown) => void)({
+    key: 'Escape',
+    preventDefault: () => undefined,
+  });
   assert.deepEqual(calls, ['close', 'cancel-remove']);
 });
 

@@ -137,13 +137,16 @@ fi
 info "Installing to $BIN_DIR..."
 mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
 
-# Install Tauri GUI behind a launcher wrapper. WebKitGTK can render a blank
-# window on some Wayland compositors unless the DMABUF renderer is disabled.
+# Install Tauri GUI behind a launcher wrapper. Keep WebKitGTK's accelerated
+# DMABUF path by default; an explicit compatibility switch remains available
+# for Wayland setups that otherwise render a blank window.
 cp "$TAURI_BIN" "$GUI_BIN_FILE"
 chmod +x "$GUI_BIN_FILE"
 cat > "$BIN_DIR/wallpaper-console-gui-rust" <<EOF_GUI_WRAPPER
 #!/usr/bin/env sh
-export WEBKIT_DISABLE_DMABUF_RENDERER="\${WEBKIT_DISABLE_DMABUF_RENDERER:-1}"
+if [ "\${WCR_WEBKIT_DISABLE_DMABUF_RENDERER:-0}" = "1" ] && [ -z "\${WEBKIT_DISABLE_DMABUF_RENDERER+x}" ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
 exec "$GUI_BIN_FILE" "\$@"
 EOF_GUI_WRAPPER
 chmod +x "$BIN_DIR/wallpaper-console-gui-rust"
@@ -198,6 +201,7 @@ fi
 info ""
 info "To run the Tauri GUI:"
 info "  $BIN_DIR/wallpaper-console-gui-rust"
+info "  Blank-window compatibility: WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 $BIN_DIR/wallpaper-console-gui-rust"
 info ""
 info "For niri startup restore:"
 info "  $BIN_DIR/wallpaper-console-rust config-set restore_on_login on"
