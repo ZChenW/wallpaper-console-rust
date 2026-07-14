@@ -28,6 +28,16 @@ export type SourcePanelVisibility = {
   readonly hasOpened: boolean;
 };
 
+type RenameEditor = { readonly sourceId: number; readonly draft: string };
+
+export function renameEditorAfterResult(
+  editor: RenameEditor | null,
+  sourceId: number,
+  succeeded: boolean,
+): RenameEditor | null {
+  return succeeded && editor?.sourceId === sourceId ? null : editor;
+}
+
 export function transitionSourcePanelVisibility(
   previous: SourcePanelVisibility,
   open: boolean,
@@ -807,7 +817,7 @@ export function SourcePanel({
     onScanFinished,
   });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
-  const [renameEditor, setRenameEditor] = useState<{ readonly sourceId: number; readonly draft: string } | null>(null);
+  const [renameEditor, setRenameEditor] = useState<RenameEditor | null>(null);
   const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
 
   useEffect(() => {
@@ -833,13 +843,14 @@ export function SourcePanel({
   }, [addFromPicker, onNotice]);
 
   const handleRename = useCallback((id: number, displayName: string) => {
-    setRenameEditor(null);
     void runCommand({
       action: () => rename(id, displayName),
       channel: 'settings',
       successMessage: 'Source renamed',
       failureMessage: 'Could not rename source',
       onNotice,
+    }).then((succeeded) => {
+      setRenameEditor((current) => renameEditorAfterResult(current, id, succeeded));
     });
   }, [onNotice, rename]);
 

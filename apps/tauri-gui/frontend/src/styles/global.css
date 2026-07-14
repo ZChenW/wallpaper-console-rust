@@ -429,8 +429,8 @@ input:focus {
 .single-page-filters select {
   height: 1.85rem;
   flex: 0 0 auto;
-  border-color: transparent;
-  border-radius: 0.35rem;
+  border-color: var(--border-subtle);
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
 }
@@ -449,8 +449,8 @@ input:focus {
   align-items: center;
   gap: 0.42rem;
   padding: 0 0.5rem;
-  border: 1px solid transparent;
-  border-radius: 0.35rem;
+  border: 1px solid var(--border-subtle);
+  border-radius: 6px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
@@ -473,7 +473,6 @@ input:focus {
 .settings-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
   display: flex;
   justify-content: flex-end;
   overflow: hidden;
@@ -577,6 +576,12 @@ input:focus {
   border-color: var(--primary);
   background: var(--primary-bg);
   color: var(--primary-strong);
+}
+
+.settings-renderer-card[data-unavailable="true"] {
+  border-color: color-mix(in srgb, var(--danger) 65%, var(--border));
+  color: var(--danger);
+  opacity: 0.68;
 }
 
 .settings-renderer-card[aria-disabled="true"] {

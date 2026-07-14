@@ -276,6 +276,18 @@ test('inline alias editor is controlled, saves on Enter, and cancels on Escape',
   assert.deepEqual(calls.at(-1), ['cancel']);
 });
 
+test('rename editor closes only after its own successful request', async () => {
+  const { renameEditorAfterResult } = await importTsxModule();
+  const editor = { sourceId: 41, draft: 'Personal picks' };
+
+  assert.deepEqual(renameEditorAfterResult(editor, 41, false), editor);
+  assert.equal(renameEditorAfterResult(editor, 41, true), null);
+  assert.deepEqual(
+    renameEditorAfterResult({ sourceId: 77, draft: 'Newer edit' }, 41, true),
+    { sourceId: 77, draft: 'Newer edit' },
+  );
+});
+
 test('availability badges use green, red, and yellow status backgrounds', async () => {
   const { SourcePanelView } = await importTsxModule();
   const tree = SourcePanelView(noopViewProps());

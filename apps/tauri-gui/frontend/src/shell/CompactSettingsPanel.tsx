@@ -50,6 +50,14 @@ function sourceSummary(sourceCount: number, offlineSourceCount: number): string 
     : `${total} ${sourceLabel} · all available`;
 }
 
+export function lockBodyScroll(body: { style: { overflow: string } }): () => void {
+  const previousOverflow = body.style.overflow;
+  body.style.overflow = 'hidden';
+  return () => {
+    body.style.overflow = previousOverflow;
+  };
+}
+
 export function CompactSettingsPanelView({
   open,
   preferences,
@@ -146,8 +154,10 @@ export function CompactSettingsPanelView({
       className="settings-renderer-card"
       data-behavior-control={onClick ? true : undefined}
       data-renderer={renderer}
+      data-unavailable={unavailable || undefined}
       disabled={onClick ? !behaviorReady || unavailable : undefined}
       tabIndex={onClick ? undefined : -1}
+      title={unavailable ? `${renderer} is unavailable` : undefined}
       type="button"
       onClick={onClick}
     >
@@ -161,6 +171,7 @@ export function CompactSettingsPanelView({
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
+      style={{ zIndex: 1100 }}
     >
       <aside
         aria-label="Settings"
@@ -419,8 +430,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
   useEffect(() => {
     if (!props.open) return undefined;
 
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = 'hidden';
+    const unlockBodyScroll = lockBodyScroll(document.body);
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
@@ -428,7 +438,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => {
-      document.body.style.overflow = previousOverflow;
+      unlockBodyScroll();
       document.removeEventListener('keydown', closeOnEscape);
     };
   }, [props.open, props.onClose]);

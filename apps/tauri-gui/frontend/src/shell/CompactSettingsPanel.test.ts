@@ -109,6 +109,7 @@ test('settings uses an icon close action and closes on Escape or backdrop only',
 
   assert.equal(close.props.autoFocus, true);
   assert.equal(close.props['data-icon-button'], true);
+  assert.equal(overlay.props.style.zIndex, 1100);
   assert.doesNotMatch(renderToStaticMarkup(close), />Close</);
   (overlay.props.onKeyDown as (event: unknown) => void)({
     key: 'Escape',
@@ -128,6 +129,16 @@ test('settings uses an icon close action and closes on Escape or backdrop only',
     target: backdrop,
   });
   assert.equal(closed, 2, 'clicking the backdrop closes settings');
+});
+
+test('settings body scroll lock restores the previous overflow value', async () => {
+  const { lockBodyScroll } = await importTsxModule();
+  const body = { style: { overflow: 'auto' } };
+  const unlock = lockBodyScroll(body);
+
+  assert.equal(body.style.overflow, 'hidden');
+  unlock();
+  assert.equal(body.style.overflow, 'auto');
 });
 
 test('renders exactly the three compact groups and excludes legacy diagnostics', async () => {
@@ -278,9 +289,11 @@ test('renderer diagnostics are hidden while confirmed-missing backend cards stay
 
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props['aria-pressed'], true);
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props.disabled, true);
+  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props['data-unavailable'], true);
+  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props.title, 'awww is unavailable');
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'mpvpaper')?.props.disabled, false);
   assert.equal(lweScaling.props.disabled, true);
-  assert.doesNotMatch(markup, /installation status|Installed|Unavailable/i);
+  assert.doesNotMatch(markup, /Renderer installation status|Installed|linux-wallpaperengine.*Unavailable/i);
 });
 
 test('unknown backend availability does not disable configuration choices', async () => {
