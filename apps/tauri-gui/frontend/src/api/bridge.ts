@@ -1,176 +1,100 @@
 import { invoke } from '@tauri-apps/api/core';
+import type {
+  ApplyRequestDTO,
+  CommandResult,
+  DisplayListDTO,
+  DisplayStateDTO,
+  FirstRunSourceSuggestionDTO,
+  LibraryCountDTO,
+  LibraryBrowserItemDTO,
+  LibraryBrowserPageDTO,
+  LibraryBrowserQueryDTO,
+  LibraryPageDTO,
+  LibrarySourceStatusDTO,
+  LinuxWallpaperEngineStatusDTO,
+  RendererStatusesDTO,
+  RuntimeWallpaperObservationDTO,
+  ScanProgressDTO,
+  SourceDTO,
+  StatusDTO,
+  TargetedApplyRequestDTO,
+  TargetedRestoreRequestDTO,
+  ThumbnailCacheDTO,
+  ThumbnailDTO,
+  WallpaperConsoleApi,
+  WeDebugInfoDTO,
+} from './types';
 
-export interface CommandResult {
-  success: boolean;
-  stdout: string;
-  stderr: string;
-  exitCode: number;
-  error?: CommandErrorDTO;
+export type * from './types';
+
+export type InvokeFn = <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+
+export function createSourceMutationApi(invokeFn: InvokeFn = invoke) {
+  return {
+    sourceRename: (id: number, displayName: string): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_rename', { id, displayName }),
+    sourceSetRecursive: (id: number, recursive: boolean): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_set_recursive', { id, recursive }),
+    sourceRefresh: (id: number): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_refresh', { id }),
+    sourceRemoveById: (id: number): Promise<CommandResult> =>
+      invokeFn<CommandResult>('source_remove_by_id', { id }),
+  };
 }
 
-export interface CommandErrorDTO {
-  kind: string;
-  message: string;
-  detail?: string;
-  recoverable: boolean;
-  suggestion?: string;
+export function createLibraryBrowserApi(invokeFn: InvokeFn = invoke) {
+  return {
+    libraryBrowserPage: (query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO> =>
+      invokeFn<LibraryBrowserPageDTO>('library_browser_page', { query }),
+    libraryBrowserRandom: (
+      query: LibraryBrowserQueryDTO,
+    ): Promise<LibraryBrowserItemDTO | null> =>
+      invokeFn<LibraryBrowserItemDTO | null>('library_browser_random', { query }),
+  };
 }
 
-export interface LibraryCountDTO {
-  total: number;
-  images: number;
-  gifs: number;
-  videos: number;
+export function createRuntimeObservationApi(invokeFn: InvokeFn = invoke) {
+  return {
+    runtimeWallpaperObservations: (): Promise<RuntimeWallpaperObservationDTO[]> =>
+      invokeFn<RuntimeWallpaperObservationDTO[]>('runtime_wallpaper_observations'),
+  };
 }
 
-export interface LibraryPageDTO {
-  total: number;
-  items: WallpaperDTO[];
+export function createRendererStatusApi(invokeFn: InvokeFn = invoke) {
+  return {
+    rendererStatuses: (): Promise<RendererStatusesDTO> =>
+      invokeFn<RendererStatusesDTO>('renderer_statuses'),
+  };
 }
 
-export interface LibrarySourceStatusDTO {
-  configured: string;
-  effective: string;
-  sqliteReady: boolean;
-  sqliteRows: number;
-  tsvRows: number;
-  stale: boolean;
-  message: string;
-}
-
-export interface ScanProgressDTO {
-  running: boolean;
-  stage: string;
-  scanned: number;
-  totalHint?: number;
-  reusedMetadata: number;
-  probedMetadata: number;
-  insertedSqlite: number;
-  staged: number;
-  skipped: number;
-  metadataErrors: number;
-  currentPath?: string;
-  cancelRequested: boolean;
-  error?: string;
-}
-
-export interface SourceDTO {
-  path: string;
-  exists: boolean;
-  isWE: boolean;
-  label: string;
-}
-
-export interface StatusDTO {
-  configDir: string;
-  current: string;
-  lastBackend: string;
-  sourceCount: number;
-}
-
-export interface LinuxWallpaperEngineStatusDTO {
-  available: boolean;
-  path?: string;
-  message: string;
-  detail?: string;
-}
-
-export interface WeDebugInfoDTO {
-  lastCommandLine: string;
-  lastTargetConfig: string;
-  lastStderr: string;
-  lastExitStatus: string;
-  logPath: string;
-}
-
-export interface ThumbnailCacheDTO {
-  dir: string;
-  size: string;
-  entries: number;
-  oldestMtime?: number;
-  newestMtime?: number;
-  failureEntries: number;
-  cleanupDays: number;
-}
-
-export interface ThumbnailDTO {
-  path: string;
-  thumbnail?: string;
-  cacheHit: boolean;
-  failureReason?: string;
-}
-
-export type ApplyAvailability = 'available' | 'unsupported' | 'retryable_failure';
-
-export type ApplyActionKind =
-  | 'apply'
-  | 'retry_backend_apply'
-  | 'apply_preview'
-  | 'open_folder'
-  | 'copy_workshop_id';
-
-export type ApplyRequestKind = 'apply' | 'retry_backend_apply' | 'apply_preview';
-
-export interface ApplyRequestDTO {
-  kind: ApplyRequestKind;
-  path: string;
-  requestId?: string;
-}
-
-export interface ApplyResultDTO {
-  requestId?: string;
-  appliedPath: string;
-  statePath: string;
-  backend: string;
-  fileType: string;
-  preview: boolean;
-}
-
-export interface ApplyActionDTO {
-  kind: ApplyActionKind;
-  label: string;
-  enabled: boolean;
-  reason?: string;
-}
-
-export interface WallpaperDTO {
-  path: string;
-  type: string;
-  ext: string;
-  backend: string;
-  size: number;
-  mtime: number;
-  resolution: string;
-  projectType?: string;
-  previewPath?: string;
-  workshopId?: string;
-  title?: string;
-  weFile?: string;
-  unsupportedReason?: string,
-  backendStatus?: string;
-  backendErrorKind?: string;
-  backendErrorMessage?: string;
-  backendErrorDetail?: string;
-  backendFailedAt?: string;
-  applyAvailability?: ApplyAvailability;
-  applyBackend?: string;
-  applyReason?: string;
-  applyActions?: ApplyActionDTO[];
-  rendererCompatibility?: string;
+export function createFirstRunSuggestionApi(invokeFn: InvokeFn = invoke) {
+  return {
+    firstRunSourceSuggestions: (): Promise<FirstRunSourceSuggestionDTO[]> =>
+      invokeFn<FirstRunSourceSuggestionDTO[]>('first_run_source_suggestions'),
+  };
 }
 
 export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
   linuxWallpaperEngineStatus: (): Promise<LinuxWallpaperEngineStatusDTO> =>
     invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
+  ...createRendererStatusApi(),
 
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   applyAction: (request: ApplyRequestDTO): Promise<CommandResult> =>
     invoke<CommandResult>('apply_action', { request }),
+  displaysList: (): Promise<DisplayListDTO> => invoke<DisplayListDTO>('displays_list'),
+  displayStateList: (): Promise<DisplayStateDTO[]> =>
+    invoke<DisplayStateDTO[]>('display_state_list'),
+  ...createRuntimeObservationApi(),
+  applyToDisplay: (request: TargetedApplyRequestDTO): Promise<CommandResult> =>
+    invoke<CommandResult>('apply_to_display', { request }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
   weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
+  restoreDisplays: (request?: TargetedRestoreRequestDTO): Promise<CommandResult> =>
+    invoke<CommandResult>('restore_displays', { request }),
 
   libraryCount: (): Promise<LibraryCountDTO> =>
     invoke<LibraryCountDTO>('library_count').catch(() => ({ total: 0, images: 0, gifs: 0, videos: 0 })),
@@ -183,6 +107,7 @@ export const api = {
     limit: number,
   ): Promise<LibraryPageDTO> =>
     invoke<LibraryPageDTO>('library_page_gui', { filter, sort, search, offset, limit }),
+  ...createLibraryBrowserApi(),
 
   rescan: (): Promise<CommandResult> => invoke<CommandResult>('rescan'),
   scanProgress: (): Promise<ScanProgressDTO> => invoke<ScanProgressDTO>('scan_progress'),
@@ -195,13 +120,11 @@ export const api = {
   favoriteAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_add', { path }),
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
 
-  historyPage: (offset: number, limit: number): Promise<LibraryPageDTO> =>
-    invoke<LibraryPageDTO>('history_page', { offset, limit }),
-  historyClear: (): Promise<CommandResult> => invoke<CommandResult>('history_clear'),
-
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
+  ...createFirstRunSuggestionApi(),
   sourceAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_add', { path }),
   sourceRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_remove', { path }),
+  ...createSourceMutationApi(),
   validateSources: (): Promise<CommandResult> => invoke<CommandResult>('validate_sources'),
   removeMissingSources: (): Promise<CommandResult> => invoke<CommandResult>('remove_missing_sources'),
   scanSteamWorkshop: (): Promise<CommandResult> => invoke<CommandResult>('scan_steam_workshop'),
@@ -235,4 +158,4 @@ export const api = {
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),
 
   exportDiagnostics: (): Promise<CommandResult> => invoke<CommandResult>('export_diagnostics'),
-};
+} satisfies WallpaperConsoleApi;

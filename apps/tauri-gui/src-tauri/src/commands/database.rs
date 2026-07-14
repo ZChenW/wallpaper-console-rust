@@ -1,6 +1,27 @@
 use std::path::PathBuf;
 
-use super::common::{fail, ok, storage, CommandResult};
+use super::common::{fail, ok, storage, CommandErrorDto, CommandResult};
+
+fn integrity_failure(errors: Vec<String>) -> CommandResult {
+    let detail = format!(
+        "VERIFY FAILED: {} mismatch(es) found: {}",
+        errors.len(),
+        errors.join(", ")
+    );
+    CommandResult {
+        success: false,
+        stdout: String::new(),
+        stderr: detail.clone(),
+        exit_code: 1,
+        error: Some(CommandErrorDto {
+            kind: "sqlite_integrity".into(),
+            message: "Library database integrity check failed".into(),
+            detail: Some(detail),
+            recoverable: true,
+            suggestion: Some("Rebuild the library index with Repair library.".into()),
+        }),
+    }
+}
 
 #[tauri::command]
 pub async fn migrate_to_sqlite() -> CommandResult {
@@ -35,11 +56,7 @@ pub async fn sqlite_verify() -> CommandResult {
             Ok(wc_storage::sqlite::VerifyResult::OkWithWarnings(warnings)) => {
                 ok(format!("VERIFY OK WITH WARNINGS\n{}", warnings.join("\n")))
             }
-            Ok(wc_storage::sqlite::VerifyResult::Failed(errors)) => fail(format!(
-                "VERIFY FAILED: {} mismatch(es) found: {}",
-                errors.len(),
-                errors.join(", ")
-            )),
+            Ok(wc_storage::sqlite::VerifyResult::Failed(errors)) => integrity_failure(errors),
             Err(e) => fail(e.to_string()),
         },
         Err(e) => fail(e),
@@ -90,6 +107,28 @@ pub async fn sqlite_restore(path: String) -> CommandResult {
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::integrity_failure;
+
+    #[test]
+    fn confirmed_integrity_failures_have_a_dedicated_error_kind() {
+        let result = integrity_failure(vec!["schema: missing index".into()]);
+
+        assert!(!result.success);
+        assert_eq!(
+            result.error.as_ref().map(|error| error.kind.as_str()),
+            Some("sqlite_integrity")
+        );
+        assert!(result.stderr.contains("schema: missing index"));
+        assert!(result
+            .error
+            .as_ref()
+            .and_then(|error| error.detail.as_deref())
+            .is_some_and(|detail| detail.contains("schema: missing index")));
+    }
 }
 
 #[tauri::command]

@@ -5,6 +5,8 @@ pub mod sqlite;
 pub mod tsv;
 pub mod we_compat;
 
+pub use sqlite::{SourceAvailability, SourceKind, SourceRecord};
+
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::StorageBackend;
@@ -29,10 +31,7 @@ impl StorageApi {
     pub fn try_new(cd: ConfigDir) -> Result<Self, WcError> {
         cd.init()?;
 
-        if !cd.db_path().exists() {
-            sqlite::migrate_to_sqlite(&cd)?;
-        }
-        sqlite::ensure_sqlite_db(&cd);
+        sqlite::ensure_or_import_legacy_flat(&cd)?;
         wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
         sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
 
@@ -54,7 +53,6 @@ impl StorageApi {
         self.mode = StorageBackend::Sqlite;
         wc_core::config::write_config_value(&self.cd.path, "storage_backend", "sqlite").ok();
         sqlite::sqlite_config_set(&self.cd, "storage_backend", "sqlite").ok();
-        sqlite::ensure_sqlite_db(&self.cd);
     }
 
     // ── Reads (always SQLite) ─────────────────────────────────────────
@@ -66,13 +64,24 @@ impl StorageApi {
         self._sqlite_config_get(key, default)
     }
 
+    /// Load renderer preferences once and clamp them to the compatibility
+    /// matrix defined by `wc-core`.
+    pub fn backend_routing(&self) -> wc_core::backend_routing::BackendRouting {
+        let image = self.config_get("image_backend", "awww");
+        let gif = self.config_get("gif_backend", "awww");
+        let video = self.config_get("video_backend", "mpvpaper");
+        wc_core::backend_routing::BackendRouting::from_raw(&image, &gif, &video)
+    }
+
     fn _sqlite_config_get(&self, key: &str, default: &str) -> String {
-        sqlite::ensure_sqlite_db(&self.cd);
+        if sqlite::try_ensure_sqlite_db(&self.cd).is_err() {
+            return default.to_string();
+        }
         let db = self.cd.db_path();
         if !db.exists() {
             return default.to_string();
         }
-        match rusqlite::Connection::open(&db) {
+        match sqlite::open_runtime_connection(&self.cd) {
             Ok(conn) => conn
                 .query_row("SELECT value FROM config WHERE key=?1", [key], |row| {
                     row.get::<_, String>(0)
@@ -83,32 +92,12 @@ impl StorageApi {
     }
 
     pub fn sources_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut stmt = conn
-            .prepare("SELECT path FROM sources ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let normalized: Vec<String> = rows
-            .into_iter()
-            .map(|p| wc_scan::normalize_source_path(&p))
-            .collect();
-        let mut seen = std::collections::HashSet::new();
-        Ok(normalized
-            .into_iter()
-            .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect())
+        sqlite::source_paths_list_compat(&self.cd)
     }
 
     pub fn favorites_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM favorites ORDER BY path")
             .map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -120,29 +109,9 @@ impl StorageApi {
         Ok(result)
     }
 
-    pub fn history_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut stmt = conn
-            .prepare("SELECT path FROM history ORDER BY id DESC")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let rows: Vec<String> = stmt
-            .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        let mut seen = std::collections::HashSet::new();
-        Ok(rows
-            .into_iter()
-            .filter(|p| seen.insert(flat::try_canonicalize(p)))
-            .collect())
-    }
-
     pub fn current_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
                 row.get(0)
@@ -151,9 +120,8 @@ impl StorageApi {
     }
 
     pub fn last_backend_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::ensure_sqlite_db(&self.cd);
-        let conn = rusqlite::Connection::open(self.cd.db_path())
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row(
                 "SELECT value FROM state WHERE key='last_backend'",
@@ -173,13 +141,47 @@ impl StorageApi {
     }
 
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
-        let path = wc_scan::normalize_source_path(path);
-        sqlite::sqlite_source_add(&self.cd, &path)
+        sqlite::sqlite_source_add(&self.cd, path)
     }
 
     pub fn sources_remove(&self, path: &str) -> Result<bool, WcError> {
-        let path = wc_scan::normalize_source_path(path);
-        sqlite::sqlite_source_remove_canonical(&self.cd, &path)
+        sqlite::sqlite_source_remove_canonical(&self.cd, path)
+    }
+
+    pub fn source_records(&self) -> Result<Vec<sqlite::SourceRecord>, WcError> {
+        sqlite::sources_list_typed(&self.cd)
+    }
+
+    pub fn source_create(&self, path: &str) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_create(&self.cd, path).map(|(source, _)| source)
+    }
+
+    pub fn source_rename(
+        &self,
+        id: i64,
+        display_name: &str,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_rename(&self.cd, id, display_name)
+    }
+
+    pub fn source_set_recursive(
+        &self,
+        id: i64,
+        recursive: bool,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_set_recursive(&self.cd, id, recursive)
+    }
+
+    pub fn source_set_availability(
+        &self,
+        id: i64,
+        availability: sqlite::SourceAvailability,
+    ) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_set_availability(&self.cd, id, availability)
+    }
+
+    pub fn source_remove_by_id(&self, id: i64) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_remove_by_id(&self.cd, id)
     }
 
     pub fn favorites_add(&self, path: &str) -> Result<bool, WcError> {
@@ -188,15 +190,6 @@ impl StorageApi {
 
     pub fn favorites_remove(&self, path: &str) -> Result<(), WcError> {
         sqlite::sqlite_favorite_remove(&self.cd, path)
-    }
-
-    pub fn history_add(&self, path: &str, backend: &str) -> Result<(), WcError> {
-        let canon = flat::try_canonicalize(path);
-        sqlite::sqlite_history_add(&self.cd, &canon, backend, 100)
-    }
-
-    pub fn history_clear(&self) -> Result<(), WcError> {
-        sqlite::sqlite_history_clear(&self.cd)
     }
 
     pub fn current_write(&self, path: &str) -> Result<(), WcError> {
@@ -212,11 +205,115 @@ impl StorageApi {
         sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
         Ok(())
     }
+
+    // ── Per-display wallpaper state ───────────────────────────────────
+
+    pub fn display_state_get(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+    ) -> Result<Option<sqlite::DisplayStateRow>, WcError> {
+        sqlite::display_state_get_cd(&self.cd, target)
+    }
+
+    pub fn display_state_list(&self) -> Result<Vec<sqlite::DisplayStateRow>, WcError> {
+        sqlite::display_state_list_cd(&self.cd)
+    }
+
+    pub fn display_state_upsert(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+        wallpaper_path: &str,
+        backend: &str,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_upsert_cd(&self.cd, target, wallpaper_path, backend)
+    }
+
+    pub fn display_state_delete(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+    ) -> Result<bool, WcError> {
+        sqlite::display_state_delete_cd(&self.cd, target)
+    }
+
+    pub fn display_state_replace_all(
+        &self,
+        rows: &[(sqlite::DisplayStateTarget, String, String)],
+    ) -> Result<(), WcError> {
+        sqlite::display_state_replace_all_cd(&self.cd, rows)
+    }
+
+    /// Same as [`Self::display_state_replace_all`] with a pre-commit test seam.
+    pub fn display_state_replace_all_seam(
+        &self,
+        rows: &[(sqlite::DisplayStateTarget, String, String)],
+        before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_replace_all_cd_with_seam(&self.cd, rows, before_commit)
+    }
+
+    /// Atomically commit All Displays display_state (plus retained disconnected
+    /// named rows) and optionally legacy `current` / `last_backend` keys.
+    pub fn display_state_commit_all_displays_with_legacy(
+        &self,
+        wallpaper_path: &str,
+        backend: &str,
+        retain_rows: &[(sqlite::DisplayStateTarget, String, String)],
+        sync_legacy: bool,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_commit_all_displays_with_legacy_cd(
+            &self.cd,
+            wallpaper_path,
+            backend,
+            retain_rows,
+            sync_legacy,
+            None,
+        )
+    }
+
+    /// Same as [`Self::display_state_commit_all_displays_with_legacy`] with a
+    /// pre-commit seam for failure-injection tests.
+    pub fn display_state_commit_all_displays_with_legacy_seam(
+        &self,
+        wallpaper_path: &str,
+        backend: &str,
+        retain_rows: &[(sqlite::DisplayStateTarget, String, String)],
+        sync_legacy: bool,
+        before_commit: &mut dyn FnMut() -> Result<(), WcError>,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_commit_all_displays_with_legacy_cd(
+            &self.cd,
+            wallpaper_path,
+            backend,
+            retain_rows,
+            sync_legacy,
+            Some(before_commit),
+        )
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn insert_history(cd: &ConfigDir, path: &str, backend: &str) {
+        let conn = sqlite::open_runtime_connection(cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(cd: &ConfigDir) -> Vec<(String, String)> {
+        let conn = sqlite::open_runtime_connection(cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
 
     #[test]
     fn sqlite_mode_auto_migrates_legacy_flat_state() {
@@ -241,9 +338,128 @@ mod tests {
             vec!["/walls/a.jpg".to_string()]
         );
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/b.jpg".to_string()]
+            history_rows(&storage.cd),
+            vec![("/walls/b.jpg".to_string(), "unknown".to_string())]
         );
+        assert_eq!(
+            storage.current_read().unwrap().as_deref(),
+            Some("/walls/current.jpg")
+        );
+        assert_eq!(
+            storage.last_backend_read().unwrap().as_deref(),
+            Some("awww")
+        );
+    }
+
+    #[test]
+    fn try_new_surfaces_fallible_sqlite_bootstrap_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute("CREATE TABLE wallpapers_fts(dummy TEXT)", [])
+            .unwrap();
+        drop(conn);
+
+        match StorageApi::try_new(cd) {
+            Ok(_) => panic!("bootstrap errors must surface"),
+            Err(err) => assert!(
+                err.to_string().contains("wallpapers_fts") || err.to_string().contains("table"),
+                "{err}"
+            ),
+        }
+    }
+
+    #[test]
+    fn result_reads_reject_future_schema_without_changing_marker_or_data() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = sqlite::CURRENT_SCHEMA_VERSION + 1;
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        sqlite::create_schema(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/walls/sentinel.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES ('/walls/sentinel.jpg', 'awww')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO state (key, value) VALUES ('current', '/walls/sentinel.jpg')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+        let storage = StorageApi {
+            cd,
+            mode: StorageBackend::Sqlite,
+        };
+
+        let results = [
+            storage.favorites_list().map(|_| ()),
+            storage.current_read().map(|_| ()),
+            storage.last_backend_read().map(|_| ()),
+        ];
+
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        let sentinel_rows: i64 = conn
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM favorites WHERE path = '/walls/sentinel.jpg') +
+                    (SELECT COUNT(*) FROM history WHERE path = '/walls/sentinel.jpg') +
+                    (SELECT COUNT(*) FROM state
+                     WHERE key = 'current' AND value = '/walls/sentinel.jpg')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        for result in results {
+            let error = result.expect_err("future-schema Result read must be rejected");
+            assert!(
+                error.to_string().contains("newer") || error.to_string().contains("version"),
+                "{error}"
+            );
+        }
+        assert_eq!(version, future_version);
+        assert_eq!(sentinel_rows, 3);
+    }
+
+    #[test]
+    fn storage_api_migrates_legacy_pair_into_all_displays_without_deleting_keys() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = StorageApi::new(cd);
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+
+        // Re-open path that runs ensure_sqlite_db / create_schema migration.
+        let storage = StorageApi::new(ConfigDir {
+            path: storage.cd.path.clone(),
+        });
+
+        let row = storage
+            .display_state_get(&sqlite::DisplayStateTarget::AllDisplays)
+            .unwrap()
+            .expect("All Displays migrated");
+        assert_eq!(row.wallpaper_path, "/walls/current.jpg");
+        assert_eq!(row.backend, "awww");
         assert_eq!(
             storage.current_read().unwrap().as_deref(),
             Some("/walls/current.jpg")
@@ -359,7 +575,7 @@ mod tests {
         let root_str = root.to_string_lossy().to_string();
         let proj_str = project.to_string_lossy().to_string();
 
-        flat::write_lines(&cd.sources_path(), &[proj_str.clone()]).unwrap();
+        flat::write_lines(&cd.sources_path(), std::slice::from_ref(&proj_str)).unwrap();
 
         let s = StorageApi::new(cd);
         assert!(s.sources_remove(&root_str).unwrap());
@@ -382,15 +598,15 @@ mod tests {
 
         storage.current_write("/walls/current.jpg").unwrap();
         storage.last_backend_write("awww").unwrap();
-        storage.history_add("/walls/current.jpg", "awww").unwrap();
+        insert_history(&storage.cd, "/walls/current.jpg", "awww");
 
         storage.runtime_state_clear().unwrap();
 
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
         assert_eq!(
-            storage.history_list().unwrap(),
-            vec!["/walls/current.jpg".to_string()]
+            history_rows(&storage.cd),
+            vec![("/walls/current.jpg".to_string(), "awww".to_string())]
         );
     }
 
@@ -519,7 +735,7 @@ mod tests {
         assert!(storage.cd.db_path().exists());
         assert_eq!(storage.sources_list().unwrap(), Vec::<String>::new());
         assert_eq!(storage.favorites_list().unwrap(), Vec::<String>::new());
-        assert_eq!(storage.history_list().unwrap(), Vec::<String>::new());
+        assert!(history_rows(&storage.cd).is_empty());
         assert_eq!(storage.current_read().unwrap(), None);
         assert_eq!(storage.last_backend_read().unwrap(), None);
     }
@@ -600,6 +816,32 @@ mod tests {
         assert_eq!(
             storage.config_get("linux_wallpaperengine_target_mode", "missing"),
             "auto"
+        );
+    }
+
+    #[test]
+    fn backend_routing_reads_and_safely_normalizes_all_renderer_preferences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageApi::new(ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage.config_set("image_backend", "mpvpaper").unwrap();
+        storage.config_set("gif_backend", "invalid").unwrap();
+        storage.config_set("video_backend", "awww").unwrap();
+
+        let routing = storage.backend_routing();
+
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Image),
+            wc_core::types::Backend::Mpvpaper
+        );
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Gif),
+            wc_core::types::Backend::Awww
+        );
+        assert_eq!(
+            routing.backend_for(wc_core::types::FileType::Video),
+            wc_core::types::Backend::Mpvpaper
         );
     }
 

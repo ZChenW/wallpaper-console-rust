@@ -6,10 +6,14 @@ use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod apply_stage;
+pub mod capability;
+pub mod display_executor;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
 pub mod runtime;
+pub mod runtime_observation;
+pub mod target_commands;
 pub mod visual_handoff;
 
 mod awww;
@@ -17,14 +21,19 @@ mod debug_log;
 mod mpvpaper;
 mod restore;
 
+pub use display_executor::{
+    execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
+    DisplayExecReport,
+};
 pub use restore::{restore, restore_clean};
+pub use target_commands::ExecutionScope;
 
 use awww::{
     build_awww_img_command, build_awww_instant_command, normalize_awww_resize,
     normalize_awww_transition_type, stop_awww,
 };
 use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
-use mpvpaper::normalize_mpvpaper_options;
+use mpvpaper::{build_launch_command, normalize_mpvpaper_options};
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
@@ -95,7 +104,6 @@ pub(crate) fn execute_stop_plan_with_runtime(
 fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Result<(), WcError> {
     s.current_write(state_path)?;
     s.last_backend_write(backend.as_str())?;
-    s.history_add(state_path, backend.as_str())?;
     Ok(())
 }
 
@@ -158,9 +166,19 @@ pub(crate) fn apply_wallpaper_with_runtime(
         return Err(WcError::NotRegularFile(p.to_path_buf()));
     }
 
+    runtime.ensure_backend_available(backend, s)?;
+
     let previous_backend_raw = s.last_backend_read()?.unwrap_or_default();
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
+    if visual.fallback_stage != visual_handoff::FallbackStage::None {
+        runtime.ensure_backend_available(Backend::Awww, s)?;
+    }
+    let previous_mpvpaper_pids = if backend == Backend::Mpvpaper {
+        runtime.mpvpaper_pids()?
+    } else {
+        Vec::new()
+    };
 
     let timing_start = std::time::Instant::now();
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
@@ -209,6 +227,8 @@ pub(crate) fn apply_wallpaper_with_runtime(
         }
     }
 
+    let mut mpvpaper_launcher_succeeded = false;
+    let mut launched_mpvpaper_pid = None;
     let target_result = if backend == Backend::Awww && fallback_ok {
         Ok(())
     } else {
@@ -275,15 +295,18 @@ pub(crate) fn apply_wallpaper_with_runtime(
                 let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
                 let opts = normalize_mpvpaper_options(&opts_raw);
                 let output = s.config_get("mpvpaper_output", "*");
-                let mut cmd = Command::new("setsid");
-                cmd.args(["-f", "mpvpaper", "--fork", "-o", opts, &output, "--", path]);
+                let mut cmd = build_launch_command(opts, &output, path);
                 let status = runtime
                     .command_status(&mut cmd)
                     .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
                 if !status.success() {
-                    return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()));
+                    Err(WcError::Other("mpvpaper failed to apply wallpaper".into()))
+                } else {
+                    mpvpaper_launcher_succeeded = true;
+                    runtime
+                        .wait_for_mpvpaper_ready(&previous_mpvpaper_pids)
+                        .map(|pid| launched_mpvpaper_pid = Some(pid))
                 }
-                Ok(())
             }
             Backend::LinuxWallpaperEngine => {
                 let project = linux_wallpaperengine::project_from_path(path)?;
@@ -304,6 +327,9 @@ pub(crate) fn apply_wallpaper_with_runtime(
     let target_elapsed = timing_start.elapsed();
 
     if let Err(e) = target_result {
+        if mpvpaper_launcher_succeeded {
+            runtime.stop_mpvpaper();
+        }
         let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
             s,
             lifecycle.previous,
@@ -326,6 +352,29 @@ pub(crate) fn apply_wallpaper_with_runtime(
         std::thread::sleep(std::time::Duration::from_millis(
             lifecycle.post_success_settle_ms,
         ));
+    }
+
+    if let Some(pid) = launched_mpvpaper_pid {
+        let readiness_error = match runtime.mpvpaper_pid_running(pid) {
+            Ok(true) => None,
+            Ok(false) => Some(WcError::Other(
+                "mpvpaper renderer exited before startup settled".into(),
+            )),
+            Err(error) => Some(error),
+        };
+        if let Some(error) = readiness_error {
+            runtime.stop_mpvpaper();
+            let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
+                s,
+                lifecycle.previous,
+                fallback_ok,
+                runtime,
+            );
+            if let Some(msg) = rollback_msg {
+                write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
+            }
+            return Err(error);
+        }
     }
 
     if fallback_ok && visual.stop_fallback_after_target_settle {
@@ -469,6 +518,26 @@ mod tests {
         (tmp, s)
     }
 
+    fn insert_history(s: &StorageApi, path: &str, backend: &str) {
+        let conn = wc_storage::sqlite::open_runtime_connection(&s.cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(s: &StorageApi) -> Vec<(String, String)> {
+        let conn = wc_storage::sqlite::open_runtime_connection(&s.cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     fn apply_with_fake_runtime(
         s: &StorageApi,
         path: &str,
@@ -498,10 +567,9 @@ mod tests {
         // Simulate a previous session having written a WE Web project as current.
         s.current_write(&project.to_string_lossy()).unwrap();
         s.last_backend_write("unsupported").unwrap();
-        s.history_add(&project.to_string_lossy(), "unsupported")
-            .unwrap();
+        insert_history(&s, &project.to_string_lossy(), "unsupported");
 
-        let history_before = s.history_list().unwrap().len();
+        let history_before = history_rows(&s);
 
         let err = restore(&s).unwrap_err();
         let msg = err.to_string();
@@ -522,7 +590,7 @@ mod tests {
         );
         // No new history entry added by the failed restore.
         assert_eq!(
-            s.history_list().unwrap().len(),
+            history_rows(&s),
             history_before,
             "failed restore should not add history"
         );
@@ -670,11 +738,13 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn apply_wallpaper_lwe_writes_state_after_renderer_survives() {
+    fn apply_wallpaper_lwe_updates_state_without_appending_history() {
         use std::os::unix::fs::PermissionsExt;
 
         let (tmp, s) = temp_storage();
         s.last_backend_write("awww").unwrap();
+        insert_history(&s, "legacy.jpg", "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-state-write");
         std::fs::write(&bin, "#!/bin/sh\nsleep 5\n").unwrap();
@@ -709,10 +779,7 @@ mod tests {
             s.last_backend_read().unwrap().as_deref(),
             Some(LWE_BACKEND_NAME)
         );
-        assert_eq!(
-            s.history_list().unwrap().last().cloned(),
-            Some(scene.to_string_lossy().to_string())
-        );
+        assert_eq!(history_rows(&s), history_before);
 
         let pid = s.config_get("linux_wallpaperengine_pid", "");
         if let Ok(pid) = pid.parse::<i32>() {
@@ -734,8 +801,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&old.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fail-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -769,7 +836,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -782,8 +849,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&old.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fallback-fail-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -819,7 +886,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -832,8 +899,8 @@ mod tests {
         std::fs::write(&old, b"old").unwrap();
         s.current_write(&old.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&old.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-fallback-awww-previous");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -869,7 +936,7 @@ mod tests {
             Some(old.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[cfg(unix)]
@@ -881,8 +948,8 @@ mod tests {
         let missing = tmp.path().join("missing.jpg");
         s.current_write(&missing.to_string_lossy()).unwrap();
         s.last_backend_write("awww").unwrap();
-        s.history_add(&missing.to_string_lossy(), "awww").unwrap();
-        let history_before = s.history_list().unwrap().len();
+        insert_history(&s, &missing.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
 
         let bin = tmp.path().join("test-lwe-missing-awww-state");
         std::fs::write(&bin, "#!/bin/sh\nexit 1\n").unwrap();
@@ -918,7 +985,7 @@ mod tests {
             Some(missing.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
-        assert_eq!(s.history_list().unwrap().len(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[test]
@@ -1171,6 +1238,16 @@ mod tests {
         command_output_args: Vec<Vec<String>>,
         command_status_args: Vec<Vec<String>>,
         awww_readiness_sequence: std::cell::RefCell<Vec<crate::runtime::AwwwReadiness>>,
+        running_mpvpaper_pids: Vec<u32>,
+        mpvpaper_pids_error: Option<String>,
+        mpvpaper_pids_count: usize,
+        mpvpaper_readiness_error: Option<String>,
+        mpvpaper_wait_count: usize,
+        mpvpaper_wait_previous_pids: Vec<Vec<u32>>,
+        mpvpaper_ready_pid: Option<u32>,
+        dead_mpvpaper_pids: Vec<u32>,
+        mpvpaper_pid_running_error: Option<String>,
+        mpvpaper_pid_running_checks: Vec<u32>,
     }
 
     impl crate::runtime::BackendRuntime for FakeRuntime {
@@ -1226,10 +1303,20 @@ mod tests {
 
         fn stop_mpvpaper(&mut self) {
             self.stop_mpvpaper_count += 1;
+            self.running_mpvpaper_pids.clear();
         }
 
         fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
             self.stop_lwe_count += 1;
+        }
+
+        fn apply_lwe_to_outputs(
+            &mut self,
+            _s: &wc_storage::StorageApi,
+            _project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+            _outputs: &[String],
+        ) -> Result<(), WcError> {
+            Ok(())
         }
 
         fn awww_socket_ready(&mut self) -> crate::runtime::AwwwReadiness {
@@ -1240,6 +1327,32 @@ mod tests {
                 seq[0].clone()
             } else {
                 crate::runtime::AwwwReadiness::Ready
+            }
+        }
+
+        fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
+            self.mpvpaper_pids_count += 1;
+            match &self.mpvpaper_pids_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(self.running_mpvpaper_pids.clone()),
+            }
+        }
+
+        fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
+            self.mpvpaper_wait_count += 1;
+            self.mpvpaper_wait_previous_pids
+                .push(previous_pids.to_vec());
+            match &self.mpvpaper_readiness_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(self.mpvpaper_ready_pid.unwrap_or(1)),
+            }
+        }
+
+        fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
+            self.mpvpaper_pid_running_checks.push(pid);
+            match &self.mpvpaper_pid_running_error {
+                Some(message) => Err(WcError::Other(message.clone())),
+                None => Ok(!self.dead_mpvpaper_pids.contains(&pid)),
             }
         }
 
@@ -1261,6 +1374,245 @@ mod tests {
         fn clear_awww_state_hint(&mut self) {
             self.clear_awww_state_hint_count += 1;
         }
+    }
+
+    #[test]
+    fn mpvpaper_baseline_pid_probe_failure_happens_before_pre_stop() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.png");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("awww").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "awww");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            mpvpaper_pids_error: Some("mpvpaper baseline PID probe failed".into()),
+            mpvpaper_ready_pid: Some(808),
+            ..Default::default()
+        };
+        let error = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("baseline PID probe failed"));
+        assert!(!error.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(rt.mpvpaper_pids_count, 1);
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 0);
+        assert_eq!(rt.command_status_count, 0);
+        assert_eq!(rt.mpvpaper_wait_count, 0);
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("awww"));
+        assert_eq!(history_rows(&s), history_before);
+    }
+
+    #[test]
+    fn mpvpaper_launcher_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: false,
+            running_mpvpaper_pids: vec![101],
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mpvpaper"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(history_rows(&s), history_before);
+        assert_eq!(rt.mpvpaper_wait_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+    }
+
+    #[test]
+    fn mpvpaper_readiness_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![202],
+            mpvpaper_readiness_error: Some("mpvpaper did not become ready".into()),
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("did not become ready"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(history_rows(&s), history_before);
+        assert_eq!(rt.mpvpaper_wait_count, 1);
+        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![202]]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
+    }
+
+    #[test]
+    fn mpvpaper_readiness_success_updates_state_without_appending_history() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![303],
+            mpvpaper_ready_pid: Some(404),
+            ..Default::default()
+        };
+        apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap();
+
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(next.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(history_rows(&s), history_before);
+        assert_eq!(rt.mpvpaper_wait_count, 1);
+        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![404]);
+    }
+
+    #[test]
+    fn mpvpaper_exit_after_readiness_before_commit_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![404],
+            mpvpaper_ready_pid: Some(505),
+            dead_mpvpaper_pids: vec![505],
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("mpvpaper"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(history_rows(&s), history_before);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![505]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
+    }
+
+    #[test]
+    fn mpvpaper_post_settle_probe_failure_preserves_persisted_state() {
+        let (tmp, s) = temp_storage();
+        let old = tmp.path().join("old.mp4");
+        let next = tmp.path().join("private-next.mp4");
+        std::fs::write(&old, b"old").unwrap();
+        std::fs::write(&next, b"next").unwrap();
+        s.current_write(&old.to_string_lossy()).unwrap();
+        s.last_backend_write("mpvpaper").unwrap();
+        insert_history(&s, &old.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
+
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            running_mpvpaper_pids: vec![606],
+            mpvpaper_ready_pid: Some(707),
+            mpvpaper_pid_running_error: Some("mpvpaper PID probe failed".into()),
+            ..Default::default()
+        };
+        let err = apply_with_fake_runtime(
+            &s,
+            &next.to_string_lossy(),
+            Backend::Mpvpaper,
+            None,
+            &mut rt,
+        )
+        .unwrap_err();
+
+        assert!(err.to_string().contains("probe failed"));
+        assert!(!err.to_string().contains(next.to_string_lossy().as_ref()));
+        assert_eq!(
+            s.current_read().unwrap().as_deref(),
+            Some(old.to_string_lossy().as_ref())
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
+        assert_eq!(history_rows(&s), history_before);
+        assert_eq!(rt.mpvpaper_pid_running_checks, vec![707]);
+        assert_eq!(rt.stop_mpvpaper_count, 2);
     }
 
     #[test]
@@ -1563,8 +1915,8 @@ mod tests {
         std::fs::write(&img, b"png").unwrap();
         s.current_write(&img.to_string_lossy()).unwrap();
         s.last_backend_write("mpvpaper").unwrap();
-        s.history_add(&img.to_string_lossy(), "mpvpaper").unwrap();
-        let history_before = s.history_list().unwrap();
+        insert_history(&s, &img.to_string_lossy(), "mpvpaper");
+        let history_before = history_rows(&s);
 
         let mut rt = FakeRuntime {
             command_output_success: false,
@@ -1583,7 +1935,7 @@ mod tests {
             Some(img.to_string_lossy().as_ref())
         );
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
-        assert_eq!(s.history_list().unwrap(), history_before);
+        assert_eq!(history_rows(&s), history_before);
     }
 
     #[test]

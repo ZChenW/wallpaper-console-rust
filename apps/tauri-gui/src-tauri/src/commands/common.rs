@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::sync::{Mutex, OnceLock};
 
 use wc_core::types::{FileType, WallpaperEntry};
 use wc_storage::StorageApi;
@@ -45,8 +45,15 @@ pub struct BackendStatusDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SourceDto {
+    pub id: i64,
     pub path: String,
+    pub display_name: String,
+    pub kind: String,
+    pub recursive: bool,
+    pub availability: String,
+    pub added_at: String,
     pub exists: bool,
+    #[serde(rename = "isWE")]
     pub is_we: bool,
     pub label: String,
 }
@@ -106,6 +113,8 @@ pub struct ApplyResultDto {
     pub backend: String,
     pub file_type: String,
     pub preview: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applied_outputs: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +131,44 @@ pub struct LibraryCountDto {
 pub struct LibraryPageDto {
     pub total: usize,
     pub items: Vec<WallpaperDto>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserQueryDto {
+    pub source_id: Option<i64>,
+    pub type_filter: String,
+    pub favorites_only: bool,
+    pub search: String,
+    pub sort: String,
+    pub offset: usize,
+    pub limit: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserSourceDto {
+    pub id: i64,
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserItemDto {
+    #[serde(flatten)]
+    pub wallpaper: WallpaperDto,
+    pub wallpaper_id: i64,
+    pub favorite: bool,
+    pub author: Option<String>,
+    pub added_at: String,
+    pub sources: Vec<LibraryBrowserSourceDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserPageDto {
+    pub total: usize,
+    pub items: Vec<LibraryBrowserItemDto>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -173,6 +220,7 @@ pub struct LibrarySourceStatusDto {
     pub sqlite_ready: bool,
     pub sqlite_rows: usize,
     pub tsv_rows: usize,
+    pub source_count: usize,
     pub stale: bool,
     pub message: String,
 }
@@ -189,9 +237,47 @@ pub struct WeDebugInfoDto {
 
 pub type CommandResult = CommandResultDto;
 
-pub fn storage() -> Result<StorageApi, String> {
-    let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
-    StorageApi::try_new(cd).map_err(|e| e.to_string())
+struct StorageCell {
+    storage: OnceLock<StorageApi>,
+    initialization_lock: Mutex<()>,
+}
+
+impl StorageCell {
+    const fn new() -> Self {
+        Self {
+            storage: OnceLock::new(),
+            initialization_lock: Mutex::new(()),
+        }
+    }
+
+    fn get_or_init_with(
+        &self,
+        initializer: impl FnOnce() -> Result<StorageApi, String>,
+    ) -> Result<&StorageApi, String> {
+        if let Some(storage) = self.storage.get() {
+            return Ok(storage);
+        }
+
+        let _initialization_guard = self
+            .initialization_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(storage) = self.storage.get() {
+            return Ok(storage);
+        }
+
+        let storage = initializer()?;
+        Ok(self.storage.get_or_init(|| storage))
+    }
+}
+
+static STORAGE: StorageCell = StorageCell::new();
+
+pub fn storage() -> Result<&'static StorageApi, String> {
+    STORAGE.get_or_init_with(|| {
+        let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
+        StorageApi::try_new(cd).map_err(|e| e.to_string())
+    })
 }
 
 pub fn ok(stdout: impl Into<String>) -> CommandResultDto {
@@ -302,31 +388,15 @@ pub fn format_bytes(bytes: u64) -> String {
     }
 }
 
-pub fn source_label(path: &str) -> String {
-    let p = Path::new(path);
-    if wc_scan::is_wallpaper_engine_source(path) {
-        let has_workshop_id = path
-            .find("/steamapps/workshop/content/431960/")
-            .map(|pos| {
-                let after = &path[pos + "/steamapps/workshop/content/431960/".len()..];
-                let first_seg = after.split('/').next().unwrap_or("");
-                !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit())
-            })
-            .unwrap_or(false);
-        if has_workshop_id {
-            return p
-                .file_name()
-                .map(|s| format!("Wallpaper Engine {}", s.to_string_lossy()))
-                .unwrap_or_else(|| "Wallpaper Engine".into());
-        }
-        return "Wallpaper Engine Workshop".into();
-    }
-    p.file_name()
-        .map(|s| s.to_string_lossy().to_string())
-        .unwrap_or_else(|| path.to_string())
+#[cfg(test)]
+pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
+    dto_from_entry_with_routing(entry, &wc_core::backend_routing::BackendRouting::default())
 }
 
-pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
+pub fn dto_from_entry_with_routing(
+    entry: WallpaperEntry,
+    routing: &wc_core::backend_routing::BackendRouting,
+) -> WallpaperDto {
     let project = entry.project.clone();
 
     let cached_failure = if entry.file_type == FileType::WeScene {
@@ -339,16 +409,22 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
 
     let backend_failed = cached_failure.is_some();
     let error_kind = cached_failure.as_ref().map(|f| f.error_kind.as_str());
-    let plan = wc_app::apply_plan::plan_for_entry_with_kind(&entry, backend_failed, error_kind);
+    let plan = wc_app::apply_plan::plan_for_entry_with_kind_and_routing(
+        &entry,
+        backend_failed,
+        error_kind,
+        routing,
+    );
     let renderer_compatibility = plan.compatibility.as_ref().map(|c| match c {
         wc_app::apply_plan::CompatibilityKind::NativeScene { disclaimer } => disclaimer.clone(),
     });
+    let effective_backend = plan.backend.unwrap_or(entry.backend);
 
     let mut dto = WallpaperDto {
         path: entry.path.to_string(),
         file_type: entry.file_type.as_str().to_string(),
         ext: entry.ext,
-        backend: entry.backend.as_str().to_string(),
+        backend: effective_backend.as_str().to_string(),
         size: entry.size,
         mtime: entry.mtime,
         resolution: entry.resolution,
@@ -393,10 +469,102 @@ pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
-    use std::sync::Mutex;
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Barrier,
+    };
     use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn dto_apply_plan_uses_normalized_runtime_routing() {
+        let entry = WallpaperEntry {
+            path: Utf8PathBuf::from("/walls/still.jpg"),
+            file_type: FileType::Image,
+            ext: "jpg".into(),
+            backend: Backend::Awww,
+            size: 1,
+            mtime: 1,
+            resolution: "1920x1080".into(),
+            project: None,
+        };
+        let routing =
+            wc_core::backend_routing::BackendRouting::from_raw("mpvpaper", "awww", "mpvpaper");
+
+        let dto = dto_from_entry_with_routing(entry, &routing);
+
+        assert_eq!(dto.backend, "mpvpaper");
+        assert_eq!(dto.apply_backend.as_deref(), Some("mpvpaper"));
+    }
+
+    #[test]
+    fn storage_cell_retries_after_initialization_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+
+        let first = cell.get_or_init_with(|| {
+            initializer_calls.fetch_add(1, Ordering::SeqCst);
+            Err("transient initialization error".to_string())
+        });
+        assert_eq!(
+            first.err().as_deref(),
+            Some("transient initialization error")
+        );
+
+        let second = cell
+            .get_or_init_with(|| {
+                initializer_calls.fetch_add(1, Ordering::SeqCst);
+                StorageApi::try_new(wc_core::ConfigDir {
+                    path: tmp.path().join("config"),
+                })
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let third = cell
+            .get_or_init_with(|| panic!("successful initialization should be reused"))
+            .unwrap();
+
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 2);
+        assert!(std::ptr::eq(second, third));
+    }
+
+    #[test]
+    fn storage_cell_initializes_once() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+        let barrier = Barrier::new(16);
+
+        let handles = std::thread::scope(|scope| {
+            let mut threads = Vec::with_capacity(16);
+            for _ in 0..16 {
+                let config_path = tmp.path().join("config");
+                let cell = &cell;
+                let initializer_calls = &initializer_calls;
+                let barrier = &barrier;
+                threads.push(scope.spawn(move || {
+                    barrier.wait();
+                    let storage = cell
+                        .get_or_init_with(|| {
+                            initializer_calls.fetch_add(1, Ordering::SeqCst);
+                            StorageApi::try_new(wc_core::ConfigDir { path: config_path })
+                                .map_err(|e| e.to_string())
+                        })
+                        .unwrap();
+                    storage as *const StorageApi as usize
+                }));
+            }
+            threads
+                .into_iter()
+                .map(|thread| thread.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 1);
+        assert!(handles.windows(2).all(|pair| pair[0] == pair[1]));
+    }
 
     #[test]
     fn dto_from_entry_maps_renderer_limitation_from_we_compat() {

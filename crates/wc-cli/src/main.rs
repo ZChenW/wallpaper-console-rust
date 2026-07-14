@@ -20,6 +20,12 @@ pub(crate) enum Commands {
     // ── Wallpaper ────────────────────────────────────────────────────
     Apply {
         file: String,
+        /// Apply to one connected output, or `all` for an explicit all-display plan.
+        #[arg(long)]
+        target: Option<String>,
+        /// Complete connected-output set. Repeat for multiple outputs; omit to query Wayland.
+        #[arg(long = "output")]
+        outputs: Vec<String>,
     },
     Inspect {
         path: String,
@@ -27,6 +33,21 @@ pub(crate) enum Commands {
     Stop,
     Status,
     Restore,
+    /// Print connected display outputs as JSON.
+    Displays,
+    /// Print persisted per-display wallpaper state as JSON.
+    #[command(name = "display-state")]
+    DisplayState,
+    /// Restore persisted assignments for connected or explicitly supplied outputs.
+    #[command(name = "restore-displays")]
+    RestoreDisplays {
+        /// Connected output name. Repeat for multiple outputs; omit to query Wayland.
+        #[arg(long = "output")]
+        outputs: Vec<String>,
+    },
+    /// Restore saved display assignments only when login restoration is enabled.
+    #[command(name = "restore-at-login")]
+    RestoreAtLogin,
     Browse,
     #[command(name = "browse-all")]
     BrowseAll,
@@ -79,13 +100,6 @@ pub(crate) enum Commands {
     FavoriteRemove {
         file: Option<String>,
     },
-
-    // ── History ──────────────────────────────────────────────────────
-    History,
-    #[command(name = "history-random")]
-    HistoryRandom,
-    #[command(name = "history-clear")]
-    HistoryClear,
 
     // ── Search / Sort ────────────────────────────────────────────────
     /// Search wallpapers by filename (fzf interactive).
@@ -158,8 +172,6 @@ pub(crate) enum Commands {
     },
     #[command(name = "favorites-json")]
     FavoritesJson,
-    #[command(name = "history-json")]
-    HistoryJson,
 
     // ── SQLite ───────────────────────────────────────────────────────
     #[command(name = "migrate-to-sqlite")]
@@ -184,8 +196,6 @@ pub(crate) enum Commands {
     SqliteSourcesList,
     #[command(name = "sqlite-favorites-list")]
     SqliteFavoritesList,
-    #[command(name = "sqlite-history-list")]
-    SqliteHistoryList,
     #[command(name = "sqlite-current-read")]
     SqliteCurrentRead,
     #[command(name = "sqlite-last-backend-read")]
@@ -215,4 +225,115 @@ pub(crate) enum Commands {
 fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     commands::run(cli.command)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_without_target_parses_legacy_all_displays_default() {
+        let cli = Cli::try_parse_from(["wallpaper-console-rust", "apply", "/walls/a.jpg"])
+            .expect("legacy apply should still parse");
+
+        let Some(Commands::Apply { file, target, .. }) = cli.command else {
+            panic!("expected apply command");
+        };
+        assert_eq!(file, "/walls/a.jpg");
+        assert_eq!(target, None);
+    }
+
+    #[test]
+    fn apply_accepts_named_and_all_display_targets() {
+        for (raw, expected) in [("eDP-1", "eDP-1"), ("all", "all")] {
+            let cli = Cli::try_parse_from([
+                "wallpaper-console-rust",
+                "apply",
+                "/walls/a.jpg",
+                "--target",
+                raw,
+            ])
+            .expect("targeted apply should parse");
+
+            let Some(Commands::Apply { target, .. }) = cli.command else {
+                panic!("expected apply command");
+            };
+            assert_eq!(target.as_deref(), Some(expected));
+        }
+    }
+
+    #[test]
+    fn display_api_commands_parse_without_changing_legacy_restore() {
+        let displays = Cli::try_parse_from(["wallpaper-console-rust", "displays"]).unwrap();
+        assert!(matches!(displays.command, Some(Commands::Displays)));
+
+        let state = Cli::try_parse_from(["wallpaper-console-rust", "display-state"]).unwrap();
+        assert!(matches!(state.command, Some(Commands::DisplayState)));
+
+        let restore = Cli::try_parse_from([
+            "wallpaper-console-rust",
+            "restore-displays",
+            "--output",
+            "eDP-1",
+            "--output",
+            "HDMI-A-1",
+        ])
+        .unwrap();
+        let Some(Commands::RestoreDisplays { outputs }) = restore.command else {
+            panic!("expected restore-displays command");
+        };
+        assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
+
+        let legacy = Cli::try_parse_from(["wallpaper-console-rust", "restore"]).unwrap();
+        assert!(matches!(legacy.command, Some(Commands::Restore)));
+    }
+
+    #[test]
+    fn restore_at_login_command_parses_separately_from_manual_restore() {
+        let cli = Cli::try_parse_from(["wallpaper-console-rust", "restore-at-login"])
+            .expect("login restore should parse");
+
+        assert!(matches!(cli.command, Some(Commands::RestoreAtLogin)));
+    }
+
+    #[test]
+    fn targeted_apply_accepts_explicit_known_outputs() {
+        let cli = Cli::try_parse_from([
+            "wallpaper-console-rust",
+            "apply",
+            "/walls/video.mp4",
+            "--target",
+            "eDP-1",
+            "--output",
+            "eDP-1",
+            "--output",
+            "HDMI-A-1",
+        ])
+        .unwrap();
+
+        let Some(Commands::Apply {
+            target, outputs, ..
+        }) = cli.command
+        else {
+            panic!("expected apply command");
+        };
+        assert_eq!(target.as_deref(), Some("eDP-1"));
+        assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
+    }
+
+    #[test]
+    fn removed_history_commands_are_not_user_facing_cli_commands() {
+        for command in [
+            "history",
+            "history-random",
+            "history-clear",
+            "history-json",
+            "sqlite-history-list",
+        ] {
+            assert!(
+                Cli::try_parse_from(["wallpaper-console-rust", command]).is_err(),
+                "{command} must no longer be accepted"
+            );
+        }
+    }
 }

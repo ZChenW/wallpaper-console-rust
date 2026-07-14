@@ -1,4 +1,9 @@
-import type { WallpaperDTO, ApplyActionDTO, ApplyActionKind } from '../api/bridge';
+import type {
+  ApplyActionDTO,
+  ApplyActionKind,
+  ApplyRequestKind,
+  WallpaperDTO,
+} from '../api/bridge';
 
 export type NormalizedApplyAction = {
   kind: ApplyActionKind;
@@ -60,6 +65,13 @@ export function hasEnabledAction(entry: WallpaperDTO, kind: ApplyActionKind): bo
 
 export function isApplyAvailable(entry: WallpaperDTO): boolean {
   return hasEnabledAction(entry, 'apply');
+}
+
+/** The direct card gesture, including the one explicit recovery action. */
+export function primaryApplyKind(entry: WallpaperDTO): ApplyRequestKind | null {
+  if (hasEnabledAction(entry, 'apply')) return 'apply';
+  if (hasEnabledAction(entry, 'retry_backend_apply')) return 'retry_backend_apply';
+  return null;
 }
 
 export function getActionReason(entry: WallpaperDTO, kind: ApplyActionKind): string | undefined {

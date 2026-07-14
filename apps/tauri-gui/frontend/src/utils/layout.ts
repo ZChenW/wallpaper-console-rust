@@ -1,4 +1,34 @@
-export const COL_MIN_WIDTH = 220;
+export type WallpaperCardSize = 'small' | 'medium' | 'large';
+
+export interface WallpaperCardMetrics {
+  minWidth: number;
+  rowHeight: number;
+  thumbnailHeight: number;
+}
+
+export const WALLPAPER_CARD_METRICS: Readonly<Record<WallpaperCardSize, WallpaperCardMetrics>> = {
+  small: {
+    minWidth: 176,
+    rowHeight: 164,
+    thumbnailHeight: 96,
+  },
+  medium: {
+    minWidth: 220,
+    rowHeight: 188,
+    thumbnailHeight: 120,
+  },
+  large: {
+    minWidth: 288,
+    rowHeight: 232,
+    thumbnailHeight: 160,
+  },
+};
+
+export function wallpaperCardMetrics(size: WallpaperCardSize = 'medium'): WallpaperCardMetrics {
+  return WALLPAPER_CARD_METRICS[size];
+}
+
+export const COL_MIN_WIDTH = WALLPAPER_CARD_METRICS.medium.minWidth;
 export const GRID_GAP = 10;
 
 export const MAX_SLOW_OVERSCAN_CARDS = 12;
@@ -41,6 +71,14 @@ export function calculateGridLayout(
     columnWidth,
     rowWidth: width,
   };
+}
+
+export function calculateWallpaperGridLayout(
+  width: number,
+  size: WallpaperCardSize = 'medium',
+  gap = GRID_GAP,
+): GridLayout {
+  return calculateGridLayout(width, wallpaperCardMetrics(size).minWidth, gap);
 }
 
 export function overscanRowsFor(colCount: number, fast: boolean): number {

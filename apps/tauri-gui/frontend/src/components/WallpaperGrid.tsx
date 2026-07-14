@@ -1,16 +1,31 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { WallpaperDTO } from '../api/bridge';
+import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
-import { shouldResetScroll } from './wallpaperGridHelpers';
+import {
+  anchoredScrollTopForLayoutChange,
+  shouldRequestNextPage,
+  shouldResetScroll,
+  visibleThumbnailPaths,
+} from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
-import { COL_MIN_WIDTH, calculateGridLayout, GRID_GAP, overscanRowsFor, type GridLayout } from '../utils/layout';
+import {
+  calculateWallpaperGridLayout,
+  GRID_GAP,
+  overscanRowsFor,
+  wallpaperCardMetrics,
+  type GridLayout,
+  type WallpaperCardSize,
+} from '../utils/layout';
+import type { ApplyGesture } from '../shell/shellPreferences';
 
 interface Props {
-  entries: WallpaperDTO[];
+  entries: LibraryBrowserItemDTO[];
   onApply: (path: string) => void;
+  onSelect?: (entry: WallpaperDTO) => void;
+  onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   applying: boolean;
   emptyText?: string;
   contextActions?: ContextAction[];
@@ -18,6 +33,16 @@ interface Props {
   active?: boolean;
   refreshing?: boolean;
   resetKey?: string;
+  cardSize?: WallpaperCardSize;
+  applyGesture?: ApplyGesture;
+  selectedPath?: string | null;
+  pendingPath?: string | null;
+  favoritePendingPaths?: ReadonlySet<string>;
+  currentPath?: string | null;
+  isEntryApplicable?: (entry: WallpaperDTO) => boolean;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void | Promise<void>;
 }
 
 export interface ContextAction {
@@ -27,18 +52,28 @@ export interface ContextAction {
   visible?: (entry: WallpaperDTO) => boolean;
 }
 
-const CARD_HEIGHT = 188;
 const SCROLL_IDLE_MS = 180;
 const METRICS_SAMPLE_MS = 500;
-const INITIAL_GRID_LAYOUT: GridLayout = {
-  colCount: 4,
-  columnWidth: COL_MIN_WIDTH,
-  rowWidth: COL_MIN_WIDTH * 4 + GRID_GAP * 3,
-};
+
+interface WallpaperGridLayout extends GridLayout {
+  rowHeight: number;
+}
+
+function initialGridLayout(cardSize: WallpaperCardSize): WallpaperGridLayout {
+  const metrics = wallpaperCardMetrics(cardSize);
+  return {
+    colCount: 4,
+    columnWidth: metrics.minWidth,
+    rowWidth: metrics.minWidth * 4 + GRID_GAP * 3,
+    rowHeight: metrics.rowHeight,
+  };
+}
 
 export default function WallpaperGrid({
   entries,
   onApply,
+  onSelect,
+  onToggleFavorite,
   applying,
   emptyText = 'No wallpapers found',
   contextActions = [],
@@ -46,13 +81,25 @@ export default function WallpaperGrid({
   active = true,
   refreshing = false,
   resetKey,
+  cardSize = 'medium',
+  applyGesture = 'single',
+  selectedPath = null,
+  pendingPath = null,
+  favoritePendingPaths = new Set(),
+  currentPath = null,
+  isEntryApplicable,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [scrolling, setScrolling] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
-  const [gridLayout, setGridLayout] = useState<GridLayout>(INITIAL_GRID_LAYOUT);
+  const cardMetrics = wallpaperCardMetrics(cardSize);
+  const [gridLayout, setGridLayout] = useState<WallpaperGridLayout>(() => initialGridLayout(cardSize));
   const colCount = gridLayout.colCount;
   const isScrollingRef = useRef(false);
   const scrollIdleTimerRef = useRef<number | null>(null);
@@ -66,40 +113,61 @@ export default function WallpaperGrid({
 
   const overscan = overscanRowsFor(colCount, true);
 
-  const anchorScrollForColumnChange = useCallback((oldCols: number, newCols: number) => {
-    const el = containerRef.current;
-    if (!el || oldCols === newCols) return;
+  const anchorScrollForLayoutChange = useCallback(
+    (
+      previousColumns: number,
+      previousRowHeight: number,
+      nextColumns: number,
+      nextRowHeight: number,
+    ) => {
+      const el = containerRef.current;
+      if (!el) return;
 
-    const firstVisibleRow = Math.floor(el.scrollTop / CARD_HEIGHT);
-    const firstVisibleItem = firstVisibleRow * oldCols;
-    const nextRow = Math.floor(firstVisibleItem / newCols);
-    pendingScrollTopRef.current = nextRow * CARD_HEIGHT;
-  }, []);
+      pendingScrollTopRef.current = anchoredScrollTopForLayoutChange({
+        scrollTop: el.scrollTop,
+        previousColumns,
+        previousRowHeight,
+        nextColumns,
+        nextRowHeight,
+      });
+    },
+    [],
+  );
 
-  const updateColCountFromWidth = useCallback(
+  const updateGridLayoutFromWidth = useCallback(
     (w: number) => {
       if (w <= 0) return;
       setGridLayout((prev) => {
-        const next = calculateGridLayout(w);
-        if (next.colCount !== prev.colCount) {
-          anchorScrollForColumnChange(prev.colCount, next.colCount);
+        const next = {
+          ...calculateWallpaperGridLayout(w, cardSize),
+          rowHeight: cardMetrics.rowHeight,
+        };
+        if (next.colCount !== prev.colCount || next.rowHeight !== prev.rowHeight) {
+          anchorScrollForLayoutChange(
+            prev.colCount,
+            prev.rowHeight,
+            next.colCount,
+            next.rowHeight,
+          );
         }
         if (
           next.colCount === prev.colCount &&
           next.columnWidth === prev.columnWidth &&
-          next.rowWidth === prev.rowWidth
+          next.rowWidth === prev.rowWidth &&
+          next.rowHeight === prev.rowHeight
         ) {
           return prev;
         }
         return next;
       });
     },
-    [anchorScrollForColumnChange],
+    [anchorScrollForLayoutChange, cardMetrics.rowHeight, cardSize],
   );
 
   const beginScrolling = useCallback(() => {
     if (!isScrollingRef.current) {
       isScrollingRef.current = true;
+      setScrolling(true);
       setRevealPaused(true);
     }
     if (scrollIdleTimerRef.current !== null) {
@@ -108,6 +176,7 @@ export default function WallpaperGrid({
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
+      setScrolling(false);
       setRevealPaused(false);
     }, SCROLL_IDLE_MS);
   }, [setRevealPaused]);
@@ -117,20 +186,20 @@ export default function WallpaperGrid({
     if (!el) return;
     const w = el.clientWidth;
     if (w > 0) {
-      updateColCountFromWidth(w);
+      updateGridLayoutFromWidth(w);
     }
-  }, [updateColCountFromWidth]);
+  }, [updateGridLayoutFromWidth]);
 
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
     const obs = new ResizeObserver(([entry]) => {
       if (!active) return;
-      updateColCountFromWidth(entry.contentRect.width);
+      updateGridLayoutFromWidth(entry.contentRect.width);
     });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [active, updateColCountFromWidth]);
+  }, [active, updateGridLayoutFromWidth]);
 
   useEffect(() => {
     if (!active) return;
@@ -142,9 +211,13 @@ export default function WallpaperGrid({
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => containerRef.current,
-    estimateSize: () => CARD_HEIGHT,
+    estimateSize: () => cardMetrics.rowHeight,
     overscan,
   });
+
+  useEffect(() => {
+    virtualizer.measure();
+  }, [cardSize, virtualizer]);
 
   useEffect(() => {
     const nextTop = pendingScrollTopRef.current;
@@ -162,7 +235,7 @@ export default function WallpaperGrid({
         suppressScrollPauseRef.current = false;
       });
     });
-  }, [colCount, virtualizer]);
+  }, [colCount, gridLayout.rowHeight, virtualizer]);
 
   useEffect(() => {
     if (shouldResetScroll(prevResetKeyRef.current, resetKey)) {
@@ -205,23 +278,28 @@ export default function WallpaperGrid({
   useEffect(() => {
     if (!active) return;
     const range = virtualizer.range;
-    if (!range) return;
-
-    const startIdx = range.startIndex * colCount;
-    const endIdx = Math.min((range.endIndex + 1) * colCount, entries.length);
-    const paths = entries
-      .slice(startIdx, endIdx)
-      .filter((e) => !e.previewPath)
-      .map((e) => e.path);
+    const paths = visibleThumbnailPaths(entries, colCount, range, 3);
 
     if (paths.length === 0) return;
 
-    const key = `${range.startIndex}:${range.endIndex}:${colCount}:${paths.join('\0')}`;
+    const keyPrefix = range ? `${range.startIndex}:${range.endIndex}` : 'fallback';
+    const key = `${keyPrefix}:${colCount}:${paths.join('\0')}`;
     if (lastEnqueueKeyRef.current === key) return;
     lastEnqueueKeyRef.current = key;
 
     enqueueVisible(paths, { priority: 'front' });
   }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
+
+  useEffect(() => {
+    if (!active || !onLoadMore) return;
+    if (!shouldRequestNextPage({
+      rowCount,
+      visibleEndRow: virtualizer.range?.endIndex,
+      hasMore,
+      loadingMore,
+    })) return;
+    void onLoadMore();
+  }, [active, hasMore, loadingMore, onLoadMore, rowCount, virtualizer.range?.endIndex]);
 
   useEffect(() => () => {
     if (scrollIdleTimerRef.current !== null) {
@@ -240,9 +318,13 @@ export default function WallpaperGrid({
     setContextMenu({ x: e.clientX, y: e.clientY, path });
   }, []);
 
+  const handleKeyboardContextMenu = useCallback((path: string, x: number, y: number) => {
+    setContextMenu({ x, y, path });
+  }, []);
+
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
-  const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
+  const findEntry = (path: string): LibraryBrowserItemDTO | undefined => entryByPath.get(path);
 
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
@@ -255,6 +337,8 @@ export default function WallpaperGrid({
       className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`}
       ref={containerRef}
       onScroll={handleScroll}
+      aria-label="Wallpaper library"
+      role="listbox"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -281,7 +365,18 @@ export default function WallpaperGrid({
                   entry={e}
                   applying={applying}
                   onApply={onApply}
+                  onSelect={onSelect}
+                  onToggleFavorite={onToggleFavorite}
                   onContextMenu={handleContextMenu}
+                  onKeyboardContextMenu={handleKeyboardContextMenu}
+                  cardSize={cardSize}
+                  applyGesture={applyGesture}
+                  selected={selectedPath === e.path}
+                  pending={pendingPath === e.path}
+                  favoritePending={favoritePendingPaths.has(e.path)}
+                  current={currentPath === e.path}
+                  applyAvailable={isEntryApplicable?.(e)}
+                  scrolling={scrolling}
                 />
               ))}
             </div>

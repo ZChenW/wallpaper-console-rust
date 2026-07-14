@@ -1,19 +1,19 @@
-use rusqlite::{params, Connection};
+use rusqlite::params;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
 
-use super::schema::{ensure_sqlite_db, open_runtime_connection};
+use super::schema::{open_runtime_connection, try_ensure_sqlite_db, RuntimeConnection};
 
 pub struct LibraryReplaceSession {
-    conn: Connection,
+    conn: RuntimeConnection,
     #[allow(dead_code)]
     batch_size: usize,
     inserted: usize,
 }
 
 pub fn library_replace_session_start(cd: &ConfigDir) -> Result<LibraryReplaceSession, WcError> {
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
     conn.execute(
         "CREATE TEMP TABLE IF NOT EXISTS wallpapers_stage AS SELECT * FROM wallpapers WHERE 0",
@@ -124,6 +124,41 @@ mod tests {
         )
         .map(|v| v == 1)
         .unwrap_or(false)
+    }
+
+    #[test]
+    fn future_schema_rejects_library_session_start_without_mutation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+        let future_version = crate::sqlite::CURRENT_SCHEMA_VERSION + 1;
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/sentinel.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let error = library_replace_session_start(&cd).err();
+
+        let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, future_version);
+        assert!(path_exists(&conn, "/walls/sentinel.jpg"));
+        let error = error.expect("future-schema session start must be rejected");
+        assert!(
+            error.to_string().contains("newer") || error.to_string().contains("version"),
+            "{error}"
+        );
     }
 
     #[test]

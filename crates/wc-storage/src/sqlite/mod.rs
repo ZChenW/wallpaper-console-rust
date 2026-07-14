@@ -1,20 +1,29 @@
 //! SQLite storage — schema, migration, verify, resync, backup, restore.
 
 mod backup;
+mod connection;
+mod display_state;
 mod library_page;
 pub mod library_session;
 mod metadata_cache;
 mod row_map;
 mod schema;
 mod source_config_state;
+mod source_reconcile;
+mod sources;
 
 pub use backup::*;
+#[cfg(test)]
+pub(crate) use connection::{reset_runtime_connection_open_count, runtime_connection_open_count};
+pub use display_state::*;
 pub use library_page::*;
 pub use library_session::*;
 pub use metadata_cache::*;
 pub use row_map::wallpaper_entry_from_row;
 pub use schema::*;
 pub use source_config_state::*;
+pub use source_reconcile::*;
+pub use sources::*;
 
 use rusqlite::{params, Connection};
 use std::collections::{HashMap, HashSet};
@@ -30,12 +39,12 @@ pub struct LibraryIndexSnapshot {
 
 /// Snapshot path and workshop_id columns from the live wallpapers table.
 pub fn library_index_snapshot(cd: &ConfigDir) -> Result<LibraryIndexSnapshot, WcError> {
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Ok(LibraryIndexSnapshot::default());
     }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     let mut stmt = conn
         .prepare("SELECT path, workshop_id FROM wallpapers")
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
@@ -78,7 +87,7 @@ pub fn library_clear(cd: &ConfigDir) -> Result<(), WcError> {
     if !db_path.exists() {
         return Ok(());
     }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     conn.execute("DELETE FROM wallpapers", [])
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
@@ -100,7 +109,7 @@ pub fn library_insert(
     if !db_path.exists() {
         return Ok(());
     }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
     conn.execute(
         "INSERT OR IGNORE INTO wallpapers
@@ -130,7 +139,7 @@ pub fn library_insert_batch(
     if !db_path.exists() || entries.is_empty() {
         return Ok(0);
     }
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
     let tx = conn
         .unchecked_transaction()
@@ -168,10 +177,9 @@ pub fn library_replace_batch_atomic(
     cd: &ConfigDir,
     entries: &[(&str, &str, &str, &str, u64, u64, &str)],
 ) -> Result<usize, WcError> {
-    let db_path = cd.db_path();
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
 
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
     let tx = conn
         .unchecked_transaction()
@@ -244,10 +252,9 @@ pub fn library_replace_entries_batch_atomic(
     cd: &ConfigDir,
     entries: &[WallpaperEntry],
 ) -> Result<usize, WcError> {
-    let db_path = cd.db_path();
-    ensure_sqlite_db(cd);
+    try_ensure_sqlite_db(cd)?;
 
-    let conn = Connection::open(&db_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = open_runtime_connection(cd)?;
     ensure_wallpaper_query_indexes(&conn)?;
     let tx = conn
         .unchecked_transaction()
@@ -326,6 +333,10 @@ pub fn library_replace_entries_batch_atomic(
     Ok(inserted)
 }
 
+// Keep this large legacy test module beside the storage APIs it exercises;
+// moving it below the private timestamp/TSV helpers would create a noisy,
+// behavior-free file-wide diff.
+#[allow(clippy::items_after_test_module)]
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -352,6 +363,48 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn future_schema_rejects_library_ensure_paths_without_replacing_rows() {
+        let (_tmp, cd) = temp_config_dir();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/walls/sentinel.jpg', 'image', 'jpg', 'awww', 1, 1, '1x1')",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let results = [
+            library_index_snapshot(&cd).map(|_| ()),
+            library_replace_batch_atomic(
+                &cd,
+                &[("/walls/new.jpg", "image", "jpg", "awww", 2, 2, "2x2")],
+            )
+            .map(|_| ()),
+        ];
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        drop(conn);
+        let paths = wallpaper_paths(&cd);
+
+        for result in results {
+            let error = result.expect_err("future-schema library operation must be rejected");
+            assert!(
+                error.to_string().contains("newer") || error.to_string().contains("version"),
+                "{error}"
+            );
+        }
+        assert_eq!(version, future_version);
+        assert_eq!(paths, vec!["/walls/sentinel.jpg"]);
     }
 
     #[test]
@@ -389,6 +442,74 @@ mod tests {
 
         assert_eq!(inserted, 0);
         assert!(wallpaper_paths(&cd).is_empty());
+    }
+
+    fn insert_source_wallpaper_membership(cd: &ConfigDir, path: &str) -> (i64, i64) {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO sources (path, display_name) VALUES ('/walls', 'Walls')",
+            [],
+        )
+        .unwrap();
+        let source_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES (?1, 'image', 'jpg', 'awww')",
+            params![path],
+        )
+        .unwrap();
+        let wallpaper_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (?1, ?2)",
+            params![wallpaper_id, source_id],
+        )
+        .unwrap();
+        (wallpaper_id, source_id)
+    }
+
+    fn assert_no_memberships_or_foreign_key_violations(cd: &ConfigDir) {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let memberships: i64 = conn
+            .query_row("SELECT COUNT(*) FROM wallpaper_sources", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(memberships, 0);
+        let violations: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(violations, 0);
+    }
+
+    #[test]
+    fn library_clear_uses_foreign_keys_and_cascades_memberships() {
+        let (_tmp, cd) = temp_config_dir();
+        insert_source_wallpaper_membership(&cd, "/walls/old.jpg");
+        reset_runtime_connection_open_count();
+
+        library_clear(&cd).unwrap();
+
+        assert_eq!(runtime_connection_open_count(), 1);
+        assert_no_memberships_or_foreign_key_violations(&cd);
+    }
+
+    #[test]
+    fn library_replace_uses_foreign_keys_and_cascades_old_memberships() {
+        let (_tmp, cd) = temp_config_dir();
+        insert_source_wallpaper_membership(&cd, "/walls/old.jpg");
+        reset_runtime_connection_open_count();
+
+        library_replace_batch_atomic(
+            &cd,
+            &[("/walls/new.jpg", "image", "jpg", "awww", 1, 1, "1x1")],
+        )
+        .unwrap();
+
+        assert_eq!(runtime_connection_open_count(), 1);
+        assert_eq!(wallpaper_paths(&cd), vec!["/walls/new.jpg"]);
+        assert_no_memberships_or_foreign_key_violations(&cd);
     }
 
     #[test]
@@ -573,9 +694,10 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// Import library.tsv into the wallpapers table of an existing connection.
+/// Import library.tsv into the wallpapers table of an existing transaction.
 /// Parses each line as: type\text\tbackend\tsize\tmtime\tresolution\tpath
 /// Silently skips if the file doesn't exist or contains no valid rows.
+/// The caller owns transaction boundaries.
 fn import_library_tsv_into(conn: &Connection, cd: &ConfigDir) -> Result<(), WcError> {
     let tsv_path = cd.library_tsv_path();
     if !tsv_path.exists() {
@@ -601,29 +723,23 @@ fn import_library_tsv_into(conn: &Connection, cd: &ConfigDir) -> Result<(), WcEr
         return Ok(());
     }
 
-    let tx = conn
-        .unchecked_transaction()
+    let mut stmt = conn
+        .prepare(
+            "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        )
         .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    {
-        let mut stmt = tx
-            .prepare(
-                "INSERT OR IGNORE INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        for (path, ftype, ext, backend, size, mtime, resolution) in &batch {
-            stmt.execute(params![
-                path,
-                ftype,
-                ext,
-                backend,
-                *size as i64,
-                *mtime as i64,
-                resolution
-            ])
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
-        }
+    for (path, ftype, ext, backend, size, mtime, resolution) in &batch {
+        stmt.execute(params![
+            path,
+            ftype,
+            ext,
+            backend,
+            *size as i64,
+            *mtime as i64,
+            resolution
+        ])
+        .map_err(|e| WcError::Sqlite(e.to_string()))?;
     }
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
     Ok(())
 }

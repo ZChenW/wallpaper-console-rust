@@ -1,34 +1,36 @@
-use std::io::{BufWriter, Write};
-use std::time::Duration;
+use std::fs::OpenOptions;
+use std::io::{BufWriter, ErrorKind, Write};
 
 use wc_core::types::{Backend, WallpaperEntry};
 use wc_storage::StorageApi;
 
-use crate::output::{json_library_from_sqlite, json_library_from_tsv, json_library_page, write_library_tsv_entry};
+use crate::output::{
+    json_from_entry, json_library_from_sqlite, json_library_from_tsv, json_library_page,
+    write_library_tsv_entry,
+};
 use crate::Commands;
-
-const RESCAN_BATCH_SIZE: usize = 250;
 
 pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     match cmd {
         Commands::Rescan => rescan(s),
         Commands::Library => {
-            let content = std::fs::read_to_string(s.cd.library_tsv_path()).unwrap_or_default();
-            print!("{}", content);
-            Ok(())
+            let entries = library_entries(s)?;
+            let stdout = std::io::stdout();
+            let mut writer = BufWriter::new(stdout.lock());
+            for entry in &entries {
+                write_library_tsv_entry(&mut writer, entry)?;
+            }
+            writer.flush().map_err(Into::into)
         }
         Commands::LibraryCount => {
-            let content = std::fs::read_to_string(s.cd.library_tsv_path()).unwrap_or_default();
+            let entries = library_entries(s)?;
             let mut total = 0;
             let mut images = 0;
             let mut gifs = 0;
             let mut videos = 0;
-            for line in content.lines() {
-                if line.is_empty() {
-                    continue;
-                }
+            for entry in entries {
                 total += 1;
-                match line.split('\t').next().unwrap_or("") {
+                match entry.file_type.as_str() {
                     "image" => images += 1,
                     "gif" => gifs += 1,
                     "video" => videos += 1,
@@ -68,7 +70,7 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             sqlite: use_sqlite,
         } => {
             if use_sqlite {
-                json_library_from_sqlite(s)
+                json_source_backed_library(s)
             } else {
                 json_library_from_tsv(s)
             }
@@ -80,19 +82,10 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             search,
             offset,
             limit,
-        } => json_library_page(s, &source, &filter, &sort, &search, offset, limit),
+        } => json_cli_library_page(s, &source, &filter, &sort, &search, offset, limit),
         Commands::FavoritesJson => {
             let favs = s.favorites_list()?;
             println!("{}", serde_json::to_string_pretty(&favs)?);
-            Ok(())
-        }
-        Commands::HistoryJson => {
-            let hist: Vec<serde_json::Value> = s
-                .history_list()?
-                .into_iter()
-                .map(|p| serde_json::json!({"path": p}))
-                .collect();
-            println!("{}", serde_json::to_string_pretty(&hist)?);
             Ok(())
         }
         _ => unreachable!("library::run called with non-library command"),
@@ -100,137 +93,174 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 }
 
 fn rescan(s: &StorageApi) -> anyhow::Result<()> {
+    let _rescan_guard = acquire_rescan_lock(s)?;
     let t0 = std::time::Instant::now();
-    let raw_sources = s.sources_list()?;
-    if raw_sources.is_empty() {
-        println!("(no sources configured)");
+    let source_count = with_dirty_library_marker(s, || Ok(s.source_records()?.len()))?;
+    if source_count == 0 {
+        let sqlite_count = write_legacy_tsv_snapshot(s)?;
+        println!("(no sources configured; SQLite snapshot: {sqlite_count})");
         return Ok(());
     }
-    // Dedupe by canonical path (catches symlinks, .steam vs .local/share).
-    let sources = wc_scan::dedupe_sources(&raw_sources);
-    let dup_count = raw_sources.len() - sources.len();
 
-    // Load prior metadata to skip unchanged files.
-    let prior_cache = wc_scan::prior_metadata_cache(&s.cd.library_tsv_path());
+    let refresh_start = std::time::Instant::now();
+    let report =
+        wc_app::library_refresh::refresh_library_sources(s, |_, _| wc_scan::ScanControl::Continue)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    let refresh_time = refresh_start.elapsed();
 
-    let scan_start = std::time::Instant::now();
-    let mut metadata_time = Duration::ZERO;
-    let mut candidate_count = 0usize;
-    let mut entry_count = 0usize;
-    let mut reused = 0usize;
-    let mut probed = 0usize;
-    let mut batch: Vec<WallpaperEntry> = Vec::with_capacity(RESCAN_BATCH_SIZE);
-    let tsv_path = s.cd.library_tsv_path();
-    let tsv_tmp = tsv_path.with_extension("tsv.tmp");
-    let tsv_file = std::fs::File::create(&tsv_tmp)?;
-    let mut tsv_writer = BufWriter::new(tsv_file);
-    let mut sqlite_session = wc_storage::sqlite::library_replace_session_start(&s.cd)?;
-    let mut stream_error: Option<anyhow::Error> = None;
-
-    wc_scan::visit_wallpapers_with_callback(
-        &sources,
-        |_| wc_scan::ScanControl::Continue,
-        |path| {
-            candidate_count += 1;
-            let probe_start = std::time::Instant::now();
-            let (entry, was_reused) = wc_scan::make_entry_cached(&path, &prior_cache);
-            metadata_time += probe_start.elapsed();
-
-            let Some(entry) = entry else {
-                return wc_scan::ScanVisitControl::Continue;
-            };
-
-            if was_reused {
-                reused += 1;
-            } else {
-                probed += 1;
-            }
-            entry_count += 1;
-
-            if let Err(err) = write_library_tsv_entry(&mut tsv_writer, &entry) {
-                stream_error = Some(err.into());
-                return wc_scan::ScanVisitControl::Cancel;
-            }
-            batch.push(entry);
-            if batch.len() >= RESCAN_BATCH_SIZE {
-                if let Err(err) =
-                    wc_storage::sqlite::library_replace_session_push(&mut sqlite_session, &batch)
-                {
-                    stream_error = Some(err.into());
-                    return wc_scan::ScanVisitControl::Cancel;
-                }
-                batch.clear();
-            }
-            wc_scan::ScanVisitControl::Continue
-        },
-    );
-    let scan_time = scan_start.elapsed();
-    let walk_time = scan_time.checked_sub(metadata_time).unwrap_or_default();
-    let probe_time = metadata_time;
-
-    if let Some(err) = stream_error {
-        let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
-        let _ = std::fs::remove_file(&tsv_tmp);
-        return Err(err);
-    }
-
-    if !batch.is_empty() {
-        if let Err(err) =
-            wc_storage::sqlite::library_replace_session_push(&mut sqlite_session, &batch)
-        {
-            let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
-            let _ = std::fs::remove_file(&tsv_tmp);
-            return Err(err.into());
-        }
-    }
-    if let Err(err) = tsv_writer.flush() {
-        let _ = wc_storage::sqlite::library_replace_session_abort(sqlite_session);
-        let _ = std::fs::remove_file(&tsv_tmp);
-        return Err(err.into());
-    }
-    drop(tsv_writer);
-
-    // Atomically replace the SQLite library when staging succeeded.
-    let t2 = std::time::Instant::now();
-    let sqlite_count = match wc_storage::sqlite::library_replace_session_commit(sqlite_session) {
-        Ok(count) => count,
-        Err(err) => {
-            let _ = std::fs::remove_file(&tsv_tmp);
-            return Err(err.into());
-        }
-    };
-    let sqlite_time = t2.elapsed();
-
-    std::fs::rename(&tsv_tmp, &tsv_path)?;
-    let dirty = s.cd.path.join("library.dirty");
-    if dirty.exists() {
-        std::fs::remove_file(&dirty).ok();
-    }
+    let snapshot_start = std::time::Instant::now();
+    let sqlite_count = write_legacy_tsv_snapshot(s)?;
+    let snapshot_time = snapshot_start.elapsed();
     let total_time = t0.elapsed();
     println!(
-        "sources: {} canonical{}  walked: {} files  entries: {}  sqlite: {}\n\
-         reused_metadata: {}  probed_metadata: {}\n\
-         walk: {:.2}s  probe: {:.2}s  sqlite: {}ms  total: {:.2}s",
-        sources.len(),
-        if dup_count > 0 {
-            format!(" ({} duplicates skipped)", dup_count)
-        } else {
-            String::new()
-        },
-        candidate_count,
-        entry_count,
-        sqlite_count,
-        reused,
-        probed,
-        walk_time.as_secs_f64(),
-        probe_time.as_secs_f64(),
-        sqlite_time.as_millis(),
-        total_time.as_secs_f64(),
+        "{}",
+        format_rescan_summary(
+            source_count,
+            &report,
+            sqlite_count,
+            refresh_time,
+            snapshot_time,
+            total_time,
+        )
     );
     Ok(())
 }
 
+fn format_rescan_summary(
+    source_count: usize,
+    report: &wc_app::library_refresh::LibraryRefreshReport,
+    sqlite_count: usize,
+    refresh_time: std::time::Duration,
+    snapshot_time: std::time::Duration,
+    total_time: std::time::Duration,
+) -> String {
+    format!(
+        "sources: {} (complete: {}, offline preserved: {}, incomplete preserved: {})  \
+         candidates: {} files  entries: {}  sqlite: {}\n\
+         visited: {}  source_entries_indexed: {}  reused_metadata: {}  \
+         probed_metadata: {}  removed: {}\n\
+         refresh: {:.2}s  snapshot: {}ms  total: {:.2}s",
+        source_count,
+        report.complete_sources,
+        report.offline_sources,
+        report.incomplete_sources,
+        report.metadata.candidates_found,
+        sqlite_count,
+        sqlite_count,
+        report.metadata.entries_visited,
+        report.indexed,
+        report.metadata.metadata_reused,
+        report
+            .metadata
+            .entries_indexed
+            .saturating_sub(report.metadata.metadata_reused),
+        report.wallpapers_removed,
+        refresh_time.as_secs_f64(),
+        snapshot_time.as_millis(),
+        total_time.as_secs_f64(),
+    )
+}
+
+fn sqlite_library_snapshot(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEntry>> {
+    ensure_dirty_sqlite_is_readable(s)?;
+    let total = wc_storage::sqlite::source_backed_library_count(&s.cd)?;
+    if total == 0 {
+        return Ok(Vec::new());
+    }
+    let page = wc_storage::sqlite::source_backed_library_page_sqlite(
+        &s.cd,
+        &wc_storage::sqlite::LibraryPageQuery {
+            filter: wc_storage::sqlite::LibraryFilter::All,
+            sort: wc_storage::sqlite::LibrarySort::Name,
+            search: String::new(),
+            offset: 0,
+            limit: total,
+        },
+    )?;
+    if page.total != total || page.items.len() != total {
+        anyhow::bail!(
+            "SQLite library snapshot changed while reading (expected {total}, found {} of {})",
+            page.items.len(),
+            page.total
+        );
+    }
+    Ok(page.items)
+}
+
+fn dirty_marker_path(s: &StorageApi) -> std::path::PathBuf {
+    s.cd.path.join("library.dirty")
+}
+
+fn acquire_rescan_lock(s: &StorageApi) -> anyhow::Result<std::fs::File> {
+    std::fs::create_dir_all(&s.cd.path)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(s.cd.path.join(".library.rescan.lock"))?;
+    lock.lock()?;
+    Ok(lock)
+}
+
+fn establish_library_dirty_marker(s: &StorageApi) -> anyhow::Result<()> {
+    let dirty = dirty_marker_path(s);
+    let marker = match OpenOptions::new().write(true).create_new(true).open(&dirty) {
+        Ok(marker) => marker,
+        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    marker.sync_all()?;
+    Ok(())
+}
+
+fn with_dirty_library_marker<T, F>(s: &StorageApi, operation: F) -> anyhow::Result<T>
+where
+    F: FnOnce() -> anyhow::Result<T>,
+{
+    establish_library_dirty_marker(s)?;
+    operation()
+}
+
+fn write_legacy_tsv_snapshot(s: &StorageApi) -> anyhow::Result<usize> {
+    let entries = sqlite_library_snapshot(s)?;
+    let tsv_path = s.cd.library_tsv_path();
+    let tsv_tmp = tsv_path.with_extension("tsv.tmp");
+    let write_result = (|| -> anyhow::Result<()> {
+        let tsv_file = std::fs::File::create(&tsv_tmp)?;
+        let mut writer = BufWriter::new(tsv_file);
+        for entry in &entries {
+            write_library_tsv_entry(&mut writer, entry)?;
+        }
+        writer.flush()?;
+        drop(writer);
+        std::fs::rename(&tsv_tmp, &tsv_path)?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(&tsv_tmp);
+    }
+    write_result?;
+    let dirty = dirty_marker_path(s);
+    if dirty.exists() {
+        std::fs::remove_file(dirty)?;
+    }
+    Ok(entries.len())
+}
+
+fn ensure_dirty_sqlite_is_readable(s: &StorageApi) -> anyhow::Result<()> {
+    if dirty_marker_path(s).exists() && !s.cd.db_path().exists() {
+        anyhow::bail!(
+            "library snapshot is stale: library.dirty exists but SQLite is unavailable; run rescan"
+        );
+    }
+    Ok(())
+}
+
 pub(crate) fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEntry>> {
+    if dirty_marker_path(s).exists() || s.cd.db_path().exists() {
+        return sqlite_library_snapshot(s);
+    }
     let content = std::fs::read_to_string(s.cd.library_tsv_path()).unwrap_or_default();
     let mut entries = Vec::new();
     for line in content.lines() {
@@ -268,6 +298,64 @@ pub(crate) fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEnt
     Ok(entries)
 }
 
+fn json_source_backed_library(s: &StorageApi) -> anyhow::Result<()> {
+    ensure_dirty_sqlite_is_readable(s)?;
+    if !s.cd.db_path().exists() {
+        return json_library_from_sqlite(s);
+    }
+    let entries = sqlite_library_snapshot(s)?;
+    let json: Vec<serde_json::Value> = entries.iter().map(json_from_entry).collect();
+    println!("{}", serde_json::to_string_pretty(&json)?);
+    Ok(())
+}
+
+fn json_source_backed_library_page(
+    s: &StorageApi,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    ensure_dirty_sqlite_is_readable(s)?;
+    let query = wc_storage::sqlite::LibraryPageQuery {
+        filter: wc_storage::sqlite::LibraryFilter::parse(filter)?,
+        sort: wc_storage::sqlite::LibrarySort::parse(sort)?,
+        search: search.to_string(),
+        offset,
+        limit,
+    };
+    let page = wc_storage::sqlite::source_backed_library_page_sqlite(&s.cd, &query)?;
+    let items: Vec<serde_json::Value> = page.items.iter().map(json_from_entry).collect();
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&serde_json::json!({
+            "total": page.total,
+            "items": items,
+        }))?
+    );
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn json_cli_library_page(
+    s: &StorageApi,
+    source: &str,
+    filter: &str,
+    sort: &str,
+    search: &str,
+    offset: usize,
+    limit: usize,
+) -> anyhow::Result<()> {
+    match source {
+        "sqlite" => json_source_backed_library_page(s, filter, sort, search, offset, limit),
+        "tsv" if dirty_marker_path(s).exists() || s.cd.db_path().exists() => {
+            json_source_backed_library_page(s, filter, sort, search, offset, limit)
+        }
+        _ => json_library_page(s, source, filter, sort, search, offset, limit),
+    }
+}
+
 pub(crate) fn library_paths(
     s: &StorageApi,
     filter: Option<wc_core::types::FileType>,
@@ -278,4 +366,285 @@ pub(crate) fn library_paths(
         .filter(|e| filter.is_none_or(|f| e.file_type == f))
         .map(|e| e.path.to_string())
         .collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn storage() -> (tempfile::TempDir, StorageApi) {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        (tmp, StorageApi::new(cd))
+    }
+
+    fn library_and_membership_counts(storage: &StorageApi) -> (i64, i64) {
+        let connection = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        connection
+            .query_row(
+                "SELECT
+                    (SELECT COUNT(*) FROM wallpapers),
+                    (SELECT COUNT(*) FROM wallpaper_sources)",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn rescan_preserves_offline_membership_and_derives_tsv_from_sqlite() {
+        let (tmp, storage) = storage();
+        let source_path = tmp.path().join("offline-source");
+        std::fs::create_dir_all(&source_path).unwrap();
+        let wallpaper = source_path.join("wall.jpg");
+        std::fs::write(&wallpaper, b"wallpaper").unwrap();
+        storage
+            .source_create(&source_path.to_string_lossy())
+            .unwrap();
+        wc_app::library_refresh::refresh_library_sources(&storage, |_, _| {
+            wc_scan::ScanControl::Continue
+        })
+        .expect("initial complete refresh should publish the source snapshot");
+        assert_eq!(library_and_membership_counts(&storage), (1, 1));
+
+        std::fs::remove_dir_all(&source_path).unwrap();
+        rescan(&storage).unwrap();
+
+        assert_eq!(
+            library_and_membership_counts(&storage),
+            (1, 1),
+            "CLI rescan must not clear an offline source's SQLite snapshot"
+        );
+        let tsv = std::fs::read_to_string(storage.cd.library_tsv_path()).unwrap();
+        assert!(
+            tsv.contains(&wallpaper.to_string_lossy().to_string()),
+            "legacy TSV consumers should receive the preserved SQLite snapshot"
+        );
+        assert_eq!(
+            storage.source_records().unwrap()[0].availability,
+            wc_storage::SourceAvailability::Offline
+        );
+    }
+
+    #[test]
+    fn rescan_with_no_sources_replaces_stale_tsv_from_empty_sqlite_snapshot() {
+        let (_tmp, storage) = storage();
+        std::fs::write(
+            storage.cd.library_tsv_path(),
+            "image\tjpg\tawww\t1\t1\t1x1\t/stale/wall.jpg\n",
+        )
+        .unwrap();
+        let dirty = storage.cd.path.join("library.dirty");
+        std::fs::write(&dirty, b"stale").unwrap();
+
+        rescan(&storage).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(storage.cd.library_tsv_path()).unwrap(),
+            "",
+            "rescan must not leave legacy consumers on a stale TSV snapshot"
+        );
+        assert!(
+            !dirty.exists(),
+            "publishing the SQLite-derived TSV should clear its stale marker"
+        );
+    }
+
+    #[test]
+    fn rescan_after_last_source_removed_excludes_orphan_from_tsv_and_cli_entries() {
+        let (tmp, storage) = storage();
+        let source_path = tmp.path().join("walls");
+        std::fs::create_dir(&source_path).unwrap();
+        let wallpaper = source_path.join("orphan.jpg");
+        std::fs::write(&wallpaper, b"wallpaper").unwrap();
+        let source = storage
+            .source_create(&source_path.to_string_lossy())
+            .unwrap();
+        rescan(&storage).unwrap();
+        storage.source_remove_by_id(source.id).unwrap();
+        assert_eq!(library_and_membership_counts(&storage), (1, 0));
+
+        rescan(&storage).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(storage.cd.library_tsv_path()).unwrap(),
+            "",
+            "TSV consumers must not see physical metadata rows with no source membership"
+        );
+        assert!(
+            library_entries(&storage).unwrap().is_empty(),
+            "CLI library readers must use source-backed library semantics"
+        );
+    }
+
+    #[test]
+    fn failed_tsv_publish_keeps_dirty_marker_and_cli_reads_current_sqlite() {
+        let (tmp, storage) = storage();
+        let source_path = tmp.path().join("walls");
+        std::fs::create_dir(&source_path).unwrap();
+        std::fs::write(source_path.join("one.jpg"), b"one").unwrap();
+        storage
+            .source_create(&source_path.to_string_lossy())
+            .unwrap();
+        rescan(&storage).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(storage.cd.library_tsv_path())
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+
+        std::fs::write(source_path.join("two.jpg"), b"two").unwrap();
+        std::fs::create_dir(storage.cd.library_tsv_path().with_extension("tsv.tmp")).unwrap();
+
+        let error = rescan(&storage).unwrap_err();
+
+        assert!(error.to_string().contains("directory"));
+        assert!(
+            storage.cd.path.join("library.dirty").exists(),
+            "a failed TSV publish must leave a durable stale-snapshot signal"
+        );
+        assert_eq!(
+            std::fs::read_to_string(storage.cd.library_tsv_path())
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "the atomic publish must leave the prior TSV intact"
+        );
+        let entries = library_entries(&storage).unwrap();
+        assert_eq!(
+            entries.len(),
+            2,
+            "dirty-aware CLI readers must fall back to the current SQLite snapshot"
+        );
+    }
+
+    #[test]
+    fn dirty_marker_is_established_before_refresh_operation_starts() {
+        let (_tmp, storage) = storage();
+        let dirty = storage.cd.path.join("library.dirty");
+
+        let value = with_dirty_library_marker(&storage, || {
+            assert!(
+                dirty.exists(),
+                "the marker must predate every SQLite mutation in refresh"
+            );
+            Ok::<_, anyhow::Error>(42)
+        })
+        .unwrap();
+
+        assert_eq!(value, 42);
+        assert!(
+            dirty.exists(),
+            "only a successful TSV publish clears marker"
+        );
+    }
+
+    #[test]
+    fn overlapping_sources_publish_one_legacy_tsv_row() {
+        let (tmp, storage) = storage();
+        let root = tmp.path().join("walls");
+        let nested = root.join("nested");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::write(nested.join("shared.jpg"), b"shared").unwrap();
+        storage.source_create(&root.to_string_lossy()).unwrap();
+        storage.source_create(&nested.to_string_lossy()).unwrap();
+
+        rescan(&storage).unwrap();
+
+        assert_eq!(library_and_membership_counts(&storage), (1, 2));
+        assert_eq!(
+            std::fs::read_to_string(storage.cd.library_tsv_path())
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        assert_eq!(library_entries(&storage).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn dirty_marker_without_sqlite_reports_stale_instead_of_returning_empty() {
+        let (_tmp, storage) = storage();
+        std::fs::write(
+            storage.cd.library_tsv_path(),
+            "image\tjpg\tawww\t1\t1\t1x1\t/stale/wall.jpg\n",
+        )
+        .unwrap();
+        std::fs::write(dirty_marker_path(&storage), b"refresh interrupted").unwrap();
+        std::fs::remove_file(storage.cd.db_path()).unwrap();
+        assert!(!storage.cd.db_path().exists());
+
+        let entries_error = library_entries(&storage).unwrap_err();
+        assert!(entries_error.to_string().contains("stale"));
+
+        let page_error =
+            json_cli_library_page(&storage, "tsv", "all", "name", "", 0, 10).unwrap_err();
+        assert!(page_error.to_string().contains("stale"));
+    }
+
+    #[test]
+    fn rescan_lock_serializes_snapshot_refreshes() {
+        let (_tmp, storage) = storage();
+        let first_guard = acquire_rescan_lock(&storage).unwrap();
+        let config_path = storage.cd.path.clone();
+        let (attempting_tx, attempting_rx) = std::sync::mpsc::channel();
+        let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
+
+        let second = std::thread::spawn(move || {
+            let storage = StorageApi::new(wc_core::ConfigDir { path: config_path });
+            attempting_tx.send(()).unwrap();
+            let _guard = acquire_rescan_lock(&storage).unwrap();
+            acquired_tx.send(()).unwrap();
+        });
+
+        attempting_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(
+            acquired_rx
+                .recv_timeout(std::time::Duration::from_millis(100))
+                .is_err(),
+            "a second rescan must wait until the first snapshot publish is finished"
+        );
+
+        drop(first_guard);
+        acquired_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        second.join().unwrap();
+    }
+
+    #[test]
+    fn rescan_summary_labels_candidate_and_visited_counts_precisely() {
+        let report = wc_app::library_refresh::LibraryRefreshReport {
+            complete_sources: 1,
+            indexed: 3,
+            metadata: wc_app::library_refresh::RefreshMetadataStats {
+                entries_visited: 8,
+                candidates_found: 3,
+                entries_indexed: 3,
+                metadata_reused: 2,
+            },
+            ..wc_app::library_refresh::LibraryRefreshReport::default()
+        };
+
+        let summary = format_rescan_summary(
+            1,
+            &report,
+            3,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(2),
+            std::time::Duration::from_secs(1),
+        );
+
+        assert!(summary.contains("candidates: 3 files"));
+        assert!(summary.contains("visited: 8"));
+        assert!(!summary.contains("walked: 3"));
+    }
 }

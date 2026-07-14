@@ -23,11 +23,21 @@ pub(crate) fn run(command: Option<Commands>) -> anyhow::Result<()> {
 
 fn run_with_storage(cmd: Commands, storage: &StorageApi) -> anyhow::Result<()> {
     match cmd {
-        Commands::Apply { file } => crate::wallpaper::apply(storage, file),
+        Commands::Apply {
+            file,
+            target,
+            outputs,
+        } => crate::wallpaper::apply(storage, file, target, outputs),
         Commands::Inspect { path } => crate::wallpaper::inspect(storage, path),
         Commands::Stop => crate::wallpaper::stop(storage),
         Commands::Status => crate::wallpaper::status(storage),
         Commands::Restore => crate::wallpaper::restore(storage),
+        Commands::Displays => crate::wallpaper::displays(),
+        Commands::DisplayState => crate::wallpaper::display_state(storage),
+        Commands::RestoreDisplays { outputs } => {
+            crate::wallpaper::restore_displays(storage, outputs)
+        }
+        Commands::RestoreAtLogin => crate::wallpaper::restore_at_login(storage),
         other => run_remaining(other, storage),
     }
 }
@@ -41,8 +51,7 @@ fn run_remaining(command: Commands, storage: &StorageApi) -> anyhow::Result<()> 
         | Commands::RandomLibrary
         | Commands::LibraryJson { .. }
         | Commands::LibraryPageJson { .. }
-        | Commands::FavoritesJson
-        | Commands::HistoryJson => crate::library::run(command, storage),
+        | Commands::FavoritesJson => crate::library::run(command, storage),
 
         Commands::MigrateToSqlite
         | Commands::SqliteVerify
@@ -53,7 +62,6 @@ fn run_remaining(command: Commands, storage: &StorageApi) -> anyhow::Result<()> 
         | Commands::SqliteConfigGet { .. }
         | Commands::SqliteSourcesList
         | Commands::SqliteFavoritesList
-        | Commands::SqliteHistoryList
         | Commands::SqliteCurrentRead
         | Commands::SqliteLastBackendRead => crate::sqlite::run(command, storage),
 

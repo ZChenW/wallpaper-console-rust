@@ -21,11 +21,8 @@ docs/
 
 # Development-only project files (not needed for clone + ./install.sh)
 doc/
-scripts/
+scripts/*
+!scripts/check_runtime_config_drift.sh
 tests/
-xtask/
-apps/tauri-gui/frontend/e2e/
-apps/tauri-gui/frontend/**/*.test.ts
-apps/tauri-gui/frontend/vite.mock.config.ts
 crates/**/tests/
 crates/**/src/**/tests/

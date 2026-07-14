@@ -1,22 +1,28 @@
 use super::common::{
-    dto_from_entry, fail, ok, storage, CommandResult, LibraryCountDto, LibraryPageDto,
-    LibrarySourceStatusDto,
+    dto_from_entry_with_routing, fail, ok, storage, CommandResult, LibraryBrowserItemDto,
+    LibraryBrowserPageDto, LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryCountDto,
+    LibraryPageDto, LibrarySourceStatusDto,
 };
 
 #[tauri::command]
 pub async fn library_count() -> Result<LibraryCountDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let counts = wc_storage::sqlite::library_counts_sqlite(&s.cd).map_err(|e| e.to_string())?;
-        Ok(LibraryCountDto {
-            total: counts.total,
-            images: counts.images,
-            gifs: counts.gifs,
-            videos: counts.videos,
-        })
+        library_count_for_storage(s)
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn library_count_for_storage(s: &wc_storage::StorageApi) -> Result<LibraryCountDto, String> {
+    let counts = wc_storage::sqlite::source_backed_library_counts_sqlite(&s.cd)
+        .map_err(|e| e.to_string())?;
+    Ok(LibraryCountDto {
+        total: counts.total,
+        images: counts.images,
+        gifs: counts.gifs,
+        videos: counts.videos,
+    })
 }
 
 #[tauri::command]
@@ -51,17 +57,17 @@ pub async fn library_page_gui(
             offset,
             limit,
         };
-        let page =
-            wc_storage::sqlite::library_page_sqlite(&s.cd, &query).map_err(|e| e.to_string())?;
+        let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
+        let routing = s.backend_routing();
         let items = page
             .items
             .into_iter()
-            .map(dto_from_entry)
+            .map(|entry| dto_from_entry_with_routing(entry, &routing))
             .collect::<Vec<_>>();
         let dto_map_end = t0.elapsed();
         maybe_write_library_page_debug_log(
-            &s,
+            s,
             storage_init,
             query_end - storage_init,
             dto_map_end - query_end,
@@ -75,6 +81,124 @@ pub async fn library_page_gui(
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+fn library_page_for_storage(
+    s: &wc_storage::StorageApi,
+    query: &wc_storage::sqlite::LibraryPageQuery,
+) -> Result<wc_storage::sqlite::LibraryPage, String> {
+    wc_storage::sqlite::source_backed_library_page_sqlite(&s.cd, query).map_err(|e| e.to_string())
+}
+
+fn browser_query_from_dto(
+    query: LibraryBrowserQueryDto,
+) -> Result<wc_storage::sqlite::LibraryBrowserQuery, String> {
+    let type_filter = match query.type_filter.as_str() {
+        "usable" => wc_storage::sqlite::LibraryBrowserType::Usable,
+        "image" => wc_storage::sqlite::LibraryBrowserType::Image,
+        "gif" => wc_storage::sqlite::LibraryBrowserType::Gif,
+        "video" => wc_storage::sqlite::LibraryBrowserType::Video,
+        "weScene" => wc_storage::sqlite::LibraryBrowserType::WeScene,
+        "unsupported" => wc_storage::sqlite::LibraryBrowserType::Unsupported,
+        other => {
+            return Err(format!(
+                "unknown library browser type: {other}; expected usable, image, gif, video, weScene, or unsupported"
+            ))
+        }
+    };
+    let sort = match query.sort.as_str() {
+        "recentlyAdded" => wc_storage::sqlite::LibraryBrowserSort::RecentlyAdded,
+        "nameAsc" => wc_storage::sqlite::LibraryBrowserSort::NameAsc,
+        "nameDesc" => wc_storage::sqlite::LibraryBrowserSort::NameDesc,
+        other => {
+            return Err(format!(
+            "unknown library browser sort: {other}; expected recentlyAdded, nameAsc, or nameDesc"
+        ))
+        }
+    };
+    Ok(wc_storage::sqlite::LibraryBrowserQuery {
+        source_id: query.source_id,
+        type_filter,
+        favorites_only: query.favorites_only,
+        search: query.search,
+        sort,
+        offset: query.offset,
+        limit: query.limit,
+    })
+}
+
+fn browser_item_dto(
+    item: wc_storage::sqlite::LibraryBrowserItem,
+    routing: &wc_core::backend_routing::BackendRouting,
+) -> LibraryBrowserItemDto {
+    LibraryBrowserItemDto {
+        wallpaper: dto_from_entry_with_routing(item.entry, routing),
+        wallpaper_id: item.wallpaper_id,
+        favorite: item.favorite,
+        author: item.author,
+        added_at: item.added_at,
+        sources: item
+            .sources
+            .into_iter()
+            .map(|source| LibraryBrowserSourceDto {
+                id: source.id,
+                display_name: source.display_name,
+            })
+            .collect(),
+    }
+}
+
+fn library_browser_page_for_storage(
+    s: &wc_storage::StorageApi,
+    query: LibraryBrowserQueryDto,
+) -> Result<LibraryBrowserPageDto, String> {
+    let query = browser_query_from_dto(query)?;
+    let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)
+        .map_err(|error| error.to_string())?;
+    let routing = s.backend_routing();
+    Ok(LibraryBrowserPageDto {
+        total: page.total,
+        items: page
+            .items
+            .into_iter()
+            .map(|item| browser_item_dto(item, &routing))
+            .collect(),
+    })
+}
+
+fn library_browser_random_for_storage(
+    s: &wc_storage::StorageApi,
+    query: LibraryBrowserQueryDto,
+) -> Result<Option<LibraryBrowserItemDto>, String> {
+    let query = browser_query_from_dto(query)?;
+    let routing = s.backend_routing();
+    wc_storage::sqlite::browser_library_random(&s.cd, &query)
+        .map(|item| item.map(|item| browser_item_dto(item, &routing)))
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn library_browser_page(
+    query: LibraryBrowserQueryDto,
+) -> Result<LibraryBrowserPageDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        library_browser_page_for_storage(s, query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_browser_random(
+    query: LibraryBrowserQueryDto,
+) -> Result<Option<LibraryBrowserItemDto>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        library_browser_random_for_storage(s, query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 fn format_library_page_debug_log(
@@ -112,9 +236,14 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
         let s = storage()?;
         let page = wc_storage::sqlite::favorites_page_sqlite(&s.cd, offset, limit)
             .map_err(|e| e.to_string())?;
+        let routing = s.backend_routing();
         Ok(LibraryPageDto {
             total: page.total,
-            items: page.items.into_iter().map(dto_from_entry).collect(),
+            items: page
+                .items
+                .into_iter()
+                .map(|entry| dto_from_entry_with_routing(entry, &routing))
+                .collect(),
         })
     })
     .await
@@ -147,51 +276,42 @@ pub async fn favorite_remove(path: String) -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
-#[tauri::command]
-pub async fn history_page(offset: usize, limit: usize) -> Result<LibraryPageDto, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let s = storage()?;
-        let page = wc_storage::sqlite::history_page_sqlite(&s.cd, offset, limit)
-            .map_err(|e| e.to_string())?;
-        Ok(LibraryPageDto {
-            total: page.total,
-            items: page.items.into_iter().map(dto_from_entry).collect(),
-        })
+fn build_library_source_status(
+    s: &wc_storage::StorageApi,
+) -> Result<LibrarySourceStatusDto, String> {
+    let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
+    let sqlite_ready = s.cd.db_path().exists();
+    let sqlite_rows = wc_storage::sqlite::source_backed_library_count(&s.cd).unwrap_or(0);
+    let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
+        .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0);
+    let stale = source_count > 0 && sqlite_rows == 0 && tsv_rows > 0;
+    let message = if source_count == 0 {
+        "No sources configured. Add a source or scan Wallpaper Engine.".to_string()
+    } else if stale {
+        "Sources exist, but the SQLite library index is empty while legacy library.tsv has rows. Rebuild the SQLite index.".to_string()
+    } else if sqlite_rows == 0 {
+        "Sources exist, but the SQLite library index has no wallpapers. Rescan or repair the library index.".to_string()
+    } else {
+        "SQLite library database is active.".to_string()
+    };
+    Ok(LibrarySourceStatusDto {
+        configured: "sqlite".into(),
+        effective: "sqlite".into(),
+        sqlite_ready,
+        sqlite_rows,
+        tsv_rows,
+        source_count,
+        stale,
+        message,
     })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-#[tauri::command]
-pub async fn history_clear() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match s.history_clear() {
-            Ok(_) => ok("History cleared."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
 }
 
 #[tauri::command]
 pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let sqlite_rows = wc_storage::sqlite::library_count(&s.cd).unwrap_or(0);
-        let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
-            .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
-            .unwrap_or(0);
-        Ok(LibrarySourceStatusDto {
-            configured: "sqlite".into(),
-            effective: "sqlite".into(),
-            sqlite_ready: s.cd.db_path().exists(),
-            sqlite_rows,
-            tsv_rows,
-            stale: false,
-            message: "SQLite library database is active.".into(),
-        })
+        build_library_source_status(s)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -200,6 +320,220 @@ pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
 #[cfg(test)]
 mod tests {
     use wc_core::types::FileType;
+
+    fn browser_fixture() -> (tempfile::TempDir, wc_storage::StorageApi, i64) {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let root = tmp.path().join("workshop");
+        std::fs::create_dir(&root).unwrap();
+        let source = storage.source_create(&root.to_string_lossy()).unwrap();
+        storage.source_rename(source.id, "Curated Scenes").unwrap();
+
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, size, mtime, resolution,
+              project_type, preview_path, workshop_id, title, we_file,
+              unsupported_reason, author, added_at)
+             VALUES
+             (41, '/wallpapers/scene-41', 'we_scene', 'scene',
+              'linux-wallpaperengine', 4096, 1700000000, 'WE',
+              'scene', '/wallpapers/scene-41/preview.gif', '41',
+              'Aurora Scene', 'scene.json', '', 'Ada Lovelace',
+              '2026-07-14T10:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (41, ?1)",
+            [source.id],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/wallpapers/scene-41')",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        (tmp, storage, source.id)
+    }
+
+    fn browser_query(source_id: Option<i64>) -> super::LibraryBrowserQueryDto {
+        super::LibraryBrowserQueryDto {
+            source_id,
+            type_filter: "weScene".into(),
+            favorites_only: true,
+            search: "aurora ada curated".into(),
+            sort: "recentlyAdded".into(),
+            offset: 0,
+            limit: 20,
+        }
+    }
+
+    #[test]
+    fn browser_query_maps_every_supported_type_and_sort_and_rejects_unknown_values() {
+        let types = [
+            ("usable", wc_storage::sqlite::LibraryBrowserType::Usable),
+            ("image", wc_storage::sqlite::LibraryBrowserType::Image),
+            ("gif", wc_storage::sqlite::LibraryBrowserType::Gif),
+            ("video", wc_storage::sqlite::LibraryBrowserType::Video),
+            ("weScene", wc_storage::sqlite::LibraryBrowserType::WeScene),
+            (
+                "unsupported",
+                wc_storage::sqlite::LibraryBrowserType::Unsupported,
+            ),
+        ];
+        for (raw, expected) in types {
+            let mut dto = browser_query(None);
+            dto.type_filter = raw.into();
+            let mapped = super::browser_query_from_dto(dto).unwrap();
+            assert_eq!(mapped.type_filter, expected);
+        }
+
+        let sorts = [
+            (
+                "recentlyAdded",
+                wc_storage::sqlite::LibraryBrowserSort::RecentlyAdded,
+            ),
+            ("nameAsc", wc_storage::sqlite::LibraryBrowserSort::NameAsc),
+            ("nameDesc", wc_storage::sqlite::LibraryBrowserSort::NameDesc),
+        ];
+        for (raw, expected) in sorts {
+            let mut dto = browser_query(None);
+            dto.sort = raw.into();
+            let mapped = super::browser_query_from_dto(dto).unwrap();
+            assert_eq!(mapped.sort, expected);
+        }
+
+        let mut unknown_type = browser_query(None);
+        unknown_type.type_filter = "we_scene".into();
+        assert!(super::browser_query_from_dto(unknown_type)
+            .unwrap_err()
+            .contains("unknown library browser type"));
+
+        let mut unknown_sort = browser_query(None);
+        unknown_sort.sort = "recently_added".into();
+        assert!(super::browser_query_from_dto(unknown_sort)
+            .unwrap_err()
+            .contains("unknown library browser sort"));
+    }
+
+    #[test]
+    fn browser_query_deserializes_camel_case_wire_fields() {
+        let dto: super::LibraryBrowserQueryDto = serde_json::from_value(serde_json::json!({
+            "sourceId": 9,
+            "typeFilter": "weScene",
+            "favoritesOnly": true,
+            "search": "aurora",
+            "sort": "nameAsc",
+            "offset": 40,
+            "limit": 20
+        }))
+        .unwrap();
+
+        assert_eq!(dto.source_id, Some(9));
+        assert_eq!(dto.type_filter, "weScene");
+        assert!(dto.favorites_only);
+        assert_eq!(dto.search, "aurora");
+        assert_eq!(dto.sort, "nameAsc");
+        assert_eq!(dto.offset, 40);
+        assert_eq!(dto.limit, 20);
+    }
+
+    #[test]
+    fn browser_page_flattens_wallpaper_dto_and_keeps_browser_metadata() {
+        let (_tmp, storage, source_id) = browser_fixture();
+
+        let page =
+            super::library_browser_page_for_storage(&storage, browser_query(Some(source_id)))
+                .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+
+        let json = serde_json::to_value(&page.items[0]).unwrap();
+        assert_eq!(json["wallpaperId"], 41);
+        assert_eq!(json["path"], "/wallpapers/scene-41");
+        assert_eq!(json["type"], "we_scene");
+        assert_eq!(json["favorite"], true);
+        assert_eq!(json["author"], "Ada Lovelace");
+        assert_eq!(json["addedAt"], "2026-07-14T10:00:00Z");
+        assert_eq!(json["sources"][0]["id"], source_id);
+        assert_eq!(json["sources"][0]["displayName"], "Curated Scenes");
+        assert_eq!(json["applyAvailability"], "available");
+        assert_eq!(json["applyBackend"], "linux-wallpaperengine");
+        assert!(json["applyActions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|action| { action["kind"] == "apply" && action["enabled"] == true }));
+        assert!(
+            json.get("wallpaper").is_none(),
+            "WallpaperDTO must be flattened"
+        );
+    }
+
+    #[test]
+    fn browser_page_exposes_the_renderer_that_apply_will_use() {
+        let (_tmp, storage, source_id) = browser_fixture();
+        storage.config_set("image_backend", "mpvpaper").unwrap();
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers
+             (id, path, type, ext, backend, size, mtime, resolution, added_at)
+             VALUES
+             (42, '/wallpapers/still.jpg', 'image', 'jpg', 'awww', 1024,
+              1700000001, '1920x1080', '2026-07-14T11:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO wallpaper_sources (wallpaper_id, source_id) VALUES (42, ?1)",
+            [source_id],
+        )
+        .unwrap();
+        drop(conn);
+        let mut query = browser_query(Some(source_id));
+        query.type_filter = "image".into();
+        query.favorites_only = false;
+        query.search.clear();
+
+        let page = super::library_browser_page_for_storage(&storage, query).unwrap();
+
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].wallpaper.backend, "mpvpaper");
+        assert_eq!(
+            page.items[0].wallpaper.apply_backend.as_deref(),
+            Some("mpvpaper")
+        );
+    }
+
+    #[test]
+    fn browser_random_reuses_query_semantics_and_flattened_item_shape() {
+        let (_tmp, storage, source_id) = browser_fixture();
+
+        let item = super::library_browser_random_for_storage(&storage, {
+            let mut query = browser_query(Some(source_id));
+            query.offset = usize::MAX;
+            query.limit = 0;
+            query
+        })
+        .unwrap()
+        .expect("matching item");
+        assert_eq!(item.wallpaper_id, 41);
+        assert_eq!(item.wallpaper.path, "/wallpapers/scene-41");
+        assert_eq!(item.sources[0].display_name, "Curated Scenes");
+
+        let mut no_match = browser_query(Some(source_id));
+        no_match.search = "missing".into();
+        assert!(
+            super::library_browser_random_for_storage(&storage, no_match)
+                .unwrap()
+                .is_none()
+        );
+    }
 
     #[test]
     fn format_library_page_debug_log_records_all_stages() {
@@ -324,7 +658,7 @@ mod tests {
     }
 
     #[test]
-    fn favorites_and_history_use_shared_sql_helpers() {
+    fn favorites_use_shared_sql_helper() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = wc_core::ConfigDir {
             path: tmp.path().join("wallpaper-console"),
@@ -340,16 +674,116 @@ mod tests {
         .unwrap();
         conn.execute("INSERT INTO favorites (path) VALUES ('/fav.jpg')", [])
             .unwrap();
+        let favs = wc_storage::sqlite::favorites_page_sqlite(&cd, 0, 10).unwrap();
+        assert_eq!(favs.total, 1);
+    }
+
+    #[test]
+    fn build_library_source_status_reports_stale_when_tsv_has_rows_but_sqlite_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        std::fs::write(cd.library_tsv_path(), "/tmp/a.jpg\n/tmp/b.jpg\n").unwrap();
+
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+        let status = super::build_library_source_status(&s).unwrap();
+
+        assert_eq!(status.source_count, 1);
+        assert_eq!(status.sqlite_rows, 0);
+        assert_eq!(status.tsv_rows, 2);
+        assert!(status.stale);
+        assert!(status.sqlite_ready);
+        assert!(status.message.contains("legacy library.tsv"));
+    }
+
+    #[test]
+    fn gui_library_views_exclude_orphans_and_deduplicate_overlapping_sources() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let first_root = tmp.path().join("first");
+        let second_root = tmp.path().join("second");
+        std::fs::create_dir(&first_root).unwrap();
+        std::fs::create_dir(&second_root).unwrap();
+        let first = storage
+            .source_create(&first_root.to_string_lossy())
+            .unwrap();
+        let second = storage
+            .source_create(&second_root.to_string_lossy())
+            .unwrap();
+        let conn = rusqlite::Connection::open(storage.cd.db_path()).unwrap();
         conn.execute(
-            "INSERT INTO history (path, backend) VALUES ('/fav.jpg', 'awww')",
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/member.jpg', 'image', 'jpg', 'awww', 100, 1000, '1920x1080')",
             [],
         )
         .unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend, size, mtime, resolution)
+             VALUES ('/orphan.gif', 'gif', 'gif', 'awww', 200, 2000, '1920x1080')",
+            [],
+        )
+        .unwrap();
+        for source_id in [first.id, second.id] {
+            conn.execute(
+                "INSERT INTO wallpaper_sources (wallpaper_id, source_id)
+                 SELECT id, ?1 FROM wallpapers WHERE path = '/member.jpg'",
+                [source_id],
+            )
+            .unwrap();
+        }
+        drop(conn);
 
-        let favs = wc_storage::sqlite::favorites_page_sqlite(&cd, 0, 10).unwrap();
-        assert_eq!(favs.total, 1);
+        assert_eq!(wc_storage::sqlite::library_count(&storage.cd).unwrap(), 2);
+        let counts = super::library_count_for_storage(&storage).unwrap();
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.images, 1);
+        assert_eq!(counts.gifs, 0);
 
-        let hist = wc_storage::sqlite::history_page_sqlite(&cd, 0, 10).unwrap();
-        assert_eq!(hist.total, 1);
+        let page = super::library_page_for_storage(
+            &storage,
+            &wc_storage::sqlite::LibraryPageQuery {
+                filter: wc_storage::sqlite::LibraryFilter::All,
+                sort: wc_storage::sqlite::LibrarySort::Name,
+                search: String::new(),
+                offset: 0,
+                limit: 10,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.items[0].path.as_str(), "/member.jpg");
+
+        let status = super::build_library_source_status(&storage).unwrap();
+        assert_eq!(status.source_count, 2);
+        assert_eq!(status.sqlite_rows, 1);
+        assert!(!status.stale);
+    }
+
+    #[test]
+    fn build_library_source_status_reports_no_sources_message() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+
+        let s = wc_storage::StorageApi::new(cd);
+        let status = super::build_library_source_status(&s).unwrap();
+
+        assert_eq!(status.source_count, 0);
+        assert_eq!(status.sqlite_rows, 0);
+        assert!(!status.stale);
+        assert_eq!(
+            status.message,
+            "No sources configured. Add a source or scan Wallpaper Engine."
+        );
     }
 }

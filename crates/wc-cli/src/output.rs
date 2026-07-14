@@ -7,26 +7,28 @@ pub(crate) fn print_help() {
     println!(concat!(
         "wallpaper-console-rust\n\n",
         "Commands:\n",
-        "  apply FILE           browse              browse-all\n",
+        "  apply FILE [--target OUTPUT|all] [--output OUTPUT]...\n",
+        "                       browse              browse-all\n",
         "  browse-images        browse-gifs         browse-videos\n",
         "  random               random-all          random-image/gif/video\n",
         "  stop                 status               restore\n",
+        "  displays             display-state        restore-displays [--output OUTPUT]...\n",
+        "  restore-at-login     restore saved displays only when restore_on_login=on\n",
         "  add DIR              sources             remove (fzf)\n",
         "  remove-source DIR    steam-workshop      validate-sources\n",
         "  remove-missing       dedupe-sources\n",
         "  favorite-add FILE    favorite-add-current favorites (fzf)\n",
         "  favorite-random      favorite-remove [FILE]\n",
-        "  history (fzf)        history-random      history-clear\n",
         "  search [QUERY]       search-source [Q]   search-type [Q]\n",
         "  sort-mtime           sort-size            sort-name\n",
         "  config-get KEY       config-set KEY VAL\n",
         "  rescan               library              library-count\n",
         "  browse-library (fzf) random-library       library-json [--tsv|--sqlite]\n",
-        "  library-page-json    favorites-json       history-json\n",
+        "  library-page-json    favorites-json\n",
         "  migrate-to-sqlite    sqlite-verify        sqlite-resync (diagnostic repair)\n",
         "  sqlite-export-flat   sqlite-backup         sqlite-restore BACKUP\n",
         "  sqlite-config-get KEY sqlite-sources-list   sqlite-favorites-list\n",
-        "  sqlite-history-list  sqlite-current-read   sqlite-last-backend-read\n",
+        "  sqlite-current-read  sqlite-last-backend-read\n",
         "  tui\n",
     ));
 }
@@ -106,15 +108,13 @@ pub(crate) fn json_library_from_tsv(s: &StorageApi) -> anyhow::Result<()> {
 }
 
 pub(crate) fn json_library_from_sqlite(s: &StorageApi) -> anyhow::Result<()> {
-    use rusqlite::Connection;
     let db = s.cd.db_path();
     if !db.exists() {
-        let conn = Connection::open(&db)?;
-        wc_storage::sqlite::create_schema(&conn)?;
+        wc_storage::sqlite::try_ensure_sqlite_db(&s.cd)?;
         println!("[]");
         return Ok(());
     }
-    let conn = Connection::open(&db)?;
+    let conn = wc_storage::sqlite::open_runtime_connection(&s.cd)?;
     wc_storage::sqlite::ensure_wallpaper_metadata_columns(&conn)?;
     let mut stmt = conn.prepare(
         "SELECT path, type, ext, backend, size, mtime, resolution,
@@ -226,4 +226,98 @@ fn json_library_page_from_tsv(
         }))?
     );
     Ok(())
+}
+
+pub(crate) fn json_from_display_names(names: &[String]) -> serde_json::Value {
+    serde_json::json!({
+        "outputs": names
+            .iter()
+            .map(|name| serde_json::json!({ "name": name }))
+            .collect::<Vec<_>>()
+    })
+}
+
+pub(crate) fn json_from_display_state_rows(
+    rows: &[wc_storage::sqlite::DisplayStateRow],
+) -> serde_json::Value {
+    serde_json::Value::Array(
+        rows.iter()
+            .map(|row| {
+                let (target_key, kind, output) = match &row.target {
+                    wc_storage::sqlite::DisplayStateTarget::AllDisplays => (
+                        wc_storage::sqlite::ALL_DISPLAYS_TARGET_KEY.to_string(),
+                        "allDisplays",
+                        None,
+                    ),
+                    wc_storage::sqlite::DisplayStateTarget::Output(name) => {
+                        (name.clone(), "output", Some(name.clone()))
+                    }
+                };
+                serde_json::json!({
+                    "targetKey": target_key,
+                    "kind": kind,
+                    "output": output,
+                    "wallpaperPath": row.wallpaper_path,
+                    "backend": row.backend,
+                    "updatedAt": row.updated_at,
+                })
+            })
+            .collect(),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
+
+    #[test]
+    fn display_list_json_uses_typed_output_objects() {
+        assert_eq!(
+            json_from_display_names(&["eDP-1".into(), "HDMI-A-1".into()]),
+            serde_json::json!({
+                "outputs": [{ "name": "eDP-1" }, { "name": "HDMI-A-1" }]
+            })
+        );
+    }
+
+    #[test]
+    fn display_state_json_preserves_all_and_named_targets() {
+        let rows = vec![
+            DisplayStateRow {
+                target: DisplayStateTarget::AllDisplays,
+                wallpaper_path: "/walls/all.jpg".into(),
+                backend: "awww".into(),
+                updated_at: "2026-07-13T00:00:00Z".into(),
+            },
+            DisplayStateRow {
+                target: DisplayStateTarget::Output("eDP-1".into()),
+                wallpaper_path: "/walls/laptop.mp4".into(),
+                backend: "mpvpaper".into(),
+                updated_at: "2026-07-13T00:01:00Z".into(),
+            },
+        ];
+
+        assert_eq!(
+            json_from_display_state_rows(&rows),
+            serde_json::json!([
+                {
+                    "targetKey": "__all_displays__",
+                    "kind": "allDisplays",
+                    "output": null,
+                    "wallpaperPath": "/walls/all.jpg",
+                    "backend": "awww",
+                    "updatedAt": "2026-07-13T00:00:00Z"
+                },
+                {
+                    "targetKey": "eDP-1",
+                    "kind": "output",
+                    "output": "eDP-1",
+                    "wallpaperPath": "/walls/laptop.mp4",
+                    "backend": "mpvpaper",
+                    "updatedAt": "2026-07-13T00:01:00Z"
+                }
+            ])
+        );
+    }
 }

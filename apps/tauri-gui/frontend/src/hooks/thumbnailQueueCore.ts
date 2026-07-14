@@ -56,6 +56,12 @@ export class ThumbnailRequestQueue {
     this.pump();
   }
 
+  replacePending(paths: string[]): void {
+    this.queue = [];
+    this.queuedPaths.clear();
+    this.enqueue(paths);
+  }
+
   forget(paths: string[]): void {
     const set = new Set(paths);
     for (const path of set) {

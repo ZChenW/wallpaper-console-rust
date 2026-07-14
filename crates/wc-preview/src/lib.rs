@@ -644,6 +644,42 @@ pub fn thumbnail_cache_cleanup_all(cache_dir: &Path) -> u64 {
     removed
 }
 
+const TMP_CLEANUP_INTERVAL_SECS: u64 = 3_600;
+
+#[derive(Default)]
+struct TmpCleanupSchedule {
+    last_sweeps: Mutex<HashMap<PathBuf, u64>>,
+}
+
+impl TmpCleanupSchedule {
+    fn should_run(&self, cache_dir: &Path, now: u64, interval_secs: u64) -> bool {
+        let mut last_sweeps = self
+            .last_sweeps
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last_sweeps.get(cache_dir).is_some_and(|last_sweep| {
+            now.checked_sub(*last_sweep)
+                .is_some_and(|elapsed| elapsed < interval_secs)
+        }) {
+            return false;
+        }
+
+        last_sweeps.insert(cache_dir.to_path_buf(), now);
+        true
+    }
+}
+
+static TMP_CLEANUP_SCHEDULE: OnceLock<TmpCleanupSchedule> = OnceLock::new();
+
+fn maybe_cleanup_stale_tmp_thumbnails(cache_dir: &Path, now: u64) -> u64 {
+    let schedule = TMP_CLEANUP_SCHEDULE.get_or_init(TmpCleanupSchedule::default);
+    if schedule.should_run(cache_dir, now, TMP_CLEANUP_INTERVAL_SECS) {
+        cleanup_stale_tmp_thumbnails(cache_dir, TMP_CLEANUP_INTERVAL_SECS)
+    } else {
+        0
+    }
+}
+
 /// Full thumbnail-for API suitable for Tauri commands.
 pub fn thumbnail_for(cache_dir: &Path, path: &str) -> ThumbnailResult {
     thumbnail_for_with_failure_ttl(cache_dir, path, DEFAULT_FAILURE_TTL_SECS)
@@ -673,6 +709,7 @@ pub fn thumbnail_for_with_failure_ttl(
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs())
         .unwrap_or(0);
+    let _ = maybe_cleanup_stale_tmp_thumbnails(cache_dir, current_epoch_secs());
     let key = gui_thumb_cache_key_v2(path, mtime, size);
     let marker = failure_marker_path(cache_dir, &key);
     if let Some(failure) = read_failure_marker(&marker) {
@@ -768,7 +805,73 @@ fn write_failure_marker(
 
 // ── Internal generators ────────────────────────────────────────────────────
 
+pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 {
+    let now = current_epoch_secs();
+    let mut removed = 0u64;
+    let Ok(read_dir) = std::fs::read_dir(cache_dir) else {
+        return 0;
+    };
+    for entry in read_dir.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with('.') || !name.ends_with(".tmp.webp") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if now.saturating_sub(mtime) >= max_age_secs && std::fs::remove_file(path).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> bool {
+    let Ok(reader) = image::ImageReader::open(src) else {
+        return false;
+    };
+    let Ok(reader) = reader.with_guessed_format() else {
+        return false;
+    };
+    let Ok(img) = reader.decode() else {
+        return false;
+    };
+    let width = img.width();
+    let height = img.height();
+    if width == 0 || height == 0 {
+        return false;
+    }
+    let target_width = 400u32;
+    let target_height = ((height as f64) * (target_width as f64 / width as f64))
+        .round()
+        .max(1.0) as u32;
+    let resized = img.resize(
+        target_width,
+        target_height,
+        image::imageops::FilterType::Lanczos3,
+    );
+    resized
+        .save_with_format(dst, image::ImageFormat::WebP)
+        .is_ok()
+        && dst.exists()
+}
+
 fn generate_image_thumbnail(src: &str, dst: &Path) -> bool {
+    if generate_image_thumbnail_rust(src, dst) {
+        return true;
+    }
     for program in &["magick", "convert"] {
         if !command_exists(program) {
             continue;
@@ -1106,5 +1209,121 @@ mod tests {
 
         assert_ne!(result.failure_reason, Some(ThumbnailFailure::Unsupported));
         assert_eq!(thumbnail_cache_info(cache.path()).failure_entries, 1);
+    }
+
+    #[test]
+    fn cleanup_stale_tmp_thumbnails_removes_only_old_tmp_files() {
+        let cache = tempfile::tempdir().unwrap();
+        let old_tmp = cache.path().join(".old.tmp.webp");
+        let fresh_tmp = cache.path().join(".fresh.tmp.webp");
+        let normal = cache.path().join("normal.webp");
+        std::fs::write(&old_tmp, b"x").unwrap();
+        std::fs::write(&fresh_tmp, b"x").unwrap();
+        std::fs::write(&normal, b"x").unwrap();
+
+        let old_time = filetime::FileTime::from_unix_time((current_epoch_secs() - 7200) as i64, 0);
+        filetime::set_file_mtime(&old_tmp, old_time).unwrap();
+
+        let removed = cleanup_stale_tmp_thumbnails(cache.path(), 3600);
+        assert_eq!(removed, 1);
+        assert!(!old_tmp.exists());
+        assert!(fresh_tmp.exists());
+        assert!(normal.exists());
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_throttles_each_directory_independently() {
+        let schedule = TmpCleanupSchedule::default();
+
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+        assert!(!schedule.should_run(Path::new("/cache"), 1_001, 3_600));
+        assert!(schedule.should_run(Path::new("/cache"), 4_600, 3_600));
+        assert!(schedule.should_run(Path::new("/other"), 1_001, 3_600));
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_reopens_window_after_clock_rollback() {
+        let schedule = TmpCleanupSchedule::default();
+
+        assert!(schedule.should_run(Path::new("/cache"), 5_000, 3_600));
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_allows_one_concurrent_sweep() {
+        const THREADS: usize = 16;
+
+        let schedule = TmpCleanupSchedule::default();
+        let barrier = std::sync::Barrier::new(THREADS);
+        let winners = std::sync::atomic::AtomicUsize::new(0);
+
+        std::thread::scope(|scope| {
+            for _ in 0..THREADS {
+                let schedule = &schedule;
+                let barrier = &barrier;
+                let winners = &winners;
+                scope.spawn(move || {
+                    barrier.wait();
+                    if schedule.should_run(Path::new("/cache"), 1_000, 3_600) {
+                        winners.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+        });
+
+        assert_eq!(winners.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tmp_cleanup_schedule_recovers_from_poison() {
+        let schedule = TmpCleanupSchedule::default();
+        let poisoned = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = schedule.last_sweeps.lock().unwrap();
+            panic!("poison cleanup schedule for test");
+        }));
+
+        assert!(poisoned.is_err());
+        assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+    }
+
+    #[test]
+    fn thumbnail_for_static_image_generates_and_hits_cache() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("image.png");
+        let img = image::RgbImage::from_pixel(16, 9, image::Rgb([200, 20, 40]));
+        img.save(&image_path).unwrap();
+
+        let first = thumbnail_for(cache.path(), image_path.to_str().unwrap());
+        assert!(
+            first.thumbnail.is_some(),
+            "first call should generate thumbnail"
+        );
+        assert!(!first.cache_hit);
+        assert!(std::path::Path::new(first.thumbnail.as_ref().unwrap()).exists());
+
+        let second = thumbnail_for(cache.path(), image_path.to_str().unwrap());
+        assert!(
+            second.thumbnail.is_some(),
+            "second call should return cached thumbnail"
+        );
+        assert!(second.cache_hit);
+    }
+
+    #[test]
+    fn thumbnail_for_misnamed_jpeg_uses_magic_byte_format() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("wrong-ext.png");
+        let img = image::RgbImage::from_pixel(16, 9, image::Rgb([200, 20, 40]));
+        img.save_with_format(&image_path, image::ImageFormat::Jpeg)
+            .unwrap();
+
+        let result = thumbnail_for(cache.path(), image_path.to_str().unwrap());
+        assert!(
+            result.thumbnail.is_some(),
+            "misnamed JPEG should thumbnail via format sniffing"
+        );
+        assert!(!result.cache_hit);
     }
 }

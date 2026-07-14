@@ -55,7 +55,7 @@ pub async fn export_diagnostics() -> CommandResult {
                     .as_secs()
             ));
             let scan_snapshot = super::scan::current_scan_progress_snapshot();
-            let content = build_diagnostics_content(&s, &scan_snapshot);
+            let content = build_diagnostics_content(s, &scan_snapshot);
             match std::fs::write(&path, content) {
                 Ok(()) => ok(path.to_string_lossy().to_string()),
                 Err(e) => fail(e.to_string()),
@@ -97,7 +97,7 @@ pub(crate) fn build_diagnostics_content(
     let integrity = if !db_exists {
         "missing".to_string()
     } else {
-        match rusqlite::Connection::open(&db_path) {
+        match wc_storage::sqlite::open_runtime_connection(&s.cd) {
             Ok(conn) => {
                 match conn.query_row("PRAGMA integrity_check;", [], |row| row.get::<_, String>(0)) {
                     Ok(v) => {

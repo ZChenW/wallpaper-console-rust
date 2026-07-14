@@ -1,6 +1,8 @@
 use std::collections::HashMap;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::error::WcError;
 
@@ -14,6 +16,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("awww_transition_duration", "1"),
     ("awww_resize", "crop"),
     ("wallpaper_transition_fps", "60"),
+    ("restore_on_login", "off"),
     ("linux_wallpaperengine_enabled", "on"),
     ("linux_wallpaperengine_path", "auto"),
     ("linux_wallpaperengine_scaling", "default"),
@@ -133,6 +136,20 @@ pub fn parse_config_file(path: &Path) -> Result<HashMap<String, String>, WcError
     Ok(map)
 }
 
+static ATOMIC_CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+fn atomic_config_temp_path(config_path: &Path) -> PathBuf {
+    let sequence = ATOMIC_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let mut temp_file_name = OsString::from(".");
+    temp_file_name.push(
+        config_path
+            .file_name()
+            .unwrap_or_else(|| OsStr::new("config")),
+    );
+    temp_file_name.push(format!(".tmp.{}.{}", std::process::id(), sequence));
+    config_path.with_file_name(temp_file_name)
+}
+
 /// Set a config value in the flat config file (atomic write).
 pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
     let config_path = config_dir.join("config");
@@ -150,9 +167,15 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
 
     let content = serialize_config_map(&map);
     // Atomic: write to temp, then rename
-    let tmp = config_path.with_extension("tmp");
-    fs::write(&tmp, content).map_err(WcError::Io)?;
-    fs::rename(&tmp, &config_path).map_err(WcError::Io)?;
+    let tmp = atomic_config_temp_path(&config_path);
+    if let Err(error) = fs::write(&tmp, content) {
+        let _ = fs::remove_file(&tmp);
+        return Err(WcError::Io(error));
+    }
+    if let Err(error) = fs::rename(&tmp, &config_path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(WcError::Io(error));
+    }
     Ok(())
 }
 
@@ -245,6 +268,15 @@ mod tests {
     }
 
     #[test]
+    fn login_restore_is_opt_in_by_default() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("restore_on_login").map(String::as_str),
+            Some("off")
+        );
+    }
+
+    #[test]
     fn default_config_keys_are_unique() {
         let keys = default_config_keys();
         let unique = keys.iter().collect::<std::collections::HashSet<_>>();
@@ -274,6 +306,30 @@ mod tests {
         assert_eq!(first, second);
         assert!(first.contains("gif_backend=awww\nimage_backend=awww\n"));
         assert!(first.ends_with("z_custom=last\n"));
+    }
+
+    #[test]
+    fn atomic_config_temp_paths_are_unique() {
+        let config_path = Path::new("/tmp/config");
+
+        let first = atomic_config_temp_path(config_path);
+        let second = atomic_config_temp_path(config_path);
+
+        assert_ne!(first, second);
+        assert_eq!(first.parent(), config_path.parent());
+        assert_eq!(second.parent(), config_path.parent());
+
+        let expected_prefix = format!(".config.tmp.{}.", std::process::id());
+        assert!(first
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&expected_prefix));
+        assert!(second
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&expected_prefix));
     }
 
     #[test]

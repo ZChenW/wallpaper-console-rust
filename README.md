@@ -3,7 +3,7 @@
 Rust/Tauri wallpaper manager for Linux Wayland desktops, with niri in mind.
 
 It provides a GUI for browsing wallpaper folders, scanning Wallpaper Engine
-Workshop content, applying wallpapers, and managing sources, favorites, history,
+Workshop content, applying wallpapers, and managing sources, favorites,
 thumbnails, and backend settings.
 
 ## Features
@@ -13,7 +13,7 @@ thumbnails, and backend settings.
 - Compatible Wallpaper Engine scenes via `linux-wallpaperengine`
 - Wallpaper Engine Web projects are indexed for browsing only; live apply is not
   supported
-- SQLite storage for library, history, favorites, sources, and thumbnails
+- SQLite storage for the library, favorites, sources, and thumbnails
 
 ## Requirements
 
@@ -42,11 +42,20 @@ wallpaper-console-gui-rust
 
 ## Niri Example
 
-Startup restore:
+Login restore is opt-in. Enable it once, then point the compositor startup hook
+at the guarded command:
+
+```bash
+wallpaper-console-rust config-set restore_on_login on
+```
 
 ```kdl
-spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore"
+spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore-at-login"
 ```
+
+Set `restore_on_login` back to `off` to disable login restoration without
+editing the compositor configuration. Manual `restore` and `restore-displays`
+commands remain unconditional.
 
 Launch the GUI:
 

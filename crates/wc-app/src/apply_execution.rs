@@ -64,6 +64,28 @@ mod tests {
         (tmp, crate::AppService::from_config_dir(cd))
     }
 
+    fn insert_history(service: &crate::AppService, path: &str, backend: &str) {
+        let cd = &service.storage_for_tests().cd;
+        let conn = wc_storage::sqlite::open_runtime_connection(cd).unwrap();
+        conn.execute(
+            "INSERT INTO history (path, backend) VALUES (?1, ?2)",
+            [path, backend],
+        )
+        .unwrap();
+    }
+
+    fn history_rows(service: &crate::AppService) -> Vec<(String, String)> {
+        let cd = &service.storage_for_tests().cd;
+        let conn = wc_storage::sqlite::open_runtime_connection(cd).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT path, backend FROM history ORDER BY id")
+            .unwrap();
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+    }
+
     fn web_project(root: &Path) -> std::path::PathBuf {
         let project = root.join("steamapps/workshop/content/431960/3650880224");
         std::fs::create_dir_all(&project).unwrap();
@@ -122,6 +144,79 @@ mod tests {
     }
 
     #[test]
+    fn image_apply_uses_configured_compatible_renderer_instead_of_scan_default() {
+        let (tmp, service) = temp_service();
+        let image = tmp.path().join("wall.jpg");
+        std::fs::write(&image, b"jpg").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "mpvpaper")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&image.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.file_type, FileType::Image);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn preview_uses_the_configured_gif_renderer() {
+        let (tmp, service) = temp_service();
+        let project = scene_project_with_preview(tmp.path());
+        service
+            .storage_for_tests()
+            .config_set("gif_backend", "mpvpaper")
+            .unwrap();
+        let request = ApplyRequest {
+            kind: ApplyRequestKind::ApplyPreview,
+            path: project.to_string_lossy().to_string(),
+            request_id: Some("preview-config".into()),
+        };
+
+        let target = service.resolve_apply_request_target(&request).unwrap();
+
+        assert_eq!(target.file_type, FileType::Gif);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn video_apply_clamps_legacy_awww_preference_to_mpvpaper() {
+        let (tmp, service) = temp_service();
+        let video = tmp.path().join("wall.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("video_backend", "awww")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&video.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.file_type, FileType::Video);
+        assert_eq!(target.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn invalid_image_renderer_preference_falls_back_to_awww() {
+        let (tmp, service) = temp_service();
+        let image = tmp.path().join("wall.png");
+        std::fs::write(&image, b"png").unwrap();
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "linux-wallpaperengine")
+            .unwrap();
+
+        let target = service
+            .resolve_apply_target(&image.to_string_lossy())
+            .unwrap();
+
+        assert_eq!(target.backend, Backend::Awww);
+    }
+
+    #[test]
     fn apply_preview_without_preview_is_structured_error() {
         let (tmp, service) = temp_service();
         let project = tmp.path().join("steamapps/workshop/content/431960/1");
@@ -147,14 +242,15 @@ mod tests {
     fn unsupported_request_does_not_add_history() {
         let (tmp, service) = temp_service();
         let project = web_project(tmp.path());
-        let before = service.storage_for_tests().history_list().unwrap().len();
+        insert_history(&service, "/walls/legacy.jpg", "awww");
+        let before = history_rows(&service);
         let request = ApplyRequest {
             kind: ApplyRequestKind::Apply,
             path: project.to_string_lossy().to_string(),
             request_id: None,
         };
         assert!(service.execute_apply_request(request).is_err());
-        let after = service.storage_for_tests().history_list().unwrap().len();
+        let after = history_rows(&service);
         assert_eq!(before, after);
     }
 

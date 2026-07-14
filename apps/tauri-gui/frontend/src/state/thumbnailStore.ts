@@ -6,11 +6,11 @@ export const MAX_REVEAL_PER_FRAME = 12;
 
 export class ThumbnailStore {
   private cache = new Map<string, string>();
+  private failures = new Map<string, string>();
   private listeners = new Map<string, Set<() => void>>();
   private queue: ThumbnailRequestQueue;
   private enqueueScheduled = false;
   private pendingPaths: string[] = [];
-  private pendingOptions: EnqueueOptions | undefined;
   private pendingNotifyPaths = new Set<string>();
   private pausedNotifyPaths = new Set<string>();
   private notifyScheduled = false;
@@ -22,9 +22,11 @@ export class ThumbnailStore {
       load,
       onThumbnail: (path, thumbnail) => {
         this.cache.set(path, thumbnail);
+        this.failures.delete(path);
         this.scheduleNotify(path);
       },
-      onFailure: (path) => {
+      onFailure: (path, reason) => {
+        this.failures.set(path, reason ?? 'thumbnail_failed');
         this.scheduleNotify(path);
       },
     });
@@ -34,26 +36,42 @@ export class ThumbnailStore {
     return this.cache.get(path);
   }
 
+  getFailure(path: string): string | undefined {
+    return this.failures.get(path);
+  }
+
+  failureCount(): number {
+    return this.failures.size;
+  }
+
+  listenerPathCount(): number {
+    return this.listeners.size;
+  }
+
   subscribe(path: string, cb: () => void): () => void {
-    if (!this.listeners.has(path)) this.listeners.set(path, new Set());
-    this.listeners.get(path)!.add(cb);
+    let listeners = this.listeners.get(path);
+    if (!listeners) {
+      listeners = new Set();
+      this.listeners.set(path, listeners);
+    }
+    listeners.add(cb);
     return () => {
-      this.listeners.get(path)?.delete(cb);
+      listeners.delete(cb);
+      if (listeners.size === 0 && this.listeners.get(path) === listeners) {
+        this.listeners.delete(path);
+      }
     };
   }
 
-  enqueueVisible(paths: string[], options?: EnqueueOptions): void {
-    this.pendingPaths.push(...paths);
-    if (options) this.pendingOptions = options;
+  enqueueVisible(paths: string[], _options?: EnqueueOptions): void {
+    this.pendingPaths = paths.slice();
     if (this.enqueueScheduled) return;
     this.enqueueScheduled = true;
     const flush = () => {
       this.enqueueScheduled = false;
       const unique = Array.from(new Set(this.pendingPaths));
       this.pendingPaths = [];
-      const opts = this.pendingOptions;
-      this.pendingOptions = undefined;
-      this.queue.enqueue(unique, opts);
+      this.queue.replacePending(unique);
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
     else Promise.resolve().then(flush);
@@ -66,6 +84,7 @@ export class ThumbnailStore {
   reset(): void {
     this.queue.reset();
     this.cache.clear();
+    this.failures.clear();
     this.listeners.clear();
     this.pendingNotifyPaths.clear();
     this.pausedNotifyPaths.clear();
@@ -77,8 +96,9 @@ export class ThumbnailStore {
     return this.queue.snapshot();
   }
 
-  stats(): { pending: number; active: number; cached: number } {
-    return this.queue.stats();
+  stats(): { pending: number; active: number; cached: number; failures: number } {
+    const base = this.queue.stats();
+    return { ...base, cached: this.cache.size, failures: this.failures.size };
   }
 
   setRevealPaused(paused: boolean): void {

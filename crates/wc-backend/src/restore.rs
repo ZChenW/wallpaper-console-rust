@@ -42,27 +42,7 @@ pub(crate) fn restore_clean_with_runtime(
 }
 
 fn backend_for_restore_entry(s: &StorageApi, entry: &wc_core::types::WallpaperEntry) -> Backend {
-    match entry.file_type {
-        wc_core::types::FileType::Image => {
-            match wc_core::config::normalize_image_backend(&s.config_get("image_backend", "awww")) {
-                "mpvpaper" => Backend::Mpvpaper,
-                _ => Backend::Awww,
-            }
-        }
-        wc_core::types::FileType::Gif => match s.config_get("gif_backend", "awww").as_str() {
-            "mpvpaper" => Backend::Mpvpaper,
-            _ => Backend::Awww,
-        },
-        wc_core::types::FileType::Video => match s.config_get("video_backend", "mpvpaper").as_str()
-        {
-            "awww" => Backend::Awww,
-            _ => Backend::Mpvpaper,
-        },
-        wc_core::types::FileType::WeScene => Backend::LinuxWallpaperEngine,
-        wc_core::types::FileType::WeWeb | wc_core::types::FileType::WeApplication => {
-            Backend::Unsupported
-        }
-    }
+    s.backend_routing().backend_for(entry.file_type)
 }
 
 fn fallback_for_restore_entry(
@@ -82,4 +62,50 @@ fn fallback_for_restore_entry(
 
 pub fn restore(s: &StorageApi) -> Result<(), WcError> {
     restore_clean(s)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wc_core::types::{FileType, WallpaperEntry};
+
+    fn entry(file_type: FileType) -> WallpaperEntry {
+        WallpaperEntry {
+            path: "/tmp/wallpaper".into(),
+            file_type,
+            ext: String::new(),
+            backend: Backend::Unsupported,
+            size: 0,
+            mtime: 0,
+            resolution: String::new(),
+            project: None,
+        }
+    }
+
+    #[test]
+    fn restore_routing_matches_shared_safe_routing_for_every_type() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage.config_set("image_backend", "mpvpaper").unwrap();
+        storage.config_set("gif_backend", "mpvpaper").unwrap();
+        storage.config_set("video_backend", "awww").unwrap();
+        let routing = storage.backend_routing();
+
+        for file_type in [
+            FileType::Image,
+            FileType::Gif,
+            FileType::Video,
+            FileType::WeScene,
+            FileType::WeWeb,
+            FileType::WeApplication,
+        ] {
+            assert_eq!(
+                backend_for_restore_entry(&storage, &entry(file_type)),
+                routing.backend_for(file_type),
+                "file_type={file_type:?}"
+            );
+        }
+    }
 }

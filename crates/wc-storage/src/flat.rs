@@ -150,7 +150,7 @@ pub fn favorites_has(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
     Ok(lines.iter().any(|l| l == path))
 }
 
-pub fn history_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
+pub(crate) fn history_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
     let lines = read_lines(&cd.history_path())?;
     let mut seen = std::collections::HashSet::new();
     let deduped: Vec<String> = lines
@@ -160,7 +160,8 @@ pub fn history_list(cd: &ConfigDir) -> Result<Vec<String>, WcError> {
     Ok(deduped)
 }
 
-pub fn history_add(cd: &ConfigDir, path: &str, max_entries: usize) -> Result<(), WcError> {
+#[cfg(test)]
+pub(crate) fn history_add(cd: &ConfigDir, path: &str, max_entries: usize) -> Result<(), WcError> {
     let mut lines = read_lines(&cd.history_path())?;
     let canon = try_canonicalize(path);
     lines.retain(|l| try_canonicalize(l) != canon);
@@ -170,14 +171,6 @@ pub fn history_add(cd: &ConfigDir, path: &str, max_entries: usize) -> Result<(),
         lines.truncate(max_entries);
     }
     write_lines(&cd.history_path(), &lines)
-}
-
-pub fn history_clear(cd: &ConfigDir) -> Result<(), WcError> {
-    clear_file(&cd.history_path())
-}
-
-pub fn history_count(cd: &ConfigDir) -> Result<usize, WcError> {
-    Ok(read_lines(&cd.history_path())?.len())
 }
 
 pub fn current_read(cd: &ConfigDir) -> Result<Option<String>, WcError> {

@@ -9,6 +9,7 @@ members = [
     "crates/wc-cli",
     "crates/wc-preview",
     "apps/tauri-gui/src-tauri",
+    "xtask",
 ]
 exclude = [
     # Tauri v2 builds — webkit2gtk-4.1 is required.
@@ -32,6 +33,7 @@ tempfile = "3"
 clap = { version = "4", features = ["derive"] }
 dirs = "5"
 which = "7"
+fs2 = "0.4.3"
 
 wc-core = { path = "crates/wc-core" }
 wc-storage = { path = "crates/wc-storage" }
