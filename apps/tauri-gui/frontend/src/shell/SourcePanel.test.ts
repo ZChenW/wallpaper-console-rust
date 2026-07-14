@@ -162,6 +162,29 @@ test('source drawer autofocuses close and Escape closes or dismisses removal fir
   assert.deepEqual(calls, ['close', 'cancel-remove']);
 });
 
+test('source drawer exposes Back to settings only when a parent destination is provided', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const nestedTree = SourcePanelView({
+    ...noopViewProps(),
+    onBack: () => calls.push('back'),
+  });
+  const [back] = findElements(
+    nestedTree,
+    (element) => element.props['aria-label'] === 'Back to settings',
+  );
+
+  assert.ok(back);
+  (back.props.onClick as () => void)();
+  assert.deepEqual(calls, ['back']);
+
+  const rootTree = SourcePanelView(noopViewProps());
+  assert.equal(findElements(
+    rootTree,
+    (element) => element.props['aria-label'] === 'Back to settings',
+  ).length, 0);
+});
+
 test('renders a compact accessible drawer with source kind and honest availability', async () => {
   const { SourcePanelView } = await importTsxModule();
   const markup = renderToStaticMarkup(SourcePanelView(noopViewProps()));

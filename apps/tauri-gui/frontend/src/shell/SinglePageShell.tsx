@@ -6,7 +6,7 @@ import {
   useRef,
   useState,
 } from 'react';
-import { FolderPlus, Search, Settings, Shuffle } from 'lucide-react';
+import { FolderPlus, Heart, Search, Settings, Shuffle } from 'lucide-react';
 
 import { api } from '../api/bridge.ts';
 import type {
@@ -17,6 +17,7 @@ import type {
 } from '../api/types.ts';
 import { commandErrorFeedback } from '../api/feedback.ts';
 import WallpaperGrid, { type ContextAction } from '../components/WallpaperGrid.tsx';
+import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
 import { useApplyQueue } from '../hooks/useApplyQueue.ts';
@@ -124,6 +125,7 @@ export default function SinglePageShell() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [sourcesMounted, setSourcesMounted] = useState(false);
+  const [sourcesReturnToSettings, setSourcesReturnToSettings] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<LibraryBrowserItemDTO | null>(null);
   const [detailsEntry, setDetailsEntry] = useState<LibraryBrowserItemDTO | null>(null);
   const [favoritePendingPaths, setFavoritePendingPaths] = useState<ReadonlySet<string>>(
@@ -146,7 +148,8 @@ export default function SinglePageShell() {
     if (!trigger) return;
     window.requestAnimationFrame(() => trigger.focus());
   }, []);
-  const openSources = useCallback(() => {
+  const openSources = useCallback((returnToSettings = false) => {
+    setSourcesReturnToSettings(returnToSettings);
     setSourcesMounted(true);
     setSourcesOpen(true);
   }, []);
@@ -624,9 +627,6 @@ export default function SinglePageShell() {
   }, [reconcileSourcesAndLibrary, scan, showNotice]);
 
   const scanRunning = scan.progress?.running === true || scan.scanState.kind === 'running';
-  const offlineSourceCount = catalog.sources.filter(
-    (source) => source.availability === 'offline',
-  ).length;
   const resetKey = [
     sourceFilterValue(preferences.sourceFilter),
     preferences.typeFilter,
@@ -828,37 +828,43 @@ export default function SinglePageShell() {
       </header>
 
       <div className="single-page-filters" aria-label="Library filters">
-        <select
+        <SelectField
           aria-label="Source filter"
           value={sourceFilterValue(preferences.sourceFilter)}
-          onChange={(event) => {
-            const sourceFilter = sourceFilterFromValue(event.currentTarget.value);
+          options={[
+            { value: 'all', label: 'ALL SOURCES' },
+            ...catalog.sources.map((source) => ({
+              value: `source:${source.id}`,
+              label: `${source.displayName}${source.availability === 'offline' ? ' · Offline' : ''}`,
+            })),
+          ]}
+          onValueChange={(value) => {
+            const sourceFilter = sourceFilterFromValue(value);
             updatePreferences((current) => ({ ...current, sourceFilter }));
           }}
-        >
-          <option value="all">ALL SOURCES</option>
-          {catalog.sources.map((source) => (
-            <option key={source.id} value={`source:${source.id}`}>
-              {source.displayName}{source.availability === 'offline' ? ' · Offline' : ''}
-            </option>
-          ))}
-        </select>
-        <select
+          variant="compact"
+        />
+        <SelectField
           aria-label="Wallpaper type filter"
           value={preferences.typeFilter}
-          onChange={(event) => {
-            const typeFilter = event.currentTarget.value as LibraryTypeFilter;
+          options={[
+            { value: 'usable', label: 'ALL' },
+            { value: 'image', label: 'Images' },
+            { value: 'gif', label: 'GIFs' },
+            { value: 'video', label: 'Videos' },
+            { value: 'weScene', label: 'Wallpaper Engine scenes' },
+            { value: 'unsupported', label: 'Unsupported' },
+          ]}
+          onValueChange={(value) => {
+            const typeFilter = value as LibraryTypeFilter;
             updatePreferences((current) => ({ ...current, typeFilter }));
           }}
+          variant="compact"
+        />
+        <label
+          className="single-page-favorite-filter"
+          data-active={preferences.favoritesOnly}
         >
-          <option value="usable">ALL</option>
-          <option value="image">Images</option>
-          <option value="gif">GIFs</option>
-          <option value="video">Videos</option>
-          <option value="weScene">Wallpaper Engine scenes</option>
-          <option value="unsupported">Unsupported</option>
-        </select>
-        <label className="single-page-checkbox">
           <input
             type="checkbox"
             checked={preferences.favoritesOnly}
@@ -867,32 +873,41 @@ export default function SinglePageShell() {
               updatePreferences((current) => ({ ...current, favoritesOnly }));
             }}
           />
-          Favorites
+          <Heart
+            aria-hidden="true"
+            fill={preferences.favoritesOnly ? 'currentColor' : 'none'}
+            size={15}
+          />
+          <span>FAVORITES</span>
         </label>
-        <select
+        <SelectField
           aria-label="Library sort"
           value={preferences.sort}
-          onChange={(event) => {
-            const sort = event.currentTarget.value as LibrarySort;
+          options={[
+            { value: 'recentlyAdded', label: 'Recently added' },
+            { value: 'nameAsc', label: 'Name A–Z' },
+            { value: 'nameDesc', label: 'Name Z–A' },
+          ]}
+          onValueChange={(value) => {
+            const sort = value as LibrarySort;
             updatePreferences((current) => ({ ...current, sort }));
           }}
-        >
-          <option value="recentlyAdded">Recently added</option>
-          <option value="nameAsc">Name A–Z</option>
-          <option value="nameDesc">Name Z–A</option>
-        </select>
-        <select
+          variant="compact"
+        />
+        <SelectField
           aria-label="Card size"
           value={preferences.cardSize}
-          onChange={(event) => {
-            const cardSize = event.currentTarget.value as typeof preferences.cardSize;
+          options={[
+            { value: 'small', label: 'Small' },
+            { value: 'medium', label: 'Medium' },
+            { value: 'large', label: 'Large' },
+          ]}
+          onValueChange={(value) => {
+            const cardSize = value as typeof preferences.cardSize;
             updatePreferences((current) => ({ ...current, cardSize }));
           }}
-        >
-          <option value="small">Small</option>
-          <option value="medium">Medium</option>
-          <option value="large">Large</option>
-        </select>
+          variant="compact"
+        />
         <span className="single-page-count" aria-live="polite">
           {browser.entries.length} / {browser.total}
         </span>
@@ -927,11 +942,9 @@ export default function SinglePageShell() {
         loadError={behavior.loadError}
         saveError={behavior.saveError}
         rendererStatuses={rendererStatuses.statuses}
-        sourceCount={catalog.sources.length}
-        offlineSourceCount={offlineSourceCount}
         onOpenSources={() => {
           setSettingsOpen(false);
-          openSources();
+          openSources(true);
         }}
         onClose={() => {
           setSettingsOpen(false);
@@ -941,8 +954,16 @@ export default function SinglePageShell() {
       {sourcesMounted ? (
         <SourcePanel
           open={sourcesOpen}
+          {...(sourcesReturnToSettings ? {
+            onBack: () => {
+              setSourcesOpen(false);
+              setSourcesReturnToSettings(false);
+              setSettingsOpen(true);
+            },
+          } : {})}
           onClose={() => {
             setSourcesOpen(false);
+            setSourcesReturnToSettings(false);
             restoreOverlayFocus();
           }}
           onNotice={handleSourceNotice}

@@ -7,7 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
-import { Pencil, RefreshCw, Trash2 } from 'lucide-react';
+import { ArrowLeft, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 
 import type { CommandResult, SourceDTO } from '../api/types';
 import {
@@ -53,6 +53,7 @@ export function transitionSourcePanelVisibility(
 
 export interface SourcePanelProps extends UseWallpaperSourcesOptions {
   readonly open: boolean;
+  readonly onBack?: () => void;
   readonly onClose: () => void;
   readonly onNotice: (notice: SourcePanelNotice) => void;
   readonly onScanStarted?: () => void;
@@ -68,6 +69,7 @@ export interface SourcePanelViewProps {
   readonly removeCandidateId: number | null;
   readonly editingSourceId: number | null;
   readonly renameDraft: string;
+  readonly onBack?: () => void;
   readonly onClose: () => void;
   readonly onReload: () => void;
   readonly onAdd: () => void;
@@ -125,6 +127,13 @@ const headerStyle: CSSProperties = {
 const titleStyle: CSSProperties = {
   margin: 0,
   fontSize: '1.05rem',
+};
+
+const headerTitleStyle: CSSProperties = {
+  display: 'flex',
+  minWidth: 0,
+  alignItems: 'center',
+  gap: '0.45rem',
 };
 
 const closeStyle: CSSProperties = {
@@ -662,6 +671,7 @@ export function SourcePanelView({
   removeCandidateId,
   editingSourceId,
   renameDraft,
+  onBack,
   onClose,
   onReload,
   onAdd,
@@ -698,7 +708,14 @@ export function SourcePanelView({
         style={panelStyle}
       >
         <header style={headerStyle}>
-          <h2 style={titleStyle}>Wallpaper sources</h2>
+          <div style={headerTitleStyle}>
+            {onBack ? (
+              <button aria-label="Back to settings" onClick={onBack} style={closeStyle} type="button">
+                <ArrowLeft aria-hidden="true" size={17} />
+              </button>
+            ) : null}
+            <h2 style={titleStyle}>Wallpaper sources</h2>
+          </div>
           <button autoFocus aria-label="Close wallpaper sources" onClick={onClose} style={closeStyle} type="button">
             <span aria-hidden="true">×</span>
           </button>
@@ -793,6 +810,7 @@ export function SourcePanelView({
 
 export function SourcePanel({
   open,
+  onBack,
   onClose,
   onNotice,
   onScanStarted,
@@ -911,6 +929,7 @@ export function SourcePanel({
       loadError={loadError}
       loading={loading}
       editingSourceId={renameEditor?.sourceId ?? null}
+      onBack={onBack}
       onAdd={handleAdd}
       onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
