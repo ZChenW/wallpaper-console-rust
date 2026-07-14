@@ -468,9 +468,11 @@ pub async fn display_state_list() -> Result<Vec<DisplayStateDto>, String> {
 pub async fn runtime_wallpaper_observations() -> Result<Vec<RuntimeWallpaperObservationDto>, String>
 {
     tauri::async_runtime::spawn_blocking(|| -> Result<_, String> {
+        // Display discovery may invoke compositor CLIs. Keep it outside the
+        // renderer lock so a wedged compositor probe cannot block applies.
+        let outputs = discover_connected_outputs()?;
         with_renderer_state_lock(&APPLY_LOCK, || {
             let storage = storage()?;
-            let outputs = discover_connected_outputs()?;
             let rows = storage
                 .display_state_list()
                 .map_err(|error| error.to_string())?;

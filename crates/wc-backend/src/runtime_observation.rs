@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
@@ -23,17 +25,22 @@ pub trait RuntimeObservationIo {
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemRuntimeObservationIo;
 
+const AWWW_QUERY_TIMEOUT: Duration = Duration::from_secs(2);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
 fn awww_query_arguments() -> [&'static str; 3] {
     ["query", "--all", "--json"]
 }
 
 impl RuntimeObservationIo for SystemRuntimeObservationIo {
     fn awww_query_json(&self) -> Result<String, String> {
-        let output = Command::new("awww")
+        let mut command = Command::new("awww");
+        command
             .args(awww_query_arguments())
             .stdin(Stdio::null())
-            .output()
-            .map_err(|error| format!("could not execute awww query --json: {error}"))?;
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let output = output_with_timeout(command, AWWW_QUERY_TIMEOUT, "awww query --json")?;
         let stdout = String::from_utf8(output.stdout)
             .map_err(|error| format!("awww query returned non-UTF-8 output: {error}"))?;
         if output.status.success() {
@@ -51,6 +58,77 @@ impl RuntimeObservationIo for SystemRuntimeObservationIo {
 
     fn current_user_process_command_lines(&self) -> Result<Vec<ProcessCommandLine>, String> {
         read_current_user_process_command_lines()
+    }
+}
+
+fn output_with_timeout(
+    mut command: Command,
+    timeout: Duration,
+    label: &str,
+) -> Result<Output, String> {
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("could not execute {label}: {error}"))?;
+    let deadline = Instant::now() + timeout;
+
+    loop {
+        let status = match child.try_wait() {
+            Ok(status) => status,
+            Err(error) => {
+                let cleanup = terminate_timed_out_child(child, label);
+                return Err(format!("could not wait for {label}: {error}{cleanup}"));
+            }
+        };
+        match status {
+            Some(_) => {
+                return child
+                    .wait_with_output()
+                    .map_err(|error| format!("could not collect {label} output: {error}"));
+            }
+            None => {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    let cleanup = terminate_timed_out_child(child, label);
+                    return Err(format!(
+                        "{label} timed out after {} ms{cleanup}",
+                        timeout.as_millis()
+                    ));
+                }
+                thread::sleep(remaining.min(COMMAND_POLL_INTERVAL));
+            }
+        }
+    }
+}
+
+fn terminate_timed_out_child(mut child: Child, label: &str) -> String {
+    match child.kill() {
+        Ok(()) => child
+            .wait()
+            .err()
+            .map(|error| format!("; could not reap it: {error}"))
+            .unwrap_or_default(),
+        Err(kill_error) => match child.try_wait() {
+            Ok(Some(_)) => format!("; kill raced with {label} exit: {kill_error}"),
+            wait_result => {
+                let wait_error = wait_result
+                    .err()
+                    .map(|error| format!("; follow-up status failed: {error}"))
+                    .unwrap_or_default();
+                match thread::Builder::new()
+                    .name("wallpaper-console-probe-reaper".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    })
+                {
+                    Ok(_) => format!(
+                        "; could not kill it: {kill_error}{wait_error}; reaping in background"
+                    ),
+                    Err(spawn_error) => format!(
+                        "; could not kill it: {kill_error}{wait_error}; could not start reaper: {spawn_error}"
+                    ),
+                }
+            }
+        },
     }
 }
 
@@ -598,7 +676,10 @@ fn unknown(output: &str, reason: &str) -> RuntimeWallpaperObservation {
 
 #[cfg(test)]
 mod tests {
-    use super::{awww_query_arguments, decode_proc_cmdline};
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use super::{awww_query_arguments, decode_proc_cmdline, output_with_timeout};
 
     #[test]
     fn awww_query_covers_every_running_namespace() {
@@ -616,6 +697,67 @@ mod tests {
                 "--",
                 "/walls/night sky.mp4"
             ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_is_collected_before_timeout() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf ready"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        let output = output_with_timeout(command, Duration::from_secs(1), "test probe")
+            .expect("the short probe must finish");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"ready");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn command_output_timeout_kills_a_stuck_probe_promptly() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "exec sleep 5"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let started = Instant::now();
+
+        let error = output_with_timeout(command, Duration::from_millis(20), "test probe")
+            .expect_err("the sleeping probe must time out");
+
+        assert!(error.contains("timed out"), "unexpected error: {error}");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timeout helper did not return promptly"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn command_output_timeout_reaps_the_probe_process() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("probe.pid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 5", "probe"])
+            .arg(&pid_file)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+
+        output_with_timeout(command, Duration::from_millis(100), "test probe")
+            .expect_err("the sleeping probe must time out");
+
+        let pid = std::fs::read_to_string(pid_file).expect("probe must publish its pid");
+        assert!(
+            !std::path::Path::new("/proc").join(pid.trim()).exists(),
+            "the timed-out child must be killed and reaped"
         );
     }
 }
