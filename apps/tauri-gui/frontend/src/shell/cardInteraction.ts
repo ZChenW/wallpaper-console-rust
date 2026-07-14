@@ -20,6 +20,18 @@ export interface CardInteractionVisualState {
   readonly current: boolean;
 }
 
+export interface CardKeyboardInteractionInput {
+  readonly key: string;
+  readonly shiftKey: boolean;
+  readonly canApply: boolean;
+}
+
+export interface CardKeyboardInteraction {
+  readonly select: boolean;
+  readonly apply: boolean;
+  readonly contextMenu: boolean;
+}
+
 const NONE: CardPointerInteraction = Object.freeze({ select: false, apply: false });
 
 /**
@@ -47,6 +59,19 @@ export function resolveCardPointerInteraction(
       || (input.gesture === 'double' && input.clickCount === 2)
     );
   return { select: true, apply: shouldApply };
+}
+
+/** Keyboard activation is one explicit primary action, independent of click preference. */
+export function resolveCardKeyboardInteraction(
+  input: CardKeyboardInteractionInput,
+): CardKeyboardInteraction {
+  if (input.key === 'Enter' || input.key === ' ') {
+    return { select: true, apply: input.canApply, contextMenu: false };
+  }
+  if (input.key === 'ContextMenu' || (input.key === 'F10' && input.shiftKey)) {
+    return { select: false, apply: false, contextMenu: true };
+  }
+  return { select: false, apply: false, contextMenu: false };
 }
 
 function matchesHandledClick(gesture: ApplyGesture, clickCount: number): boolean {

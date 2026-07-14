@@ -44,6 +44,14 @@ test('normalizes missing and incompatible behavior config to safe defaults', () 
     'gif_backend',
     'video_backend',
     'awww_resize',
+    'awww_transition_type',
+    'awww_transition_duration',
+    'wallpaper_transition_fps',
+    'linux_wallpaperengine_scaling',
+    'linux_wallpaperengine_fps',
+    'linux_wallpaperengine_muted',
+    'linux_wallpaperengine_volume',
+    'restore_on_login',
   ]);
   assert.deepEqual(normalizeWallpaperBehaviorConfig({}), DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS);
   assert.deepEqual(normalizeWallpaperBehaviorConfig({
@@ -51,20 +59,61 @@ test('normalizes missing and incompatible behavior config to safe defaults', () 
     gif_backend: 'swww',
     video_backend: 'awww',
     awww_resize: 'center',
+    awww_transition_type: 'explode',
+    awww_transition_duration: '61',
+    wallpaper_transition_fps: 'not-a-number',
+    linux_wallpaperengine_scaling: 'tile',
+    linux_wallpaperengine_fps: 'not-a-number',
+    linux_wallpaperengine_muted: 'true',
+    linux_wallpaperengine_volume: 'not-a-number',
+    restore_on_login: 'true',
   }), DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS);
   assert.deepEqual(normalizeWallpaperBehaviorConfig({
     image_backend: 'mpvpaper',
     gif_backend: 'mpvpaper',
     video_backend: 'mpvpaper',
     awww_resize: 'fit',
+    awww_transition_type: 'wipe',
+    awww_transition_duration: '1.5',
+    wallpaper_transition_fps: '144',
+    linux_wallpaperengine_scaling: 'fill',
+    linux_wallpaperengine_fps: '30',
+    linux_wallpaperengine_muted: 'on',
+    linux_wallpaperengine_volume: '35',
+    restore_on_login: 'on',
   }), settings({
     imageBackend: 'mpvpaper',
     gifBackend: 'mpvpaper',
     fillMode: 'fit',
+    awwwTransitionType: 'wipe',
+    awwwTransitionDuration: 1.5,
+    awwwTransitionFps: 144,
+    lweScaling: 'fill',
+    lweFps: 30,
+    lweMuted: true,
+    lweVolume: 35,
+    restoreOnLogin: true,
+  }));
+  assert.deepEqual(normalizeWallpaperBehaviorConfig({
+    awww_transition_type: 'slide',
+    awww_transition_duration: '60',
+    wallpaper_transition_fps: '999',
+    linux_wallpaperengine_scaling: 'stretch',
+    linux_wallpaperengine_fps: '0',
+    linux_wallpaperengine_muted: 'off',
+    linux_wallpaperengine_volume: '-5',
+    restore_on_login: 'off',
+  }), settings({
+    awwwTransitionType: 'left',
+    awwwTransitionDuration: 60,
+    awwwTransitionFps: 240,
+    lweScaling: 'stretch',
+    lweFps: 1,
+    lweVolume: 0,
   }));
 });
 
-test('load requests only the four behavior keys and never writes defaults before load', async () => {
+test('load requests only the behavior keys and never writes defaults before load', async () => {
   const requests: string[][] = [];
   let writes = 0;
   const pending = deferred<Record<string, string>>();
@@ -111,10 +160,18 @@ test('save writes a normalized snapshot in fixed order and video is always mpvpa
   };
 
   await saveWallpaperBehaviorSettings(client, {
+    ...settings(),
     imageBackend: 'mpvpaper',
-    gifBackend: 'awww',
     videoBackend: 'awww',
     fillMode: 'fit',
+    awwwTransitionType: 'grow',
+    awwwTransitionDuration: 2.5,
+    awwwTransitionFps: 120,
+    lweScaling: 'stretch',
+    lweFps: 75,
+    lweMuted: true,
+    lweVolume: 45,
+    restoreOnLogin: true,
   } as unknown as WallpaperBehaviorSettings);
 
   assert.deepEqual(writes, [
@@ -122,6 +179,14 @@ test('save writes a normalized snapshot in fixed order and video is always mpvpa
     ['gif_backend', 'awww'],
     ['video_backend', 'mpvpaper'],
     ['awww_resize', 'fit'],
+    ['awww_transition_type', 'grow'],
+    ['awww_transition_duration', '2.5'],
+    ['wallpaper_transition_fps', '120'],
+    ['linux_wallpaperengine_scaling', 'stretch'],
+    ['linux_wallpaperengine_fps', '75'],
+    ['linux_wallpaperengine_muted', 'on'],
+    ['linux_wallpaperengine_volume', '45'],
+    ['restore_on_login', 'on'],
   ]);
 });
 
@@ -181,18 +246,20 @@ test('save queue serializes snapshots so the newest values finish last', async (
 
   await nextTask();
   assert.deepEqual(starts, ['image_backend=mpvpaper']);
-  for (let index = 0; index < 4; index += 1) {
+  const snapshotSize = WALLPAPER_BEHAVIOR_CONFIG_KEYS.length;
+  for (let index = 0; index < snapshotSize; index += 1) {
     writes[index]!.resolve(ok);
     await nextTask();
   }
   await older;
-  assert.equal(starts[4], 'image_backend=awww');
-  for (let index = 4; index < 8; index += 1) {
+  assert.equal(starts[snapshotSize], 'image_backend=awww');
+  for (let index = snapshotSize; index < snapshotSize * 2; index += 1) {
     writes[index]!.resolve(ok);
     await nextTask();
   }
   await newer;
-  assert.equal(starts.at(-1), 'awww_resize=fit');
+  assert.equal(starts.at(-1), 'restore_on_login=off');
+  assert.equal(starts[snapshotSize + 3], 'awww_resize=fit');
   assert.equal(queue.latestError, null);
 });
 

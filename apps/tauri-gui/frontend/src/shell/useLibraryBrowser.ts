@@ -70,6 +70,35 @@ export function formatRandomWallpaperError(error: unknown): string {
   return 'Failed to choose a random wallpaper';
 }
 
+export type RandomWallpaperOutcome =
+  | { readonly kind: 'selected'; readonly entry: LibraryBrowserItemDTO }
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'error'; readonly message: string }
+  | { readonly kind: 'stale' };
+
+export function randomWallpaperErrorOutcome(
+  error: unknown,
+): Extract<RandomWallpaperOutcome, { readonly kind: 'error' }> {
+  return { kind: 'error', message: formatRandomWallpaperError(error) };
+}
+
+export function isCurrentQueryEmpty(
+  emptyConfirmed: boolean,
+  resolvedCriteriaKey: string | null,
+  currentCriteriaKey: string,
+): boolean {
+  return emptyConfirmed && resolvedCriteriaKey === currentCriteriaKey;
+}
+
+export function isRandomRequestCurrent(
+  requestId: number,
+  currentRequestId: number,
+  requestedSearch: string,
+  currentSearch: string,
+): boolean {
+  return requestId === currentRequestId && requestedSearch === currentSearch;
+}
+
 export function useDebouncedValue<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
 
@@ -99,6 +128,14 @@ export function useLibraryBrowser({
 }: UseLibraryBrowserOptions) {
   const debouncedSearch = useDebouncedValue(search, searchDebounceMs);
   const sourceId = sourceFilter.kind === 'source' ? sourceFilter.sourceId : null;
+  const criteriaKey = JSON.stringify([
+    sourceId,
+    typeFilter,
+    favoritesOnly,
+    sort,
+    normalizedSearch(debouncedSearch),
+  ]);
+  const [resolvedCriteriaKey, setResolvedCriteriaKey] = useState<string | null>(null);
 
   const criteria = useCallback((): LibraryBrowserCriteria => ({
     sourceFilter: sourceId === null
@@ -116,49 +153,70 @@ export function useLibraryBrowser({
     ),
     [browserApi, criteria],
   );
+  const markCriteriaResolved = useCallback(() => {
+    setResolvedCriteriaKey(criteriaKey);
+  }, [criteriaKey]);
 
   const pages = usePagedWallpapers<LibraryBrowserItemDTO>({
     pageSize,
     loadPage,
     refreshEvent,
+    onPage: markCriteriaResolved,
   });
 
   const [randomPending, setRandomPending] = useState(false);
   const [randomError, setRandomError] = useState<string | null>(null);
   const randomRequestSeq = useRef(0);
+  const rawSearchRef = useRef(search);
+  rawSearchRef.current = search;
 
   useEffect(() => {
     randomRequestSeq.current += 1;
     setRandomPending(false);
     setRandomError(null);
-  }, [criteria]);
+  }, [criteria, search]);
 
   useEffect(() => () => {
     randomRequestSeq.current += 1;
   }, []);
 
-  const chooseRandom = useCallback(async (): Promise<LibraryBrowserItemDTO | null> => {
+  const chooseRandom = useCallback(async (): Promise<RandomWallpaperOutcome> => {
     const requestId = randomRequestSeq.current + 1;
     randomRequestSeq.current = requestId;
+    const requestedSearch = search;
+    const isCurrent = () => isRandomRequestCurrent(
+      requestId,
+      randomRequestSeq.current,
+      requestedSearch,
+      rawSearchRef.current,
+    );
     setRandomPending(true);
     setRandomError(null);
     try {
-      const wallpaper = await browserApi.libraryBrowserRandom(
+      const entry = await browserApi.libraryBrowserRandom(
         createRandomLibraryBrowserQuery(criteria()),
       );
-      return randomRequestSeq.current === requestId ? wallpaper : null;
+      if (!isCurrent()) return { kind: 'stale' };
+      return entry ? { kind: 'selected', entry } : { kind: 'empty' };
     } catch (error) {
-      if (randomRequestSeq.current === requestId) {
-        setRandomError(formatRandomWallpaperError(error));
+      if (isCurrent()) {
+        const outcome = randomWallpaperErrorOutcome(error);
+        setRandomError(outcome.message);
+        return outcome;
       }
-      return null;
+      return { kind: 'stale' };
     } finally {
-      if (randomRequestSeq.current === requestId) setRandomPending(false);
+      if (isCurrent()) setRandomPending(false);
     }
-  }, [browserApi, criteria]);
+  }, [browserApi, criteria, search]);
 
   return {
     ...pages,
+    emptyConfirmed: isCurrentQueryEmpty(
+      pages.emptyConfirmed,
+      resolvedCriteriaKey,
+      criteriaKey,
+    ),
     debouncedSearch,
     searchSettled: debouncedSearch === search,
     chooseRandom,

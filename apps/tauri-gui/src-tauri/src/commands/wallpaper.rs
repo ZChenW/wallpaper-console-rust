@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
+use wc_backend::runtime::BackendRuntime;
+use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget, ALL_DISPLAYS_TARGET_KEY};
 use wc_storage::StorageApi;
 
@@ -34,6 +36,26 @@ pub struct DisplayStateDto {
     pub updated_at: String,
 }
 
+/// Read-only renderer evidence for one connected output.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeWallpaperObservationDto {
+    pub output: String,
+    pub wallpaper_path: Option<String>,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Read-only installation/readiness snapshot for every supported renderer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RendererStatusesDto {
+    pub awww: BackendStatusDto,
+    pub mpvpaper: BackendStatusDto,
+    pub linux_wallpaper_engine: BackendStatusDto,
+}
+
 /// Targeted apply request. Omitting `target` means All Displays.
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -58,6 +80,16 @@ pub struct TargetedRestoreRequestDto {
 
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn with_renderer_state_lock<T>(
+    lock: &Mutex<()>,
+    operation: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = lock
+        .lock()
+        .map_err(|_| "Renderer state lock is poisoned.".to_string())?;
+    operation()
+}
 
 struct TauriStageReporter {
     app: tauri::AppHandle,
@@ -143,6 +175,19 @@ pub async fn linux_wallpaperengine_status() -> Result<BackendStatusDto, String> 
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn renderer_statuses() -> Result<RendererStatusesDto, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let s = storage()?;
+        let mut runtime = wc_backend::runtime::SystemBackendRuntime;
+        Ok(renderer_statuses_with(|backend| {
+            runtime.ensure_backend_available(backend, s)
+        }))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -417,6 +462,29 @@ pub async fn display_state_list() -> Result<Vec<DisplayStateDto>, String> {
     .map_err(|e| e.to_string())?
 }
 
+/// Reconcile saved display assignments with renderer processes without
+/// starting, stopping, or otherwise mutating a renderer.
+#[tauri::command]
+pub async fn runtime_wallpaper_observations() -> Result<Vec<RuntimeWallpaperObservationDto>, String>
+{
+    tauri::async_runtime::spawn_blocking(|| -> Result<_, String> {
+        with_renderer_state_lock(&APPLY_LOCK, || {
+            let storage = storage()?;
+            let outputs = discover_connected_outputs()?;
+            let rows = storage
+                .display_state_list()
+                .map_err(|error| error.to_string())?;
+            Ok(runtime_observation_dtos_with(
+                &outputs,
+                &rows,
+                wc_backend::runtime_observation::observe_runtime_wallpapers,
+            ))
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 #[tauri::command]
 pub async fn apply_to_display(
     app: tauri::AppHandle,
@@ -646,6 +714,73 @@ fn display_state_row_dto(row: &DisplayStateRow) -> DisplayStateDto {
             backend: row.backend.clone(),
             updated_at: row.updated_at.clone(),
         },
+    }
+}
+
+fn runtime_observation_dto(
+    observation: wc_backend::runtime_observation::RuntimeWallpaperObservation,
+) -> RuntimeWallpaperObservationDto {
+    let status = match observation.status {
+        wc_backend::runtime_observation::RuntimeObservationStatus::Confirmed => "confirmed",
+        wc_backend::runtime_observation::RuntimeObservationStatus::Unknown => "unknown",
+    };
+    RuntimeWallpaperObservationDto {
+        output: observation.output,
+        wallpaper_path: observation.wallpaper_path,
+        status: status.into(),
+        reason: observation.reason,
+    }
+}
+
+fn runtime_observation_dtos_with<F>(
+    outputs: &[String],
+    rows: &[DisplayStateRow],
+    observe: F,
+) -> Vec<RuntimeWallpaperObservationDto>
+where
+    F: FnOnce(
+        &[String],
+        &[DisplayStateRow],
+    ) -> Vec<wc_backend::runtime_observation::RuntimeWallpaperObservation>,
+{
+    observe(outputs, rows)
+        .into_iter()
+        .map(runtime_observation_dto)
+        .collect()
+}
+
+fn renderer_status_from_result(
+    backend: Backend,
+    result: Result<(), wc_core::error::WcError>,
+) -> BackendStatusDto {
+    let name = backend.as_str();
+    match result {
+        Ok(()) => BackendStatusDto {
+            available: true,
+            path: None,
+            message: format!("{name} is installed."),
+            detail: None,
+        },
+        Err(error) => BackendStatusDto {
+            available: false,
+            path: None,
+            message: format!("{name} is unavailable."),
+            detail: Some(error.to_string()),
+        },
+    }
+}
+
+fn renderer_statuses_with<F>(mut probe: F) -> RendererStatusesDto
+where
+    F: FnMut(Backend) -> Result<(), wc_core::error::WcError>,
+{
+    RendererStatusesDto {
+        awww: renderer_status_from_result(Backend::Awww, probe(Backend::Awww)),
+        mpvpaper: renderer_status_from_result(Backend::Mpvpaper, probe(Backend::Mpvpaper)),
+        linux_wallpaper_engine: renderer_status_from_result(
+            Backend::LinuxWallpaperEngine,
+            probe(Backend::LinuxWallpaperEngine),
+        ),
     }
 }
 
@@ -942,6 +1077,134 @@ mod tests {
         assert_eq!(named_json["kind"], "output");
         assert_eq!(named_json["targetKey"], "eDP-1");
         assert_eq!(named_json["output"], "eDP-1");
+    }
+
+    #[test]
+    fn runtime_observation_dtos_serialize_positive_evidence_and_unknown_reason() {
+        let confirmed = runtime_observation_dto(
+            wc_backend::runtime_observation::RuntimeWallpaperObservation {
+                output: "eDP-1".into(),
+                wallpaper_path: Some("/walls/current.jpg".into()),
+                status: wc_backend::runtime_observation::RuntimeObservationStatus::Confirmed,
+                reason: None,
+            },
+        );
+        let unknown = runtime_observation_dto(
+            wc_backend::runtime_observation::RuntimeWallpaperObservation {
+                output: "HDMI-A-1".into(),
+                wallpaper_path: None,
+                status: wc_backend::runtime_observation::RuntimeObservationStatus::Unknown,
+                reason: Some("No renderer evidence.".into()),
+            },
+        );
+
+        let confirmed = serde_json::to_value(confirmed).unwrap();
+        assert_eq!(confirmed["output"], "eDP-1");
+        assert_eq!(confirmed["wallpaperPath"], "/walls/current.jpg");
+        assert_eq!(confirmed["status"], "confirmed");
+        assert!(confirmed.get("reason").is_none());
+
+        let unknown = serde_json::to_value(unknown).unwrap();
+        assert_eq!(unknown["output"], "HDMI-A-1");
+        assert!(unknown["wallpaperPath"].is_null());
+        assert_eq!(unknown["status"], "unknown");
+        assert_eq!(unknown["reason"], "No renderer evidence.");
+    }
+
+    #[test]
+    fn runtime_observation_coordinator_passes_connected_outputs_and_saved_rows_to_probe() {
+        let outputs = vec!["eDP-1".to_string()];
+        let rows = vec![wc_storage::sqlite::DisplayStateRow {
+            target: wc_storage::sqlite::DisplayStateTarget::Output("eDP-1".into()),
+            wallpaper_path: "/walls/current.jpg".into(),
+            backend: "awww".into(),
+            updated_at: "2026-07-14 00:00:00".into(),
+        }];
+
+        let dtos = runtime_observation_dtos_with(&outputs, &rows, |actual_outputs, actual_rows| {
+            assert_eq!(actual_outputs, outputs);
+            assert_eq!(actual_rows, rows);
+            vec![
+                wc_backend::runtime_observation::RuntimeWallpaperObservation {
+                    output: "eDP-1".into(),
+                    wallpaper_path: Some("/walls/current.jpg".into()),
+                    status: wc_backend::runtime_observation::RuntimeObservationStatus::Confirmed,
+                    reason: None,
+                },
+            ]
+        });
+
+        assert_eq!(dtos.len(), 1);
+        assert_eq!(dtos[0].status, "confirmed");
+        assert_eq!(
+            dtos[0].wallpaper_path.as_deref(),
+            Some("/walls/current.jpg")
+        );
+    }
+
+    #[test]
+    fn renderer_statuses_probe_each_supported_backend_without_starting_one() {
+        let seen = std::cell::RefCell::new(Vec::new());
+        let statuses = renderer_statuses_with(|backend| {
+            seen.borrow_mut().push(backend);
+            match backend {
+                wc_core::types::Backend::Mpvpaper => {
+                    Err(wc_core::error::WcError::BackendNotFound("mpvpaper".into()))
+                }
+                _ => Ok(()),
+            }
+        });
+
+        assert_eq!(
+            seen.into_inner(),
+            [
+                wc_core::types::Backend::Awww,
+                wc_core::types::Backend::Mpvpaper,
+                wc_core::types::Backend::LinuxWallpaperEngine,
+            ]
+        );
+        assert!(statuses.awww.available);
+        assert!(!statuses.mpvpaper.available);
+        assert_eq!(
+            statuses.mpvpaper.detail.as_deref(),
+            Some("backend not found: mpvpaper")
+        );
+        assert!(statuses.linux_wallpaper_engine.available);
+
+        let json = serde_json::to_value(statuses).unwrap();
+        assert!(json.get("awww").is_some());
+        assert!(json.get("mpvpaper").is_some());
+        assert!(json.get("linuxWallpaperEngine").is_some());
+        assert!(json.get("linux_wallpaper_engine").is_none());
+    }
+
+    #[test]
+    fn runtime_observation_waits_for_an_in_progress_apply() {
+        let lock = Arc::new(std::sync::Mutex::new(()));
+        let apply_guard = lock.lock().unwrap();
+        let worker_lock = Arc::clone(&lock);
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (observed_tx, observed_rx) = std::sync::mpsc::channel();
+
+        let worker = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            with_renderer_state_lock(&worker_lock, || {
+                observed_tx.send(()).unwrap();
+                Ok(())
+            })
+            .unwrap();
+        });
+
+        started_rx.recv().unwrap();
+        assert!(
+            observed_rx.try_recv().is_err(),
+            "runtime inspection must not run while apply owns the renderer lock"
+        );
+        drop(apply_guard);
+        observed_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        worker.join().unwrap();
     }
 
     #[test]

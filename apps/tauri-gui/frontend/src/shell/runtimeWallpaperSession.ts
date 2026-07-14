@@ -22,6 +22,10 @@ export type RuntimeWallpaperSessionAction =
     readonly connectedOutputs: readonly string[];
   }
   | {
+    readonly type: 'runtimeReconciled';
+    readonly observations: readonly RuntimeDisplayWallpaper[];
+  }
+  | {
     readonly type: 'applySucceeded';
     readonly transport: 'action' | 'targeted';
     readonly request: ApplyRequestDTO | TargetedApplyRequestDTO;
@@ -107,6 +111,31 @@ export function reduceRuntimeWallpaperSession(
     return {
       connectedOutputs,
       confirmations: confirmationsInOutputOrder(connectedOutputs, state.confirmations),
+    };
+  }
+
+  if (action.type === 'runtimeReconciled') {
+    const observed = new Map<string, string | null>();
+    for (const observation of action.observations) {
+      const output = observation.output.trim();
+      if (!state.connectedOutputs.includes(output)) continue;
+      const next = observation.status === 'confirmed'
+        && typeof observation.wallpaperPath === 'string'
+        && observation.wallpaperPath.trim().length > 0
+        ? observation.wallpaperPath
+        : null;
+      if (!observed.has(output)) {
+        observed.set(output, next);
+      } else if (observed.get(output) !== next) {
+        observed.set(output, null);
+      }
+    }
+    return {
+      ...state,
+      confirmations: state.connectedOutputs.flatMap((output) => {
+        const wallpaperPath = observed.get(output);
+        return wallpaperPath ? [{ output, wallpaperPath }] : [];
+      }),
     };
   }
 

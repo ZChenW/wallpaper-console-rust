@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  executeTrackedSourceScan,
   executeSourceMutation,
   formatSourceLoadError,
 } from './useWallpaperSources.ts';
@@ -67,4 +68,35 @@ test('source load errors preserve useful text and provide a stable fallback', ()
   assert.equal(formatSourceLoadError(new Error('database is locked')), 'database is locked');
   assert.equal(formatSourceLoadError('permission denied'), 'permission denied');
   assert.equal(formatSourceLoadError({ code: 1 }), 'Failed to load wallpaper sources');
+});
+
+test('tracked source scans bracket success and failure without hiding the primary result', async () => {
+  const successCalls: string[] = [];
+  assert.equal(
+    await executeTrackedSourceScan(
+      async () => {
+        successCalls.push('scan');
+        return success;
+      },
+      () => successCalls.push('started'),
+      () => successCalls.push('finished'),
+    ),
+    success,
+  );
+  assert.deepEqual(successCalls, ['started', 'scan', 'finished']);
+
+  const failureCalls: string[] = [];
+  const primary = new Error('scan transport failed');
+  await assert.rejects(
+    executeTrackedSourceScan(
+      async () => {
+        failureCalls.push('scan');
+        throw primary;
+      },
+      () => failureCalls.push('started'),
+      () => failureCalls.push('finished'),
+    ),
+    (error) => error === primary,
+  );
+  assert.deepEqual(failureCalls, ['started', 'scan', 'finished']);
 });

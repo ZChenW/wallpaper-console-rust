@@ -10,11 +10,9 @@ export default defineConfig({
   base: './',
   resolve: {
     alias: [
-      { find: './api/bridge', replacement: mockBridge },
-      { find: '../api/bridge', replacement: mockBridge },
-      { find: '../../api/bridge', replacement: mockBridge },
-      { find: 'src/api/bridge', replacement: mockBridge },
-      { find: /\/api\/bridge$/, replacement: mockBridge },
+      { find: /^(?:\.\.\/)+api\/bridge(?:\.ts)?$/, replacement: mockBridge },
+      { find: /^\.\/api\/bridge(?:\.ts)?$/, replacement: mockBridge },
+      { find: /^src\/api\/bridge(?:\.ts)?$/, replacement: mockBridge },
     ],
   },
   build: {

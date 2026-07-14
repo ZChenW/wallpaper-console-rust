@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  cardHoverLabel,
   displayName,
   formatSize,
   metaLine,
@@ -101,4 +102,16 @@ test('formatSize scales across units', () => {
   assert.equal(formatSize(2048), '2 KB');
   assert.equal(formatSize(5 << 20), '5.0 MB');
   assert.equal(formatSize(3 * (1 << 30)), '3.0 GB');
+});
+
+test('hover label uses the title and source names without exposing the absolute path', () => {
+  assert.equal(cardHoverLabel(baseEntry({
+    path: '/private/walls/secret.jpg',
+    title: 'Quiet Lake',
+    sources: [
+      { id: 1, displayName: 'Pictures' },
+      { id: 2, displayName: 'Downloaded' },
+    ],
+  })), 'Quiet Lake · Pictures, Downloaded');
+  assert.equal(cardHoverLabel(baseEntry({ path: '/private/walls/secret.jpg' })), 'secret.jpg');
 });

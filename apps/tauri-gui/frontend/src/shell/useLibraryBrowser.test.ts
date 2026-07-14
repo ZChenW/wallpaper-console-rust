@@ -5,6 +5,9 @@ import {
   createLibraryBrowserQuery,
   createRandomLibraryBrowserQuery,
   formatRandomWallpaperError,
+  isCurrentQueryEmpty,
+  isRandomRequestCurrent,
+  randomWallpaperErrorOutcome,
 } from './useLibraryBrowser.ts';
 
 const criteria = {
@@ -57,4 +60,23 @@ test('random errors preserve useful messages and provide a stable fallback', () 
   assert.equal(formatRandomWallpaperError(new Error('database is locked')), 'database is locked');
   assert.equal(formatRandomWallpaperError('backend unavailable'), 'backend unavailable');
   assert.equal(formatRandomWallpaperError({ code: 1 }), 'Failed to choose a random wallpaper');
+});
+
+test('random command failures return an explicit outcome instead of looking empty', () => {
+  assert.deepEqual(randomWallpaperErrorOutcome(new Error('database is locked')), {
+    kind: 'error',
+    message: 'database is locked',
+  });
+});
+
+test('confirmed emptiness is used only for the query that produced it', () => {
+  assert.equal(isCurrentQueryEmpty(true, 'all|usable|false|', 'all|usable|false|'), true);
+  assert.equal(isCurrentQueryEmpty(true, 'source:7|usable|false|', 'all|usable|false|'), false);
+  assert.equal(isCurrentQueryEmpty(false, 'all|usable|false|', 'all|usable|false|'), false);
+});
+
+test('a random result becomes stale as soon as raw search text changes', () => {
+  assert.equal(isRandomRequestCurrent(4, 4, 'city', 'city'), true);
+  assert.equal(isRandomRequestCurrent(4, 4, '', 'n'), false);
+  assert.equal(isRandomRequestCurrent(4, 5, 'city', 'city'), false);
 });

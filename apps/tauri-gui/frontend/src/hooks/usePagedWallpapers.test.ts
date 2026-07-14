@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   formatLoadPageError,
   mergePagedWallpaperItems,
+  shouldPauseAutomaticAppend,
 } from './usePagedWallpapers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
 
@@ -63,4 +64,29 @@ test('formatLoadPageError preserves string errors', () => {
 
 test('formatLoadPageError falls back for unknown error shapes', () => {
   assert.equal(formatLoadPageError({ code: 1 }), 'Failed to load library page');
+});
+
+test('append failures pause automatic retries until an explicit retry', () => {
+  assert.equal(shouldPauseAutomaticAppend({ kind: 'error' }), true);
+});
+
+test('append pages with no progress pause automatic retries while the server reports more', () => {
+  assert.equal(shouldPauseAutomaticAppend({
+    kind: 'success',
+    offset: 120,
+    itemCount: 0,
+    total: 240,
+  }), true);
+  assert.equal(shouldPauseAutomaticAppend({
+    kind: 'success',
+    offset: 120,
+    itemCount: 120,
+    total: 240,
+  }), false);
+  assert.equal(shouldPauseAutomaticAppend({
+    kind: 'success',
+    offset: 120,
+    itemCount: 0,
+    total: 120,
+  }), false);
 });

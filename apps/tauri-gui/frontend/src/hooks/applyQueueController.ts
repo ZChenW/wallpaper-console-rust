@@ -8,6 +8,11 @@ import type { ApplyStagePayload } from '../events/appEvents';
 
 export type ApplyStage = 'queued' | 'starting backend' | 'settling' | 'applied';
 
+export interface ApplyQueueScheduler {
+  setTimer(callback: () => void, delayMs: number): unknown;
+  clearTimer(handle: unknown): void;
+}
+
 interface ApplyCommandResult {
   success: boolean;
   stdout: string;
@@ -38,11 +43,25 @@ export interface ApplyQueueDeps {
     result: ApplyResultDTO | undefined,
     transport: ApplyTransport,
   ) => void;
+  scheduler?: ApplyQueueScheduler;
+  slowStatusDelayMs?: number;
 }
 
 type QueuedApply =
   | { transport: 'action'; request: ApplyRequestDTO }
   | { transport: 'targeted'; request: TargetedApplyRequestDTO };
+
+const DEFAULT_SLOW_STATUS_DELAY_MS = 500;
+const DEFAULT_SCHEDULER: ApplyQueueScheduler = {
+  setTimer: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimer: (handle) => globalThis.clearTimeout(handle as number),
+};
+
+function slowStatusDelay(value: number | undefined): number {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0
+    ? Math.floor(value)
+    : DEFAULT_SLOW_STATUS_DELAY_MS;
+}
 
 export interface ApplyQueueEnqueuer {
   enqueue(request: ApplyRequestDTO): void;
@@ -197,17 +216,27 @@ export class ApplyQueueController {
     const request = item.request;
     const requestStart = performance.now();
     const queuedSuffix = () => (this.pending !== null ? ' · Next wallpaper queued.' : '');
+    const scheduler = this.deps.scheduler ?? DEFAULT_SCHEDULER;
+    let slowStatusVisible = false;
+    const showSlowStatus = () => {
+      this.deps.setFeedback({
+        state: 'running',
+        label: 'Applying wallpaper',
+        detail: `Applying wallpaper…${queuedSuffix()}`,
+      });
+    };
+    let slowStatusTimer: unknown | null = scheduler.setTimer(() => {
+      slowStatusTimer = null;
+      slowStatusVisible = true;
+      showSlowStatus();
+    }, slowStatusDelay(this.deps.slowStatusDelayMs));
     const unsubscribeStage = this.deps.subscribeApplyStage?.((event) => {
       if (request.requestId) {
         if (event.requestId !== request.requestId) return;
       } else if (event.requestId) {
         return;
       }
-      this.deps.setFeedback({
-        state: 'running',
-        label: event.label,
-        detail: `${event.detail}${queuedSuffix()}`,
-      });
+      if (slowStatusVisible) showSlowStatus();
     }) ?? (() => {});
 
     try {
@@ -239,12 +268,9 @@ export class ApplyQueueController {
         this.deps.invalidateLibrary();
       }
 
-      this.emitStage('settling', false);
-      try {
-        await this.deps.refreshStatus();
-      } catch {
+      void this.deps.refreshStatus().catch(() => {
         // Status refresh is secondary; the backend has already confirmed success.
-      }
+      });
       this.deps.setFeedback({
         state: 'success',
         label: 'Applied',
@@ -252,6 +278,7 @@ export class ApplyQueueController {
       });
       this.deps.recordMetric?.('apply.request.ms', performance.now() - requestStart);
     } finally {
+      if (slowStatusTimer !== null) scheduler.clearTimer(slowStatusTimer);
       unsubscribeStage();
     }
   }
@@ -265,29 +292,4 @@ export class ApplyQueueController {
     this.onQueueStateChange(this.getState());
   }
 
-  private emitStage(stage: ApplyStage, isBackendApply: boolean): void {
-    const queuedSuffix = this.pending !== null ? ' · Next wallpaper queued.' : '';
-    switch (stage) {
-      case 'queued':
-        break;
-      case 'starting backend':
-        this.deps.setFeedback({
-          state: 'running',
-          label: 'Applying wallpaper',
-          detail: isBackendApply
-            ? `Starting renderer. Scene wallpapers may take several seconds.${queuedSuffix}`
-            : `Applying wallpaper.${queuedSuffix}`,
-        });
-        break;
-      case 'settling':
-        this.deps.setFeedback({
-          state: 'running',
-          label: 'Applying wallpaper',
-          detail: `Settling…${queuedSuffix}`,
-        });
-        break;
-      case 'applied':
-        break;
-    }
-  }
 }

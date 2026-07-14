@@ -49,3 +49,17 @@ test('subscribeApplyStage forwards payload events to handler', async () => {
   assert.equal(payloads.length, 1);
   assert.equal(payloads[0]?.requestId, 'req-1');
 });
+
+test('subscribeApplyStage degrades safely when the Tauri event bridge is unavailable', async () => {
+  const syncFailure = (() => {
+    throw new Error('missing Tauri internals');
+  }) as Parameters<typeof createSubscribeApplyStage>[1];
+  const asyncFailure = (() => Promise.reject(new Error('listen rejected'))) as
+    Parameters<typeof createSubscribeApplyStage>[1];
+
+  const unsubscribeSync = createSubscribeApplyStage(APP_EVENTS.applyStage, syncFailure)(() => {});
+  const unsubscribeAsync = createSubscribeApplyStage(APP_EVENTS.applyStage, asyncFailure)(() => {});
+  unsubscribeSync();
+  unsubscribeAsync();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});

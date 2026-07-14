@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useRef,
   useState,
   type CSSProperties,
   type FormEvent,
@@ -21,6 +22,24 @@ export type SourcePanelNotice = {
   readonly technicalDetails?: string;
 };
 
+export type SourcePanelVisibility = {
+  readonly open: boolean;
+  readonly hasOpened: boolean;
+};
+
+export function transitionSourcePanelVisibility(
+  previous: SourcePanelVisibility,
+  open: boolean,
+): { readonly next: SourcePanelVisibility; readonly reload: boolean } {
+  return {
+    next: {
+      open,
+      hasOpened: previous.hasOpened || open,
+    },
+    reload: open && !previous.open && previous.hasOpened,
+  };
+}
+
 export interface SourcePanelProps extends UseWallpaperSourcesOptions {
   readonly open: boolean;
   readonly onClose: () => void;
@@ -39,6 +58,7 @@ export interface SourcePanelViewProps {
   readonly onClose: () => void;
   readonly onReload: () => void;
   readonly onAdd: () => void;
+  readonly onRefreshAll: () => void;
   readonly onScanWallpaperEngine: () => void;
   readonly onRename: (id: number, displayName: string) => void;
   readonly onSetRecursive: (id: number, recursive: boolean) => void;
@@ -351,9 +371,31 @@ export async function runSourceRefreshAction(
   }
 }
 
+export async function runAllSourcesRefreshAction(
+  action: () => Promise<CommandResult>,
+  onNotice: (notice: SourcePanelNotice) => void,
+  onStarted?: () => void,
+  onFinished?: () => void,
+): Promise<boolean> {
+  onStarted?.();
+  onNotice({ channel: 'scan', severity: 'info', message: 'Refreshing all sources' });
+  try {
+    return await runCommand({
+      action,
+      channel: 'scan',
+      successMessage: 'All sources refreshed',
+      failureMessage: 'Could not refresh all sources',
+      onNotice,
+    });
+  } finally {
+    onFinished?.();
+  }
+}
+
 function pendingOperationLabel(operation: string): string {
   if (operation === 'add') return 'Adding source…';
   if (operation === 'scanWallpaperEngine') return 'Scanning Wallpaper Engine…';
+  if (operation === 'refreshAll') return 'Refreshing all sources…';
   if (operation.startsWith('rename:')) return 'Renaming source…';
   if (operation.startsWith('recursive:')) return 'Updating scan depth…';
   if (operation.startsWith('refresh:')) return 'Refreshing source…';
@@ -541,6 +583,7 @@ export function SourcePanelView({
   onClose,
   onReload,
   onAdd,
+  onRefreshAll,
   onScanWallpaperEngine,
   onRename,
   onSetRecursive,
@@ -571,7 +614,7 @@ export function SourcePanelView({
       >
         <header style={headerStyle}>
           <h2 style={titleStyle}>Wallpaper sources</h2>
-          <button aria-label="Close wallpaper sources" onClick={onClose} style={closeStyle} type="button">
+          <button autoFocus aria-label="Close wallpaper sources" onClick={onClose} style={closeStyle} type="button">
             <span aria-hidden="true">×</span>
           </button>
         </header>
@@ -586,6 +629,16 @@ export function SourcePanelView({
             type="button"
           >
             Add folder
+          </button>
+          <button
+            data-source-action="refresh-all"
+            data-source-mutating={true}
+            disabled={busy || loading || sources.length === 0}
+            onClick={onRefreshAll}
+            style={buttonStyle}
+            type="button"
+          >
+            Refresh all
           </button>
           <button
             data-source-action="scan-wallpaper-engine"
@@ -667,10 +720,23 @@ export function SourcePanel({
     rename,
     setRecursive,
     refresh,
+    refreshAll,
     remove,
     scanWallpaperEngine,
-  } = useWallpaperSources({ sourceApi, onLibraryChanged });
+  } = useWallpaperSources({
+    sourceApi,
+    onLibraryChanged,
+    onScanStarted,
+    onScanFinished,
+  });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
+  const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
+
+  useEffect(() => {
+    const transition = transitionSourcePanelVisibility(visibility.current, open);
+    visibility.current = transition.next;
+    if (transition.reload) void reload();
+  }, [open, reload]);
 
   useEffect(() => {
     if (removeCandidateId !== null && !sources.some((source) => source.id === removeCandidateId)) {
@@ -711,6 +777,15 @@ export function SourcePanel({
     );
   }, [onNotice, onScanFinished, onScanStarted, refresh]);
 
+  const handleRefreshAll = useCallback(() => {
+    void runAllSourcesRefreshAction(
+      refreshAll,
+      onNotice,
+      onScanStarted,
+      onScanFinished,
+    );
+  }, [onNotice, onScanFinished, onScanStarted, refreshAll]);
+
   const handleRemove = useCallback((id: number) => {
     void runCommand({
       action: () => remove(id),
@@ -740,6 +815,7 @@ export function SourcePanel({
       onCancelRemove={() => setRemoveCandidateId(null)}
       onClose={onClose}
       onRefresh={handleRefresh}
+      onRefreshAll={handleRefreshAll}
       onReload={() => { void reload(); }}
       onRemove={handleRemove}
       onRename={handleRename}

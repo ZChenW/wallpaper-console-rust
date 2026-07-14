@@ -181,3 +181,26 @@ test('mismatched request evidence and outputs outside a named target are ignored
   assert.equal(wrongOutput, initial);
   assert.equal(blankRequestIdWithoutResponseId, initial);
 });
+
+test('runtime reconciliation replaces session confirmations and clears stopped renderers', () => {
+  const initial = createRuntimeWallpaperSession(['eDP-1', 'HDMI-A-1']);
+  const applied = reduceRuntimeWallpaperSession(initial, {
+    type: 'applySucceeded',
+    transport: 'targeted',
+    request: { path: '/shared.jpg', requestId: 'shared' },
+    result: result('/shared.jpg', 'shared'),
+  });
+
+  const reconciled = reduceRuntimeWallpaperSession(applied, {
+    type: 'runtimeReconciled',
+    observations: [
+      { output: 'eDP-1', wallpaperPath: '/observed.jpg', status: 'confirmed' },
+      { output: 'HDMI-A-1', wallpaperPath: null, status: 'unknown' },
+    ],
+  });
+
+  assert.deepEqual(toRuntimeDisplayWallpapers(reconciled), [
+    { output: 'eDP-1', wallpaperPath: '/observed.jpg', status: 'confirmed' },
+    { output: 'HDMI-A-1', wallpaperPath: null, status: 'unknown' },
+  ]);
+});

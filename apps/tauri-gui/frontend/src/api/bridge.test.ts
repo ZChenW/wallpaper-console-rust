@@ -2,11 +2,60 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  createFirstRunSuggestionApi,
   createLibraryBrowserApi,
+  createRendererStatusApi,
+  createRuntimeObservationApi,
   createSourceMutationApi,
   type InvokeFn,
   type LibraryBrowserQueryDTO,
 } from './bridge.ts';
+
+test('renderer status bridge invokes the unified read-only probe', async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const statuses = {
+    awww: { available: true, message: 'awww is installed.' },
+    mpvpaper: { available: false, message: 'mpvpaper is unavailable.' },
+    linuxWallpaperEngine: {
+      available: true,
+      message: 'linux-wallpaperengine is installed.',
+    },
+  };
+  const invoke: InvokeFn = async <T>(command: string, args?: Record<string, unknown>) => {
+    calls.push({ command, args });
+    return statuses as T;
+  };
+
+  const api = createRendererStatusApi(invoke);
+  assert.deepEqual(await api.rendererStatuses(), statuses);
+  assert.deepEqual(calls, [{ command: 'renderer_statuses', args: undefined }]);
+});
+
+test('first-run suggestion bridge invokes the read-only detector', async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const invoke: InvokeFn = async <T>(command: string, args?: Record<string, unknown>) => {
+    calls.push({ command, args });
+    return [{ kind: 'directory', label: 'Downloads', path: '/home/demo/Downloads' }] as T;
+  };
+
+  const api = createFirstRunSuggestionApi(invoke);
+  assert.deepEqual(await api.firstRunSourceSuggestions(), [
+    { kind: 'directory', label: 'Downloads', path: '/home/demo/Downloads' },
+  ]);
+  assert.deepEqual(calls, [{ command: 'first_run_source_suggestions', args: undefined }]);
+});
+
+test('runtime observation bridge invokes the read-only reconciliation command', async () => {
+  const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
+  const invoke: InvokeFn = async <T>(command: string, args?: Record<string, unknown>) => {
+    calls.push({ command, args });
+    return [] as T;
+  };
+
+  const api = createRuntimeObservationApi(invoke);
+  assert.deepEqual(await api.runtimeWallpaperObservations(), []);
+  assert.deepEqual(calls, [{ command: 'runtime_wallpaper_observations', args: undefined }]);
+});
 
 test('source mutation invokes use camelCase command arguments', async () => {
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];

@@ -1,6 +1,12 @@
 import { describe, it } from 'node:test';
 import assert from 'node:assert';
-import { normalizeApplyActions, hasEnabledAction, isApplyAvailable, getActionReason } from './applyActions.ts';
+import {
+  getActionReason,
+  hasEnabledAction,
+  isApplyAvailable,
+  normalizeApplyActions,
+  primaryApplyKind,
+} from './applyActions.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
 
 const IMAGE: WallpaperDTO = {
@@ -94,6 +100,18 @@ describe('normalizeApplyActions with applyActions present', () => {
 
   it('failed WE Scene isApplyAvailable false', () => {
     assert(!isApplyAvailable(WE_SCENE_FAILED));
+  });
+
+  it('card primary action retries a retryable scene without adding apply to its menu', () => {
+    assert.equal(primaryApplyKind(WE_SCENE_FAILED), 'retry_backend_apply');
+    assert(!normalizeApplyActions(WE_SCENE_FAILED).some((action) => action.kind === 'apply'));
+  });
+
+  it('card primary action prefers normal apply and rejects unsupported entries', () => {
+    assert.equal(primaryApplyKind(IMAGE), 'apply');
+    assert.equal(primaryApplyKind(WE_SCENE), 'apply');
+    assert.equal(primaryApplyKind(WE_WEB), null);
+    assert.equal(primaryApplyKind(UNSUPPORTED), null);
   });
 
   it('WE Web has open_folder and copy_workshop_id, no apply or apply_preview', () => {

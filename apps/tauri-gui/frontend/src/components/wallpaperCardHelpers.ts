@@ -15,6 +15,18 @@ export function displayName(e: WallpaperDTO): string {
   return e.title || e.workshopId || e.path.split('/').pop() || e.path;
 }
 
+/** User-facing hover text deliberately avoids leaking a long absolute path. */
+export function cardHoverLabel(e: WallpaperDTO): string {
+  const rich = e as WallpaperDTO & {
+    readonly sources?: ReadonlyArray<{ readonly displayName?: unknown }>;
+  };
+  const sourceNames = rich.sources
+    ?.map((source) => typeof source.displayName === 'string' ? source.displayName.trim() : '')
+    .filter(Boolean)
+    .join(', ');
+  return sourceNames ? `${displayName(e)} · ${sourceNames}` : displayName(e);
+}
+
 export function weBadge(e: WallpaperDTO): string | null {
   if (e.type === 'we_scene') {
     if (e.backendStatus === 'renderer_limitation') return 'Renderer limitation';

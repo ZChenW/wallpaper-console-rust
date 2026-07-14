@@ -12,6 +12,7 @@ pub mod lifecycle;
 pub mod linux_wallpaperengine;
 pub mod process_control;
 pub mod runtime;
+pub mod runtime_observation;
 pub mod target_commands;
 pub mod visual_handoff;
 

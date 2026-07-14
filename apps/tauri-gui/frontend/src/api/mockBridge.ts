@@ -6,12 +6,15 @@ import type {
   DisplayDTO,
   DisplayListDTO,
   DisplayStateDTO,
+  FirstRunSourceSuggestionDTO,
   LibraryCountDTO,
   LibraryBrowserItemDTO,
   LibraryBrowserPageDTO,
   LibraryBrowserQueryDTO,
   LibraryPageDTO,
   LinuxWallpaperEngineStatusDTO,
+  RendererStatusesDTO,
+  RuntimeWallpaperObservationDTO,
   ScanProgressDTO,
   SourceDTO,
   StatusDTO,
@@ -195,8 +198,39 @@ const DEFAULT_DISPLAY_STATE: DisplayStateDTO[] = [
   },
 ];
 
+const DEFAULT_RUNTIME_OBSERVATIONS: RuntimeWallpaperObservationDTO[] = MOCK_DISPLAYS.map(
+  ({ name }) => ({
+    output: name,
+    wallpaperPath: '/mock/path/wallpaper-001.jpg',
+    status: 'confirmed',
+  }),
+);
+
+const DEFAULT_RENDERER_STATUSES: RendererStatusesDTO = {
+  awww: { available: true, message: 'awww is installed.' },
+  mpvpaper: { available: true, message: 'mpvpaper is installed.' },
+  linuxWallpaperEngine: {
+    available: false,
+    message: 'linux-wallpaperengine is unavailable.',
+    detail: 'backend not found: linux-wallpaperengine',
+  },
+};
+
 const ok: CommandResult = { success: true, stdout: 'ok', stderr: '', exitCode: 0 };
 const failResult: CommandResult = { success: false, stdout: '', stderr: 'mock failure', exitCode: 1 };
+const sqliteIntegrityFailure: CommandResult = {
+  success: false,
+  stdout: '',
+  stderr: 'VERIFY FAILED: mock integrity mismatch',
+  exitCode: 1,
+  error: {
+    kind: 'sqlite_integrity',
+    message: 'Library database integrity check failed',
+    detail: 'VERIFY FAILED: mock integrity mismatch',
+    recoverable: true,
+    suggestion: 'Rebuild the library index with Repair library.',
+  },
+};
 
 const defaultScanProgress: ScanProgressDTO = {
   running: false,
@@ -257,9 +291,23 @@ const thumbnailFailures = new Set<string>();
 let libraryFirstPageEmpty = false;
 let libraryFirstPageEmptyConsumed = false;
 let browserFixtureCopies = 1;
+type NextBrowserAppendScenario =
+  | { readonly kind: 'reject'; readonly message: string }
+  | { readonly kind: 'empty' };
+let nextBrowserAppendScenario: NextBrowserAppendScenario | null = null;
+let browserAppendRequests = 0;
+let sourceRefreshHeld = false;
+let sourceRefreshCalls = 0;
+let sourceRefreshWaiters: Array<() => void> = [];
 let sourceStore: SourceDTO[] = DEFAULT_MOCK_SOURCES.map((source) => ({ ...source }));
 let nextSourceId = 4;
 let favoriteStore = new Set(MOCK_FAVORITES);
+let runtimeObservationStore: RuntimeWallpaperObservationDTO[] =
+  DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+let firstRunSuggestionStore: FirstRunSourceSuggestionDTO[] = [];
+let rendererStatusesStore: RendererStatusesDTO = cloneRendererStatuses(
+  DEFAULT_RENDERER_STATUSES,
+);
 
 function resetScanProgressState(): void {
   scanProgressState = { ...defaultScanProgress };
@@ -275,6 +323,20 @@ function resetLibraryScenario(): void {
   libraryFirstPageEmpty = false;
   libraryFirstPageEmptyConsumed = false;
   browserFixtureCopies = 1;
+  nextBrowserAppendScenario = null;
+  browserAppendRequests = 0;
+}
+
+function releaseHeldSourceRefreshes(): void {
+  sourceRefreshHeld = false;
+  const waiters = sourceRefreshWaiters;
+  sourceRefreshWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+function resetSourceRefreshScenario(): void {
+  releaseHeldSourceRefreshes();
+  sourceRefreshCalls = 0;
 }
 
 function resetSourceStore(): void {
@@ -284,6 +346,26 @@ function resetSourceStore(): void {
 
 function resetFavoriteStore(): void {
   favoriteStore = new Set(MOCK_FAVORITES);
+}
+
+function resetRuntimeObservationStore(): void {
+  runtimeObservationStore = DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+}
+
+function resetFirstRunSuggestionStore(): void {
+  firstRunSuggestionStore = [];
+}
+
+function cloneRendererStatuses(statuses: RendererStatusesDTO): RendererStatusesDTO {
+  return {
+    awww: { ...statuses.awww },
+    mpvpaper: { ...statuses.mpvpaper },
+    linuxWallpaperEngine: { ...statuses.linuxWallpaperEngine },
+  };
+}
+
+function resetRendererStatusesStore(): void {
+  rendererStatusesStore = cloneRendererStatuses(DEFAULT_RENDERER_STATUSES);
 }
 
 function normalizeMockSourcePath(path: string): string {
@@ -425,6 +507,9 @@ const mockBridgeAdapter = {
     detail: 'backend not found: linux-wallpaperengine',
   }),
 
+  rendererStatuses: async (): Promise<RendererStatusesDTO> =>
+    cloneRendererStatuses(rendererStatusesStore),
+
   weDebugInfo: async () => ({
     lastCommandLine: '',
     lastTargetConfig: '',
@@ -453,6 +538,8 @@ const mockBridgeAdapter = {
   }),
   displayStateList: async (): Promise<DisplayStateDTO[]> =>
     DEFAULT_DISPLAY_STATE.map((row) => ({ ...row })),
+  runtimeWallpaperObservations: async (): Promise<RuntimeWallpaperObservationDTO[]> =>
+    runtimeObservationStore.map((entry) => ({ ...entry })),
   applyToDisplay: async (request: TargetedApplyRequestDTO): Promise<CommandResult> => {
     lastTargetedApplyRequest = { ...request };
     const kind = request.kind ?? 'apply';
@@ -513,6 +600,17 @@ const mockBridgeAdapter = {
     const items = filterBrowserItems(query);
     const offset = Math.max(0, Math.trunc(query.offset));
     const limit = Math.min(500, Math.max(0, Math.trunc(query.limit)));
+
+    if (offset > 0) {
+      browserAppendRequests += 1;
+      const scenario = nextBrowserAppendScenario;
+      nextBrowserAppendScenario = null;
+      if (scenario?.kind === 'reject') throw new Error(scenario.message);
+      if (scenario?.kind === 'empty') {
+        return { total: items.length, items: [] };
+      }
+    }
+
     return {
       total: items.length,
       items: items.slice(offset, offset + limit),
@@ -582,6 +680,12 @@ const mockBridgeAdapter = {
   },
 
   sourcesList: async (): Promise<SourceDTO[]> => sourceStore.map((source) => ({ ...source })),
+  firstRunSourceSuggestions: async (): Promise<FirstRunSourceSuggestionDTO[]> =>
+    firstRunSuggestionStore.map((suggestion) => (
+      suggestion.kind === 'wallpaperEngine'
+        ? { ...suggestion, roots: [...suggestion.roots] }
+        : { ...suggestion }
+    )),
   sourceAdd: async (path: string): Promise<CommandResult> => {
     const normalizedPath = normalizeMockSourcePath(path);
     if (sourceStore.some((source) => normalizeMockSourcePath(source.path) === normalizedPath)) {
@@ -624,8 +728,14 @@ const mockBridgeAdapter = {
     source.recursive = recursive;
     return ok;
   },
-  sourceRefresh: async (id: number): Promise<CommandResult> =>
-    sourceStore.some((source) => source.id === id) ? ok : failResult,
+  sourceRefresh: async (id: number): Promise<CommandResult> => {
+    sourceRefreshCalls += 1;
+    const sourceExists = sourceStore.some((source) => source.id === id);
+    if (sourceRefreshHeld) {
+      await new Promise<void>((resolve) => sourceRefreshWaiters.push(resolve));
+    }
+    return sourceExists ? ok : failResult;
+  },
   sourceRemoveById: async (id: number): Promise<CommandResult> => {
     const before = sourceStore.length;
     sourceStore = sourceStore.filter((source) => source.id !== id);
@@ -648,8 +758,12 @@ const mockBridgeAdapter = {
   },
 
   sqliteVerify: async (): Promise<CommandResult> =>
-    commandFailures.has('sqliteVerify') ? failResult : ok,
-  sqliteRepair: async (): Promise<CommandResult> => ok,
+    commandFailures.has('sqliteVerify') ? sqliteIntegrityFailure : ok,
+  sqliteRepair: async (): Promise<CommandResult> => {
+    if (commandFailures.has('sqliteRepair')) return failResult;
+    commandFailures.delete('sqliteVerify');
+    return ok;
+  },
   sqliteResync: async (): Promise<CommandResult> => ok,
   sqliteBackup: async (): Promise<CommandResult> => ok,
   sqliteRestore: async (): Promise<CommandResult> => ok,
@@ -722,7 +836,43 @@ const mockControl = {
     libraryFirstPageEmptyConsumed = false;
   },
   setBrowserFixtureCopies: (copies: number): void => {
-    browserFixtureCopies = Math.max(1, Math.trunc(copies));
+    browserFixtureCopies = Math.max(0, Math.trunc(copies));
+  },
+  rejectNextBrowserAppend: (message = 'mock append request failed'): void => {
+    nextBrowserAppendScenario = { kind: 'reject', message };
+  },
+  emptyNextBrowserAppend: (): void => {
+    nextBrowserAppendScenario = { kind: 'empty' };
+  },
+  browserAppendRequestCount: (): number => browserAppendRequests,
+  holdSourceRefresh: (): void => {
+    sourceRefreshHeld = true;
+  },
+  releaseSourceRefresh: (): void => {
+    releaseHeldSourceRefreshes();
+  },
+  sourceRefreshCallCount: (): number => sourceRefreshCalls,
+  setSourceAvailability: (
+    id: number,
+    availability: SourceDTO['availability'],
+  ): void => {
+    const source = sourceStore.find((candidate) => candidate.id === id);
+    if (source) source.availability = availability;
+  },
+  setRuntimeWallpaperObservations: (
+    observations: RuntimeWallpaperObservationDTO[],
+  ): void => {
+    runtimeObservationStore = observations.map((entry) => ({ ...entry }));
+  },
+  setFirstRunSourceSuggestions: (suggestions: FirstRunSourceSuggestionDTO[]): void => {
+    firstRunSuggestionStore = suggestions.map((suggestion) => (
+      suggestion.kind === 'wallpaperEngine'
+        ? { ...suggestion, roots: [...suggestion.roots] }
+        : { ...suggestion }
+    ));
+  },
+  setRendererStatuses: (statuses: RendererStatusesDTO): void => {
+    rendererStatusesStore = cloneRendererStatuses(statuses);
   },
   lastApplyActionRequest: (): ApplyRequestDTO | null =>
     lastApplyActionRequest ? { ...lastApplyActionRequest } : null,
@@ -732,8 +882,12 @@ const mockControl = {
     resetScanProgressState();
     resetConfigStore();
     resetLibraryScenario();
+    resetSourceRefreshScenario();
     resetSourceStore();
     resetFavoriteStore();
+    resetRuntimeObservationStore();
+    resetFirstRunSuggestionStore();
+    resetRendererStatusesStore();
     lastApplyActionRequest = null;
     lastTargetedApplyRequest = null;
     commandFailures.clear();

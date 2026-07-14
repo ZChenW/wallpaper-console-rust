@@ -5,6 +5,7 @@ import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
 import {
   anchoredScrollTopForLayoutChange,
+  shouldRequestNextPage,
   shouldResetScroll,
   visibleThumbnailPaths,
 } from './wallpaperGridHelpers';
@@ -36,6 +37,10 @@ interface Props {
   selectedPath?: string | null;
   pendingPath?: string | null;
   currentPath?: string | null;
+  isEntryApplicable?: (entry: WallpaperDTO) => boolean;
+  hasMore?: boolean;
+  loadingMore?: boolean;
+  onLoadMore?: () => void | Promise<void>;
 }
 
 export interface ContextAction {
@@ -78,6 +83,10 @@ export default function WallpaperGrid({
   selectedPath = null,
   pendingPath = null,
   currentPath = null,
+  isEntryApplicable,
+  hasMore = false,
+  loadingMore = false,
+  onLoadMore,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -274,6 +283,17 @@ export default function WallpaperGrid({
     enqueueVisible(paths, { priority: 'front' });
   }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
 
+  useEffect(() => {
+    if (!active || !onLoadMore) return;
+    if (!shouldRequestNextPage({
+      rowCount,
+      visibleEndRow: virtualizer.range?.endIndex,
+      hasMore,
+      loadingMore,
+    })) return;
+    void onLoadMore();
+  }, [active, hasMore, loadingMore, onLoadMore, rowCount, virtualizer.range?.endIndex]);
+
   useEffect(() => () => {
     if (scrollIdleTimerRef.current !== null) {
       window.clearTimeout(scrollIdleTimerRef.current);
@@ -291,6 +311,10 @@ export default function WallpaperGrid({
     setContextMenu({ x: e.clientX, y: e.clientY, path });
   }, []);
 
+  const handleKeyboardContextMenu = useCallback((path: string, x: number, y: number) => {
+    setContextMenu({ x, y, path });
+  }, []);
+
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
   const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
@@ -306,6 +330,8 @@ export default function WallpaperGrid({
       className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`}
       ref={containerRef}
       onScroll={handleScroll}
+      aria-label="Wallpaper library"
+      role="listbox"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -334,11 +360,13 @@ export default function WallpaperGrid({
                   onApply={onApply}
                   onSelect={onSelect}
                   onContextMenu={handleContextMenu}
+                  onKeyboardContextMenu={handleKeyboardContextMenu}
                   cardSize={cardSize}
                   applyGesture={applyGesture}
                   selected={selectedPath === e.path}
                   pending={pendingPath === e.path}
                   current={currentPath === e.path}
+                  applyAvailable={isEntryApplicable?.(e)}
                 />
               ))}
             </div>

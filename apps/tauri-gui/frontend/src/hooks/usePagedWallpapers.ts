@@ -18,6 +18,15 @@ export interface LoadingState {
   refreshing: boolean;
 }
 
+export type AutomaticAppendOutcome =
+  | { kind: 'error' }
+  | {
+    kind: 'success';
+    offset: number;
+    itemCount: number;
+    total: number;
+  };
+
 interface UsePagedWallpapersOptions<T extends WallpaperDTO = WallpaperDTO> {
   pageSize: number;
   loadPage: WallpaperPageLoader<T>;
@@ -69,6 +78,11 @@ export function formatLoadPageError(error: unknown): string {
   return 'Failed to load library page';
 }
 
+export function shouldPauseAutomaticAppend(outcome: AutomaticAppendOutcome): boolean {
+  if (outcome.kind === 'error') return true;
+  return outcome.itemCount === 0 && outcome.total > outcome.offset;
+}
+
 export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   pageSize,
   loadPage,
@@ -80,6 +94,8 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [appending, setAppending] = useState(false);
+  const [automaticAppendPaused, setAutomaticAppendPaused] = useState(false);
   const [lastRequestKind, setLastRequestKind] = useState<RequestKind>('initial');
   const [replaceCount, setReplaceCount] = useState(0);
   const [loadError, setLoadError] = useState(false);
@@ -89,6 +105,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   const hasLoadedOnceRef = useRef(false);
   const consecutiveZeroCountRef = useRef(0);
   const confirmEmptyTimerRef = useRef<number | null>(null);
+  const appendInFlightRef = useRef(false);
 
   const clearConfirmEmptyTimer = useCallback(() => {
     if (confirmEmptyTimerRef.current !== null) {
@@ -98,6 +115,11 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   }, []);
 
   const load = useCallback(async (append = false, offset = 0) => {
+    if (append && appendInFlightRef.current) return;
+    if (append) {
+      appendInFlightRef.current = true;
+      setAppending(true);
+    }
     clearConfirmEmptyTimer();
     const requestId = requestSeq.current + 1;
     requestSeq.current = requestId;
@@ -118,6 +140,14 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       onPage?.(page);
       setTotal(page.total);
       setEntries((prev) => mergePagedWallpaperItems(prev, page.items, append));
+      if (append) {
+        setAutomaticAppendPaused(shouldPauseAutomaticAppend({
+          kind: 'success',
+          offset,
+          itemCount: page.items?.length ?? 0,
+          total: page.total,
+        }));
+      }
       if (!append) {
         setReplaceCount((c) => c + 1);
         if (page.total === 0) {
@@ -139,11 +169,18 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       if (!isCurrent()) return;
       setLoadError(true);
       setLoadErrorDetail(formatLoadPageError(error));
+      if (append) {
+        setAutomaticAppendPaused(shouldPauseAutomaticAppend({ kind: 'error' }));
+      }
       if (!append && !hasLoadedOnceRef.current) {
         setEntries([]);
         setTotal(0);
       }
     } finally {
+      if (append) {
+        appendInFlightRef.current = false;
+        setAppending(false);
+      }
       if (isCurrent()) {
         if (succeeded) {
           hasLoadedOnceRef.current = true;
@@ -155,8 +192,14 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     }
   }, [loadPage, onPage, pageSize, clearConfirmEmptyTimer]);
 
-  const reload = useCallback(() => load(false, 0), [load]);
-  const loadMore = useCallback(() => load(true, entries.length), [entries.length, load]);
+  const reload = useCallback(() => {
+    setAutomaticAppendPaused(false);
+    return load(false, 0);
+  }, [load]);
+  const loadMore = useCallback(() => {
+    setAutomaticAppendPaused(false);
+    return load(true, entries.length);
+  }, [entries.length, load]);
 
   useEffect(() => {
     void reload();
@@ -181,6 +224,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     setEmptyConfirmed(false);
     setLoadError(false);
     setLoadErrorDetail(null);
+    setAutomaticAppendPaused(false);
   }, [loadPage]);
 
   const entryByPath = useMemo(
@@ -197,6 +241,8 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     loading,
     initialLoading,
     refreshing,
+    appending,
+    automaticAppendPaused,
     hasLoadedOnce,
     lastRequestKind,
     replaceCount,

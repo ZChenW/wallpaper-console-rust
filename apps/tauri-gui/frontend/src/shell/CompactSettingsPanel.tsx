@@ -1,5 +1,6 @@
-import type { ChangeEvent, CSSProperties } from 'react';
+import type { ChangeEvent, CSSProperties, KeyboardEvent } from 'react';
 
+import type { BackendStatusDTO, RendererStatusesDTO } from '../api/types.ts';
 import DisplayTargetSelector from './DisplayTargetSelector.tsx';
 import type {
   ApplyGesture,
@@ -7,9 +8,13 @@ import type {
   ShellTheme,
 } from './shellPreferences.ts';
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
-import type {
+import {
+  AWWW_TRANSITION_TYPES,
+  LWE_SCALING_MODES,
+  type AwwwTransitionType,
   GifRenderer,
   ImageRenderer,
+  type LweScalingMode,
   WallpaperBehaviorSettings,
   WallpaperBehaviorSettingsUpdate,
   WallpaperFillMode,
@@ -26,6 +31,9 @@ export interface CompactSettingsPanelProps {
   readonly behaviorReady: boolean;
   readonly loadError: Error | null;
   readonly saveError: Error | null;
+  readonly rendererStatuses: RendererStatusesDTO | null;
+  readonly rendererStatusesLoading: boolean;
+  readonly rendererStatusesError: string | null;
   readonly sourceCount: number;
   readonly offlineSourceCount: number;
   readonly onOpenSources: () => void;
@@ -90,6 +98,11 @@ function sourceSummary(sourceCount: number, offlineSourceCount: number): string 
     : `${total} ${sourceLabel} · all available`;
 }
 
+function rendererStatusLabel(status: BackendStatusDTO | undefined): string {
+  if (!status) return 'Unknown';
+  return status.available ? 'Installed' : 'Unavailable';
+}
+
 export function CompactSettingsPanelView({
   open,
   preferences,
@@ -100,6 +113,9 @@ export function CompactSettingsPanelView({
   behaviorReady,
   loadError,
   saveError,
+  rendererStatuses,
+  rendererStatusesLoading,
+  rendererStatusesError,
   sourceCount,
   offlineSourceCount,
   onOpenSources,
@@ -109,6 +125,9 @@ export function CompactSettingsPanelView({
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
+  const awwwUnavailable = rendererStatuses?.awww.available === false;
+  const mpvpaperUnavailable = rendererStatuses?.mpvpaper.available === false;
+  const lweUnavailable = rendererStatuses?.linuxWallpaperEngine.available === false;
   const updateTheme = (event: ChangeEvent<HTMLSelectElement>) => {
     const theme = event.currentTarget.value as ShellTheme;
     updatePreferences((current) => ({ ...current, theme }));
@@ -133,9 +152,46 @@ export function CompactSettingsPanelView({
     const fillMode = event.currentTarget.value as WallpaperFillMode;
     updateBehaviorSettings((current) => ({ ...current, fillMode }));
   };
+  const updateAwwwTransitionType = (event: ChangeEvent<HTMLSelectElement>) => {
+    const awwwTransitionType = event.currentTarget.value as AwwwTransitionType;
+    updateBehaviorSettings((current) => ({ ...current, awwwTransitionType }));
+  };
+  const updateAwwwTransitionDuration = (event: ChangeEvent<HTMLInputElement>) => {
+    const awwwTransitionDuration = Number(event.currentTarget.value);
+    updateBehaviorSettings((current) => ({ ...current, awwwTransitionDuration }));
+  };
+  const updateAwwwTransitionFps = (event: ChangeEvent<HTMLInputElement>) => {
+    const awwwTransitionFps = Number(event.currentTarget.value);
+    updateBehaviorSettings((current) => ({ ...current, awwwTransitionFps }));
+  };
+  const updateLweScaling = (event: ChangeEvent<HTMLSelectElement>) => {
+    const lweScaling = event.currentTarget.value as LweScalingMode;
+    updateBehaviorSettings((current) => ({ ...current, lweScaling }));
+  };
+  const updateLweFps = (event: ChangeEvent<HTMLInputElement>) => {
+    const lweFps = Number(event.currentTarget.value);
+    updateBehaviorSettings((current) => ({ ...current, lweFps }));
+  };
+  const updateLweMuted = (event: ChangeEvent<HTMLInputElement>) => {
+    const lweMuted = event.currentTarget.checked;
+    updateBehaviorSettings((current) => ({ ...current, lweMuted }));
+  };
+  const updateLweVolume = (event: ChangeEvent<HTMLInputElement>) => {
+    const lweVolume = Number(event.currentTarget.value);
+    updateBehaviorSettings((current) => ({ ...current, lweVolume }));
+  };
+  const updateRestoreOnLogin = (event: ChangeEvent<HTMLInputElement>) => {
+    const restoreOnLogin = event.currentTarget.checked;
+    updateBehaviorSettings((current) => ({ ...current, restoreOnLogin }));
+  };
+  const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Escape') return;
+    event.preventDefault();
+    onClose();
+  };
 
   return (
-    <div style={overlayStyle}>
+    <div onKeyDown={handleKeyDown} style={overlayStyle}>
       <aside
         aria-label="Settings"
         aria-modal="true"
@@ -144,7 +200,7 @@ export function CompactSettingsPanelView({
       >
         <header style={headerStyle}>
           <h2>Settings</h2>
-          <button type="button" aria-label="Close settings" onClick={onClose}>
+          <button autoFocus type="button" aria-label="Close settings" onClick={onClose}>
             Close
           </button>
         </header>
@@ -201,9 +257,32 @@ export function CompactSettingsPanelView({
               }}
             />
           </div>
-          {!behaviorReady && <p role="status">Loading wallpaper behavior settings…</p>}
+          {!behaviorReady && loadError === null ? (
+            <p role="status">Loading wallpaper behavior settings…</p>
+          ) : null}
+          {!behaviorReady && loadError !== null ? (
+            <p>Wallpaper behavior controls are disabled until configuration can be read.</p>
+          ) : null}
           {loadError !== null && <p role="alert" style={errorStyle}>{errorMessage(loadError)}</p>}
           {saveError !== null && <p role="alert" style={errorStyle}>{errorMessage(saveError)}</p>}
+          <div aria-label="Renderer installation status">
+            <strong>Renderer installation status</strong>
+            <ul>
+              {([
+                ['awww', rendererStatuses?.awww],
+                ['mpvpaper', rendererStatuses?.mpvpaper],
+                ['linux-wallpaperengine', rendererStatuses?.linuxWallpaperEngine],
+              ] as const).map(([name, status]) => (
+                <li key={name} title={status?.detail}>
+                  <span>{name}</span>: <span>{rendererStatusLabel(status)}</span>
+                </li>
+              ))}
+            </ul>
+            {rendererStatusesLoading ? <p role="status">Checking renderer installation…</p> : null}
+            {rendererStatusesError ? (
+              <p role="status">Renderer status is Unknown: {rendererStatusesError}</p>
+            ) : null}
+          </div>
           <label style={fieldStyle}>
             <span>Image renderer</span>
             <select
@@ -213,8 +292,8 @@ export function CompactSettingsPanelView({
               value={behaviorSettings.imageBackend}
               onChange={updateImageRenderer}
             >
-              <option value="awww">awww renderer</option>
-              <option value="mpvpaper">mpvpaper renderer</option>
+              <option disabled={awwwUnavailable} value="awww">awww renderer</option>
+              <option disabled={mpvpaperUnavailable} value="mpvpaper">mpvpaper renderer</option>
             </select>
           </label>
           <label style={fieldStyle}>
@@ -226,32 +305,148 @@ export function CompactSettingsPanelView({
               value={behaviorSettings.gifBackend}
               onChange={updateGifRenderer}
             >
-              <option value="awww">awww renderer</option>
-              <option value="mpvpaper">mpvpaper renderer</option>
+              <option disabled={awwwUnavailable} value="awww">awww renderer</option>
+              <option disabled={mpvpaperUnavailable} value="mpvpaper">mpvpaper renderer</option>
             </select>
           </label>
           <div style={fieldStyle}>
             <span>Video renderer</span>
-            <output>mpvpaper (required for video)</output>
+            <output>
+              mpvpaper (required for video){mpvpaperUnavailable ? ' · unavailable' : ''}
+            </output>
           </div>
           {usesAwww ? (
-            <label style={fieldStyle}>
-              <span>Fill behavior</span>
-              <select
-                aria-label="Fill behavior"
-                data-behavior-control={true}
-                disabled={!behaviorReady}
-                value={behaviorSettings.fillMode}
-                onChange={updateFillMode}
-              >
-                <option value="crop">Crop to fill</option>
-                <option value="fit">Fit inside</option>
-                <option value="stretch">Stretch</option>
-              </select>
-            </label>
+            <>
+              <label style={fieldStyle}>
+                <span>Fill behavior</span>
+                <select
+                  aria-label="Fill behavior"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady}
+                  value={behaviorSettings.fillMode}
+                  onChange={updateFillMode}
+                >
+                  <option value="crop">Crop to fill</option>
+                  <option value="fit">Fit inside</option>
+                  <option value="stretch">Stretch</option>
+                </select>
+              </label>
+              <label style={fieldStyle}>
+                <span>Transition</span>
+                <select
+                  aria-label="awww transition type"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady}
+                  value={behaviorSettings.awwwTransitionType}
+                  onChange={updateAwwwTransitionType}
+                >
+                  {AWWW_TRANSITION_TYPES.map((transitionType) => (
+                    <option key={transitionType} value={transitionType}>{transitionType}</option>
+                  ))}
+                </select>
+              </label>
+              <label style={fieldStyle}>
+                <span>Transition duration</span>
+                <input
+                  aria-label="awww transition duration"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady}
+                  max={60}
+                  min={0}
+                  onChange={updateAwwwTransitionDuration}
+                  step={0.1}
+                  type="number"
+                  value={behaviorSettings.awwwTransitionDuration}
+                />
+              </label>
+              <label style={fieldStyle}>
+                <span>Transition FPS</span>
+                <input
+                  aria-label="awww transition FPS"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady}
+                  max={240}
+                  min={1}
+                  onChange={updateAwwwTransitionFps}
+                  step={1}
+                  type="number"
+                  value={behaviorSettings.awwwTransitionFps}
+                />
+              </label>
+            </>
           ) : (
-            <p>Fill behavior is available when awww handles images or GIFs.</p>
+            <p>Fill and transition controls are available when awww handles images or GIFs.</p>
           )}
+          <h4>Wallpaper Engine scenes</h4>
+          <label style={fieldStyle}>
+            <span>Scene scaling</span>
+            <select
+              aria-label="Wallpaper Engine scaling"
+              data-behavior-control={true}
+              disabled={!behaviorReady || lweUnavailable}
+              value={behaviorSettings.lweScaling}
+              onChange={updateLweScaling}
+            >
+              {LWE_SCALING_MODES.map((scaling) => (
+                <option key={scaling} value={scaling}>{scaling}</option>
+              ))}
+            </select>
+          </label>
+          <label style={fieldStyle}>
+            <span>Scene FPS</span>
+            <input
+              aria-label="Wallpaper Engine FPS"
+              data-behavior-control={true}
+              disabled={!behaviorReady || lweUnavailable}
+              max={240}
+              min={1}
+              onChange={updateLweFps}
+              step={1}
+              type="number"
+              value={behaviorSettings.lweFps}
+            />
+          </label>
+          <label style={fieldStyle}>
+            <span>Mute scene audio</span>
+            <input
+              aria-label="Mute Wallpaper Engine audio"
+              checked={behaviorSettings.lweMuted}
+              data-behavior-control={true}
+              disabled={!behaviorReady || lweUnavailable}
+              onChange={updateLweMuted}
+              type="checkbox"
+            />
+          </label>
+          <label style={fieldStyle}>
+            <span>Scene volume</span>
+            <input
+              aria-label="Wallpaper Engine volume"
+              data-behavior-control={true}
+              disabled={!behaviorReady || lweUnavailable || behaviorSettings.lweMuted}
+              max={100}
+              min={0}
+              onChange={updateLweVolume}
+              step={1}
+              type="number"
+              value={behaviorSettings.lweVolume}
+            />
+          </label>
+          <h4>Session restore</h4>
+          <label style={fieldStyle}>
+            <span>Restore on login</span>
+            <input
+              aria-label="Restore on login"
+              checked={behaviorSettings.restoreOnLogin}
+              data-behavior-control={true}
+              disabled={!behaviorReady}
+              onChange={updateRestoreOnLogin}
+              type="checkbox"
+            />
+          </label>
+          <p>
+            Add <code>wallpaper-console-rust restore-at-login</code> to your desktop session
+            startup. This switch allows that command to restore saved display wallpapers.
+          </p>
           <p>
             Renderer availability is checked when applying. Missing dependencies are reported
             with installation guidance.

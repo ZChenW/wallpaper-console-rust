@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:unit": "node --experimental-strip-types --test 'src/**/*.test.ts'",
-    "smoke": "playwright install chromium && playwright test --config e2e/playwright.config.ts"
+    "smoke": "node e2e/ensure-chromium.mjs && playwright test --config e2e/playwright.config.ts"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.0",

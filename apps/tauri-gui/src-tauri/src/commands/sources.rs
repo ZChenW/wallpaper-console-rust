@@ -7,6 +7,35 @@ use super::scan::{
 use std::path::Path;
 use wc_storage::{SourceKind, SourceRecord, StorageApi};
 
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FirstRunSourceSuggestionDto {
+    Directory { label: String, path: String },
+    WallpaperEngine { roots: Vec<String> },
+}
+
+fn detect_first_run_source_suggestions(home: &Path) -> Vec<FirstRunSourceSuggestionDto> {
+    let mut suggestions = Vec::new();
+    let downloads = home.join("Downloads");
+    if downloads.is_dir() {
+        suggestions.push(FirstRunSourceSuggestionDto::Directory {
+            label: "Downloads".to_string(),
+            path: downloads.to_string_lossy().into_owned(),
+        });
+    }
+
+    let roots = wc_scan::discover_steam_workshop_roots(home);
+    if !roots.is_empty() {
+        suggestions.push(FirstRunSourceSuggestionDto::WallpaperEngine {
+            roots: roots
+                .into_iter()
+                .map(|root| root.to_string_lossy().into_owned())
+                .collect(),
+        });
+    }
+    suggestions
+}
+
 fn source_dtos_with_storage(storage: &StorageApi) -> Result<Vec<SourceDto>, String> {
     let records = storage
         .source_records()
@@ -162,6 +191,16 @@ pub async fn sources_list() -> Result<Vec<SourceDto>, String> {
     })
     .await
     .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn first_run_source_suggestions() -> Result<Vec<FirstRunSourceSuggestionDto>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set.".to_string())?;
+        Ok(detect_first_run_source_suggestions(Path::new(&home)))
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -633,5 +672,73 @@ mod tests {
         assert!(wallpaper.exists());
         assert!(storage.source_records().unwrap().is_empty());
         assert_eq!(source_backed_count(&storage), 0);
+    }
+
+    #[test]
+    fn first_run_suggestions_offer_only_an_existing_downloads_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let downloads = home.path().join("Downloads");
+        std::fs::create_dir_all(&downloads).unwrap();
+
+        let suggestions = detect_first_run_source_suggestions(home.path());
+
+        assert_eq!(
+            suggestions,
+            vec![FirstRunSourceSuggestionDto::Directory {
+                label: "Downloads".to_string(),
+                path: downloads.to_string_lossy().into_owned(),
+            }]
+        );
+
+        std::fs::remove_dir(&downloads).unwrap();
+        assert!(detect_first_run_source_suggestions(home.path()).is_empty());
+    }
+
+    #[test]
+    fn first_run_suggestions_include_discovered_wallpaper_engine_roots() {
+        let home = tempfile::tempdir().unwrap();
+        let workshop = home
+            .path()
+            .join(".local/share/Steam/steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&workshop).unwrap();
+        let canonical_workshop = std::fs::canonicalize(&workshop).unwrap();
+
+        let suggestions = detect_first_run_source_suggestions(home.path());
+
+        assert_eq!(
+            suggestions,
+            vec![FirstRunSourceSuggestionDto::WallpaperEngine {
+                roots: vec![canonical_workshop.to_string_lossy().into_owned()],
+            }]
+        );
+        let json = serde_json::to_value(&suggestions).unwrap();
+        assert_eq!(json[0]["kind"], "wallpaperEngine");
+        assert_eq!(
+            json[0]["roots"][0],
+            canonical_workshop.to_string_lossy().as_ref()
+        );
+    }
+
+    #[test]
+    fn first_run_suggestion_detection_never_mutates_sources_or_scan_state() {
+        let _guard = crate::commands::scan::TEST_SCAN_LOCK.lock().unwrap();
+        crate::commands::scan::reset_scan_state_for_test();
+        let (config_root, storage) = storage();
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(home.path().join("Downloads")).unwrap();
+        std::fs::create_dir_all(
+            home.path()
+                .join(".steam/steam/steamapps/workshop/content/431960"),
+        )
+        .unwrap();
+        assert!(storage.source_records().unwrap().is_empty());
+
+        let suggestions = detect_first_run_source_suggestions(home.path());
+
+        assert_eq!(suggestions.len(), 2);
+        assert!(storage.source_records().unwrap().is_empty());
+        assert_eq!(source_backed_count(&storage), 0);
+        assert!(!crate::commands::scan::current_scan_progress_snapshot().running);
+        drop(config_root);
     }
 }

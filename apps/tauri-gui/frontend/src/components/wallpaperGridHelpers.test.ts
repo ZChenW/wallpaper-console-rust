@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   anchoredScrollTopForLayoutChange,
+  shouldRequestNextPage,
   visibleThumbnailPaths,
 } from './wallpaperGridHelpers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
@@ -76,4 +77,37 @@ test('anchoredScrollTopForLayoutChange handles simultaneous size and column chan
     }),
     464,
   );
+});
+
+test('next page is requested only near the loaded virtual tail', () => {
+  assert.equal(shouldRequestNextPage({
+    rowCount: 30,
+    visibleEndRow: 27,
+    hasMore: true,
+    loadingMore: false,
+  }), true);
+  assert.equal(shouldRequestNextPage({
+    rowCount: 30,
+    visibleEndRow: 26,
+    hasMore: true,
+    loadingMore: false,
+  }), false);
+  assert.equal(shouldRequestNextPage({
+    rowCount: 30,
+    visibleEndRow: 29,
+    hasMore: false,
+    loadingMore: false,
+  }), false);
+  assert.equal(shouldRequestNextPage({
+    rowCount: 30,
+    visibleEndRow: 29,
+    hasMore: true,
+    loadingMore: true,
+  }), false);
+  assert.equal(shouldRequestNextPage({
+    rowCount: 0,
+    visibleEndRow: null,
+    hasMore: true,
+    loadingMore: false,
+  }), false);
 });

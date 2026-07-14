@@ -33,6 +33,8 @@ function makeDeps(opts: {
   invalidateLibrary?: () => void;
   refreshStatus?: () => Promise<void>;
   onApplied?: ApplyQueueDeps['onApplied'];
+  scheduler?: ApplyQueueDeps['scheduler'];
+  slowStatusDelayMs?: number;
 }): ApplyQueueDeps {
   return {
     applyAction: opts.applyAction,
@@ -46,7 +48,37 @@ function makeDeps(opts: {
     recordMetric: (name) => { opts.metrics?.push(name); },
     subscribeApplyStage: opts.subscribeApplyStage,
     onApplied: opts.onApplied,
+    scheduler: opts.scheduler,
+    slowStatusDelayMs: opts.slowStatusDelayMs,
   };
+}
+
+class ManualApplyScheduler {
+  private nextId = 1;
+  private tasks = new Map<number, { callback: () => void; delayMs: number }>();
+
+  readonly setTimer = (callback: () => void, delayMs: number): unknown => {
+    const id = this.nextId++;
+    this.tasks.set(id, { callback, delayMs });
+    return id;
+  };
+
+  readonly clearTimer = (handle: unknown): void => {
+    if (typeof handle === 'number') this.tasks.delete(handle);
+  };
+
+  nextDelay(): number | null {
+    return this.tasks.values().next().value?.delayMs ?? null;
+  }
+
+  fireNext(): void {
+    const entry = this.tasks.entries().next().value as
+      | [number, { callback: () => void; delayMs: number }]
+      | undefined;
+    assert.ok(entry, 'expected a delayed apply status');
+    this.tasks.delete(entry[0]);
+    entry[1].callback();
+  }
 }
 
 test('apply handlers preserve legacy actions and construct targeted requests', () => {
@@ -373,6 +405,53 @@ test('refresh failure after backend success keeps success and onApplied', async 
   assert.ok(!feedback.some((value) => value.state === 'error' && value.label === 'Apply'));
 });
 
+test('backend success ends the active apply before a hung status refresh completes', async () => {
+  const feedback: CommandFeedback[] = [];
+  const calls: string[] = [];
+  const scheduler = new ManualApplyScheduler();
+  let finishFirstApply: ((result: {
+    success: boolean;
+    stdout: string;
+    stderr: string;
+  }) => void) | undefined;
+  const firstApply = new Promise<{
+    success: boolean;
+    stdout: string;
+    stderr: string;
+  }>((resolve) => { finishFirstApply = resolve; });
+  const hungRefresh = new Promise<void>(() => {});
+  const deps = makeDeps({
+    applyAction: async (request) => {
+      calls.push(request.requestId ?? '');
+      if (request.requestId === 'first') return firstApply;
+      return { success: true, stdout: '{}', stderr: '' };
+    },
+    feedback,
+    refreshStatus: async () => hungRefresh,
+    scheduler,
+    slowStatusDelayMs: 500,
+  });
+  const controller = new ApplyQueueController(deps, () => {});
+
+  controller.enqueue(req('first'));
+  controller.enqueue(req('latest'));
+  finishFirstApply?.({ success: true, stdout: '{}', stderr: '' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(calls, ['first', 'latest'], 'secondary refresh must not block pending apply');
+  assert.equal(scheduler.nextDelay(), null, 'backend success must clear delayed status timers');
+  assert.equal(
+    feedback.some((value) => value.state === 'running'),
+    false,
+    'secondary refresh must not surface late Applying feedback',
+  );
+  assert.deepEqual(controller.getState(), {
+    applying: false,
+    activePath: undefined,
+    pendingPath: undefined,
+  });
+});
+
 test('failed apply never calls onApplied', async () => {
   const feedback: CommandFeedback[] = [];
   let appliedCount = 0;
@@ -395,6 +474,7 @@ test('apply queue runs current request then latest pending request only', async 
   const firstBlock = new Promise<void>((resolve) => { releaseFirst = resolve; });
   const feedback: CommandFeedback[] = [];
   const applyingStates: boolean[] = [];
+  const scheduler = new ManualApplyScheduler();
 
   const deps = makeDeps({
     applyAction: async (request) => {
@@ -414,6 +494,7 @@ test('apply queue runs current request then latest pending request only', async 
       };
     },
     feedback,
+    scheduler,
     subscribeApplyStage: (handler) => {
       handler({
         requestId: 'a',
@@ -429,18 +510,19 @@ test('apply queue runs current request then latest pending request only', async 
   controller.enqueue(req('a'));
   controller.enqueue(req('b'));
   controller.enqueue(req('c'));
+  scheduler.fireNext();
   releaseFirst?.();
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.deepEqual(calls, ['a', 'c'], 'should execute current then latest pending only; drop superseded middle');
   assert.deepEqual(applyingStates, [true, false]);
   assert(
-    feedback.some((f) => f.state === 'running' && f.label === 'Starting awww daemon'),
-    'apply stage feedback surfaced for active request',
+    feedback.some((f) => f.state === 'running' && f.label === 'Applying wallpaper'),
+    'slow active request should show one generic status',
   );
   assert(
-    !feedback.some((f) => f.state === 'running' && f.detail?.startsWith('Queued')),
-    'queued must not overwrite the active apply stage',
+    !feedback.some((f) => f.label.includes('awww')),
+    'renderer internals must stay hidden',
   );
   assert(
     feedback.some((f) => f.state === 'running' && f.detail?.includes('Next wallpaper queued.')),
@@ -449,7 +531,7 @@ test('apply queue runs current request then latest pending request only', async 
   assert(feedback.some((f) => f.state === 'success' && f.label === 'Applied'));
 });
 
-test('apply queue emits settling stage before success', async () => {
+test('quick apply does not flash a settling stage before success', async () => {
   const feedback: CommandFeedback[] = [];
 
   const deps = makeDeps({
@@ -473,7 +555,7 @@ test('apply queue emits settling stage before success', async () => {
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   const stages = feedback.filter((f) => f.state === 'running').map((f) => f.detail);
-  assert.ok(stages.some((d) => d?.startsWith('Settling')), 'settling stage emitted');
+  assert.deepEqual(stages, []);
 });
 
 test('apply queue records request duration metric on success', async () => {
@@ -563,7 +645,7 @@ test('successful retry invalidates library only after backend confirmation', asy
   assert.equal(libraryInvalidations, 1, 'confirmed retry success refreshes the cleared failure badge');
 });
 
-test('apply queue updates feedback from wc-apply-stage and unsubscribes on success', async () => {
+test('apply queue hides wc-apply-stage details and unsubscribes on success', async () => {
   const feedback: CommandFeedback[] = [];
   let unsubscribeCount = 0;
   let emitStage: ((event: ApplyStagePayload) => void) | undefined;
@@ -589,11 +671,73 @@ test('apply queue updates feedback from wc-apply-stage and unsubscribes on succe
   controller.enqueue(req('stage-success'));
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.ok(
-    feedback.some((f) => f.state === 'running' && f.detail?.includes('linux-wallpaperengine')),
-    'stage detail should update running feedback',
-  );
+  assert.equal(feedback.some((f) => f.detail?.includes('linux-wallpaperengine')), false);
   assert.equal(unsubscribeCount, 1, 'should unsubscribe after successful apply');
+});
+
+test('backend stages stay hidden until a slow apply shows one generic status', async () => {
+  const feedback: CommandFeedback[] = [];
+  const scheduler = new ManualApplyScheduler();
+  let emitStage: ((event: ApplyStagePayload) => void) | undefined;
+  let finishApply: ((value: { success: boolean; stdout: string; stderr: string }) => void) | undefined;
+  const pendingApply = new Promise<{ success: boolean; stdout: string; stderr: string }>(
+    (resolve) => { finishApply = resolve; },
+  );
+  const deps = makeDeps({
+    applyAction: async () => pendingApply,
+    feedback,
+    scheduler,
+    slowStatusDelayMs: 500,
+    subscribeApplyStage: (handler) => {
+      emitStage = handler;
+      return () => {};
+    },
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('slow'));
+  emitStage?.({
+    requestId: 'slow',
+    stage: 'EnsureAwwwDaemon',
+    label: 'Starting awww daemon',
+    detail: 'Waiting for awww socket internals.',
+  });
+
+  assert.equal(scheduler.nextDelay(), 500);
+  assert.equal(feedback.some((value) => value.state === 'running'), false);
+
+  scheduler.fireNext();
+  assert.deepEqual(
+    feedback.filter((value) => value.state === 'running'),
+    [{ state: 'running', label: 'Applying wallpaper', detail: 'Applying wallpaper…' }],
+  );
+  assert.equal(
+    feedback.some((value) => value.label.includes('awww') || value.detail?.includes('socket')),
+    false,
+  );
+
+  finishApply?.({ success: true, stdout: '{}', stderr: '' });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(feedback.some((value) => value.state === 'success'));
+});
+
+test('quick apply completes without ever presenting running feedback', async () => {
+  const feedback: CommandFeedback[] = [];
+  const scheduler = new ManualApplyScheduler();
+  const deps = makeDeps({
+    applyAction: async () => ({ success: true, stdout: '{}', stderr: '' }),
+    feedback,
+    scheduler,
+    slowStatusDelayMs: 500,
+  });
+
+  const controller = new ApplyQueueController(deps, () => {});
+  controller.enqueue(req('quick'));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(feedback.some((value) => value.state === 'running'), false);
+  assert.equal(scheduler.nextDelay(), null);
+  assert.ok(feedback.some((value) => value.state === 'success'));
 });
 
 test('apply queue unsubscribes from wc-apply-stage on failure', async () => {
@@ -647,7 +791,7 @@ test('apply queue ignores wc-apply-stage events with null requestId when current
   );
 });
 
-test('apply queue ignores wc-apply-stage events for other request ids', async () => {
+test('apply queue never exposes stages for current or other request ids', async () => {
   const feedback: CommandFeedback[] = [];
   let emitStage: ((event: ApplyStagePayload) => void) | undefined;
 
@@ -679,16 +823,16 @@ test('apply queue ignores wc-apply-stage events for other request ids', async ()
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.ok(
-    feedback.some((f) => f.state === 'running' && f.detail?.includes('linux-wallpaperengine to start')),
-    'should apply stage for matching request id only',
-  );
-  assert.ok(
     !feedback.some((f) => f.detail?.includes('Should be ignored')),
     'should ignore stages for other request ids',
   );
+  assert.ok(
+    !feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')),
+    'matching backend details must also remain out of ordinary UI',
+  );
 });
 
-test('apply queue surfaces different preview and scene stage details', async () => {
+test('apply queue hides both preview and scene renderer stage details', async () => {
   const feedback: CommandFeedback[] = [];
   let emitStage: ((event: ApplyStagePayload) => void) | undefined;
 
@@ -724,6 +868,6 @@ test('apply queue surfaces different preview and scene stage details', async () 
   controller.enqueue(req('scene'));
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.ok(feedback.some((f) => f.detail?.includes('Awww to display the preview')));
-  assert.ok(feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')));
+  assert.ok(!feedback.some((f) => f.detail?.includes('Awww to display the preview')));
+  assert.ok(!feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')));
 });

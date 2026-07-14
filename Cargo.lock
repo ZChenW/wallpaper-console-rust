@@ -4557,6 +4557,7 @@ name = "wc-backend"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "serde_json",
  "tempfile",
  "wc-core",
  "wc-scan",

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   cardInteractionClassName,
+  resolveCardKeyboardInteraction,
   resolveCardPointerInteraction,
 } from './cardInteraction.ts';
 
@@ -86,4 +87,27 @@ test('card visual state classes expose selection, pending, and current independe
     cardInteractionClassName({ selected: false, pending: false, current: false }),
     'wallpaper-card',
   );
+});
+
+test('keyboard activation applies once and exposes the context menu key', () => {
+  assert.deepEqual(resolveCardKeyboardInteraction({
+    key: 'Enter',
+    shiftKey: false,
+    canApply: true,
+  }), { select: true, apply: true, contextMenu: false });
+  assert.deepEqual(resolveCardKeyboardInteraction({
+    key: ' ',
+    shiftKey: false,
+    canApply: false,
+  }), { select: true, apply: false, contextMenu: false });
+  assert.deepEqual(resolveCardKeyboardInteraction({
+    key: 'F10',
+    shiftKey: true,
+    canApply: true,
+  }), { select: false, apply: false, contextMenu: true });
+  assert.deepEqual(resolveCardKeyboardInteraction({
+    key: 'ArrowRight',
+    shiftKey: false,
+    canApply: true,
+  }), { select: false, apply: false, contextMenu: false });
 });

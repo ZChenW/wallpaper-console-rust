@@ -71,6 +71,38 @@ test('running scan is non-modal, exposes coarse elapsed time, and can cancel onc
   assert.equal(cancelCount, 1);
 });
 
+test('running scan renders determinate progress when total hint is usable', async () => {
+  const { ScanActivity } = await importTsxModule();
+  const tree = ScanActivity({
+    presentation: { kind: 'running', nonModal: true, canCancel: true, elapsedMs: 501 },
+    progress: { scanned: 25, totalHint: 100 },
+    onCancel: () => undefined,
+    onDismiss: () => assert.fail('running scan must not dismiss'),
+  });
+  const [progressBar] = findElements(tree, (element) => element.type === 'progress');
+
+  assert.ok(progressBar);
+  assert.equal(progressBar.props['aria-label'], 'Wallpaper scan progress');
+  assert.equal(progressBar.props.value, 25);
+  assert.equal(progressBar.props.max, 100);
+});
+
+test('running scan renders indeterminate progress without a usable total hint', async () => {
+  const { ScanActivity } = await importTsxModule();
+  const tree = ScanActivity({
+    presentation: { kind: 'running', nonModal: true, canCancel: true, elapsedMs: 501 },
+    progress: { scanned: 25, totalHint: 0 },
+    onCancel: () => undefined,
+    onDismiss: () => assert.fail('running scan must not dismiss'),
+  });
+  const [progressBar] = findElements(tree, (element) => element.type === 'progress');
+
+  assert.ok(progressBar);
+  assert.equal(progressBar.props['aria-label'], 'Wallpaper scan progress');
+  assert.equal(progressBar.props.value, undefined);
+  assert.equal(progressBar.props.max, undefined);
+});
+
 test('cancelling scan disables repeated cancellation', async () => {
   const { ScanActivity } = await importTsxModule();
   const tree = ScanActivity({

@@ -8,6 +8,7 @@ import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { wallpaperCardMetrics, type WallpaperCardSize } from '../utils/layout';
 import {
   displayName,
+  cardHoverLabel,
   formatSize,
   metaLine,
   typeIcon,
@@ -16,6 +17,7 @@ import {
 } from './wallpaperCardHelpers';
 import {
   cardInteractionClassName,
+  resolveCardKeyboardInteraction,
   resolveCardPointerInteraction,
 } from '../shell/cardInteraction';
 import type { ApplyGesture } from '../shell/shellPreferences';
@@ -38,11 +40,13 @@ interface CardProps {
   onApply: (path: string) => void;
   onSelect?: (entry: WallpaperDTO) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
+  onKeyboardContextMenu?: (path: string, x: number, y: number) => void;
   cardSize?: WallpaperCardSize;
   applyGesture?: ApplyGesture;
   selected?: boolean;
   pending?: boolean;
   current?: boolean;
+  applyAvailable?: boolean;
 }
 
 function WallpaperCardImpl({
@@ -51,11 +55,13 @@ function WallpaperCardImpl({
   onApply,
   onSelect,
   onContextMenu,
+  onKeyboardContextMenu,
   cardSize = 'medium',
   applyGesture = 'single',
   selected = false,
   pending = false,
   current = false,
+  applyAvailable,
 }: CardProps) {
   const store = useThumbnailStore();
   const thumbnail = useSyncExternalStore(
@@ -75,7 +81,7 @@ function WallpaperCardImpl({
     const fromControl = control !== null
       && control !== event.currentTarget
       && event.currentTarget.contains(control);
-    const canApply = isApplyAvailable(entry);
+    const canApply = applyAvailable ?? isApplyAvailable(entry);
     const interaction = resolveCardPointerInteraction({
       gesture: applyGesture,
       clickCount: event.detail,
@@ -100,6 +106,33 @@ function WallpaperCardImpl({
     }
   };
 
+  const canApply = applyAvailable ?? isApplyAvailable(entry);
+  const reportUnsupportedApply = () => {
+    emitFeedback({
+      state: 'warning',
+      label: 'Cannot apply',
+      detail: entry.applyReason || entry.unsupportedReason || 'This item cannot be applied as a live wallpaper.',
+    });
+  };
+
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    const interaction = resolveCardKeyboardInteraction({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      canApply,
+    });
+    if (!interaction.select && !interaction.apply && !interaction.contextMenu) return;
+    event.preventDefault();
+    if (interaction.contextMenu) {
+      const rect = event.currentTarget.getBoundingClientRect();
+      onKeyboardContextMenu?.(entry.path, rect.left + 12, rect.top + 12);
+      return;
+    }
+    if (interaction.select) onSelect?.(entry);
+    if (interaction.apply) onApply(entry.path);
+    else if (interaction.select && !canApply) reportUnsupportedApply();
+  };
+
   const badge = weBadge(entry);
   const cardStyle = {
     '--wallpaper-thumbnail-height': `${wallpaperCardMetrics(cardSize).thumbnailHeight}px`,
@@ -111,10 +144,14 @@ function WallpaperCardImpl({
       style={cardStyle}
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
       onClick={handleClick}
+      onKeyDown={handleKeyDown}
       aria-current={current ? 'true' : undefined}
       aria-selected={selected}
       data-pending={pending || undefined}
-      title={entry.path}
+      data-wallpaper-path={entry.path}
+      role="option"
+      tabIndex={0}
+      title={cardHoverLabel(entry)}
     >
       <div className="wallpaper-thumb">
         {entry.previewPath ? (
@@ -128,6 +165,9 @@ function WallpaperCardImpl({
           </div>
         )}
         {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
+        {'favorite' in entry && entry.favorite === true ? (
+          <span aria-label="Favorite" className="wallpaper-favorite-badge">♥</span>
+        ) : null}
       </div>
       <div className="wallpaper-info">
         <span className="wallpaper-name">{displayName(entry)}</span>

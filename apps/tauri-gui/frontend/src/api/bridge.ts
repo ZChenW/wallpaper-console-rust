@@ -4,6 +4,7 @@ import type {
   CommandResult,
   DisplayListDTO,
   DisplayStateDTO,
+  FirstRunSourceSuggestionDTO,
   LibraryCountDTO,
   LibraryBrowserItemDTO,
   LibraryBrowserPageDTO,
@@ -11,6 +12,8 @@ import type {
   LibraryPageDTO,
   LibrarySourceStatusDTO,
   LinuxWallpaperEngineStatusDTO,
+  RendererStatusesDTO,
+  RuntimeWallpaperObservationDTO,
   ScanProgressDTO,
   SourceDTO,
   StatusDTO,
@@ -50,10 +53,32 @@ export function createLibraryBrowserApi(invokeFn: InvokeFn = invoke) {
   };
 }
 
+export function createRuntimeObservationApi(invokeFn: InvokeFn = invoke) {
+  return {
+    runtimeWallpaperObservations: (): Promise<RuntimeWallpaperObservationDTO[]> =>
+      invokeFn<RuntimeWallpaperObservationDTO[]>('runtime_wallpaper_observations'),
+  };
+}
+
+export function createRendererStatusApi(invokeFn: InvokeFn = invoke) {
+  return {
+    rendererStatuses: (): Promise<RendererStatusesDTO> =>
+      invokeFn<RendererStatusesDTO>('renderer_statuses'),
+  };
+}
+
+export function createFirstRunSuggestionApi(invokeFn: InvokeFn = invoke) {
+  return {
+    firstRunSourceSuggestions: (): Promise<FirstRunSourceSuggestionDTO[]> =>
+      invokeFn<FirstRunSourceSuggestionDTO[]>('first_run_source_suggestions'),
+  };
+}
+
 export const api = {
   status: (): Promise<StatusDTO> => invoke<StatusDTO>('status'),
   linuxWallpaperEngineStatus: (): Promise<LinuxWallpaperEngineStatusDTO> =>
     invoke<LinuxWallpaperEngineStatusDTO>('linux_wallpaperengine_status'),
+  ...createRendererStatusApi(),
 
   apply: (path: string): Promise<CommandResult> => invoke<CommandResult>('apply', { path }),
   applyAction: (request: ApplyRequestDTO): Promise<CommandResult> =>
@@ -61,6 +86,7 @@ export const api = {
   displaysList: (): Promise<DisplayListDTO> => invoke<DisplayListDTO>('displays_list'),
   displayStateList: (): Promise<DisplayStateDTO[]> =>
     invoke<DisplayStateDTO[]>('display_state_list'),
+  ...createRuntimeObservationApi(),
   applyToDisplay: (request: TargetedApplyRequestDTO): Promise<CommandResult> =>
     invoke<CommandResult>('apply_to_display', { request }),
   stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
@@ -95,6 +121,7 @@ export const api = {
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
 
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
+  ...createFirstRunSuggestionApi(),
   sourceAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_add', { path }),
   sourceRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('source_remove', { path }),
   ...createSourceMutationApi(),

@@ -20,6 +20,36 @@ export function reconcileSourceFilter(
     : { kind: 'all' };
 }
 
+export function reconcileSelectedEntry<T extends { readonly path: string }>(
+  selected: T | null,
+  entryByPath: ReadonlyMap<string, T>,
+): T | null {
+  if (!selected) return null;
+  return entryByPath.get(selected.path) ?? null;
+}
+
+/** A failed source read is an error state, never evidence of a fresh install. */
+export function shouldOfferFirstRun(
+  sources: readonly SourceDTO[],
+  sourceError: string | undefined,
+): boolean {
+  return sources.length === 0 && sourceError === undefined;
+}
+
+export interface RandomWallpaperAvailability {
+  readonly searchSettled: boolean;
+  readonly randomPending: boolean;
+  readonly total: number;
+  readonly canApply: boolean;
+}
+
+export function canChooseRandomWallpaper(input: RandomWallpaperAvailability): boolean {
+  return input.searchSettled
+    && !input.randomPending
+    && input.total > 0
+    && input.canApply;
+}
+
 function basename(path: string): string {
   const normalized = path.replace(/\/+$/, '');
   const separator = normalized.lastIndexOf('/');

@@ -1,691 +1,668 @@
 import { expect, test, type Page } from '@playwright/test';
 
-test('library renders wallpaper grid', async ({ page }) => {
-  await page.goto('/');
-  await expect(page.getByRole('heading', { name: 'Library' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
-  await expect(page.locator('.wallpaper-card').first()).toBeVisible();
+type TargetedApplyRequest = {
+  requestId: string;
+  path: string;
+  target?: string;
+};
+
+type MockControl = {
+  injectCommandFailure(command: string): void;
+  clearCommandFailure(command: string): void;
+  setBrowserFixtureCopies(copies: number): void;
+  rejectNextBrowserAppend(message?: string): void;
+  emptyNextBrowserAppend(): void;
+  browserAppendRequestCount(): number;
+  setScanProgress(progress: Record<string, unknown>): void;
+  setSourceAvailability(id: number, availability: 'unknown' | 'available' | 'offline'): void;
+  holdSourceRefresh(): void;
+  releaseSourceRefresh(): void;
+  sourceRefreshCallCount(): number;
+  setFirstRunSourceSuggestions(suggestions: Array<
+    | { kind: 'directory'; label: string; path: string }
+    | { kind: 'wallpaperEngine'; roots: string[] }
+  >): void;
+  setRuntimeWallpaperObservations(observations: Array<{
+    output: string;
+    wallpaperPath: string | null;
+    status: 'confirmed' | 'unknown';
+    reason?: string;
+  }>): void;
+  setThumbnailFailure(path: string): void;
+  lastTargetedApplyRequest(): TargetedApplyRequest | null;
+};
+
+declare global {
+  interface Window {
+    __mockControl?: MockControl;
+  }
+}
+
+const pageErrors = new WeakMap<Page, string[]>();
+
+test.beforeEach(({ page }) => {
+  const errors: string[] = [];
+  pageErrors.set(page, errors);
+  page.on('pageerror', (error) => errors.push(error.message));
 });
 
-test('library keeps cards visible after resizing from compact to wide viewport', async ({ page }) => {
-  await page.setViewportSize({ width: 520, height: 800 });
-  await page.goto('/');
-  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible' });
+test.afterEach(({ page }) => {
+  expect(pageErrors.get(page) ?? [], 'uncaught browser page errors').toEqual([]);
+});
 
-  await page.locator('.wallpaper-grid').evaluate((el) => {
-    el.scrollTop = 800;
+async function openApp(page: Page): Promise<void> {
+  await page.goto('/');
+  await expect(page.locator('.single-page-shell')).toBeVisible();
+}
+
+async function waitForGrid(page: Page): Promise<void> {
+  await expect(page.locator('.wallpaper-grid')).toBeVisible();
+  await expect(page.locator('.wallpaper-card').first()).toBeVisible();
+}
+
+async function lastApplyRequest(page: Page): Promise<TargetedApplyRequest | null> {
+  return page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    return control.lastTargetedApplyRequest();
+  });
+}
+
+async function browserAppendRequestCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    return control.browserAppendRequestCount();
+  });
+}
+
+async function sourceRefreshCallCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    return control.sourceRefreshCallCount();
+  });
+}
+
+async function scrollLibraryGrid(page: Page, edge: 'start' | 'end'): Promise<void> {
+  await page.locator('.wallpaper-grid').evaluate((element, requestedEdge) => {
+    element.scrollTop = requestedEdge === 'end' ? element.scrollHeight : 0;
+    element.dispatchEvent(new Event('scroll'));
+  }, edge);
+}
+
+async function openSettings(page: Page): Promise<void> {
+  await page.getByRole('button', { name: 'Open settings' }).click();
+  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
+}
+
+async function openSources(page: Page): Promise<void> {
+  await openSettings(page);
+  await page.getByRole('button', { name: 'Manage wallpaper sources' }).click();
+  await expect(page.getByRole('dialog', { name: 'Wallpaper sources' })).toBeVisible();
+}
+
+function sourceRow(page: Page, sourceId: number) {
+  return page.locator(`[data-source-id="${sourceId}"]`);
+}
+
+async function removeSource(page: Page, sourceId: number): Promise<void> {
+  const row = sourceRow(page, sourceId);
+  await row.getByRole('button', { name: 'Remove', exact: true }).click();
+  const confirmation = row.getByRole('alertdialog');
+  await expect(confirmation).toBeVisible();
+  await confirmation.getByRole('button', { name: 'Remove source' }).click();
+  await expect(row).toHaveCount(0);
+}
+
+test('renders one unified wallpaper picker without legacy navigation', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  await expect(page.getByLabel('Wallpaper Console')).toBeAttached();
+  await expect(page.getByLabel('Search wallpapers')).toBeVisible();
+  await expect(page.getByLabel('Library filters')).toBeVisible();
+  await expect(page.getByLabel('Source filter')).toBeVisible();
+  await expect(page.getByLabel('Wallpaper type filter')).toBeVisible();
+  await expect(page.getByLabel('Library sort')).toBeVisible();
+  await expect(page.getByLabel('Card size')).toBeVisible();
+  await expect(page.getByLabel('Display target')).toBeVisible();
+
+  await expect(page.locator('.sidebar')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Favorites', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Sources', exact: true })).toHaveCount(0);
+});
+
+test('runtime reconciliation confirms current state and clears it after renderer exit', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await expect(page.locator('.single-page-statusbar__current')).toHaveText('Current: wallpaper-001.jpg');
+
+  await page.evaluate(() => window.__mockControl?.setRuntimeWallpaperObservations([
+    { output: 'eDP-1', wallpaperPath: null, status: 'unknown', reason: 'renderer stopped' },
+    { output: 'HDMI-A-1', wallpaperPath: null, status: 'unknown', reason: 'renderer stopped' },
+  ]));
+
+  await expect(page.locator('.single-page-statusbar__current')).toHaveText(
+    'Current: not verified',
+    { timeout: 8_000 },
+  );
+  await expect(page.locator('.wallpaper-card.current')).toHaveCount(0);
+});
+
+test('search, source, type, favorites, and sort compose in the unified grid', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  await page.getByLabel('Source filter').selectOption('source:1');
+  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+
+  await expect(page.locator('.wallpaper-card').first()).toHaveAttribute(
+    'title',
+    'wallpaper-148.jpg · Pictures',
+  );
+  await expect(page.locator('.wallpaper-card').first()).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-148.jpg',
+  );
+  const filteredPaths = await page.locator('.wallpaper-card').evaluateAll((cards) =>
+    cards.map((card) => card.getAttribute('data-wallpaper-path') ?? ''),
+  );
+  expect(filteredPaths.length).toBeGreaterThan(0);
+  expect(filteredPaths.every((path) => /wallpaper-\d*[02468]\.jpg$/.test(path))).toBe(true);
+
+  await page.getByLabel('Search wallpapers').fill('wallpaper-002');
+  await expect(page.locator('.single-page-count')).toHaveText('1 / 1');
+  await expect(page.locator('.wallpaper-card')).toHaveCount(1);
+  await expect(page.locator('.wallpaper-card')).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-002.jpg',
+  );
+
+  await page.getByLabel('Search wallpapers').fill('');
+  await page.getByLabel('Source filter').selectOption('all');
+  await page.getByLabel('Favorites').check();
+  await expect(page.locator('.single-page-count')).toHaveText('1 / 1');
+  await expect(page.locator('.wallpaper-card')).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-001.jpg',
+  );
+});
+
+test('random selection obeys every active filter', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  await page.getByLabel('Source filter').selectOption('source:1');
+  await page.getByLabel('Wallpaper type filter').selectOption('video');
+  await page.getByLabel('Search wallpapers').fill('wallpaper-020');
+  await expect(page.locator('.single-page-count')).toHaveText('1 / 1');
+
+  await page.getByRole('button', { name: 'Apply a random wallpaper from active filters' }).click();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({
+    path: '/mock/path/wallpaper-020.mp4',
+  });
+  await expect(page.locator('.single-page-statusbar__selection')).toContainText('wallpaper-020.mp4');
+});
+
+test('single/double-click setting and display target govern apply requests', async ({ page }) => {
+  await openApp(page);
+  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await waitForGrid(page);
+
+  const firstCard = page.locator('.wallpaper-card').nth(0);
+  const firstPath = await firstCard.getAttribute('data-wallpaper-path');
+  expect(firstPath).toBeTruthy();
+  await firstCard.click();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: firstPath! });
+
+  await openSettings(page);
+  await page.getByLabel('Apply gesture').selectOption('double');
+  await page.getByRole('button', { name: 'Close settings' }).click();
+  await page.getByLabel('Display target').selectOption({ label: 'HDMI-A-1' });
+
+  const secondCard = page.locator('.wallpaper-card').nth(1);
+  const secondPath = await secondCard.getAttribute('data-wallpaper-path');
+  expect(secondPath).toBeTruthy();
+  const firstRequest = await lastApplyRequest(page);
+  await secondCard.click();
+  await expect(page.locator('.single-page-statusbar__selection')).toContainText(
+    secondPath!.split('/').at(-1)!,
+  );
+  await page.waitForTimeout(250);
+  expect(await lastApplyRequest(page)).toEqual(firstRequest);
+
+  await secondCard.dblclick();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({
+    path: secondPath!,
+    target: 'HDMI-A-1',
+  });
+});
+
+test('compact settings contains exactly the three user-facing groups', async ({ page }) => {
+  await openApp(page);
+  await openSettings(page);
+
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+  await expect(dialog.locator('[data-settings-group]')).toHaveCount(3);
+  await expect(dialog.getByRole('heading', { name: 'Appearance & interaction' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Wallpaper behavior' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
+  await expect(dialog.getByLabel('Theme')).toHaveValue('system');
+  await expect(dialog.getByLabel('Apply gesture')).toHaveValue('single');
+  await expect(dialog.getByLabel('Image renderer')).toHaveValue('awww');
+  await expect(dialog.getByLabel('GIF renderer')).toHaveValue('awww');
+  await expect(dialog.getByText('mpvpaper (required for video)')).toBeVisible();
+  const rendererStatus = dialog.getByLabel('Renderer installation status');
+  await expect(rendererStatus).toContainText('awww: Installed');
+  await expect(rendererStatus).toContainText('mpvpaper: Installed');
+  await expect(rendererStatus).toContainText('linux-wallpaperengine: Unavailable');
+  await expect(dialog.getByLabel('Wallpaper Engine scaling')).toBeDisabled();
+  await expect(dialog.getByRole('button', { name: 'Manage wallpaper sources' })).toBeVisible();
+
+  for (const forbidden of [
+    'Database',
+    'Cache TTL',
+    'Raw config',
+    'Runtime stages',
+    'Repair Database',
+  ]) {
+    await expect(dialog.getByText(forbidden, { exact: true })).toHaveCount(0);
+  }
+});
+
+test('source drawer adds, renames, configures, refreshes, and safely removes sources', async ({ page }) => {
+  await openApp(page);
+  await openSources(page);
+
+  const configuredSources = page.getByRole('list', { name: 'Configured wallpaper sources' });
+  await expect(configuredSources.locator('[data-source-id]')).toHaveCount(3);
+  await expect(configuredSources.locator('[data-source-availability="available"]')).toHaveCount(3);
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setSourceAvailability(2, 'offline');
+  });
+
+  await page.getByRole('dialog', { name: 'Wallpaper sources' })
+    .getByRole('button', { name: 'Add folder', exact: true })
+    .click();
+  await expect(configuredSources.locator('[data-source-id]')).toHaveCount(4);
+  await expect(sourceRow(page, 4)).toContainText('/mock/selected/dir');
+  await expect(sourceRow(page, 2)).toHaveAttribute('data-source-id', '2');
+  await expect(sourceRow(page, 2).locator('[data-source-availability="offline"]')).toContainText(
+    'Offline — indexed wallpapers are kept',
+  );
+
+  await page.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  await openSettings(page);
+  const settings = page.getByRole('dialog', { name: 'Settings' });
+  await expect(settings.getByText('4 sources · 1 offline')).toBeVisible();
+  await settings.getByRole('button', { name: 'Manage wallpaper sources' }).click();
+
+  const pictures = sourceRow(page, 1);
+  await pictures.getByText('Rename', { exact: true }).click();
+  await pictures.getByLabel('Display name').fill('Art collection');
+  await pictures.getByRole('button', { name: 'Save' }).click();
+  await expect(sourceRow(page, 1)).toContainText('Art collection');
+
+  const recursive = sourceRow(page, 1).getByRole('switch', {
+    name: 'Scan Art collection recursively',
+  });
+  await expect(recursive).toBeChecked();
+  await recursive.uncheck();
+  await expect(recursive).not.toBeChecked();
+
+  await page.getByRole('button', { name: 'Refresh all' }).click();
+  await expect(page.locator('[data-feedback-card="scan"]')).toContainText('All sources refreshed');
+
+  await sourceRow(page, 1).getByRole('button', { name: 'Remove', exact: true }).click();
+  const confirmation = sourceRow(page, 1).getByRole('alertdialog');
+  await expect(confirmation).toContainText('It does not delete wallpaper files.');
+  await confirmation.getByRole('button', { name: 'Cancel' }).click();
+  await expect(sourceRow(page, 1)).toBeVisible();
+
+  await removeSource(page, 1);
+  await expect(configuredSources.locator('[data-source-id]')).toHaveCount(3);
+});
+
+test('source refresh remains busy across close and reopen without a duplicate request', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.holdSourceRefresh();
+  });
+  await openSources(page);
+
+  const dialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
+  await sourceRow(page, 1).getByRole('button', { name: 'Refresh', exact: true }).click();
+  await expect(dialog).toHaveAttribute('aria-busy', 'true');
+  await expect(dialog.getByRole('status').filter({ hasText: 'Refreshing source' })).toBeVisible();
+  await expect.poll(() => dialog.locator('[data-source-mutating="true"]')
+    .evaluateAll((elements) => elements.length > 0 && elements.every(
+      (element) => (element as HTMLButtonElement | HTMLInputElement).disabled,
+    ))).toBe(true);
+  await expect.poll(() => sourceRefreshCallCount(page)).toBe(1);
+
+  await dialog.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  await expect(dialog).toHaveCount(0);
+  await openSources(page);
+
+  const reopened = page.getByRole('dialog', { name: 'Wallpaper sources' });
+  await expect(reopened).toHaveAttribute('aria-busy', 'true');
+  await expect(reopened.getByRole('status').filter({ hasText: 'Refreshing source' })).toBeVisible();
+  await expect.poll(() => reopened.locator('[data-source-mutating="true"]')
+    .evaluateAll((elements) => elements.length > 0 && elements.every(
+      (element) => (element as HTMLButtonElement | HTMLInputElement).disabled,
+    ))).toBe(true);
+  await page.waitForTimeout(300);
+  expect(await sourceRefreshCallCount(page)).toBe(1);
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.releaseSourceRefresh();
+  });
+  await expect(reopened).toHaveAttribute('aria-busy', 'false');
+  await expect(reopened.getByRole('status').filter({ hasText: 'Refreshing source' })).toHaveCount(0);
+  await expect.poll(() => reopened.locator('[data-source-mutating="true"]')
+    .evaluateAll((elements) => elements.length > 0 && elements.every(
+      (element) => !(element as HTMLButtonElement | HTMLInputElement).disabled,
+    ))).toBe(true);
+  await expect(page.locator('[data-feedback-card="scan"]')).toContainText('Source refresh finished');
+  expect(await sourceRefreshCallCount(page)).toBe(1);
+});
+
+test('unsupported wallpaper context offers only browsing and limitation actions', async ({ page }) => {
+  await openApp(page);
+  await page.getByLabel('Wallpaper type filter').selectOption('unsupported');
+  await expect(page.locator('.single-page-count')).toHaveText('2 / 2');
+
+  const webWallpaper = page.locator('.wallpaper-card').filter({ hasText: 'Web title' });
+  await webWallpaper.click({ button: 'right' });
+  const menu = page.locator('.context-menu');
+  await expect(menu.getByRole('button', { name: 'Add to Favorites' })).toBeVisible();
+  await expect(menu.getByRole('button', { name: 'Open Location' })).toBeVisible();
+  await expect(menu.getByRole('button', { name: 'Information' })).toBeVisible();
+  await expect(menu.getByRole('button', { name: 'Limitation Details' })).toBeVisible();
+  await expect(menu.getByRole('button', { name: 'Apply', exact: true })).toHaveCount(0);
+  await expect(menu.getByText(/Retry|preview|linux-wallpaperengine/i)).toHaveCount(0);
+
+  await menu.getByRole('button', { name: 'Limitation Details' }).click();
+  await expect(page.locator('[data-feedback-card="system"]')).toContainText(
+    'This wallpaper has a renderer limitation.',
+  );
+  await expect(page.locator('[data-feedback-progress="system"]')).toBeVisible();
+});
+
+test('feedback countdown pauses on hover and resumes to automatic dismissal', async ({ page }) => {
+  await openApp(page);
+  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+  const card = page.locator('.wallpaper-card').first();
+  await expect(card).toBeVisible();
+  await card.click({ button: 'right' });
+  await page.locator('.context-menu').getByRole('button', { name: 'Add to Favorites' }).click();
+
+  const feedback = page.locator('[data-feedback-card="system"]');
+  const progress = feedback.getByRole('progressbar');
+  await expect(feedback).toContainText('Added to favorites.');
+  await expect(progress).toBeVisible();
+
+  await feedback.hover();
+  await page.waitForTimeout(150);
+  const pausedAt = Number(await progress.getAttribute('aria-valuenow'));
+  await page.waitForTimeout(650);
+  expect(Number(await progress.getAttribute('aria-valuenow'))).toBe(pausedAt);
+
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(450);
+  expect(Number(await progress.getAttribute('aria-valuenow'))).toBeLessThan(pausedAt);
+  await expect(feedback).toHaveCount(0, { timeout: 3_500 });
+});
+
+test('scan activity is delayed, non-modal, and cancellable', async ({ page }) => {
+  await openApp(page);
+  await openSources(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setScanProgress({
+      running: true,
+      stage: 'walking files',
+      scanned: 5,
+      totalHint: 100,
+    });
+  });
+
+  await page.getByRole('button', { name: 'Refresh all' }).click();
+  await page.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  const activity = page.locator('.scan-activity');
+  await page.waitForTimeout(250);
+  await expect(activity).toHaveCount(0);
+  await expect(activity).toBeVisible({ timeout: 1_000 });
+  await expect(activity).toHaveAttribute('data-non-modal', 'true');
+  await expect(page.locator('.wallpaper-card').first()).toBeVisible();
+
+  await activity.getByRole('button', { name: 'Cancel' }).click();
+  await expect(activity).toHaveCount(0, { timeout: 1_000 });
+});
+
+test('1000+ entry fixture stays virtualized while scrolling, searching, filtering, and loading thumbnails', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setBrowserFixtureCopies(8);
+    control.setThumbnailFailure('/mock/path/wallpaper-001.jpg');
+    for (let copy = 1; copy < 8; copy += 1) {
+      control.setThumbnailFailure(`/mock/browser-fixture-${copy}/path/wallpaper-001.jpg`);
+    }
+  });
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 1216');
+
+  for (let pageIndex = 2; pageIndex <= 9; pageIndex += 1) {
+    await page.getByRole('button', { name: /Load more/ }).click();
+    await expect(page.locator('.single-page-count')).toHaveText(`${pageIndex * 120} / 1216`);
+  }
+  expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
+
+  const grid = page.locator('.wallpaper-grid');
+  const beforeScroll = await page.locator('.wallpaper-card').first().getAttribute('data-wallpaper-path');
+  await grid.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(async () => page.locator('.wallpaper-card').first().getAttribute('data-wallpaper-path'))
+    .not.toBe(beforeScroll);
+  expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
+
+  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await page.getByLabel('Search wallpapers').fill('wallpaper-001');
+  await expect(page.locator('.single-page-count')).toHaveText('8 / 8');
+  await expect(page.locator('.wallpaper-card').first().getByText('Preview failed')).toBeVisible();
+});
+
+test('5000+ entries auto-page near the virtual tail without expanding the DOM', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setBrowserFixtureCopies(33);
+  });
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
+  expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
+
+  const grid = page.locator('.wallpaper-grid');
+  await grid.evaluate((element) => {
+    element.scrollTop = element.scrollHeight;
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect(page.locator('.single-page-count')).toHaveText('240 / 5016');
+  expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
+
+  await page.getByLabel('Search wallpapers').fill('wallpaper-001');
+  await expect(page.locator('.single-page-count')).toHaveText('33 / 33');
+  expect(await page.locator('.wallpaper-card').count()).toBeLessThan(40);
+});
+
+test('automatic paging fuse stops after one rejected append and manual retry recovers', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setBrowserFixtureCopies(33);
+    control.rejectNextBrowserAppend('mock append transport failure');
+  });
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
+
+  await scrollLibraryGrid(page, 'end');
+  const retry = page.getByRole('button', { name: 'Retry loading more' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('mock append transport failure');
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(1);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await scrollLibraryGrid(page, 'end');
+  }
+  await page.waitForTimeout(500);
+  expect(await browserAppendRequestCount(page)).toBe(1);
+
+  await scrollLibraryGrid(page, 'start');
+  await retry.click();
+  await expect(page.locator('.single-page-count')).toHaveText('240 / 5016');
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(2);
+  await expect(page.getByRole('button', { name: 'Retry loading more' })).toHaveCount(0);
+});
+
+test('automatic paging fuse stops after one empty append and manual retry recovers', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setBrowserFixtureCopies(33);
+    control.emptyNextBrowserAppend();
+  });
+  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
+
+  await scrollLibraryGrid(page, 'end');
+  const retry = page.getByRole('button', { name: 'Retry loading more' });
+  await expect(retry).toBeVisible();
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(1);
+
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await scrollLibraryGrid(page, 'end');
+  }
+  await page.waitForTimeout(500);
+  expect(await browserAppendRequestCount(page)).toBe(1);
+
+  await scrollLibraryGrid(page, 'start');
+  await retry.click();
+  await expect(page.locator('.single-page-count')).toHaveText('240 / 5016');
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(2);
+  await expect(page.getByRole('button', { name: 'Retry loading more' })).toHaveCount(0);
+});
+
+test('repair is offered only after integrity verification confirms a fault', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await expect(page.getByRole('button', { name: 'Repair library' })).toHaveCount(0);
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.injectCommandFailure('sqliteVerify');
+    control.setBrowserFixtureCopies(0);
+  });
+  await page.getByLabel('Library sort').selectOption('nameAsc');
+
+  const repair = page.getByRole('alert', { name: 'Library repair' });
+  await expect(repair).toBeVisible();
+  await expect(repair).toContainText('Library database needs repair');
+  await repair.getByRole('button', { name: 'Repair library' }).click();
+  await expect(repair).toHaveCount(0);
+  await expect(page.getByText('Library index repaired')).toBeVisible();
+});
+
+test('an empty filtered view never triggers database repair verification', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.injectCommandFailure('sqliteVerify');
+  });
+
+  await page.getByLabel('Search wallpapers').fill('definitely-missing-wallpaper');
+  await expect(page.getByText('No wallpapers match the active filters.')).toBeVisible();
+  await expect(page.getByRole('alert', { name: 'Library repair' })).toHaveCount(0);
+});
+
+test('resizing from compact to wide keeps the visible scroll anchor mounted', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openApp(page);
+  await waitForGrid(page);
+  const grid = page.locator('.wallpaper-grid');
+  await grid.evaluate((element) => {
+    element.scrollTop = 1_400;
+    element.dispatchEvent(new Event('scroll'));
   });
 
   const anchorPath = await page.evaluate(() => {
     const cards = Array.from(document.querySelectorAll<HTMLElement>('.wallpaper-card'));
-    const visible = cards.filter((card) => {
-      const r = card.getBoundingClientRect();
-      return r.bottom > 0 && r.top < window.innerHeight;
-    });
-    return visible[0]?.title ?? null;
+    return cards.find((card) => {
+      const bounds = card.getBoundingClientRect();
+      return bounds.bottom > 0 && bounds.top < window.innerHeight;
+    })?.dataset.wallpaperPath ?? null;
   });
   expect(anchorPath).toBeTruthy();
 
-  await page.setViewportSize({ width: 1920, height: 1000 });
-
-  await expect
-    .poll(async () =>
-      page.evaluate((path) => {
-        const card = Array.from(document.querySelectorAll<HTMLElement>('.wallpaper-card')).find(
-          (c) => c.title === path,
-        );
-        if (!card) return false;
-        const r = card.getBoundingClientRect();
-        return r.bottom > 0 && r.top < window.innerHeight;
-      }, anchorPath!),
-    )
-    .toBe(true);
+  await page.setViewportSize({ width: 1_440, height: 900 });
+  await expect.poll(() => page.evaluate((path) => {
+    const card = Array.from(document.querySelectorAll<HTMLElement>('.wallpaper-card'))
+      .find((candidate) => candidate.dataset.wallpaperPath === path);
+    if (!card) return false;
+    const bounds = card.getBoundingClientRect();
+    return bounds.bottom > 0 && bounds.top < window.innerHeight;
+  }, anchorPath!)).toBe(true);
 });
 
-test('WE Web is indexed but unsupported for live apply', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('we_web');
-  const card = page.locator('.wallpaper-card').first();
-  await expect(card.getByText('Web · browse only')).toBeVisible();
-  await expect(card.getByText(/Web wallpaper — unsupported/)).toBeVisible();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
-  await expect(page.getByText('Apply preview GIF')).toHaveCount(0);
-  await expect(page.getByText('Open experimental Chromium preview')).toHaveCount(0);
-  await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
-  await expect(page.getByText('Open folder')).toBeVisible();
-  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
-});
-
-test('settings defaults to General with status cards in modal', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  await expect(page.locator('.status-card')).toHaveCount(3);
-  await expect(page.getByRole('heading', { name: 'Status' })).toBeVisible();
-  // Quick Actions should no longer appear on General page
-  await expect(page.getByRole('heading', { name: 'Quick Actions' })).toHaveCount(0);
-  // Web Wallpaper Renderer should not appear
-  await expect(page.getByText('Web Wallpaper Renderer')).toHaveCount(0);
-  await expect(page.getByText('Chromium Preview (Experimental)')).toHaveCount(0);
-  // Settings should be a modal, not a regular .view page
-  await expect(page.locator('.view.settings-view')).toHaveCount(0);
-});
-
-test('settings can navigate to all categories', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  for (const cat of ['Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced']) {
-    await sidebar.getByRole('button', { name: cat, exact: true }).click();
-    await expect(sidebar.getByRole('button', { name: cat, exact: true })).toHaveAttribute('aria-current', 'page');
-  }
-});
-
-test('settings modal closes back to previous view', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Favorites' }).click();
-  await expect(page.getByRole('heading', { name: 'Favorites' })).toBeVisible();
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  await page.getByRole('button', { name: 'Close settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(0);
-  await expect(page.getByRole('heading', { name: 'Favorites' })).toBeVisible();
-});
-
-test('settings modal closes with escape', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  await page.keyboard.press('Escape');
-  await expect(page.getByRole('dialog')).toHaveCount(0);
-});
-
-test('wallpaper page shows backends and no raw config keys', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Backends' })).toBeVisible();
-  await expect(page.getByText(/Images and GIFs use awww for/)).toBeVisible();
-  await expect(page.getByText('Image fit mode')).toBeVisible();
-  // mpvpaper arguments is in collapsed Advanced section — expand to verify
-  await page.locator('.settings-advanced summary').click();
-  await expect(page.getByText('mpvpaper arguments')).toBeVisible();
-  // No raw config keys on Wallpaper page
-  await expect(page.locator('.raw-row')).toHaveCount(0);
-  // No WE Web renderer settings
-  await expect(page.getByText('Web Wallpaper Renderer')).toHaveCount(0);
-  // Old labels should be gone
-  await expect(page.getByText('awww resize')).toHaveCount(0);
-  await expect(page.getByText('mpvpaper options')).toHaveCount(0);
-});
-
-test('database page shows confirm dialog for rebuild', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  await page.getByRole('button', { name: 'Rebuild Database' }).click();
-  await expect(page.getByText('Re-scan all configured source directories')).toBeVisible();
-  await page.getByRole('button', { name: 'Cancel' }).click();
-  await expect(page.getByText('Re-scan all configured source directories')).toHaveCount(0);
-});
-
-test('database has verify backup rebuild restore export buttons', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Backup Database' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Rebuild Database' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Restore Backup' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Export Legacy Files' })).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeVisible();
-});
-
-test('advanced page shows raw config keys after checkbox', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Advanced', exact: true }).click();
-  await expect(page.locator('.raw-row')).toHaveCount(0);
-  await page.locator('.settings-toggle input[type="checkbox"]').check();
-  await expect(page.locator('.raw-row').first()).toBeVisible();
-  await expect(page.locator('.raw-key').first()).toContainText('awww_resize');
-  await expect(page.getByText('Debug logs')).toBeVisible();
-});
-
-test('settings is responsive on narrow viewport', async ({ page }) => {
-  await page.setViewportSize({ width: 500, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toBeVisible();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await expect(sidebar).toBeVisible();
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeVisible();
-});
-
-test('settings disables database actions while diagnostics export is running', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  await page.getByRole('button', { name: 'Export diagnostics' }).click();
-  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Backup Database' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Rebuild Database' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Restore Backup' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Export Legacy Files' })).toBeDisabled();
-  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeEnabled({ timeout: 5000 });
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeEnabled();
-  await expect(page.getByRole('button', { name: 'Backup Database' })).toBeEnabled();
-});
-
-test('single click does not show batch selection toolbar', async ({ page }) => {
-  await page.goto('/');
-  const card = page.locator('.wallpaper-card').first();
-  await card.click();
-  await expect(page.getByText(/selected$/)).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Add to Favorites' })).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Clear' })).toHaveCount(0);
-});
-
-test('context menu action shows error feedback on failure', async ({ page }) => {
-  await page.goto('/');
-  await page.waitForSelector('.wallpaper-card');
-  // Right-click the WE Web card (path contains 3650880224, which mock rejects)
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'Web title' }).first();
-  await card.click({ button: 'right' });
-  // Click "Add to Favorites" — mock returns success=false
-  await page.getByText('Add to Favorites').click();
-  // Error toast should appear
-  await expect(page.locator('.toast')).toBeVisible({ timeout: 5000 });
-});
-
-test('sources page renders flat list without group headers', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Sources' }).click();
-  await expect(page.locator('.source-item').first()).toBeVisible();
-  await expect(page.getByText('Other Sources')).toHaveCount(0);
-  await expect(page.locator('.source-group-header')).toHaveCount(0);
-  await expect(page.getByRole('button', { name: 'Scan Wallpaper Engine' })).toBeVisible();
-});
-
-test('settings wallpaper page shows awww image backend', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-  await expect(page.getByText(/awww for smooth static/)).toBeVisible({ timeout: 3000 });
-  // Expand advanced section for frame rate
-  await page.locator('.settings-advanced summary').click();
-  await expect(page.getByText('Transition frame rate')).toBeVisible({ timeout: 3000 });
-});
-
-test('wallpaper engine page shows WE Web unsupported notice', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Wallpaper Engine', exact: true }).click();
-  await expect(page.getByText(/Wallpaper Engine.*Web.*indexed/)).toBeVisible();
-});
-
-test('settings advanced shows open location mode without ask option', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Advanced', exact: true }).click();
-  const select = page.locator('.config-row').filter({ hasText: 'Open project folders with' }).locator('select');
-  const options = await select.locator('option').allTextContents();
-  expect(options).not.toContain('ask');
-  expect(options).toContain('file_manager');
-  // Ask-on-first-use callout should be visible by default
-  await expect(page.getByText(/ask on first use/)).toBeVisible();
-  await select.selectOption({ value: 'terminal' });
-  await expect(page.getByRole('heading', { name: 'Terminal File Manager' })).toBeVisible({ timeout: 5000 });
-  await select.selectOption({ value: 'file_manager' });
-  await expect(page.getByRole('heading', { name: 'File Manager' })).toBeVisible({ timeout: 5000 });
-});
-
-test('WE Scene context menu shows all actions', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('we_scene');
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'WE Scene' }).first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
-  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
-  await expect(page.getByText('Apply preview GIF')).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
-  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
-});
-
-test('failed WE Scene context menu shows retry not apply', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('we_scene');
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'Incompatible Scene' }).first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Retry backend apply')).toBeVisible();
-  await expect(page.getByText('Apply', { exact: true })).toHaveCount(0);
-  await expect(page.getByText('Apply preview GIF')).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
-  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
-});
-
-test('regular wallpaper context menu has apply and open folder', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('image');
-  const card = page.locator('.wallpaper-card').first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
-});
-
-test('favorites context menu shows apply and open folder', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Favorites' }).click();
-  await expect(page.locator('h2').filter({ hasText: 'Favorites' })).toBeVisible({ timeout: 5000 });
-  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
-  const card = page.locator('.wallpaper-card').first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
-  await expect(page.getByText('Remove from Favorites')).toBeVisible();
-});
-
-test('favorites context menu shows WE Scene actions', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Favorites' }).click();
-  await expect(page.locator('h2').filter({ hasText: 'Favorites' })).toBeVisible({ timeout: 5000 });
-  await page.locator('.wallpaper-card').first().waitFor({ state: 'visible', timeout: 10000 });
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'Scene title' }).first();
-  await card.click({ button: 'right' });
-  await expect(page.getByText('Apply', { exact: true })).toBeVisible();
-  await expect(page.getByText('Apply preview GIF')).toBeVisible();
-  await expect(page.getByText('Open folder')).toBeVisible();
-  await expect(page.getByText('Copy Workshop ID')).toBeVisible();
-  await expect(page.getByText('Apply with linux-wallpaperengine')).toHaveCount(0);
-});
-
-test('Apply preview GIF completes through explicit preview action', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('we_scene');
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'WE Scene' }).first();
-  await card.click({ button: 'right' });
-  await page.getByText('Apply preview GIF').click();
-  await expect(page.locator('.toast')).toContainText(/Applied|Preview/);
-});
-
-test('WE Web double click shows cannot apply warning', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('combobox').first().selectOption('we_web');
-  const card = page.locator('.wallpaper-card').filter({ hasText: 'Web title' }).first();
-  await card.dblclick();
-  await expect(page.locator('.toast')).toContainText('Cannot apply');
-});
-
-test('raw config has no horizontal overflow', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Advanced', exact: true }).click();
-  await page.locator('.settings-toggle input[type="checkbox"]').check();
-  await expect(page.locator('.raw-row').first()).toBeVisible();
-  const raw = page.locator('.settings-raw-config');
-  const ok = await raw.evaluate(el => el.scrollWidth <= el.clientWidth + 1);
-  expect(ok).toBeTruthy();
-});
-
-test('small-viewport sidebar buttons keep stable dimensions while switching categories', async ({ page }) => {
-  await page.setViewportSize({ width: 500, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await expect(sidebar).toBeVisible();
-
-  const display = await sidebar.evaluate(el => window.getComputedStyle(el).display);
-  expect(display).toBe('flex');
-
-  const labels = ['General', 'Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced'];
-
-  const readBoxes = async () => {
-    return sidebar.evaluate((nav) => {
-      const result: Record<string, { width: number; height: number }> = {};
-      for (const btn of nav.querySelectorAll<HTMLElement>('button')) {
-        const text = btn.textContent?.trim() ?? '';
-        if (text) result[text] = { width: btn.offsetWidth, height: btn.offsetHeight };
-      }
-      return result;
-    });
-  };
-
-  const before = await readBoxes();
-
-  for (const activeLabel of labels) {
-    await sidebar.getByRole('button', { name: activeLabel, exact: true }).click();
-    const current = await readBoxes();
-    for (const label of labels) {
-      expect(Math.abs(current[label].width - before[label].width), `${label} width changed after ${activeLabel}`).toBeLessThanOrEqual(1);
-      expect(Math.abs(current[label].height - before[label].height), `${label} height changed after ${activeLabel}`).toBeLessThanOrEqual(1);
-    }
-  }
-});
-
-test('mobile tab bar vertical baseline stays stable across all categories', async ({ page }) => {
-  await page.setViewportSize({ width: 500, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  const labels = ['General', 'Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced'];
-
-  const measurements: Record<string, { navY: number; navH: number; activeY: number; activeH: number; contentY: number }> = {};
-
-  for (const label of labels) {
-    await sidebar.getByRole('button', { name: label, exact: true }).click();
-
-    const navBox = await sidebar.boundingBox();
-    const activeBox = await sidebar.locator('button.active').boundingBox();
-    const contentBox = await page.locator('.settings-content').boundingBox();
-
-    if (!navBox || !activeBox || !contentBox) throw new Error(`missing layout for ${label}`);
-
-    measurements[label] = {
-      navY: navBox.y,
-      navH: navBox.height,
-      activeY: activeBox.y,
-      activeH: activeBox.height,
-      contentY: contentBox.y,
-    };
-  }
-
-  const base = measurements['General'];
-
-  for (const label of labels) {
-    expect(Math.abs(measurements[label].navH - base.navH), `${label} nav height`).toBeLessThanOrEqual(1);
-    expect(Math.abs(measurements[label].activeY - base.activeY), `${label} active y from nav top`).toBeLessThanOrEqual(1);
-    const bottomGap = (base.navY + base.navH) - (base.activeY + base.activeH);
-    const currentBottomGap = (measurements[label].navY + measurements[label].navH) - (measurements[label].activeY + measurements[label].activeH);
-    expect(Math.abs(currentBottomGap - bottomGap), `${label} bottom gap`).toBeLessThanOrEqual(1);
-    expect(Math.abs(measurements[label].contentY - base.contentY), `${label} content y`).toBeLessThanOrEqual(2);
-  }
-});
-
-test('mobile tab bar divider stays fixed across categories', async ({ page }) => {
-  await page.setViewportSize({ width: 500, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  const labels = ['General', 'Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced'];
-
-  let baseBottom: number | null = null;
-
-  for (const label of labels) {
-    await sidebar.getByRole('button', { name: label, exact: true }).click();
-    const navBox = await sidebar.boundingBox();
-    if (!navBox) throw new Error(`missing nav for ${label}`);
-    const bottom = navBox.y + navBox.height;
-    if (baseBottom === null) {
-      baseBottom = bottom;
-    } else {
-      expect(Math.abs(bottom - baseBottom), `${label} divider bottom`).toBeLessThanOrEqual(1);
-    }
-  }
-});
-
-test('desktop settings sidebar buttons keep stable dimensions while switching categories', async ({ page }) => {
-  await page.setViewportSize({ width: 1000, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  const labels = ['General', 'Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced'];
-
-  const readBoxes = async () => {
-    return sidebar.evaluate((nav) => {
-      const result: Record<string, { width: number; height: number }> = {};
-      for (const btn of nav.querySelectorAll<HTMLElement>('button')) {
-        const text = btn.textContent?.trim() ?? '';
-        if (text) result[text] = { width: btn.offsetWidth, height: btn.offsetHeight };
-      }
-      return result;
-    });
-  };
-
-  const before = await readBoxes();
-
-  for (const activeLabel of labels) {
-    await sidebar.getByRole('button', { name: activeLabel, exact: true }).click();
-    const current = await readBoxes();
-    for (const label of labels) {
-      expect(Math.abs(current[label].width - before[label].width), `${label} width changed after ${activeLabel}`).toBeLessThanOrEqual(1);
-      expect(Math.abs(current[label].height - before[label].height), `${label} height changed after ${activeLabel}`).toBeLessThanOrEqual(1);
-    }
-  }
-});
-
-test('settings sidebar keeps stable block from General and Database transitions', async ({ page }) => {
-  await page.setViewportSize({ width: 1000, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-
-  const boxOf = async (label: string) => {
-    const box = await sidebar.getByRole('button', { name: label, exact: true }).boundingBox();
-    if (!box) throw new Error(`missing ${label}`);
-    return { width: box.width, height: box.height };
-  };
-
-  const generalBefore = await boxOf('General');
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-  const generalAfter = await boxOf('General');
-  expect(Math.abs(generalAfter.width - generalBefore.width)).toBeLessThanOrEqual(1);
-  expect(Math.abs(generalAfter.height - generalBefore.height)).toBeLessThanOrEqual(1);
-
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  const databaseBefore = await boxOf('Database');
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-  const databaseAfter = await boxOf('Database');
-  expect(Math.abs(databaseAfter.width - databaseBefore.width)).toBeLessThanOrEqual(1);
-  expect(Math.abs(databaseAfter.height - databaseBefore.height)).toBeLessThanOrEqual(1);
-});
-
-test('database maintenance and export sections have no outer card', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeVisible();
-  await expect(page.locator('.setting-section-plain .section-card')).toHaveCount(0);
-});
-
-test('settings pages have compact and consistent top spacing', async ({ page }) => {
-  await page.setViewportSize({ width: 1000, height: 800 });
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  const labels = ['General', 'Wallpaper', 'Wallpaper Engine', 'Library', 'Database', 'Advanced'];
-
-  const measurements: Record<string, { contentTop: number; headerTop: number; sectionTop: number }> = {};
-
-  for (const label of labels) {
-    await sidebar.getByRole('button', { name: label, exact: true }).click();
-
-    const content = await page.locator('.settings-content').boundingBox();
-    const header = await page.locator('.settings-page-header').boundingBox();
-    const section = await page.locator('.setting-section').first().boundingBox();
-
-    if (!content || !header || !section) throw new Error(`missing layout for ${label}`);
-
-    measurements[label] = {
-      contentTop: content.y,
-      headerTop: header.y,
-      sectionTop: section.y,
-    };
-  }
-
-  const base = measurements['Database'];
-
-  for (const label of labels) {
-    expect(Math.abs(measurements[label].headerTop - base.headerTop), `${label} header top`).toBeLessThanOrEqual(1);
-    expect(Math.abs(measurements[label].sectionTop - base.sectionTop), `${label} section top`).toBeLessThanOrEqual(8);
-  }
-
-  for (const label of ['General', 'Wallpaper']) {
-    const topGap = measurements[label].headerTop - measurements[label].contentTop;
-    expect(topGap, `${label} top gap`).toBeLessThanOrEqual(18);
-  }
-});
-
-test('Known Settings card content has safe inset from card border', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Advanced', exact: true }).click();
-
-  const section = page.locator('.setting-section').filter({ hasText: 'Known Settings' });
-  const card = section.locator('.section-card');
-  const desc = section.locator('.known-settings-description');
-
-  const cardBox = await card.boundingBox();
-  const descBox = await desc.boundingBox();
-
-  if (!cardBox || !descBox) throw new Error('missing Known Settings layout');
-
-  expect(descBox.y - cardBox.y).toBeGreaterThanOrEqual(12);
-  expect(descBox.x - cardBox.x).toBeGreaterThanOrEqual(12);
-});
-
-test('settings theme defaults to light label', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const themeSelect = page.locator('.config-row').filter({ hasText: 'Theme' }).locator('select');
-  await expect(themeSelect).toHaveValue('light');
-});
-
-test('settings theme switch applies obsidian warm theme', async ({ page }) => {
-  await page.goto('/');
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const themeSelect = page.locator('.config-row').filter({ hasText: 'Theme' }).locator('select');
-  await themeSelect.selectOption('obsidian_warm');
-  await expect(page.locator('html')).toHaveAttribute('data-theme', 'obsidian_warm');
-  const bg = await page.evaluate(() =>
-    getComputedStyle(document.documentElement).getPropertyValue('--bg').trim()
-  );
-  expect(bg).toBe('#241a14');
-});
-
-const resetMock = (page: Page) =>
-  page.evaluate(() => (window as unknown as { __mockControl?: { resetAll: () => void } }).__mockControl?.resetAll());
-
-test('settings save persists and is visible after close and reopen', async ({ page }) => {
-  await page.goto('/');
-  await resetMock(page);
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-
-  const fitSelect = page.locator('.config-row').filter({ hasText: 'Image fit mode' }).locator('select');
-  await expect(fitSelect).toHaveValue('crop');
-  await fitSelect.selectOption('fit');
-  // Wait for the save to complete (success toast confirms configSet ran)
-  await expect(page.locator('.toast.success')).toContainText(/Setting saved/i, { timeout: 3000 });
-  await expect(fitSelect).toHaveValue('fit');
-
-  await page.getByRole('button', { name: 'Close settings' }).click();
-  await expect(page.getByRole('dialog', { name: 'Settings' })).toHaveCount(0);
-
-  // Reopen settings and confirm the saved value is shown again (config reload)
-  await page.getByRole('button', { name: 'Settings' }).click();
-  await sidebar.getByRole('button', { name: 'Wallpaper', exact: true }).click();
-  const fitSelectAfter = page.locator('.config-row').filter({ hasText: 'Image fit mode' }).locator('select');
-  await expect(fitSelectAfter).toHaveValue('fit', { timeout: 5000 });
-});
-
-test('scan cancel button appears while scanning and dismisses after cancel', async ({ page }) => {
-  await page.goto('/');
-  await resetMock(page);
-  // Drive the mock bridge into a running scan state.
-  await page.evaluate(() =>
-    (window as unknown as { __mockControl: { setScanProgress: (s: object) => void } }).__mockControl.setScanProgress({
-      running: true,
-      scanned: 5,
-      totalHint: 100,
-      stage: 'walking files',
-    }),
-  );
-
-  // The toolbar only re-fetches scanProgress via polling, started by a rescan.
-  await page.locator('button[title="Rescan library"]').click();
-
-  const cancelBtn = page.locator('button[title="Cancel scan"]');
-  await expect(cancelBtn).toBeVisible({ timeout: 5000 });
-  await expect(page.locator('.statusbar-badge')).toContainText(/walking files/);
-  await expect(page.locator('.statusbar-badge')).toContainText(/5\/100/);
-
-  await cancelBtn.click();
-  // scanCancel resets running=false; the cancel button is removed from the DOM.
-  await expect(cancelBtn).toHaveCount(0);
-});
-
-test('failed sqliteVerify surfaces an error toast', async ({ page }) => {
-  await page.goto('/');
-  await resetMock(page);
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-
-  await page.evaluate(() =>
-    (window as unknown as { __mockControl: { injectCommandFailure: (c: string) => void } }).__mockControl.injectCommandFailure('sqliteVerify'),
-  );
-
-  await page.getByRole('button', { name: 'Verify Database' }).click();
-  await expect(page.locator('.toast.error')).toContainText(/Verify failed/i, { timeout: 5000 });
-  // Operation lock is released after the failed command
-  await expect(page.getByRole('button', { name: 'Verify Database' })).toBeEnabled();
-});
-
-test('diagnostics export success shows a success toast', async ({ page }) => {
-  await page.goto('/');
-  await resetMock(page);
-  await page.getByRole('button', { name: 'Settings' }).click();
-  const sidebar = page.getByRole('navigation', { name: 'Settings categories' });
-  await sidebar.getByRole('button', { name: 'Database', exact: true }).click();
-
-  await page.getByRole('button', { name: 'Export diagnostics' }).click();
-  // Button disables while the export is running (covers "database buttons disabled")
-  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeDisabled();
-  await expect(page.locator('.toast.success')).toContainText(/Diagnostics exported/i, { timeout: 5000 });
-  await expect(page.getByRole('button', { name: 'Export diagnostics' })).toBeEnabled({ timeout: 5000 });
-});
-
-test('library does not flash empty state on transient first zero page', async ({ page }) => {
-  await page.goto('/');
-  await resetMock(page);
-  // Grid is visible from the initial full load.
-  await expect(page.locator('.wallpaper-card').first()).toBeVisible();
-
-  // Enable the "first page empty, then filled" mock scenario.
-  await page.evaluate(() =>
-    (window as unknown as { __mockControl: { setLibraryFirstPageEmpty: (e: boolean) => void } })
-      .__mockControl.setLibraryFirstPageEmpty(true),
-  );
-
-  // Trigger a reload via sort change. The first page returns total=0 (scenario).
-  await page.getByRole('combobox').nth(1).selectOption('name');
-
-  // The unconfirmed zero must show a loading state, NOT the empty state.
-  await expect(page.locator('.library-view .loading')).toBeVisible({ timeout: 5000 });
-  await expect(page.locator('.library-view .empty-state')).toHaveCount(0);
-
-  // After the confirmation reload, the grid reappears with content.
-  await expect(page.locator('.wallpaper-card').first()).toBeVisible({ timeout: 5000 });
+test('first run requires explicit folder or Wallpaper Engine confirmation', async ({ page }) => {
+  await openApp(page);
+  await page.evaluate(() => window.__mockControl?.setFirstRunSourceSuggestions([
+    { kind: 'directory', label: 'Downloads', path: '/mock/Downloads' },
+    { kind: 'wallpaperEngine', roots: ['/mock/Steam/workshop/content/431960'] },
+  ]));
+  await openSources(page);
+  await removeSource(page, 1);
+  await removeSource(page, 2);
+  await removeSource(page, 3);
+  await page.getByRole('button', { name: 'Close wallpaper sources' }).click();
+
+  await expect(page.getByRole('heading', { name: 'Choose where your wallpapers live' })).toBeVisible();
+  await expect(page.getByText('Nothing is scanned until you choose it.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add Folder' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'Suggested sources' })).toBeVisible();
+  await expect(page.getByText('Nothing is scanned until you confirm a suggestion.')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Add Downloads as a wallpaper source' })).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Confirm Wallpaper Engine scan' })).toBeVisible();
+  await expect(page.locator('.scan-activity')).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Add Folder' }).click();
+  const sourceDialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
+  await expect(sourceDialog).toBeVisible();
+  await expect(page.getByText('No wallpaper sources yet')).toBeVisible();
+  await sourceDialog.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  await page.getByRole('button', { name: 'Add Downloads as a wallpaper source' }).click();
+  await openSources(page);
+  await expect(sourceRow(page, 4)).toContainText('/mock/Downloads');
 });

@@ -11,12 +11,19 @@ export function createSubscribeApplyStage(
     let unlisten: (() => void) | undefined;
     let disposed = false;
 
-    void listenFn<ApplyStagePayload>(eventName, (event) => {
-      if (event.payload) handler(event.payload);
-    }).then((u) => {
-      if (disposed) u();
-      else unlisten = u;
-    });
+    try {
+      void listenFn<ApplyStagePayload>(eventName, (event) => {
+        if (event.payload) handler(event.payload);
+      }).then((u) => {
+        if (disposed) u();
+        else unlisten = u;
+      }).catch(() => {
+        // Browser/mock surfaces do not expose the Tauri event bridge. Apply
+        // still works; it simply has no fine-grained stage events.
+      });
+    } catch {
+      // Some Tauri helpers throw synchronously when internals are absent.
+    }
 
     return () => {
       disposed = true;

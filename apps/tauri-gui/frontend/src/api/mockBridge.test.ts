@@ -29,6 +29,52 @@ test('history is not exposed by the wallpaper console API', () => {
   assert.equal('historyClear' in api, false);
 });
 
+test('runtime observation mock exposes replaceable positive evidence and reset restores defaults', async () => {
+  const defaults = await api.runtimeWallpaperObservations();
+  assert.equal(defaults.length, 2);
+  assert.ok(defaults.every((entry) => entry.status === 'confirmed'));
+
+  ctrl.setRuntimeWallpaperObservations([
+    {
+      output: 'eDP-1',
+      wallpaperPath: null,
+      status: 'unknown',
+      reason: 'mock renderer stopped',
+    },
+  ]);
+  const changed = await api.runtimeWallpaperObservations();
+  assert.deepEqual(changed, [{
+    output: 'eDP-1',
+    wallpaperPath: null,
+    status: 'unknown',
+    reason: 'mock renderer stopped',
+  }]);
+
+  ctrl.resetAll();
+  assert.deepEqual(await api.runtimeWallpaperObservations(), defaults);
+});
+
+test('renderer status mock is replaceable and reset restores installation defaults', async () => {
+  const defaults = await api.rendererStatuses();
+  assert.equal(defaults.awww.available, true);
+  assert.equal(defaults.mpvpaper.available, true);
+  assert.equal(defaults.linuxWallpaperEngine.available, false);
+
+  ctrl.setRendererStatuses({
+    awww: { available: false, message: 'awww missing', detail: 'not in PATH' },
+    mpvpaper: { available: true, message: 'mpvpaper installed' },
+    linuxWallpaperEngine: {
+      available: true,
+      message: 'linux-wallpaperengine installed',
+      path: '/mock/bin/linux-wallpaperengine',
+    },
+  });
+  assert.equal((await api.rendererStatuses()).awww.available, false);
+
+  ctrl.resetAll();
+  assert.deepEqual(await api.rendererStatuses(), defaults);
+});
+
 test('setScanProgress changes the returned scanProgress state', async () => {
   ctrl.setScanProgress({ running: true, scanned: 5, totalHint: 100, stage: 'walking files' });
   const p = await api.scanProgress();
@@ -232,6 +278,35 @@ test('sources expose stable rich metadata while preserving legacy fields', async
   );
   assert.equal(sources[0]?.label, sources[0]?.displayName);
   assert.equal(sources[2]?.isWE, true);
+});
+
+test('setSourceAvailability changes one source and resetAll restores it', async () => {
+  ctrl.setSourceAvailability(2, 'offline');
+
+  let sources = await api.sourcesList();
+  assert.equal(sources.find((source) => source.id === 1)?.availability, 'available');
+  assert.equal(sources.find((source) => source.id === 2)?.availability, 'offline');
+
+  ctrl.resetAll();
+  sources = await api.sourcesList();
+  assert.equal(sources.find((source) => source.id === 2)?.availability, 'available');
+});
+
+test('first-run suggestions are explicit mock state and reset with all scenarios', async () => {
+  const ctrl = api.__mockControl;
+  assert.deepEqual(await api.firstRunSourceSuggestions(), []);
+
+  ctrl.setFirstRunSourceSuggestions([
+    { kind: 'directory', label: 'Downloads', path: '/mock/Downloads' },
+    { kind: 'wallpaperEngine', roots: ['/mock/Steam/workshop/content/431960'] },
+  ]);
+  assert.deepEqual(await api.firstRunSourceSuggestions(), [
+    { kind: 'directory', label: 'Downloads', path: '/mock/Downloads' },
+    { kind: 'wallpaperEngine', roots: ['/mock/Steam/workshop/content/431960'] },
+  ]);
+
+  ctrl.resetAll();
+  assert.deepEqual(await api.firstRunSourceSuggestions(), []);
 });
 
 test('source mutations are stable-id scoped and resettable', async () => {

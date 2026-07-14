@@ -132,7 +132,12 @@ export class ScanProgressController {
       ? this.snapshot.scanState
       : scanReducer(this.snapshot.scanState, { type: 'started', nowMs });
     this.update({ scanState, observedAtMs: nowMs });
-    if (this.started) this.scheduleNext('active');
+    if (this.started) {
+      // An idle probe may have started before the source command. Ignore that
+      // snapshot and let its completion trigger a fresh single-flight read.
+      this.generation += 1;
+      this.scheduleNext('active');
+    }
   };
 
   /** Observes the backend immediately; command completion is not assumed to be scan success. */

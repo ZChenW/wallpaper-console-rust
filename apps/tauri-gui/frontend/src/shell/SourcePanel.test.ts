@@ -85,6 +85,7 @@ function noopViewProps() {
     onClose: () => undefined,
     onReload: () => undefined,
     onAdd: () => undefined,
+    onRefreshAll: () => undefined,
     onScanWallpaperEngine: () => undefined,
     onRename: (_id: number, _displayName: string) => undefined,
     onSetRecursive: (_id: number, _recursive: boolean) => undefined,
@@ -98,6 +99,50 @@ function noopViewProps() {
 test('closed source panel renders nothing', async () => {
   const { SourcePanelView } = await importTsxModule();
   assert.equal(SourcePanelView({ ...noopViewProps(), open: false }), null);
+});
+
+test('source panel reloads only when an already-opened drawer is reopened', async () => {
+  const { transitionSourcePanelVisibility } = await importTsxModule();
+  let visibility = { open: false, hasOpened: false };
+
+  let transition = transitionSourcePanelVisibility(visibility, true);
+  assert.equal(transition.reload, false, 'the hook mount already loads the first opening');
+  visibility = transition.next;
+
+  transition = transitionSourcePanelVisibility(visibility, false);
+  assert.equal(transition.reload, false);
+  visibility = transition.next;
+
+  transition = transitionSourcePanelVisibility(visibility, true);
+  assert.equal(transition.reload, true, 'reopening reconciles mutations made while hidden');
+  visibility = transition.next;
+
+  transition = transitionSourcePanelVisibility(visibility, true);
+  assert.equal(transition.reload, false, 'ordinary rerenders while open do not reload');
+});
+
+test('source drawer autofocuses close and Escape closes or dismisses removal first', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    onClose: () => calls.push('close'),
+  });
+  const [dialog] = findElements(tree, (element) => element.props.role === 'dialog');
+  const [close] = findElements(tree, (element) => element.props['aria-label'] === 'Close wallpaper sources');
+  assert.equal(close.props.autoFocus, true);
+  (dialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  assert.deepEqual(calls, ['close']);
+
+  const confirmTree = SourcePanelView({
+    ...noopViewProps(),
+    removeCandidateId: 41,
+    onClose: () => calls.push('unexpected-close'),
+    onCancelRemove: () => calls.push('cancel-remove'),
+  });
+  const [confirmDialog] = findElements(confirmTree, (element) => element.props.role === 'dialog');
+  (confirmDialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  assert.deepEqual(calls, ['close', 'cancel-remove']);
 });
 
 test('renders a compact accessible drawer with source kind and honest availability', async () => {
@@ -184,6 +229,37 @@ test('source row actions use stable IDs and reject an empty inline rename', asyn
     ['refresh', 77],
     ['request-remove', 77],
   ]);
+});
+
+test('refresh all is available only when configured sources can be scanned', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    onRefreshAll: () => calls.push('refresh-all'),
+  });
+  const [refreshAll] = findElements(
+    tree,
+    (element) => element.props['data-source-action'] === 'refresh-all',
+  );
+
+  assert.ok(refreshAll);
+  assert.equal(refreshAll.props.disabled, false);
+  (refreshAll.props.onClick as () => void)();
+  assert.deepEqual(calls, ['refresh-all']);
+
+  const empty = SourcePanelView({ ...noopViewProps(), sources: [] });
+  const [emptyRefreshAll] = findElements(
+    empty,
+    (element) => element.props['data-source-action'] === 'refresh-all',
+  );
+  assert.equal(emptyRefreshAll.props.disabled, true);
+
+  const pending = renderToStaticMarkup(SourcePanelView({
+    ...noopViewProps(),
+    pendingOperation: 'refreshAll',
+  }));
+  assert.match(pending, /Refreshing all sources/);
 });
 
 test('removal requires an explicit confirmation that promises files are untouched', async () => {
@@ -320,6 +396,26 @@ test('single-source refresh also brackets backend scan polling', async () => {
     'started',
     'notice:info:Refreshing source',
     'notice:success:Source refresh finished',
+    'finished',
+  ]);
+});
+
+test('all-source refresh uses distinct feedback and always closes scan polling', async () => {
+  const { runAllSourcesRefreshAction } = await importTsxModule();
+  const events: string[] = [];
+
+  const refreshed = await runAllSourcesRefreshAction(
+    async () => success,
+    (notice) => events.push(`notice:${notice.severity}:${notice.message}`),
+    () => events.push('started'),
+    () => events.push('finished'),
+  );
+
+  assert.equal(refreshed, true);
+  assert.deepEqual(events, [
+    'started',
+    'notice:info:Refreshing all sources',
+    'notice:success:All sources refreshed',
     'finished',
   ]);
 });

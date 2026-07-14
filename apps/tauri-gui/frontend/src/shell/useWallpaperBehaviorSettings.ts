@@ -11,18 +11,58 @@ export const WALLPAPER_BEHAVIOR_CONFIG_KEYS = Object.freeze([
   'gif_backend',
   'video_backend',
   'awww_resize',
+  'awww_transition_type',
+  'awww_transition_duration',
+  'wallpaper_transition_fps',
+  'linux_wallpaperengine_scaling',
+  'linux_wallpaperengine_fps',
+  'linux_wallpaperengine_muted',
+  'linux_wallpaperengine_volume',
+  'restore_on_login',
+] as const);
+
+export const AWWW_TRANSITION_TYPES = Object.freeze([
+  'simple',
+  'fade',
+  'left',
+  'right',
+  'top',
+  'bottom',
+  'wipe',
+  'grow',
+  'center',
+  'outer',
+  'random',
+  'wave',
+] as const);
+
+export const LWE_SCALING_MODES = Object.freeze([
+  'default',
+  'fill',
+  'fit',
+  'stretch',
 ] as const);
 
 export type ImageRenderer = 'awww' | 'mpvpaper';
 export type GifRenderer = 'awww' | 'mpvpaper';
 export type VideoRenderer = 'mpvpaper';
 export type WallpaperFillMode = 'crop' | 'fit' | 'stretch';
+export type AwwwTransitionType = (typeof AWWW_TRANSITION_TYPES)[number];
+export type LweScalingMode = (typeof LWE_SCALING_MODES)[number];
 
 export interface WallpaperBehaviorSettings {
   readonly imageBackend: ImageRenderer;
   readonly gifBackend: GifRenderer;
   readonly videoBackend: VideoRenderer;
   readonly fillMode: WallpaperFillMode;
+  readonly awwwTransitionType: AwwwTransitionType;
+  readonly awwwTransitionDuration: number;
+  readonly awwwTransitionFps: number;
+  readonly lweScaling: LweScalingMode;
+  readonly lweFps: number;
+  readonly lweMuted: boolean;
+  readonly lweVolume: number;
+  readonly restoreOnLogin: boolean;
 }
 
 export const DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS: Readonly<WallpaperBehaviorSettings> =
@@ -31,6 +71,14 @@ export const DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS: Readonly<WallpaperBehaviorSett
     gifBackend: 'awww',
     videoBackend: 'mpvpaper',
     fillMode: 'crop',
+    awwwTransitionType: 'fade',
+    awwwTransitionDuration: 1,
+    awwwTransitionFps: 60,
+    lweScaling: 'default',
+    lweFps: 60,
+    lweMuted: false,
+    lweVolume: 100,
+    restoreOnLogin: false,
   });
 
 export interface WallpaperBehaviorCommandResult {
@@ -79,11 +127,59 @@ function fillMode(value: unknown): WallpaperFillMode {
   return value === 'fit' || value === 'stretch' ? value : 'crop';
 }
 
+function awwwTransitionType(value: unknown): AwwwTransitionType {
+  // Preserve the two legacy aliases accepted by the renderer layer.
+  if (value === 'slide') return 'left';
+  if (value === 'none') return 'simple';
+  return typeof value === 'string'
+    && (AWWW_TRANSITION_TYPES as readonly string[]).includes(value)
+    ? value as AwwwTransitionType
+    : 'fade';
+}
+
+function boundedNumber(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+  if (typeof value === 'string' && value.trim().length === 0) return fallback;
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= minimum && parsed <= maximum
+    ? parsed
+    : fallback;
+}
+
+function boundedInteger(
+  value: unknown,
+  minimum: number,
+  maximum: number,
+  fallback: number,
+): number {
+  if (typeof value !== 'number' && typeof value !== 'string') return fallback;
+  if (typeof value === 'string' && value.trim().length === 0) return fallback;
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return fallback;
+  return Math.min(maximum, Math.max(minimum, parsed));
+}
+
+function lweScaling(value: unknown): LweScalingMode {
+  return typeof value === 'string'
+    && (LWE_SCALING_MODES as readonly string[]).includes(value)
+    ? value as LweScalingMode
+    : 'default';
+}
+
+function enabled(value: unknown): boolean {
+  return value === true || value === 'on';
+}
+
 function defaultSettings(): WallpaperBehaviorSettings {
   return { ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS };
 }
 
-/** Normalize the four raw config values exposed by the compact settings UI. */
+/** Normalize the raw config values exposed by the compact settings UI. */
 export function normalizeWallpaperBehaviorConfig(
   values: Readonly<Record<string, string | undefined>>,
 ): WallpaperBehaviorSettings {
@@ -94,6 +190,14 @@ export function normalizeWallpaperBehaviorConfig(
     // values are deliberately repaired instead of being offered in the UI.
     videoBackend: 'mpvpaper',
     fillMode: fillMode(values.awww_resize),
+    awwwTransitionType: awwwTransitionType(values.awww_transition_type),
+    awwwTransitionDuration: boundedNumber(values.awww_transition_duration, 0, 60, 1),
+    awwwTransitionFps: boundedInteger(values.wallpaper_transition_fps, 1, 240, 60),
+    lweScaling: lweScaling(values.linux_wallpaperengine_scaling),
+    lweFps: boundedInteger(values.linux_wallpaperengine_fps, 1, 240, 60),
+    lweMuted: enabled(values.linux_wallpaperengine_muted),
+    lweVolume: boundedInteger(values.linux_wallpaperengine_volume, 0, 100, 100),
+    restoreOnLogin: enabled(values.restore_on_login),
   };
 }
 
@@ -105,6 +209,14 @@ export function normalizeWallpaperBehaviorSettings(value: unknown): WallpaperBeh
     gifBackend: renderer(record.gifBackend),
     videoBackend: 'mpvpaper',
     fillMode: fillMode(record.fillMode),
+    awwwTransitionType: awwwTransitionType(record.awwwTransitionType),
+    awwwTransitionDuration: boundedNumber(record.awwwTransitionDuration, 0, 60, 1),
+    awwwTransitionFps: boundedInteger(record.awwwTransitionFps, 1, 240, 60),
+    lweScaling: lweScaling(record.lweScaling),
+    lweFps: boundedInteger(record.lweFps, 1, 240, 60),
+    lweMuted: enabled(record.lweMuted),
+    lweVolume: boundedInteger(record.lweVolume, 0, 100, 100),
+    restoreOnLogin: enabled(record.restoreOnLogin),
   };
 }
 
@@ -117,6 +229,14 @@ function configEntries(
     ['gif_backend', normalized.gifBackend],
     ['video_backend', normalized.videoBackend],
     ['awww_resize', normalized.fillMode],
+    ['awww_transition_type', normalized.awwwTransitionType],
+    ['awww_transition_duration', String(normalized.awwwTransitionDuration)],
+    ['wallpaper_transition_fps', String(normalized.awwwTransitionFps)],
+    ['linux_wallpaperengine_scaling', normalized.lweScaling],
+    ['linux_wallpaperengine_fps', String(normalized.lweFps)],
+    ['linux_wallpaperengine_muted', normalized.lweMuted ? 'on' : 'off'],
+    ['linux_wallpaperengine_volume', String(normalized.lweVolume)],
+    ['restore_on_login', normalized.restoreOnLogin ? 'on' : 'off'],
   ];
 }
 
@@ -259,10 +379,12 @@ export function useWallpaperBehaviorSettings(
       (failure: unknown) => {
         if (!active) return;
         const fallback = defaultSettings();
-        persistedSnapshotRef.current = settingsSnapshot(fallback);
+        // Keep fallback values render-only. Treating them as loaded would let a
+        // later edit overwrite unread real configuration with defaults.
+        persistedSnapshotRef.current = null;
         setSettings(fallback);
         setLoadError(errorFromUnknown(failure, 'Failed to load wallpaper behavior settings.'));
-        setReady(true);
+        setReady(false);
       },
     );
 
@@ -272,8 +394,8 @@ export function useWallpaperBehaviorSettings(
   }, [client]);
 
   useEffect(() => {
-    // Initial defaults are render-only. Writes begin only after a load (or a
-    // load failure with an explicit fallback baseline) has completed.
+    // Initial defaults are render-only. Writes begin only after a successful
+    // load established an exact persisted baseline.
     if (!ready || persistedSnapshotRef.current === null) return;
     const snapshot = settingsSnapshot(settings);
     if (snapshot === persistedSnapshotRef.current) return;

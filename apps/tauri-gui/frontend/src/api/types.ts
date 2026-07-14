@@ -104,6 +104,17 @@ export interface SourceDTO {
   label: string;
 }
 
+export type FirstRunSourceSuggestionDTO =
+  | {
+    readonly kind: 'directory';
+    readonly label: string;
+    readonly path: string;
+  }
+  | {
+    readonly kind: 'wallpaperEngine';
+    readonly roots: string[];
+  };
+
 export interface StatusDTO {
   configDir: string;
   current: string;
@@ -130,6 +141,13 @@ export interface DisplayStateDTO {
   updatedAt: string;
 }
 
+export interface RuntimeWallpaperObservationDTO {
+  output: string;
+  wallpaperPath: string | null;
+  status: 'confirmed' | 'unknown';
+  reason?: string;
+}
+
 export interface TargetedApplyRequestDTO {
   /** Omitted by legacy callers and interpreted as a normal apply. */
   kind?: ApplyRequestKind;
@@ -144,11 +162,19 @@ export interface TargetedRestoreRequestDTO {
   outputs?: string[];
 }
 
-export interface LinuxWallpaperEngineStatusDTO {
+export interface BackendStatusDTO {
   available: boolean;
   path?: string;
   message: string;
   detail?: string;
+}
+
+export type LinuxWallpaperEngineStatusDTO = BackendStatusDTO;
+
+export interface RendererStatusesDTO {
+  awww: BackendStatusDTO;
+  mpvpaper: BackendStatusDTO;
+  linuxWallpaperEngine: BackendStatusDTO;
 }
 
 export interface WeDebugInfoDTO {
@@ -240,11 +266,13 @@ export interface WallpaperDTO {
 export interface WallpaperConsoleApi {
   status(): Promise<StatusDTO>;
   linuxWallpaperEngineStatus(): Promise<LinuxWallpaperEngineStatusDTO>;
+  rendererStatuses(): Promise<RendererStatusesDTO>;
 
   apply(path: string): Promise<CommandResult>;
   applyAction(request: ApplyRequestDTO): Promise<CommandResult>;
   displaysList(): Promise<DisplayListDTO>;
   displayStateList(): Promise<DisplayStateDTO[]>;
+  runtimeWallpaperObservations(): Promise<RuntimeWallpaperObservationDTO[]>;
   applyToDisplay(request: TargetedApplyRequestDTO): Promise<CommandResult>;
   stop(): Promise<CommandResult>;
   weClearBackendError(path: string): Promise<CommandResult>;
@@ -272,6 +300,7 @@ export interface WallpaperConsoleApi {
   favoriteRemove(path: string): Promise<CommandResult>;
 
   sourcesList(): Promise<SourceDTO[]>;
+  firstRunSourceSuggestions(): Promise<FirstRunSourceSuggestionDTO[]>;
   sourceAdd(path: string): Promise<CommandResult>;
   sourceRemove(path: string): Promise<CommandResult>;
   sourceRename(id: number, displayName: string): Promise<CommandResult>;

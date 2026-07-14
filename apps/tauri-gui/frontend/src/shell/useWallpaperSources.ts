@@ -11,6 +11,7 @@ export interface WallpaperSourcesApi {
   sourceSetRecursive(id: number, recursive: boolean): Promise<CommandResult>;
   sourceRefresh(id: number): Promise<CommandResult>;
   sourceRemoveById(id: number): Promise<CommandResult>;
+  rescan(): Promise<CommandResult>;
   scanSteamWorkshop(): Promise<CommandResult>;
 }
 
@@ -21,6 +22,9 @@ export type AddSourceOutcome =
 export interface UseWallpaperSourcesOptions {
   readonly sourceApi?: WallpaperSourcesApi;
   readonly onLibraryChanged?: () => void | Promise<void>;
+  /** Brackets source mutations that synchronously rebuild part of the index. */
+  readonly onScanStarted?: () => void;
+  readonly onScanFinished?: () => void;
 }
 
 /**
@@ -51,6 +55,20 @@ export async function executeSourceMutation<T>(
   return result;
 }
 
+/** Keep scan presentation honest even when a tracked mutation throws. */
+export async function executeTrackedSourceScan<T>(
+  operation: () => Promise<T>,
+  onStarted?: () => void,
+  onFinished?: () => void,
+): Promise<T> {
+  onStarted?.();
+  try {
+    return await operation();
+  } finally {
+    onFinished?.();
+  }
+}
+
 export function formatSourceLoadError(error: unknown): string {
   if (error instanceof Error && error.message) return error.message;
   if (typeof error === 'string' && error) return error;
@@ -60,6 +78,8 @@ export function formatSourceLoadError(error: unknown): string {
 export function useWallpaperSources({
   sourceApi = defaultApi,
   onLibraryChanged,
+  onScanStarted,
+  onScanFinished,
 }: UseWallpaperSourcesOptions = {}) {
   const [sources, setSources] = useState<SourceDTO[]>([]);
   const [loading, setLoading] = useState(true);
@@ -124,10 +144,14 @@ export function useWallpaperSources({
     async () => {
       const path = await sourceApi.browseDirectory();
       if (!path) return { kind: 'cancelled' };
-      const result = await executeSourceMutation(() => sourceApi.sourceAdd(path), reconcile);
+      const result = await executeTrackedSourceScan(
+        () => executeSourceMutation(() => sourceApi.sourceAdd(path), reconcile),
+        onScanStarted,
+        onScanFinished,
+      );
       return { kind: 'completed', path, result };
     },
-  ), [reconcile, runOperation, sourceApi]);
+  ), [onScanFinished, onScanStarted, reconcile, runOperation, sourceApi]);
 
   const rename = useCallback(
     (id: number, displayName: string) => runOperation(
@@ -143,18 +167,30 @@ export function useWallpaperSources({
   const setRecursive = useCallback(
     (id: number, recursive: boolean) => runOperation(
       `recursive:${id}`,
-      () => executeSourceMutation(
-        () => sourceApi.sourceSetRecursive(id, recursive),
-        reconcile,
+      () => executeTrackedSourceScan(
+        () => executeSourceMutation(
+          () => sourceApi.sourceSetRecursive(id, recursive),
+          reconcile,
+        ),
+        onScanStarted,
+        onScanFinished,
       ),
     ),
-    [reconcile, runOperation, sourceApi],
+    [onScanFinished, onScanStarted, reconcile, runOperation, sourceApi],
   );
 
   const refresh = useCallback(
     (id: number) => runOperation(
       `refresh:${id}`,
       () => executeSourceMutation(() => sourceApi.sourceRefresh(id), reconcile),
+    ),
+    [reconcile, runOperation, sourceApi],
+  );
+
+  const refreshAll = useCallback(
+    () => runOperation(
+      'refreshAll',
+      () => executeSourceMutation(() => sourceApi.rescan(), reconcile),
     ),
     [reconcile, runOperation, sourceApi],
   );
@@ -185,6 +221,7 @@ export function useWallpaperSources({
     rename,
     setRecursive,
     refresh,
+    refreshAll,
     remove,
     scanWallpaperEngine,
   };

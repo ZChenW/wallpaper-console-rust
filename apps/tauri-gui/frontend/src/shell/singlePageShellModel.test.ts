@@ -4,8 +4,11 @@ import test from 'node:test';
 import type { SourceDTO } from '../api/types.ts';
 import type { CurrentWallpaperState } from './currentWallpaperState.ts';
 import {
+  canChooseRandomWallpaper,
   currentWallpaperLabel,
+  reconcileSelectedEntry,
   reconcileSourceFilter,
+  shouldOfferFirstRun,
   targetArgument,
 } from './singlePageShellModel.ts';
 
@@ -56,4 +59,43 @@ test('bottom status distinguishes confirmed, mixed, and unknown runtime evidence
   assert.equal(currentWallpaperLabel(confirmed), 'Current: quiet-lake.jpg');
   assert.equal(currentWallpaperLabel(mixed), 'Current: displays use different wallpapers');
   assert.equal(currentWallpaperLabel(unknown), 'Current: not verified');
+});
+
+test('source read failures never masquerade as a first run', () => {
+  assert.equal(shouldOfferFirstRun([], undefined), true);
+  assert.equal(shouldOfferFirstRun([], 'database unavailable'), false);
+  assert.equal(shouldOfferFirstRun([source(1)], undefined), false);
+});
+
+test('random waits for the debounced search and an applicable display', () => {
+  assert.equal(canChooseRandomWallpaper({
+    searchSettled: true,
+    randomPending: false,
+    total: 1,
+    canApply: true,
+  }), true);
+  assert.equal(canChooseRandomWallpaper({
+    searchSettled: false,
+    randomPending: false,
+    total: 1,
+    canApply: true,
+  }), false);
+  assert.equal(canChooseRandomWallpaper({
+    searchSettled: true,
+    randomPending: false,
+    total: 0,
+    canApply: true,
+  }), false);
+});
+
+test('selection follows a replacement entry and clears when the replacement omits it', () => {
+  const selected = { path: '/walls/a.jpg', title: 'Old' };
+  const refreshed = { path: '/walls/a.jpg', title: 'Refreshed' };
+
+  assert.equal(
+    reconcileSelectedEntry(selected, new Map([[refreshed.path, refreshed]])),
+    refreshed,
+  );
+  assert.equal(reconcileSelectedEntry(selected, new Map()), null);
+  assert.equal(reconcileSelectedEntry(null, new Map()), null);
 });

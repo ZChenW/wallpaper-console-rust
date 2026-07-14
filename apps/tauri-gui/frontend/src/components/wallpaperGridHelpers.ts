@@ -13,6 +13,25 @@ export interface GridLayoutChange {
   nextRowHeight: number;
 }
 
+export interface NextPageRequestState {
+  readonly rowCount: number;
+  readonly visibleEndRow: number | null | undefined;
+  readonly hasMore: boolean;
+  readonly loadingMore: boolean;
+}
+
+const NEXT_PAGE_PREFETCH_ROWS = 2;
+
+export function shouldRequestNextPage({
+  rowCount,
+  visibleEndRow,
+  hasMore,
+  loadingMore,
+}: NextPageRequestState): boolean {
+  if (!hasMore || loadingMore || rowCount <= 0 || visibleEndRow == null) return false;
+  return visibleEndRow >= rowCount - 1 - NEXT_PAGE_PREFETCH_ROWS;
+}
+
 export function anchoredScrollTopForLayoutChange({
   scrollTop,
   previousColumns,

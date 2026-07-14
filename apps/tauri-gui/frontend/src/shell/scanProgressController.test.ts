@@ -162,6 +162,39 @@ test('source action signals cover a quick scan without flashing stale progress',
   );
 });
 
+test('source start ignores a pre-start idle response and repolls the active scan', async () => {
+  const clock = new ManualClock();
+  let resolveStaleIdle: ((value: ScanProgressDTO) => void) | undefined;
+  const staleIdle = new Promise<ScanProgressDTO>((resolve) => { resolveStaleIdle = resolve; });
+  let readCalls = 0;
+  const controller = createController({
+    clock,
+    read: () => {
+      readCalls += 1;
+      return readCalls === 1
+        ? staleIdle
+        : Promise.resolve(progress({ running: true, stage: 'indexing', scanned: 4 }));
+    },
+  });
+
+  controller.start();
+  assert.equal(readCalls, 1);
+
+  controller.signalStarted();
+  assert.equal(controller.getSnapshot().scanState.kind, 'running');
+  assert.equal(controller.getSnapshot().pollingMode, 'active');
+
+  resolveStaleIdle?.(progress());
+  await settle();
+
+  assert.equal(readCalls, 2, 'the stale response should trigger an immediate replacement probe');
+  assert.equal(controller.getSnapshot().scanState.kind, 'running');
+  assert.equal(controller.getSnapshot().progress?.running, true);
+  assert.equal(controller.getSnapshot().progress?.stage, 'indexing');
+  assert.equal(controller.getSnapshot().pollingMode, 'active');
+  assert.equal(clock.nextDelay(), 100);
+});
+
 test('cancel remains pending until backend terminal progress and cannot be requested twice', async () => {
   const clock = new ManualClock();
   let backend = progress({ running: true, stage: 'walking files' });

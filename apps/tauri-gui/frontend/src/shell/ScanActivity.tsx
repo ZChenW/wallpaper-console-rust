@@ -1,9 +1,11 @@
 import type { CSSProperties } from 'react';
 
+import type { ScanProgressDTO } from '../api/types.ts';
 import type { ScanPresentation } from './feedbackState';
 
 export interface ScanActivityProps {
   readonly presentation: ScanPresentation;
+  readonly progress?: Pick<ScanProgressDTO, 'scanned' | 'totalHint'> | null;
   readonly onCancel: () => void;
   readonly onDismiss: () => void;
 }
@@ -43,6 +45,12 @@ const metaStyle: CSSProperties = {
   opacity: 0.72,
 };
 
+const progressStyle: CSSProperties = {
+  width: '100%',
+  height: '0.35rem',
+  accentColor: 'currentColor',
+};
+
 const actionStyle: CSSProperties = {
   flex: '0 0 auto',
   minHeight: '2rem',
@@ -72,7 +80,23 @@ export function formatScanElapsed(elapsedMs: number): string {
   return `${hours}h ${minutes}m`;
 }
 
-export function ScanActivity({ presentation, onCancel, onDismiss }: ScanActivityProps) {
+function determinateProgress(
+  progress: ScanActivityProps['progress'],
+): { readonly max: number; readonly value: number } | null {
+  const totalHint = progress?.totalHint;
+  if (typeof totalHint !== 'number' || !Number.isFinite(totalHint) || totalHint <= 0) {
+    return null;
+  }
+
+  const scannedValue = progress?.scanned ?? 0;
+  const scanned = Number.isFinite(scannedValue) ? scannedValue : 0;
+  return {
+    max: totalHint,
+    value: Math.min(totalHint, Math.max(0, scanned)),
+  };
+}
+
+export function ScanActivity({ presentation, progress, onCancel, onDismiss }: ScanActivityProps) {
   if (presentation.kind === 'hidden') return null;
 
   if (presentation.kind === 'cancelled') {
@@ -99,6 +123,7 @@ export function ScanActivity({ presentation, onCancel, onDismiss }: ScanActivity
 
   const isCancelling = presentation.kind === 'cancelling';
   const canCancel = !isCancelling && presentation.canCancel;
+  const determinate = determinateProgress(progress);
   return (
     <section
       aria-atomic="true"
@@ -111,6 +136,12 @@ export function ScanActivity({ presentation, onCancel, onDismiss }: ScanActivity
     >
       <div style={textStyle}>
         <span style={titleStyle}>{isCancelling ? 'Cancelling scan…' : 'Scanning wallpapers…'}</span>
+        <progress
+          aria-label="Wallpaper scan progress"
+          className="scan-activity__progress"
+          style={progressStyle}
+          {...(determinate ?? {})}
+        />
         <span style={metaStyle}>Elapsed {formatScanElapsed(presentation.elapsedMs)}</span>
       </div>
       <button
