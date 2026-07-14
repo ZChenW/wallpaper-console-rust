@@ -65,6 +65,8 @@ pub fn normalize_config_value(key: &str, value: &str) -> String {
 
         "linux_wallpaperengine_muted" => on_off(value, "off"),
 
+        "restore_on_login" => on_off(value, "off"),
+
         "linux_wallpaperengine_scaling" => normalize_lwe_scaling(value).to_string(),
 
         "linux_wallpaperengine_target_mode" => normalize_lwe_target_mode(value).to_string(),
@@ -306,6 +308,11 @@ mod tests {
             normalize_config_value("linux_wallpaperengine_target_mode", "bad"),
             "auto"
         );
+
+        assert_eq!(normalize_config_value("restore_on_login", "on"), "on");
+        assert_eq!(normalize_config_value("restore_on_login", "off"), "off");
+        assert_eq!(normalize_config_value("restore_on_login", "true"), "off");
+        assert_eq!(normalize_config_value("restore_on_login", "bad"), "off");
     }
 
     #[test]

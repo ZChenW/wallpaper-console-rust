@@ -16,6 +16,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("awww_transition_duration", "1"),
     ("awww_resize", "crop"),
     ("wallpaper_transition_fps", "60"),
+    ("restore_on_login", "off"),
     ("linux_wallpaperengine_enabled", "on"),
     ("linux_wallpaperengine_path", "auto"),
     ("linux_wallpaperengine_scaling", "default"),
@@ -263,6 +264,15 @@ mod tests {
         assert_eq!(
             defaults.get("mpvpaper_options").unwrap(),
             "--loop-file=inf --panscan=1.0"
+        );
+    }
+
+    #[test]
+    fn login_restore_is_opt_in_by_default() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("restore_on_login").map(String::as_str),
+            Some("off")
         );
     }
 

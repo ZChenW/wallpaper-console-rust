@@ -37,6 +37,7 @@ fn run_with_storage(cmd: Commands, storage: &StorageApi) -> anyhow::Result<()> {
         Commands::RestoreDisplays { outputs } => {
             crate::wallpaper::restore_displays(storage, outputs)
         }
+        Commands::RestoreAtLogin => crate::wallpaper::restore_at_login(storage),
         other => run_remaining(other, storage),
     }
 }

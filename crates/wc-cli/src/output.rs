@@ -13,6 +13,7 @@ pub(crate) fn print_help() {
         "  random               random-all          random-image/gif/video\n",
         "  stop                 status               restore\n",
         "  displays             display-state        restore-displays [--output OUTPUT]...\n",
+        "  restore-at-login     restore saved displays only when restore_on_login=on\n",
         "  add DIR              sources             remove (fzf)\n",
         "  remove-source DIR    steam-workshop      validate-sources\n",
         "  remove-missing       dedupe-sources\n",

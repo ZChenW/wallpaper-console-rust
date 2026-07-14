@@ -45,6 +45,9 @@ pub(crate) enum Commands {
         #[arg(long = "output")]
         outputs: Vec<String>,
     },
+    /// Restore saved display assignments only when login restoration is enabled.
+    #[command(name = "restore-at-login")]
+    RestoreAtLogin,
     Browse,
     #[command(name = "browse-all")]
     BrowseAll,
@@ -283,6 +286,14 @@ mod tests {
 
         let legacy = Cli::try_parse_from(["wallpaper-console-rust", "restore"]).unwrap();
         assert!(matches!(legacy.command, Some(Commands::Restore)));
+    }
+
+    #[test]
+    fn restore_at_login_command_parses_separately_from_manual_restore() {
+        let cli = Cli::try_parse_from(["wallpaper-console-rust", "restore-at-login"])
+            .expect("login restore should parse");
+
+        assert!(matches!(cli.command, Some(Commands::RestoreAtLogin)));
     }
 
     #[test]

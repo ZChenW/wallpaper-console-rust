@@ -55,6 +55,17 @@ where
     restore(known_outputs).map_err(|e| anyhow::anyhow!(e.message))
 }
 
+fn restore_at_login_with<F>(enabled: bool, restore: F) -> anyhow::Result<bool>
+where
+    F: FnOnce() -> anyhow::Result<()>,
+{
+    if !enabled {
+        return Ok(false);
+    }
+    restore()?;
+    Ok(true)
+}
+
 fn resolve_known_outputs_with<F>(
     explicit_outputs: &[String],
     discover: F,
@@ -187,6 +198,15 @@ pub(crate) fn restore_displays(
     });
     restore_displays_with(&known_outputs, |outputs| service.restore_displays(outputs))?;
     println!("Display wallpapers restored.");
+    Ok(())
+}
+
+pub(crate) fn restore_at_login(s: &StorageApi) -> anyhow::Result<()> {
+    let enabled = s.config_get("restore_on_login", "off") == "on";
+    let restored = restore_at_login_with(enabled, || restore_displays(s, Vec::new()))?;
+    if !restored {
+        println!("Login wallpaper restore is disabled.");
+    }
     Ok(())
 }
 
@@ -770,6 +790,40 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    #[test]
+    fn disabled_login_restore_skips_the_restore_operation() {
+        let restored = restore_at_login_with(false, || {
+            panic!("disabled login restore must not inspect displays or change renderers")
+        })
+        .unwrap();
+
+        assert!(!restored);
+    }
+
+    #[test]
+    fn enabled_login_restore_runs_the_restore_operation_once() {
+        let calls = std::cell::Cell::new(0);
+        let restored = restore_at_login_with(true, || {
+            calls.set(calls.get() + 1);
+            Ok(())
+        })
+        .unwrap();
+
+        assert!(restored);
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn enabled_login_restore_propagates_restore_failures() {
+        let error =
+            restore_at_login_with(true, || anyhow::bail!("display discovery failed")).unwrap_err();
+
+        assert!(
+            error.to_string().contains("display discovery failed"),
+            "{error}"
+        );
     }
 
     #[test]

@@ -42,11 +42,20 @@ wallpaper-console-gui-rust
 
 ## Niri Example
 
-Startup restore:
+Login restore is opt-in. Enable it once, then point the compositor startup hook
+at the guarded command:
+
+```bash
+wallpaper-console-rust config-set restore_on_login on
+```
 
 ```kdl
-spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore"
+spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore-at-login"
 ```
+
+Set `restore_on_login` back to `off` to disable login restoration without
+editing the compositor configuration. Manual `restore` and `restore-displays`
+commands remain unconditional.
 
 Launch the GUI:
 
