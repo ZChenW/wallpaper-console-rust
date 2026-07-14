@@ -525,6 +525,9 @@ function SourceRow({
                   disabled={busy}
                   maxLength={120}
                   name="displayName"
+                  onBlur={() => {
+                    if (!busy) onCancelRename();
+                  }}
                   onChange={(event) => onChangeRenameDraft(event.currentTarget.value)}
                   onKeyDown={(event) => {
                     if (event.key !== 'Escape') return;

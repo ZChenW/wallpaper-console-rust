@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { WallpaperDTO } from '../api/bridge';
+import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
 import {
@@ -22,9 +22,10 @@ import {
 import type { ApplyGesture } from '../shell/shellPreferences';
 
 interface Props {
-  entries: WallpaperDTO[];
+  entries: LibraryBrowserItemDTO[];
   onApply: (path: string) => void;
   onSelect?: (entry: WallpaperDTO) => void;
+  onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   applying: boolean;
   emptyText?: string;
   contextActions?: ContextAction[];
@@ -36,6 +37,7 @@ interface Props {
   applyGesture?: ApplyGesture;
   selectedPath?: string | null;
   pendingPath?: string | null;
+  favoritePendingPaths?: ReadonlySet<string>;
   currentPath?: string | null;
   isEntryApplicable?: (entry: WallpaperDTO) => boolean;
   hasMore?: boolean;
@@ -71,6 +73,7 @@ export default function WallpaperGrid({
   entries,
   onApply,
   onSelect,
+  onToggleFavorite,
   applying,
   emptyText = 'No wallpapers found',
   contextActions = [],
@@ -82,6 +85,7 @@ export default function WallpaperGrid({
   applyGesture = 'single',
   selectedPath = null,
   pendingPath = null,
+  favoritePendingPaths = new Set(),
   currentPath = null,
   isEntryApplicable,
   hasMore = false,
@@ -320,7 +324,7 @@ export default function WallpaperGrid({
 
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
-  const findEntry = (path: string): WallpaperDTO | undefined => entryByPath.get(path);
+  const findEntry = (path: string): LibraryBrowserItemDTO | undefined => entryByPath.get(path);
 
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
@@ -362,12 +366,14 @@ export default function WallpaperGrid({
                   applying={applying}
                   onApply={onApply}
                   onSelect={onSelect}
+                  onToggleFavorite={onToggleFavorite}
                   onContextMenu={handleContextMenu}
                   onKeyboardContextMenu={handleKeyboardContextMenu}
                   cardSize={cardSize}
                   applyGesture={applyGesture}
                   selected={selectedPath === e.path}
                   pending={pendingPath === e.path}
+                  favoritePending={favoritePendingPaths.has(e.path)}
                   current={currentPath === e.path}
                   applyAvailable={isEntryApplicable?.(e)}
                   scrolling={scrolling}

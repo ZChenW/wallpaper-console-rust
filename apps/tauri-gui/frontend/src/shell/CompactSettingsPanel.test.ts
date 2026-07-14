@@ -174,6 +174,17 @@ test('appearance controls update only remembered shell preferences', async () =>
   const [theme] = findElements(tree, (element) => element.props['aria-label'] === 'Theme');
   const [gesture] = findElements(tree, (element) => element.props['aria-label'] === 'Apply gesture');
   const [cardSize] = findElements(tree, (element) => element.props['aria-label'] === 'Card size');
+  const [interfaceCard] = findElements(
+    tree,
+    (element) => element.props['data-settings-card'] === 'interface',
+  );
+
+  assert.ok(interfaceCard);
+  assert.deepEqual(
+    findElements(interfaceCard, (element) => typeof element.props['aria-label'] === 'string')
+      .map((control) => control.props['aria-label']),
+    ['Theme', 'Apply gesture', 'Card size'],
+  );
 
   (theme.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'dark' } });
   (gesture.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'double' } });
@@ -221,6 +232,30 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
     (element) => element.props['aria-label'] === 'awww transition FPS',
   );
   const markup = renderToStaticMarkup(tree);
+
+  assert.deepEqual(
+    findElements(tree, (element) => typeof element.props['data-behavior-card'] === 'string')
+      .map((card) => card.props['data-behavior-card']),
+    ['renderer-selection', 'image-appearance', 'scene-playback', 'session-restore'],
+  );
+  const [rendererSelection] = findElements(
+    tree,
+    (element) => element.props['data-behavior-card'] === 'renderer-selection',
+  );
+  assert.deepEqual(
+    findElements(rendererSelection, (element) => ['Image', 'GIF', 'Video'].includes(element.props['aria-label']))
+      .map((field) => field.props['aria-label']),
+    ['Image', 'GIF', 'Video'],
+  );
+  assert.deepEqual(
+    findElements(tree, (element) => typeof element.props['data-control-unit'] === 'string')
+      .map((unit) => unit.props['data-control-unit']),
+    ['seconds', 'transition-fps', 'scene-fps', 'scene-volume'],
+  );
+  assert.ok(
+    markup.indexOf('aria-label="Wallpaper Engine volume"')
+      < markup.indexOf('aria-label="Mute Wallpaper Engine audio"'),
+  );
 
   assert.equal(findElements(tree, (element) => element.props['aria-label'] === 'Default display target').length, 0);
   const imageMpvpaper = findElements(image, (element) => element.props['data-renderer'] === 'mpvpaper')[0];
@@ -395,7 +430,9 @@ test('renderer-specific options update Wallpaper Engine audio and login restore 
     (element) => element.props['aria-label'] === 'Wallpaper Engine volume',
   );
   assert.equal(mutedVolume.props.disabled, true);
-  assert.match(renderToStaticMarkup(tree), /restore-at-login.*session startup/i);
+  const markup = renderToStaticMarkup(tree);
+  assert.doesNotMatch(markup, /restore-at-login.*session startup/i);
+  assert.doesNotMatch(markup, /Availability is checked when applying/i);
 });
 
 test('behavior readiness and errors are explicit without disabling unrelated settings', async () => {

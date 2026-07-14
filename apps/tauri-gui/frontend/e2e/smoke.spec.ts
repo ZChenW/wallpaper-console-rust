@@ -128,6 +128,14 @@ test('renders one unified wallpaper picker without legacy navigation', async ({ 
   await expect(page.getByLabel('Card size')).toBeVisible();
   await expect(page.getByLabel('Display target')).toBeVisible();
 
+  await expect(page.getByLabel('Source filter')).toHaveCSS('padding-top', '0px');
+  await expect(page.getByLabel('Source filter')).toHaveCSS('padding-bottom', '0px');
+  await expect(page.getByLabel('Card size').locator('option')).toHaveText([
+    'Small',
+    'Medium',
+    'Large',
+  ]);
+
   await expect(page.locator('.sidebar')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Favorites', exact: true })).toHaveCount(0);
@@ -191,6 +199,31 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
   );
 });
 
+test('card heart adds and removes a favorite without applying the wallpaper', async ({ page }) => {
+  await openApp(page);
+  await page.getByLabel('Wallpaper type filter').selectOption('image');
+
+  const card = page.locator('[data-wallpaper-path="/mock/path/wallpaper-002.jpg"]');
+  await expect(card).toBeVisible();
+  const addFavorite = card.getByRole('button', { name: 'Add favorite' });
+  await expect(addFavorite).toHaveCSS('opacity', '0');
+
+  await card.hover();
+  await expect(addFavorite).toHaveCSS('opacity', '1');
+  await expect(addFavorite).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  const applyBeforeFavorite = await lastApplyRequest(page);
+  await addFavorite.click();
+
+  const removeFavorite = card.getByRole('button', { name: 'Remove favorite' });
+  await expect(removeFavorite).toBeVisible();
+  await expect(removeFavorite).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  expect(await lastApplyRequest(page)).toEqual(applyBeforeFavorite);
+
+  await removeFavorite.click();
+  await expect(card.getByRole('button', { name: 'Add favorite' })).toBeAttached();
+  expect(await lastApplyRequest(page)).toEqual(applyBeforeFavorite);
+});
+
 test('random selection obeys every active filter', async ({ page }) => {
   await openApp(page);
   await waitForGrid(page);
@@ -243,10 +276,19 @@ test('single/double-click setting and display target govern apply requests', asy
 
 test('compact settings contains exactly the three user-facing groups', async ({ page }) => {
   await openApp(page);
+  const grid = page.locator('.wallpaper-grid');
+  await expect(grid).toHaveCSS('overflow-y', 'auto');
   await openSettings(page);
+  await expect(grid).toHaveCSS('overflow-y', 'hidden');
 
   const dialog = page.getByRole('dialog', { name: 'Settings' });
   await expect(dialog.locator('[data-settings-group]')).toHaveCount(3);
+  await expect(dialog.locator('[data-behavior-card]')).toHaveCount(4);
+  await expect(dialog.getByRole('heading', { name: 'Interface', exact: true })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Renderer selection' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Fill & transition' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Scene playback' })).toBeVisible();
+  await expect(dialog.getByRole('heading', { name: 'Restore', exact: true })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Appearance & interaction' })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Wallpaper behavior' })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
@@ -272,6 +314,9 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   ]) {
     await expect(dialog.getByText(forbidden, { exact: true })).toHaveCount(0);
   }
+
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(grid).toHaveCSS('overflow-y', 'auto');
 });
 
 test('source drawer adds, renames, configures, refreshes, and safely removes sources', async ({ page }) => {
@@ -306,7 +351,14 @@ test('source drawer adds, renames, configures, refreshes, and safely removes sou
 
   const pictures = sourceRow(page, 1);
   await pictures.getByRole('button', { name: 'Rename Pictures' }).click();
-  const alias = pictures.getByLabel('Alias for Pictures');
+  let alias = pictures.getByLabel('Alias for Pictures');
+  await alias.fill('Discard this alias');
+  await pictures.getByText('/mock/Pictures', { exact: true }).click();
+  await expect(alias).toHaveCount(0);
+  await expect(pictures).toContainText('Pictures');
+
+  await pictures.getByRole('button', { name: 'Rename Pictures' }).click();
+  alias = pictures.getByLabel('Alias for Pictures');
   await alias.fill('Art collection');
   await alias.press('Enter');
   await expect(sourceRow(page, 1)).toContainText('Art collection');

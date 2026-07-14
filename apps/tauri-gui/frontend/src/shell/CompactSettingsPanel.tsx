@@ -197,33 +197,43 @@ export function CompactSettingsPanelView({
           className="settings-section"
         >
           <h3 id="settings-appearance-heading">Appearance &amp; interaction</h3>
-          <label className="settings-field">
-            <span>Theme</span>
-            <select aria-label="Theme" value={preferences.theme} onChange={updateTheme}>
-              <option value="system">System</option>
-              <option value="light">Light</option>
-              <option value="dark">Dark</option>
-            </select>
-          </label>
-          <label className="settings-field">
-            <span>Apply gesture</span>
-            <select
-              aria-label="Apply gesture"
-              value={preferences.applyGesture}
-              onChange={updateGesture}
-            >
-              <option value="single">Single click</option>
-              <option value="double">Double click</option>
-            </select>
-          </label>
-          <label className="settings-field">
-            <span>Card size</span>
-            <select aria-label="Card size" value={preferences.cardSize} onChange={updateCardSize}>
-              <option value="small">Small</option>
-              <option value="medium">Medium</option>
-              <option value="large">Large</option>
-            </select>
-          </label>
+          <div
+            aria-labelledby="settings-interface-heading"
+            className="settings-behavior-card"
+            data-settings-card="interface"
+            role="group"
+          >
+            <h4 id="settings-interface-heading">Interface</h4>
+            <div className="settings-behavior-card__rows">
+              <label className="settings-behavior-row">
+                <span>Theme</span>
+                <select aria-label="Theme" value={preferences.theme} onChange={updateTheme}>
+                  <option value="system">System</option>
+                  <option value="light">Light</option>
+                  <option value="dark">Dark</option>
+                </select>
+              </label>
+              <label className="settings-behavior-row">
+                <span>Apply gesture</span>
+                <select
+                  aria-label="Apply gesture"
+                  value={preferences.applyGesture}
+                  onChange={updateGesture}
+                >
+                  <option value="single">Single click</option>
+                  <option value="double">Double click</option>
+                </select>
+              </label>
+              <label className="settings-behavior-row">
+                <span>Card size</span>
+                <select aria-label="Card size" value={preferences.cardSize} onChange={updateCardSize}>
+                  <option value="small">Small</option>
+                  <option value="medium">Medium</option>
+                  <option value="large">Large</option>
+                </select>
+              </label>
+            </div>
+          </div>
         </section>
 
         <section
@@ -240,166 +250,226 @@ export function CompactSettingsPanelView({
           ) : null}
           {loadError !== null && <p role="alert" className="settings-error">{errorMessage(loadError)}</p>}
           {saveError !== null && <p role="alert" className="settings-error">{errorMessage(saveError)}</p>}
-          <div aria-label="Image" className="settings-renderer-field" role="group">
-            <span>Image</span>
-            <div className="settings-renderer-cards">
-              {rendererCard('awww', behaviorSettings.imageBackend === 'awww', awwwUnavailable,
-                () => updateImageRenderer('awww'))}
-              {rendererCard('mpvpaper', behaviorSettings.imageBackend === 'mpvpaper', mpvpaperUnavailable,
-                () => updateImageRenderer('mpvpaper'))}
+          <h4 className="settings-behavior-category">Renderers</h4>
+          <div
+            aria-labelledby="settings-renderer-selection-heading"
+            className="settings-behavior-card"
+            data-behavior-card="renderer-selection"
+            role="group"
+          >
+            <h5 id="settings-renderer-selection-heading">Renderer selection</h5>
+            <div className="settings-behavior-card__rows">
+              <div
+                aria-label="Image"
+                className="settings-behavior-row settings-renderer-field"
+                role="group"
+              >
+                <span>Image</span>
+                <div className="settings-renderer-cards">
+                  {rendererCard('awww', behaviorSettings.imageBackend === 'awww', awwwUnavailable,
+                    () => updateImageRenderer('awww'))}
+                  {rendererCard('mpvpaper', behaviorSettings.imageBackend === 'mpvpaper', mpvpaperUnavailable,
+                    () => updateImageRenderer('mpvpaper'))}
+                </div>
+              </div>
+              <div
+                aria-label="GIF"
+                className="settings-behavior-row settings-renderer-field"
+                role="group"
+              >
+                <span>GIF</span>
+                <div className="settings-renderer-cards">
+                  {rendererCard('awww', behaviorSettings.gifBackend === 'awww', awwwUnavailable,
+                    () => updateGifRenderer('awww'))}
+                  {rendererCard('mpvpaper', behaviorSettings.gifBackend === 'mpvpaper', mpvpaperUnavailable,
+                    () => updateGifRenderer('mpvpaper'))}
+                </div>
+              </div>
+              <div
+                aria-label="Video"
+                className="settings-behavior-row settings-renderer-field"
+                role="group"
+              >
+                <span>Video</span>
+                <div className="settings-renderer-cards settings-renderer-cards--single">
+                  {rendererCard('mpvpaper', true, mpvpaperUnavailable)}
+                </div>
+              </div>
             </div>
           </div>
-          <div aria-label="GIF" className="settings-renderer-field" role="group">
-            <span>GIF</span>
-            <div className="settings-renderer-cards">
-              {rendererCard('awww', behaviorSettings.gifBackend === 'awww', awwwUnavailable,
-                () => updateGifRenderer('awww'))}
-              {rendererCard('mpvpaper', behaviorSettings.gifBackend === 'mpvpaper', mpvpaperUnavailable,
-                () => updateGifRenderer('mpvpaper'))}
-            </div>
-          </div>
-          <div aria-label="Video" className="settings-renderer-field" role="group">
-            <span>Video</span>
-            <div className="settings-renderer-cards settings-renderer-cards--single">
-              {rendererCard('mpvpaper', true, mpvpaperUnavailable)}
-            </div>
-          </div>
+          <h4 className="settings-behavior-category">Image appearance</h4>
           {usesAwww ? (
-            <>
-              <label className="settings-field">
-                <span>Fill behavior</span>
-                <select
-                  aria-label="Fill behavior"
-                  data-behavior-control={true}
-                  disabled={!behaviorReady}
-                  value={behaviorSettings.fillMode}
-                  onChange={updateFillMode}
-                >
-                  <option value="crop">Crop to fill</option>
-                  <option value="fit">Fit inside</option>
-                  <option value="stretch">Stretch</option>
-                </select>
-              </label>
-              <label className="settings-field">
-                <span>Transition</span>
-                <select
-                  aria-label="awww transition type"
-                  data-behavior-control={true}
-                  disabled={!behaviorReady}
-                  value={behaviorSettings.awwwTransitionType}
-                  onChange={updateAwwwTransitionType}
-                >
-                  {AWWW_TRANSITION_TYPES.map((transitionType) => (
-                    <option key={transitionType} value={transitionType}>{transitionType}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="settings-field">
-                <span>Transition duration</span>
-                <input
-                  aria-label="awww transition duration"
-                  data-behavior-control={true}
-                  disabled={!behaviorReady}
-                  max={60}
-                  min={0}
-                  onChange={updateAwwwTransitionDuration}
-                  step={0.1}
-                  type="number"
-                  value={behaviorSettings.awwwTransitionDuration}
-                />
-              </label>
-              <label className="settings-field">
-                <span>Transition FPS</span>
-                <input
-                  aria-label="awww transition FPS"
-                  data-behavior-control={true}
-                  disabled={!behaviorReady}
-                  max={240}
-                  min={1}
-                  onChange={updateAwwwTransitionFps}
-                  step={1}
-                  type="number"
-                  value={behaviorSettings.awwwTransitionFps}
-                />
-              </label>
-            </>
+            <div
+              aria-labelledby="settings-fill-transition-heading"
+              className="settings-behavior-card"
+              data-behavior-card="image-appearance"
+              role="group"
+            >
+              <h5 id="settings-fill-transition-heading">Fill &amp; transition</h5>
+              <div className="settings-behavior-card__rows">
+                <label className="settings-behavior-row">
+                  <span>Fill behavior</span>
+                  <select
+                    aria-label="Fill behavior"
+                    data-behavior-control={true}
+                    disabled={!behaviorReady}
+                    value={behaviorSettings.fillMode}
+                    onChange={updateFillMode}
+                  >
+                    <option value="crop">Crop to fill</option>
+                    <option value="fit">Fit inside</option>
+                    <option value="stretch">Stretch</option>
+                  </select>
+                </label>
+                <label className="settings-behavior-row">
+                  <span>Transition</span>
+                  <select
+                    aria-label="awww transition type"
+                    data-behavior-control={true}
+                    disabled={!behaviorReady}
+                    value={behaviorSettings.awwwTransitionType}
+                    onChange={updateAwwwTransitionType}
+                  >
+                    {AWWW_TRANSITION_TYPES.map((transitionType) => (
+                      <option key={transitionType} value={transitionType}>{transitionType}</option>
+                    ))}
+                  </select>
+                </label>
+                <label className="settings-behavior-row">
+                  <span>Transition duration</span>
+                  <span className="settings-number-control">
+                    <input
+                      aria-label="awww transition duration"
+                      data-behavior-control={true}
+                      disabled={!behaviorReady}
+                      max={60}
+                      min={0}
+                      onChange={updateAwwwTransitionDuration}
+                      step={0.1}
+                      type="number"
+                      value={behaviorSettings.awwwTransitionDuration}
+                    />
+                    <span aria-hidden="true" data-control-unit="seconds">s</span>
+                  </span>
+                </label>
+                <label className="settings-behavior-row">
+                  <span>Transition FPS</span>
+                  <span className="settings-number-control">
+                    <input
+                      aria-label="awww transition FPS"
+                      data-behavior-control={true}
+                      disabled={!behaviorReady}
+                      max={240}
+                      min={1}
+                      onChange={updateAwwwTransitionFps}
+                      step={1}
+                      type="number"
+                      value={behaviorSettings.awwwTransitionFps}
+                    />
+                    <span aria-hidden="true" data-control-unit="transition-fps">FPS</span>
+                  </span>
+                </label>
+              </div>
+            </div>
           ) : (
             <p>Fill and transition controls are available when awww handles images or GIFs.</p>
           )}
-          <h4>Wallpaper Engine scenes</h4>
-          <label className="settings-field">
-            <span>Scene scaling</span>
-            <select
-              aria-label="Wallpaper Engine scaling"
-              data-behavior-control={true}
-              disabled={!behaviorReady || lweUnavailable}
-              value={behaviorSettings.lweScaling}
-              onChange={updateLweScaling}
-            >
-              {LWE_SCALING_MODES.map((scaling) => (
-                <option key={scaling} value={scaling}>{scaling}</option>
-              ))}
-            </select>
-          </label>
-          <label className="settings-field">
-            <span>Scene FPS</span>
-            <input
-              aria-label="Wallpaper Engine FPS"
-              data-behavior-control={true}
-              disabled={!behaviorReady || lweUnavailable}
-              max={240}
-              min={1}
-              onChange={updateLweFps}
-              step={1}
-              type="number"
-              value={behaviorSettings.lweFps}
-            />
-          </label>
-          <label className="settings-field">
-            <span>Mute scene audio</span>
-            <input
-              aria-label="Mute Wallpaper Engine audio"
-              checked={behaviorSettings.lweMuted}
-              data-behavior-control={true}
-              disabled={!behaviorReady || lweUnavailable}
-              onChange={updateLweMuted}
-              type="checkbox"
-            />
-          </label>
-          <label className="settings-field">
-            <span>Scene volume</span>
-            <input
-              aria-label="Wallpaper Engine volume"
-              data-behavior-control={true}
-              disabled={!behaviorReady || lweUnavailable || behaviorSettings.lweMuted}
-              max={100}
-              min={0}
-              onChange={updateLweVolume}
-              step={1}
-              type="number"
-              value={behaviorSettings.lweVolume}
-            />
-          </label>
-          <h4>Session restore</h4>
-          <label className="settings-field">
-            <span>Restore on login</span>
-            <input
-              aria-label="Restore on login"
-              checked={behaviorSettings.restoreOnLogin}
-              data-behavior-control={true}
-              disabled={!behaviorReady}
-              onChange={updateRestoreOnLogin}
-              type="checkbox"
-            />
-          </label>
-          <p>
-            Add <code>wallpaper-console-rust restore-at-login</code> to your desktop session
-            startup. This switch allows that command to restore saved display wallpapers.
-          </p>
-          <p>
-            Availability is checked when applying. Missing dependencies are reported with
-            installation guidance.
-          </p>
+
+          <h4 className="settings-behavior-category">Wallpaper Engine</h4>
+          <div
+            aria-labelledby="settings-scene-playback-heading"
+            className="settings-behavior-card"
+            data-behavior-card="scene-playback"
+            role="group"
+          >
+            <h5 id="settings-scene-playback-heading">Scene playback</h5>
+            <div className="settings-behavior-card__rows">
+              <label className="settings-behavior-row">
+                <span>Scene scaling</span>
+                <select
+                  aria-label="Wallpaper Engine scaling"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady || lweUnavailable}
+                  value={behaviorSettings.lweScaling}
+                  onChange={updateLweScaling}
+                >
+                  {LWE_SCALING_MODES.map((scaling) => (
+                    <option key={scaling} value={scaling}>{scaling}</option>
+                  ))}
+                </select>
+              </label>
+              <label className="settings-behavior-row">
+                <span>Scene FPS</span>
+                <span className="settings-number-control">
+                  <input
+                    aria-label="Wallpaper Engine FPS"
+                    data-behavior-control={true}
+                    disabled={!behaviorReady || lweUnavailable}
+                    max={240}
+                    min={1}
+                    onChange={updateLweFps}
+                    step={1}
+                    type="number"
+                    value={behaviorSettings.lweFps}
+                  />
+                  <span aria-hidden="true" data-control-unit="scene-fps">FPS</span>
+                </span>
+              </label>
+              <label className="settings-behavior-row">
+                <span>Scene volume</span>
+                <span className="settings-number-control">
+                  <input
+                    aria-label="Wallpaper Engine volume"
+                    data-behavior-control={true}
+                    disabled={!behaviorReady || lweUnavailable || behaviorSettings.lweMuted}
+                    max={100}
+                    min={0}
+                    onChange={updateLweVolume}
+                    step={1}
+                    type="number"
+                    value={behaviorSettings.lweVolume}
+                  />
+                  <span aria-hidden="true" data-control-unit="scene-volume">%</span>
+                </span>
+              </label>
+              <label className="settings-behavior-row settings-behavior-row--switch">
+                <span>Mute scene audio</span>
+                <input
+                  aria-label="Mute Wallpaper Engine audio"
+                  checked={behaviorSettings.lweMuted}
+                  className="settings-switch-input"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady || lweUnavailable}
+                  onChange={updateLweMuted}
+                  type="checkbox"
+                />
+              </label>
+            </div>
+          </div>
+
+          <h4 className="settings-behavior-category">Session</h4>
+          <div
+            aria-labelledby="settings-session-restore-heading"
+            className="settings-behavior-card"
+            data-behavior-card="session-restore"
+            role="group"
+          >
+            <h5 id="settings-session-restore-heading">Restore</h5>
+            <div className="settings-behavior-card__rows">
+              <label className="settings-behavior-row settings-behavior-row--switch">
+                <span>Restore on login</span>
+                <input
+                  aria-label="Restore on login"
+                  checked={behaviorSettings.restoreOnLogin}
+                  className="settings-switch-input"
+                  data-behavior-control={true}
+                  disabled={!behaviorReady}
+                  onChange={updateRestoreOnLogin}
+                  type="checkbox"
+                />
+              </label>
+            </div>
+          </div>
         </section>
 
         <section

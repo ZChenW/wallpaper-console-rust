@@ -126,6 +126,10 @@ export default function SinglePageShell() {
   const [sourcesMounted, setSourcesMounted] = useState(false);
   const [selectedEntry, setSelectedEntry] = useState<LibraryBrowserItemDTO | null>(null);
   const [detailsEntry, setDetailsEntry] = useState<LibraryBrowserItemDTO | null>(null);
+  const [favoritePendingPaths, setFavoritePendingPaths] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const favoritePendingPathsRef = useRef(new Set<string>());
   const [firstRunSuggestions, setFirstRunSuggestions] = useState<FirstRunSourceSuggestionDTO[]>([]);
   const [firstRunSuggestionsError, setFirstRunSuggestionsError] = useState<string | null>(null);
   const [firstRunSuggestionReload, setFirstRunSuggestionReload] = useState(0);
@@ -495,6 +499,9 @@ export default function SinglePageShell() {
   }, [reconcileSourcesAndLibrary, scan.onScanFinished, scan.onScanStarted, setCommandFeedback, showNotice]);
 
   const toggleFavorite = useCallback(async (entry: LibraryBrowserItemDTO) => {
+    if (favoritePendingPathsRef.current.has(entry.path)) return;
+    favoritePendingPathsRef.current.add(entry.path);
+    setFavoritePendingPaths((current) => new Set(current).add(entry.path));
     const label = entry.favorite ? 'Remove favorite' : 'Add favorite';
     try {
       const result = entry.favorite
@@ -512,6 +519,13 @@ export default function SinglePageShell() {
       await reloadLibraryRef.current();
     } catch (error) {
       setCommandFeedback(commandErrorFeedback(label, error), 'system');
+    } finally {
+      favoritePendingPathsRef.current.delete(entry.path);
+      setFavoritePendingPaths((current) => {
+        const next = new Set(current);
+        next.delete(entry.path);
+        return next;
+      });
     }
   }, [setCommandFeedback, showNotice]);
 
@@ -687,7 +701,9 @@ export default function SinglePageShell() {
             entries={browser.entries}
             onApply={applyPath}
             onSelect={(entry) => setSelectedEntry(entry as LibraryBrowserItemDTO)}
+            onToggleFavorite={toggleFavorite}
             applying={applyQueue.applying}
+            favoritePendingPaths={favoritePendingPaths}
             buildContextActions={buildContextActions}
             active={true}
             refreshing={browser.refreshing || scanRunning}
@@ -762,7 +778,7 @@ export default function SinglePageShell() {
   };
 
   return (
-    <div className="single-page-shell">
+    <div className={`single-page-shell${settingsOpen ? ' settings-open' : ''}`}>
       <header className="single-page-topbar">
         <div className="single-page-brand" aria-label="Wallpaper Console">Wallpaper Console</div>
         <label className="single-page-search">
@@ -873,9 +889,9 @@ export default function SinglePageShell() {
             updatePreferences((current) => ({ ...current, cardSize }));
           }}
         >
-          <option value="small">Small cards</option>
-          <option value="medium">Medium cards</option>
-          <option value="large">Large cards</option>
+          <option value="small">Small</option>
+          <option value="medium">Medium</option>
+          <option value="large">Large</option>
         </select>
         <span className="single-page-count" aria-live="polite">
           {browser.entries.length} / {browser.total}

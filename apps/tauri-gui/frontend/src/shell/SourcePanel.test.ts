@@ -276,6 +276,26 @@ test('inline alias editor is controlled, saves on Enter, and cancels on Escape',
   assert.deepEqual(calls.at(-1), ['cancel']);
 });
 
+test('inline alias editor cancels without renaming when focus moves outside', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: unknown[][] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    editingSourceId: 41,
+    renameDraft: 'Unsaved alias',
+    onRename: (id, name) => calls.push(['rename', id, name]),
+    onCancelRename: () => calls.push(['cancel']),
+  });
+  const [input] = findElements(
+    tree,
+    (element) => element.props['aria-label'] === 'Alias for Downloaded',
+  );
+
+  (input.props.onBlur as () => void)();
+
+  assert.deepEqual(calls, [['cancel']]);
+});
+
 test('rename editor closes only after its own successful request', async () => {
   const { renameEditorAfterResult } = await importTsxModule();
   const editor = { sourceId: 41, draft: 'Personal picks' };

@@ -1,6 +1,6 @@
 import { memo, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
-import type { WallpaperDTO } from '../api/bridge';
+import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
 import { BoundedFileSrcCache } from './fileSrcCache';
@@ -36,16 +36,18 @@ export function safeFileSrc(path: string): string {
 }
 
 interface CardProps {
-  entry: WallpaperDTO;
+  entry: LibraryBrowserItemDTO;
   applying: boolean;
   onApply: (path: string) => void;
   onSelect?: (entry: WallpaperDTO) => void;
+  onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
   onKeyboardContextMenu?: (path: string, x: number, y: number) => void;
   cardSize?: WallpaperCardSize;
   applyGesture?: ApplyGesture;
   selected?: boolean;
   pending?: boolean;
+  favoritePending?: boolean;
   current?: boolean;
   applyAvailable?: boolean;
   scrolling?: boolean;
@@ -56,12 +58,14 @@ function WallpaperCardImpl({
   applying,
   onApply,
   onSelect,
+  onToggleFavorite,
   onContextMenu,
   onKeyboardContextMenu,
   cardSize = 'medium',
   applyGesture = 'single',
   selected = false,
   pending = false,
+  favoritePending = false,
   current = false,
   applyAvailable,
   scrolling = false,
@@ -176,9 +180,20 @@ function WallpaperCardImpl({
           </div>
         )}
         {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
-        {'favorite' in entry && entry.favorite === true ? (
-          <span aria-label="Favorite" className="wallpaper-favorite-badge">♥</span>
-        ) : null}
+        <button
+          aria-label={entry.favorite ? 'Remove favorite' : 'Add favorite'}
+          className={`wallpaper-favorite-button${entry.favorite ? ' is-favorite' : ''}`}
+          data-card-control
+          disabled={favoritePending}
+          type="button"
+          onClick={(event) => {
+            event.stopPropagation();
+            onToggleFavorite(entry);
+          }}
+          onKeyDown={(event) => event.stopPropagation()}
+        >
+          {entry.favorite ? '♥' : '♡'}
+        </button>
       </div>
       <div className="wallpaper-info">
         <span className="wallpaper-name">{displayName(entry)}</span>
