@@ -293,7 +293,7 @@ test('save queue reports only the latest request failure and recovers on a newer
   assert.deepEqual(observed, ['latest transport failure', null]);
 });
 
-test('persistence retries an unchanged snapshot after failure and confirms it only on success', async () => {
+test('persistence retries one transient failure and confirms the snapshot only on success', async () => {
   let attempts = 0;
   const client: WallpaperBehaviorSettingsClient = {
     configGetMany: async () => ({}),
@@ -309,10 +309,7 @@ test('persistence retries an unchanged snapshot after failure and confirms it on
   const changed = settings({ imageBackend: 'mpvpaper' });
   persistence.reset(settings());
 
-  await assert.rejects(persistence.persist(changed), /temporary write failure/);
-  assert.equal(attempts, 1);
-
-  await persistence.persist({ ...changed });
+  await persistence.persist(changed);
   assert.equal(attempts, 1 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
 
   await persistence.persist({ ...changed });
@@ -321,4 +318,282 @@ test('persistence retries an unchanged snapshot after failure and confirms it on
     1 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length,
     'a successful write becomes the new persisted baseline',
   );
+});
+
+test('persistence stops after one automatic retry when failures continue', async () => {
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async () => {
+      attempts += 1;
+      throw new Error('persistent write failure');
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  persistence.reset(settings());
+
+  await assert.rejects(
+    persistence.persist(settings({ imageBackend: 'mpvpaper' })),
+    /persistent write failure/,
+  );
+  await nextTask();
+  assert.equal(attempts, 2);
+});
+
+test('persistence permits an explicit retry after the bounded attempts fail', async () => {
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async () => {
+      attempts += 1;
+      if (attempts <= 2) throw new Error('storage temporarily unavailable');
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  const changed = settings({ imageBackend: 'mpvpaper' });
+  persistence.reset(settings());
+
+  await assert.rejects(persistence.persist(changed), /storage temporarily unavailable/);
+  await persistence.persist({ ...changed });
+
+  assert.equal(attempts, 2 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
+});
+
+test('persistence restores the confirmed snapshot when UI reverts during an in-flight save', async () => {
+  const firstWrite = deferred<typeof ok>();
+  const imageWrites: string[] = [];
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      attempts += 1;
+      if (key === 'image_backend') imageWrites.push(value);
+      if (attempts === 1) return firstWrite.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  const original = settings();
+  persistence.reset(original);
+
+  const change = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  await nextTask();
+  const revert = persistence.persist({ ...original });
+  firstWrite.resolve(ok);
+
+  await Promise.all([change, revert]);
+  assert.deepEqual(imageWrites, ['mpvpaper', 'awww']);
+  assert.equal(attempts, WALLPAPER_BEHAVIOR_CONFIG_KEYS.length * 2);
+});
+
+test('persistence repairs a partially failed save when UI reverts to the prior snapshot', async () => {
+  const failedWrite = deferred<typeof ok>();
+  const imageWrites: string[] = [];
+  let gifAttempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      if (key === 'image_backend') imageWrites.push(value);
+      if (key === 'gif_backend') {
+        gifAttempts += 1;
+        if (gifAttempts === 1) return failedWrite.promise;
+      }
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  const original = settings();
+  persistence.reset(original);
+
+  const change = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  await nextTask();
+  const revert = persistence.persist({ ...original });
+  failedWrite.reject(new Error('write interrupted after the first key'));
+
+  await Promise.all([change, revert]);
+  assert.deepEqual(imageWrites, ['mpvpaper', 'awww']);
+});
+
+test('persistence coalesces rapid changes to the latest UI snapshot', async () => {
+  const firstWrite = deferred<typeof ok>();
+  const imageWrites: string[] = [];
+  const resizeWrites: string[] = [];
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      attempts += 1;
+      if (key === 'image_backend') imageWrites.push(value);
+      if (key === 'awww_resize') resizeWrites.push(value);
+      if (attempts === 1) return firstWrite.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  const original = settings();
+  persistence.reset(original);
+
+  const first = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  await nextTask();
+  const superseded = persistence.persist(settings({ fillMode: 'fit' }));
+  const latest = persistence.persist({ ...original });
+  firstWrite.resolve(ok);
+
+  await Promise.all([first, superseded, latest]);
+  assert.deepEqual(imageWrites, ['mpvpaper', 'awww']);
+  assert.deepEqual(resizeWrites, ['crop', 'crop']);
+  assert.equal(attempts, WALLPAPER_BEHAVIOR_CONFIG_KEYS.length * 2);
+});
+
+test('persistence deduplicates an in-flight desired snapshot', async () => {
+  const firstWrite = deferred<typeof ok>();
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async () => {
+      attempts += 1;
+      if (attempts === 1) return firstWrite.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  persistence.reset(settings());
+  const changed = settings({ imageBackend: 'mpvpaper' });
+
+  const first = persistence.persist(changed);
+  await nextTask();
+  const duplicate = persistence.persist({ ...changed });
+  assert.equal(attempts, 1);
+  firstWrite.resolve(ok);
+
+  await Promise.all([first, duplicate]);
+  assert.equal(attempts, WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
+});
+
+test('persistence drains a newer revision arriving between terminal failure and rejection handling', async () => {
+  const secondFailure = deferred<typeof ok>();
+  const recoveryScheduled = deferred<void>();
+  const imageWrites: string[] = [];
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      attempts += 1;
+      if (key === 'image_backend') imageWrites.push(value);
+      if (attempts === 1) throw new Error('first persistent failure');
+      if (attempts === 2) return secondFailure.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  persistence.reset(settings());
+
+  let terminalFailure: unknown = null;
+  let recoveryPromise: Promise<void> | null = null;
+  const originalSave = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  const completion = originalSave.then(
+    () => {},
+    (failure: unknown) => {
+      terminalFailure = failure;
+    },
+  );
+  await nextTask();
+  assert.equal(attempts, 2);
+
+  void secondFailure.promise.catch(() => {
+    // The fourth microtask lands after drain has rejected but before the
+    // active-promise rejection observer runs.
+    queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+      recoveryPromise = persistence.persist(settings({ fillMode: 'fit' }));
+      recoveryScheduled.resolve();
+    }))));
+  });
+  secondFailure.reject(new Error('second persistent failure'));
+
+  await recoveryScheduled.promise;
+  assert.equal(recoveryPromise, originalSave, 'the terminal failure observer is still pending');
+  await completion;
+  assert.equal(terminalFailure, null);
+  assert.deepEqual(imageWrites, ['mpvpaper', 'mpvpaper', 'awww']);
+  assert.equal(attempts, 2 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
+  await nextTask();
+  assert.equal(attempts, 2 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
+});
+
+test('reset during an in-flight save rewrites the new baseline after the old save succeeds', async () => {
+  const oldWrite = deferred<typeof ok>();
+  const imageWrites: string[] = [];
+  const resizeWrites: string[] = [];
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      attempts += 1;
+      if (key === 'image_backend') imageWrites.push(value);
+      if (key === 'awww_resize') resizeWrites.push(value);
+      if (attempts === 1) return oldWrite.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  persistence.reset(settings());
+
+  const oldSave = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  await nextTask();
+  persistence.reset(settings({ fillMode: 'fit' }));
+  oldWrite.resolve(ok);
+
+  await oldSave;
+  assert.deepEqual(imageWrites, ['mpvpaper', 'awww']);
+  assert.deepEqual(resizeWrites, ['crop', 'fit']);
+  assert.equal(attempts, WALLPAPER_BEHAVIOR_CONFIG_KEYS.length * 2);
+});
+
+test('reset through an unavailable baseline rewrites the new baseline after the old save fails', async () => {
+  const oldWrite = deferred<typeof ok>();
+  const imageWrites: string[] = [];
+  const resizeWrites: string[] = [];
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async (key, value) => {
+      attempts += 1;
+      if (key === 'image_backend') imageWrites.push(value);
+      if (key === 'awww_resize') resizeWrites.push(value);
+      if (attempts === 1) return oldWrite.promise;
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  persistence.reset(settings());
+
+  const oldSave = persistence.persist(settings({ imageBackend: 'mpvpaper' }));
+  await nextTask();
+  persistence.reset(null);
+  persistence.reset(settings({ fillMode: 'fit' }));
+  oldWrite.reject(new Error('old generation failed'));
+
+  await oldSave;
+  assert.deepEqual(imageWrites, ['mpvpaper', 'awww']);
+  assert.deepEqual(resizeWrites, ['fit']);
+  assert.equal(attempts, 1 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
 });

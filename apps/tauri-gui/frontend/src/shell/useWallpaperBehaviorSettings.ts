@@ -356,19 +356,153 @@ export function createWallpaperBehaviorSaveQueue(
 export function createWallpaperBehaviorPersistence(
   saveQueue: WallpaperBehaviorSaveQueue,
 ): WallpaperBehaviorPersistence {
-  let persistedSnapshot: string | null = null;
+  // One immediate retry covers transient failures without creating an
+  // unbounded write loop when configuration storage remains unavailable.
+  const maximumAttempts = 2;
+  let generation = 0;
+  let baselineEstablished = false;
+  let confirmedSnapshot: string | null = null;
+  let latestDesired: {
+    readonly settings: WallpaperBehaviorSettings;
+    readonly snapshot: string;
+    readonly revision: number;
+  } | null = null;
+  let nextRevision = 0;
+  let storageUncertain = false;
+  let activePromise: Promise<void> | null = null;
+
+  class TerminalPersistenceFailure {
+    readonly cause: unknown;
+    readonly generation: number;
+    readonly revision: number;
+
+    constructor(
+      cause: unknown,
+      failureGeneration: number,
+      failureRevision: number,
+    ) {
+      this.cause = cause;
+      this.generation = failureGeneration;
+      this.revision = failureRevision;
+    }
+  }
+
+  const needsPersistence = (): boolean => baselineEstablished
+    && latestDesired !== null
+    && (storageUncertain || latestDesired.snapshot !== confirmedSnapshot);
+
+  const drain = async (runGeneration: number): Promise<void> => {
+    let attemptedSnapshot: string | null = null;
+    let attempts = 0;
+
+    while (runGeneration === generation && baselineEstablished && latestDesired !== null) {
+      const desired = latestDesired;
+      if (!storageUncertain && desired.snapshot === confirmedSnapshot) return;
+      if (desired.snapshot !== attemptedSnapshot) {
+        attemptedSnapshot = desired.snapshot;
+        attempts = 0;
+      }
+
+      try {
+        await saveQueue.enqueue(desired.settings);
+      } catch (failure) {
+        if (runGeneration !== generation) return;
+        // A failed multi-key save may already have changed earlier keys. The
+        // last confirmed snapshot is no longer proof of what is on disk.
+        storageUncertain = true;
+        if (latestDesired?.snapshot !== desired.snapshot) {
+          attemptedSnapshot = null;
+          attempts = 0;
+          continue;
+        }
+        attempts += 1;
+        if (attempts >= maximumAttempts) {
+          throw new TerminalPersistenceFailure(
+            failure,
+            runGeneration,
+            desired.revision,
+          );
+        }
+        continue;
+      }
+
+      if (runGeneration !== generation) return;
+      confirmedSnapshot = desired.snapshot;
+      storageUncertain = false;
+      attemptedSnapshot = null;
+      attempts = 0;
+    }
+  };
+
+  const ensureDrain = (): Promise<void> => {
+    if (activePromise !== null) return activePromise;
+    const runGeneration = generation;
+    const run = drain(runGeneration);
+    let observed!: Promise<void>;
+    observed = run.then(
+      () => {
+        if (activePromise !== observed) return;
+        activePromise = null;
+        // A desired snapshot can arrive after drain decides it has no work but
+        // before this completion callback runs. Recheck once ownership clears.
+        if (needsPersistence()) return ensureDrain();
+      },
+      (failure: unknown) => {
+        if (activePromise === observed) activePromise = null;
+        if (failure instanceof TerminalPersistenceFailure) {
+          const desiredChanged = failure.generation !== generation
+            || failure.revision !== latestDesired?.revision;
+          if (desiredChanged && needsPersistence()) return ensureDrain();
+          throw failure.cause;
+        }
+        throw failure;
+      },
+    );
+    activePromise = observed;
+    return observed;
+  };
 
   return {
     reset(value) {
-      persistedSnapshot = value === null ? null : settingsSnapshot(value);
-    },
-    async persist(value) {
-      if (persistedSnapshot === null) return;
-      const snapshot = settingsSnapshot(value);
-      if (snapshot === persistedSnapshot) return;
+      generation += 1;
+      const writeInFlight = activePromise !== null;
+      baselineEstablished = value !== null;
+      if (value === null) {
+        confirmedSnapshot = null;
+        latestDesired = null;
+        storageUncertain = writeInFlight;
+        return;
+      }
 
-      await saveQueue.enqueue(value);
-      persistedSnapshot = snapshot;
+      const normalized = normalizeWallpaperBehaviorSettings(value);
+      const snapshot = settingsSnapshot(normalized);
+      confirmedSnapshot = snapshot;
+      if (writeInFlight) {
+        latestDesired = {
+          settings: normalized,
+          snapshot,
+          revision: ++nextRevision,
+        };
+        // The old generation can finish after this new baseline was read, so
+        // rewrite it once the old active promise releases the queue.
+        storageUncertain = true;
+      } else {
+        latestDesired = null;
+        storageUncertain = false;
+      }
+    },
+    persist(value) {
+      if (!baselineEstablished) return Promise.resolve();
+      const normalized = normalizeWallpaperBehaviorSettings(value);
+      const snapshot = settingsSnapshot(normalized);
+      latestDesired = {
+        settings: normalized,
+        snapshot,
+        revision: latestDesired?.snapshot === snapshot
+          ? latestDesired.revision
+          : ++nextRevision,
+      };
+      return ensureDrain();
     },
   };
 }
