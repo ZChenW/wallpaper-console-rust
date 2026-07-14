@@ -144,6 +144,29 @@ where
     ))
 }
 
+pub(crate) fn wait_for_mpvpaper_stopped_with<P, S>(
+    mut probe: P,
+    mut sleep: S,
+) -> Result<(), WcError>
+where
+    P: FnMut() -> Result<Vec<u32>, WcError>,
+    S: FnMut(std::time::Duration),
+{
+    for poll in 0..=40 {
+        let pids = probe()?;
+        if pids.is_empty() {
+            return Ok(());
+        }
+        if poll == 40 {
+            return Err(WcError::Other(format!(
+                "mpvpaper still running after stop: pids={pids:?}"
+            )));
+        }
+        sleep(std::time::Duration::from_millis(50));
+    }
+    unreachable!()
+}
+
 impl BackendRuntime for SystemBackendRuntime {
     fn ensure_backend_available(
         &mut self,
@@ -233,13 +256,7 @@ impl BackendRuntime for SystemBackendRuntime {
 
     fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
         self.stop_mpvpaper();
-        let pids = self.mpvpaper_pids()?;
-        if !pids.is_empty() {
-            return Err(WcError::Other(format!(
-                "mpvpaper still running after stop: pids={pids:?}"
-            )));
-        }
-        Ok(())
+        wait_for_mpvpaper_stopped_with(|| self.mpvpaper_pids(), std::thread::sleep)
     }
 
     fn stop_lwe_checked(&mut self, s: Option<&StorageApi>) -> Result<(), WcError> {
@@ -334,7 +351,44 @@ mod tests {
 
     use wc_core::error::WcError;
 
-    use super::{new_mpvpaper_pid, wait_for_mpvpaper_ready_with};
+    use super::{new_mpvpaper_pid, wait_for_mpvpaper_ready_with, wait_for_mpvpaper_stopped_with};
+
+    #[test]
+    fn mpvpaper_stop_waits_for_a_process_to_exit() {
+        let mut probes: VecDeque<Result<Vec<u32>, WcError>> =
+            VecDeque::from([Ok(vec![41]), Ok(vec![])]);
+        let mut sleeps = Vec::new();
+
+        wait_for_mpvpaper_stopped_with(
+            || probes.pop_front().expect("unexpected extra PID probe"),
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+
+        assert_eq!(sleeps, vec![Duration::from_millis(50)]);
+    }
+
+    #[test]
+    fn mpvpaper_stop_reports_remaining_pids_after_two_seconds() {
+        let mut probe_count = 0;
+        let mut sleeps = Vec::new();
+
+        let error = wait_for_mpvpaper_stopped_with(
+            || {
+                probe_count += 1;
+                Ok(vec![41])
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error.to_string(),
+            "mpvpaper still running after stop: pids=[41]"
+        );
+        assert_eq!(probe_count, 41);
+        assert_eq!(sleeps, vec![Duration::from_millis(50); 40]);
+    }
 
     #[test]
     fn mpvpaper_wait_returns_new_pid_after_an_immediate_old_only_probe() {
