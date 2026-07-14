@@ -7,6 +7,7 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from 'react';
+import { Pencil, RefreshCw, Trash2 } from 'lucide-react';
 
 import type { CommandResult, SourceDTO } from '../api/types';
 import {
@@ -55,12 +56,17 @@ export interface SourcePanelViewProps {
   readonly loadError: string | null;
   readonly pendingOperation: string | null;
   readonly removeCandidateId: number | null;
+  readonly editingSourceId: number | null;
+  readonly renameDraft: string;
   readonly onClose: () => void;
   readonly onReload: () => void;
   readonly onAdd: () => void;
   readonly onRefreshAll: () => void;
   readonly onScanWallpaperEngine: () => void;
   readonly onRename: (id: number, displayName: string) => void;
+  readonly onStartRename: (source: SourceDTO) => void;
+  readonly onChangeRenameDraft: (displayName: string) => void;
+  readonly onCancelRename: () => void;
   readonly onSetRecursive: (id: number, recursive: boolean) => void;
   readonly onRefresh: (id: number) => void;
   readonly onRequestRemove: (id: number) => void;
@@ -202,6 +208,13 @@ const sourceNameStyle: CSSProperties = {
   whiteSpace: 'nowrap',
 };
 
+const sourceNameRowStyle: CSSProperties = {
+  display: 'flex',
+  minWidth: 0,
+  alignItems: 'center',
+  gap: '0.35rem',
+};
+
 const sourcePathStyle: CSSProperties = {
   display: 'block',
   marginTop: '0.2rem',
@@ -226,11 +239,30 @@ const rowActionsStyle: CSSProperties = {
   gap: '0.45rem',
 };
 
+const iconActionsStyle: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  gap: '0.35rem',
+  marginInlineStart: 'auto',
+};
+
+const iconButtonStyle: CSSProperties = {
+  display: 'inline-flex',
+  width: '2rem',
+  height: '2rem',
+  alignItems: 'center',
+  justifyContent: 'center',
+  padding: 0,
+  border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
+  borderRadius: '0.45rem',
+  background: 'transparent',
+  color: 'inherit',
+  cursor: 'pointer',
+};
+
 const renameFormStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(0, 1fr) auto',
-  gap: '0.45rem',
-  marginTop: '0.55rem',
+  minWidth: 0,
+  flex: 1,
 };
 
 const inputStyle: CSSProperties = {
@@ -413,19 +445,26 @@ function availabilityLabel(source: SourceDTO): string {
   return 'Availability unknown';
 }
 
-function renameValue(event: FormEvent<HTMLFormElement>): string {
-  const field = event.currentTarget.elements.namedItem('displayName');
-  if (!field || typeof field !== 'object' || !('value' in field) || typeof field.value !== 'string') {
-    return '';
+function availabilityStyle(availability: SourceDTO['availability']): CSSProperties {
+  if (availability === 'available') {
+    return { color: '#2e9b59', background: 'rgb(46 155 89 / 16%)' };
   }
-  return field.value.trim();
+  if (availability === 'offline') {
+    return { color: '#d94b4b', background: 'rgb(217 75 75 / 16%)' };
+  }
+  return { color: '#b78700', background: 'rgb(183 135 0 / 16%)' };
 }
 
 function SourceRow({
   source,
   busy,
   confirmingRemoval,
+  editing,
+  renameDraft,
   onRename,
+  onStartRename,
+  onChangeRenameDraft,
+  onCancelRename,
   onSetRecursive,
   onRefresh,
   onRequestRemove,
@@ -435,7 +474,12 @@ function SourceRow({
   readonly source: SourceDTO;
   readonly busy: boolean;
   readonly confirmingRemoval: boolean;
+  readonly editing: boolean;
+  readonly renameDraft: string;
   readonly onRename: SourcePanelViewProps['onRename'];
+  readonly onStartRename: SourcePanelViewProps['onStartRename'];
+  readonly onChangeRenameDraft: SourcePanelViewProps['onChangeRenameDraft'];
+  readonly onCancelRename: SourcePanelViewProps['onCancelRename'];
   readonly onSetRecursive: SourcePanelViewProps['onSetRecursive'];
   readonly onRefresh: SourcePanelViewProps['onRefresh'];
   readonly onRequestRemove: SourcePanelViewProps['onRequestRemove'];
@@ -452,13 +496,60 @@ function SourceRow({
     >
       <div style={rowHeaderStyle}>
         <div>
-          <span id={sourceNameId} style={sourceNameStyle}>{source.displayName}</span>
+          <div style={sourceNameRowStyle}>
+            {editing ? (
+              <form
+                data-source-action={`rename:${source.id}`}
+                onSubmit={(event: FormEvent<HTMLFormElement>) => {
+                  event.preventDefault();
+                  const displayName = renameDraft.trim();
+                  if (displayName) onRename(source.id, displayName);
+                }}
+                style={renameFormStyle}
+              >
+                <input
+                  aria-label={`Alias for ${source.displayName}`}
+                  autoComplete="off"
+                  autoFocus
+                  data-source-mutating={true}
+                  disabled={busy}
+                  maxLength={120}
+                  name="displayName"
+                  onChange={(event) => onChangeRenameDraft(event.currentTarget.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== 'Escape') return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onCancelRename();
+                  }}
+                  required
+                  style={{ ...inputStyle, width: '100%' }}
+                  value={renameDraft}
+                />
+              </form>
+            ) : (
+              <span id={sourceNameId} style={{ ...sourceNameStyle, minWidth: 0 }}>{source.displayName}</span>
+            )}
+            <button
+              aria-label={`Rename ${source.displayName}`}
+              aria-pressed={editing}
+              data-source-action={`start-rename:${source.id}`}
+              data-source-mutating={true}
+              disabled={busy}
+              onClick={() => onStartRename(source)}
+              style={{ ...iconButtonStyle, flex: '0 0 auto' }}
+              title={`Rename ${source.displayName}`}
+              type="button"
+            >
+              <Pencil aria-hidden="true" size={15} />
+            </button>
+          </div>
           <span style={sourcePathStyle} title={source.path}>{source.path}</span>
         </div>
         <span
           aria-label={`Availability: ${availabilityLabel(source)}`}
           data-source-availability={source.availability}
-          style={badgeStyle}
+          style={{ ...badgeStyle, ...availabilityStyle(source.availability) }}
         >
           {availabilityLabel(source)}
         </span>
@@ -483,57 +574,33 @@ function SourceRow({
           </label>
         ) : null}
 
-        <button
-          data-source-action={`refresh:${source.id}`}
-          data-source-mutating={true}
-          disabled={busy}
-          onClick={() => onRefresh(source.id)}
-          style={buttonStyle}
-          type="button"
-        >
-          Refresh
-        </button>
-        <details>
-          <summary style={{ cursor: busy ? 'default' : 'pointer', fontSize: '0.78rem' }}>Rename</summary>
-          <form
-            data-source-action={`rename:${source.id}`}
-            onSubmit={(event) => {
-              event.preventDefault();
-              const displayName = renameValue(event);
-              if (displayName) onRename(source.id, displayName);
-            }}
-            style={renameFormStyle}
+        <div style={iconActionsStyle}>
+          <button
+            aria-label={`Refresh ${source.displayName}`}
+            data-source-action={`refresh:${source.id}`}
+            data-source-mutating={true}
+            disabled={busy}
+            onClick={() => onRefresh(source.id)}
+            style={iconButtonStyle}
+            title={`Refresh ${source.displayName}`}
+            type="button"
           >
-            <label htmlFor={`source-display-name-${source.id}`} style={{ position: 'absolute', clipPath: 'inset(50%)' }}>
-              Display name
-            </label>
-            <input
-              autoComplete="off"
-              data-source-mutating={true}
-              defaultValue={source.displayName}
-              disabled={busy}
-              id={`source-display-name-${source.id}`}
-              maxLength={120}
-              name="displayName"
-              required
-              style={inputStyle}
-            />
-            <button data-source-mutating={true} disabled={busy} style={primaryButtonStyle} type="submit">
-              Save
-            </button>
-          </form>
-        </details>
-        <button
-          aria-describedby={sourceNameId}
-          data-source-action={`request-remove:${source.id}`}
-          data-source-mutating={true}
-          disabled={busy}
-          onClick={() => onRequestRemove(source.id)}
-          style={dangerButtonStyle}
-          type="button"
-        >
-          Remove
-        </button>
+            <RefreshCw aria-hidden="true" size={15} />
+          </button>
+          <button
+            aria-label={`Remove ${source.displayName}`}
+            aria-describedby={editing ? undefined : sourceNameId}
+            data-source-action={`request-remove:${source.id}`}
+            data-source-mutating={true}
+            disabled={busy}
+            onClick={() => onRequestRemove(source.id)}
+            style={{ ...iconButtonStyle, color: '#d94b4b' }}
+            title={`Remove ${source.displayName}`}
+            type="button"
+          >
+            <Trash2 aria-hidden="true" size={15} />
+          </button>
+        </div>
       </div>
 
       {confirmingRemoval ? (
@@ -580,12 +647,17 @@ export function SourcePanelView({
   loadError,
   pendingOperation,
   removeCandidateId,
+  editingSourceId,
+  renameDraft,
   onClose,
   onReload,
   onAdd,
   onRefreshAll,
   onScanWallpaperEngine,
   onRename,
+  onStartRename,
+  onChangeRenameDraft,
+  onCancelRename,
   onSetRecursive,
   onRefresh,
   onRequestRemove,
@@ -683,13 +755,18 @@ export function SourcePanelView({
                 <SourceRow
                   busy={busy}
                   confirmingRemoval={removeCandidateId === source.id}
+                  editing={editingSourceId === source.id}
                   key={source.id}
+                  onCancelRename={onCancelRename}
+                  onChangeRenameDraft={onChangeRenameDraft}
                   onCancelRemove={onCancelRemove}
                   onRefresh={onRefresh}
                   onRemove={onRemove}
                   onRename={onRename}
+                  onStartRename={onStartRename}
                   onRequestRemove={onRequestRemove}
                   onSetRecursive={onSetRecursive}
+                  renameDraft={renameDraft}
                   source={source}
                 />
               ))}
@@ -730,6 +807,7 @@ export function SourcePanel({
     onScanFinished,
   });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
+  const [renameEditor, setRenameEditor] = useState<{ readonly sourceId: number; readonly draft: string } | null>(null);
   const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
 
   useEffect(() => {
@@ -744,11 +822,18 @@ export function SourcePanel({
     }
   }, [removeCandidateId, sources]);
 
+  useEffect(() => {
+    if (renameEditor !== null && !sources.some((source) => source.id === renameEditor.sourceId)) {
+      setRenameEditor(null);
+    }
+  }, [renameEditor, sources]);
+
   const handleAdd = useCallback(() => {
     void runAddSourceAction(addFromPicker, onNotice);
   }, [addFromPicker, onNotice]);
 
   const handleRename = useCallback((id: number, displayName: string) => {
+    setRenameEditor(null);
     void runCommand({
       action: () => rename(id, displayName),
       channel: 'settings',
@@ -811,8 +896,11 @@ export function SourcePanel({
     <SourcePanelView
       loadError={loadError}
       loading={loading}
+      editingSourceId={renameEditor?.sourceId ?? null}
       onAdd={handleAdd}
+      onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
+      onChangeRenameDraft={(draft) => setRenameEditor((current) => current ? { ...current, draft } : current)}
       onClose={onClose}
       onRefresh={handleRefresh}
       onRefreshAll={handleRefreshAll}
@@ -822,8 +910,10 @@ export function SourcePanel({
       onRequestRemove={setRemoveCandidateId}
       onScanWallpaperEngine={handleScanWallpaperEngine}
       onSetRecursive={handleSetRecursive}
+      onStartRename={(source) => setRenameEditor({ sourceId: source.id, draft: source.displayName })}
       open={open}
       pendingOperation={pendingOperation}
+      renameDraft={renameEditor?.draft ?? ''}
       removeCandidateId={removeCandidateId}
       sources={sources}
     />

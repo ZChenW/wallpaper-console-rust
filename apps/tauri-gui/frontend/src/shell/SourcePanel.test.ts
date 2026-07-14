@@ -72,6 +72,18 @@ const sources: SourceDTO[] = [
     isWE: true,
     label: 'Wallpaper Engine',
   },
+  {
+    id: 99,
+    path: '/media/archive/wallpapers',
+    displayName: 'Archive',
+    kind: 'directory',
+    recursive: false,
+    availability: 'unknown',
+    addedAt: '2026-07-14T00:00:00Z',
+    exists: false,
+    isWE: false,
+    label: 'Archive',
+  },
 ];
 
 function noopViewProps() {
@@ -82,12 +94,17 @@ function noopViewProps() {
     loadError: null,
     pendingOperation: null,
     removeCandidateId: null,
+    editingSourceId: null,
+    renameDraft: '',
     onClose: () => undefined,
     onReload: () => undefined,
     onAdd: () => undefined,
     onRefreshAll: () => undefined,
     onScanWallpaperEngine: () => undefined,
     onRename: (_id: number, _displayName: string) => undefined,
+    onStartRename: (_source: SourceDTO) => undefined,
+    onChangeRenameDraft: (_displayName: string) => undefined,
+    onCancelRename: () => undefined,
     onSetRecursive: (_id: number, _recursive: boolean) => undefined,
     onRefresh: (_id: number) => undefined,
     onRequestRemove: (_id: number) => undefined,
@@ -157,6 +174,7 @@ test('renders a compact accessible drawer with source kind and honest availabili
   assert.match(markup, /Available/);
   assert.match(markup, /Wallpaper Engine/);
   assert.match(markup, /Offline/);
+  assert.match(markup, /Availability unknown/);
   assert.match(markup, /indexed wallpapers are kept/);
   assert.match(markup, /data-source-id="41"/);
   assert.match(markup, /data-source-id="77"/);
@@ -189,46 +207,86 @@ test('renders loading, load failure with retry, and empty-library states', async
   assert.match(empty, /Add a folder or scan Wallpaper Engine when you are ready/);
 });
 
-test('source row actions use stable IDs and reject an empty inline rename', async () => {
+test('source rows expose always-visible labelled icon actions with stable IDs', async () => {
   const { SourcePanelView } = await importTsxModule();
   const calls: unknown[][] = [];
   const tree = SourcePanelView({
     ...noopViewProps(),
-    onRename: (id, name) => calls.push(['rename', id, name]),
+    onStartRename: (source) => calls.push(['start-rename', source.id]),
     onSetRecursive: (id, recursive) => calls.push(['recursive', id, recursive]),
     onRefresh: (id) => calls.push(['refresh', id]),
     onRequestRemove: (id) => calls.push(['request-remove', id]),
   });
-  const [renameForm] = findElements(tree, (element) => element.props['data-source-action'] === 'rename:41');
+  const [rename] = findElements(tree, (element) => element.props['data-source-action'] === 'start-rename:41');
   const [recursive] = findElements(tree, (element) => element.props['data-source-action'] === 'recursive:41');
   const [refresh] = findElements(tree, (element) => element.props['data-source-action'] === 'refresh:77');
   const [requestRemove] = findElements(tree, (element) => element.props['data-source-action'] === 'request-remove:77');
 
-  assert.ok(renameForm);
+  assert.equal(rename.props['aria-label'], 'Rename Downloaded');
+  assert.equal(rename.props.title, 'Rename Downloaded');
+  assert.equal(refresh.props['aria-label'], 'Refresh Wallpaper Engine');
+  assert.equal(refresh.props.title, 'Refresh Wallpaper Engine');
+  assert.equal(requestRemove.props['aria-label'], 'Remove Wallpaper Engine');
+  assert.equal(requestRemove.props.title, 'Remove Wallpaper Engine');
   assert.ok(recursive);
-  assert.ok(refresh);
-  assert.ok(requestRemove);
 
-  let prevented = 0;
-  const submitRename = (value: string) => (renameForm.props.onSubmit as (event: unknown) => void)({
-    preventDefault: () => { prevented += 1; },
-    currentTarget: {
-      elements: { namedItem: (name: string) => name === 'displayName' ? { value } : null },
-    },
-  });
-  submitRename('   ');
-  submitRename('  Personal picks  ');
+  (rename.props.onClick as () => void)();
   (recursive.props.onChange as (event: unknown) => void)({ currentTarget: { checked: false } });
   (refresh.props.onClick as () => void)();
   (requestRemove.props.onClick as () => void)();
 
-  assert.equal(prevented, 2);
   assert.deepEqual(calls, [
-    ['rename', 41, 'Personal picks'],
+    ['start-rename', 41],
     ['recursive', 41, false],
     ['refresh', 77],
     ['request-remove', 77],
   ]);
+});
+
+test('inline alias editor is controlled, saves on Enter, and cancels on Escape', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: unknown[][] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    editingSourceId: 41,
+    renameDraft: 'Personal picks',
+    onRename: (id, name) => calls.push(['rename', id, name]),
+    onChangeRenameDraft: (name) => calls.push(['change', name]),
+    onCancelRename: () => calls.push(['cancel']),
+  });
+  const [form] = findElements(tree, (element) => element.props['data-source-action'] === 'rename:41');
+  const [input] = findElements(tree, (element) => element.props['aria-label'] === 'Alias for Downloaded');
+
+  assert.equal(input.props.value, 'Personal picks');
+  assert.equal(input.props.autoFocus, true);
+  (input.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'New alias' } });
+
+  let prevented = 0;
+  (form.props.onSubmit as (event: unknown) => void)({ preventDefault: () => { prevented += 1; } });
+  assert.equal(prevented, 1);
+  assert.deepEqual(calls, [['change', 'New alias'], ['rename', 41, 'Personal picks']]);
+
+  let stopped = 0;
+  (input.props.onKeyDown as (event: unknown) => void)({
+    key: 'Escape',
+    preventDefault: () => { prevented += 1; },
+    stopPropagation: () => { stopped += 1; },
+  });
+  assert.equal(stopped, 1, 'Escape must not bubble and close the drawer');
+  assert.deepEqual(calls.at(-1), ['cancel']);
+});
+
+test('availability badges use green, red, and yellow status backgrounds', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const tree = SourcePanelView(noopViewProps());
+  const badge = (availability: string) => findElements(
+    tree,
+    (element) => element.props['data-source-availability'] === availability,
+  )[0];
+
+  assert.equal(badge('available').props.style.background, 'rgb(46 155 89 / 16%)');
+  assert.equal(badge('offline').props.style.background, 'rgb(217 75 75 / 16%)');
+  assert.equal(badge('unknown').props.style.background, 'rgb(183 135 0 / 16%)');
 });
 
 test('refresh all is available only when configured sources can be scanned', async () => {
