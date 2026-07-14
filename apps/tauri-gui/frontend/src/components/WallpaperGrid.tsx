@@ -89,6 +89,7 @@ export default function WallpaperGrid({
   onLoadMore,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [scrolling, setScrolling] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
 
@@ -162,6 +163,7 @@ export default function WallpaperGrid({
   const beginScrolling = useCallback(() => {
     if (!isScrollingRef.current) {
       isScrollingRef.current = true;
+      setScrolling(true);
       setRevealPaused(true);
     }
     if (scrollIdleTimerRef.current !== null) {
@@ -170,6 +172,7 @@ export default function WallpaperGrid({
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
+      setScrolling(false);
       setRevealPaused(false);
     }, SCROLL_IDLE_MS);
   }, [setRevealPaused]);
@@ -367,6 +370,7 @@ export default function WallpaperGrid({
                   pending={pendingPath === e.path}
                   current={currentPath === e.path}
                   applyAvailable={isEntryApplicable?.(e)}
+                  scrolling={scrolling}
                 />
               ))}
             </div>

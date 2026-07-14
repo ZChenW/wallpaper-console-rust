@@ -1,4 +1,4 @@
-import { memo, useSyncExternalStore, type CSSProperties } from 'react';
+import { memo, useState, useSyncExternalStore, type CSSProperties } from 'react';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { WallpaperDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
@@ -21,6 +21,7 @@ import {
   resolveCardPointerInteraction,
 } from '../shell/cardInteraction';
 import type { ApplyGesture } from '../shell/shellPreferences';
+import { animatedPreviewPath, previewAssetPath } from './wallpaperGridHelpers';
 
 const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
   try {
@@ -47,6 +48,7 @@ interface CardProps {
   pending?: boolean;
   current?: boolean;
   applyAvailable?: boolean;
+  scrolling?: boolean;
 }
 
 function WallpaperCardImpl({
@@ -62,16 +64,20 @@ function WallpaperCardImpl({
   pending = false,
   current = false,
   applyAvailable,
+  scrolling = false,
 }: CardProps) {
   const store = useThumbnailStore();
+  const [hovered, setHovered] = useState(false);
+  const thumbnailPath = previewAssetPath(entry);
   const thumbnail = useSyncExternalStore(
-    (cb) => store.subscribe(entry.path, cb),
-    () => store.get(entry.path),
+    (cb) => store.subscribe(thumbnailPath, cb),
+    () => store.get(thumbnailPath),
   );
   const thumbnailFailure = useSyncExternalStore(
-    (cb) => store.subscribe(entry.path, cb),
-    () => store.getFailure(entry.path),
+    (cb) => store.subscribe(thumbnailPath, cb),
+    () => store.getFailure(thumbnailPath),
   );
+  const animatedPreview = animatedPreviewPath(entry, hovered, scrolling);
 
   const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
     const target = event.target;
@@ -145,6 +151,8 @@ function WallpaperCardImpl({
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
       onClick={handleClick}
       onKeyDown={handleKeyDown}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       aria-current={current ? 'true' : undefined}
       aria-selected={selected}
       data-pending={pending || undefined}
@@ -154,10 +162,13 @@ function WallpaperCardImpl({
       title={cardHoverLabel(entry)}
     >
       <div className="wallpaper-thumb">
-        {entry.previewPath ? (
-          <img src={safeFileSrc(entry.previewPath)} alt="" loading="lazy" decoding="async" />
-        ) : thumbnail ? (
-          <img src={safeFileSrc(thumbnail)} alt="" loading="lazy" decoding="async" />
+        {animatedPreview || thumbnail ? (
+          <img
+            src={safeFileSrc(animatedPreview ?? thumbnail ?? '')}
+            alt=""
+            loading="lazy"
+            decoding="async"
+          />
         ) : (
           <div className="wallpaper-thumb-placeholder" title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}>
             <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>

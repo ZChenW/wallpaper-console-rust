@@ -2,7 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  animatedPreviewPath,
   anchoredScrollTopForLayoutChange,
+  previewAssetPath,
   shouldRequestNextPage,
   visibleThumbnailPaths,
 } from './wallpaperGridHelpers.ts';
@@ -35,9 +37,22 @@ test('visibleThumbnailPaths uses virtual range when available', () => {
   );
 });
 
-test('visibleThumbnailPaths excludes entries with previewPath', () => {
+test('visibleThumbnailPaths generates static thumbnails from preview assets', () => {
   const entries = [entry('a'), entry('b', '/preview.gif'), entry('c')];
-  assert.deepEqual(visibleThumbnailPaths(entries, 3, null, 1), ['a', 'c']);
+  assert.deepEqual(visibleThumbnailPaths(entries, 3, null, 1), ['a', '/preview.gif', 'c']);
+});
+
+test('previewAssetPath prefers a project preview over the wallpaper path', () => {
+  assert.equal(previewAssetPath(entry('/project', '/project/preview.gif')), '/project/preview.gif');
+  assert.equal(previewAssetPath(entry('/picture.jpg')), '/picture.jpg');
+});
+
+test('animated preview is exposed only for a hovered GIF while scrolling is idle', () => {
+  const gif = entry('/project', '/project/preview.GIF');
+  assert.equal(animatedPreviewPath(gif, true, false), '/project/preview.GIF');
+  assert.equal(animatedPreviewPath(gif, false, false), null);
+  assert.equal(animatedPreviewPath(gif, true, true), null);
+  assert.equal(animatedPreviewPath(entry('/project', '/project/preview.jpg'), true, false), null);
 });
 
 test('anchoredScrollTopForLayoutChange preserves the first visible item when columns change', () => {

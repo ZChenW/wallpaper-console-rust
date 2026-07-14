@@ -22,6 +22,20 @@ export interface NextPageRequestState {
 
 const NEXT_PAGE_PREFETCH_ROWS = 2;
 
+export function previewAssetPath(entry: WallpaperDTO): string {
+  return entry.previewPath || entry.path;
+}
+
+export function animatedPreviewPath(
+  entry: WallpaperDTO,
+  hovered: boolean,
+  scrolling: boolean,
+): string | null {
+  if (!hovered || scrolling || !entry.previewPath) return null;
+  const pathWithoutQuery = entry.previewPath.split(/[?#]/, 1)[0].toLowerCase();
+  return pathWithoutQuery.endsWith('.gif') ? entry.previewPath : null;
+}
+
 export function shouldRequestNextPage({
   rowCount,
   visibleEndRow,
@@ -59,8 +73,7 @@ export function visibleThumbnailPaths(
     : Math.min(safeCols * safeFallbackRows, entries.length);
   return entries
     .slice(startIdx, endIdx)
-    .filter((entry) => !entry.previewPath)
-    .map((entry) => entry.path);
+    .map(previewAssetPath);
 }
 
 export function shouldResetScroll(
