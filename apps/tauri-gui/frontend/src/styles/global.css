@@ -578,18 +578,12 @@ input:focus {
   color: var(--primary-strong);
 }
 
-.settings-renderer-card[data-unavailable="true"] {
-  border-color: color-mix(in srgb, var(--danger) 65%, var(--border));
-  color: var(--danger);
-  opacity: 0.68;
-}
-
 .settings-renderer-card[aria-disabled="true"] {
   cursor: default;
 }
 
-.settings-renderer-card:disabled:not([aria-pressed="true"]) {
-  opacity: 0.42;
+.settings-renderer-card:disabled {
+  opacity: 0.52;
   cursor: not-allowed;
 }
 

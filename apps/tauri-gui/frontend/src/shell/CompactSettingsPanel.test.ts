@@ -289,11 +289,9 @@ test('renderer diagnostics are hidden while confirmed-missing backend cards stay
 
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props['aria-pressed'], true);
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props.disabled, true);
-  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props['data-unavailable'], true);
-  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props.title, 'awww is unavailable');
   assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'mpvpaper')?.props.disabled, false);
   assert.equal(lweScaling.props.disabled, true);
-  assert.doesNotMatch(markup, /Renderer installation status|Installed|linux-wallpaperengine.*Unavailable/i);
+  assert.doesNotMatch(markup, /installation status|Installed|Unavailable/i);
 });
 
 test('unknown backend availability does not disable configuration choices', async () => {

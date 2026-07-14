@@ -154,10 +154,8 @@ export function CompactSettingsPanelView({
       className="settings-renderer-card"
       data-behavior-control={onClick ? true : undefined}
       data-renderer={renderer}
-      data-unavailable={unavailable || undefined}
       disabled={onClick ? !behaviorReady || unavailable : undefined}
       tabIndex={onClick ? undefined : -1}
-      title={unavailable ? `${renderer} is unavailable` : undefined}
       type="button"
       onClick={onClick}
     >
