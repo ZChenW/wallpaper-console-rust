@@ -1,7 +1,7 @@
-import type { ChangeEvent, CSSProperties, KeyboardEvent } from 'react';
+import { useEffect, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { X } from 'lucide-react';
 
-import type { BackendStatusDTO, RendererStatusesDTO } from '../api/types.ts';
-import DisplayTargetSelector from './DisplayTargetSelector.tsx';
+import type { RendererStatusesDTO } from '../api/types.ts';
 import type {
   ApplyGesture,
   ShellPreferences,
@@ -25,65 +25,17 @@ export interface CompactSettingsPanelProps {
   readonly open: boolean;
   readonly preferences: ShellPreferences;
   readonly updatePreferences: (update: ShellPreferencesUpdate) => void;
-  readonly connectedOutputs: readonly string[];
   readonly behaviorSettings: WallpaperBehaviorSettings;
   readonly updateBehaviorSettings: (update: WallpaperBehaviorSettingsUpdate) => void;
   readonly behaviorReady: boolean;
   readonly loadError: Error | null;
   readonly saveError: Error | null;
   readonly rendererStatuses: RendererStatusesDTO | null;
-  readonly rendererStatusesLoading: boolean;
-  readonly rendererStatusesError: string | null;
   readonly sourceCount: number;
   readonly offlineSourceCount: number;
   readonly onOpenSources: () => void;
   readonly onClose: () => void;
 }
-
-const overlayStyle: CSSProperties = {
-  position: 'fixed',
-  inset: 0,
-  zIndex: 50,
-  display: 'flex',
-  justifyContent: 'flex-end',
-  background: 'rgb(0 0 0 / 0.38)',
-};
-
-const panelStyle: CSSProperties = {
-  width: 'min(30rem, 100%)',
-  height: '100%',
-  overflowY: 'auto',
-  background: 'var(--surface, #171717)',
-  color: 'var(--text, #f5f5f5)',
-  boxShadow: '-0.75rem 0 2rem rgb(0 0 0 / 0.28)',
-  padding: '1rem',
-};
-
-const headerStyle: CSSProperties = {
-  display: 'flex',
-  alignItems: 'center',
-  justifyContent: 'space-between',
-  gap: '1rem',
-};
-
-const sectionStyle: CSSProperties = {
-  display: 'grid',
-  gap: '0.75rem',
-  padding: '1rem 0',
-  borderTop: '1px solid rgb(128 128 128 / 0.3)',
-};
-
-const fieldStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(8rem, 1fr) minmax(9rem, 1fr)',
-  alignItems: 'center',
-  gap: '0.75rem',
-};
-
-const errorStyle: CSSProperties = {
-  margin: 0,
-  color: 'var(--danger, #ffb4ab)',
-};
 
 function errorMessage(error: Error): string {
   return error.message.trim() || 'Unknown configuration error';
@@ -98,24 +50,16 @@ function sourceSummary(sourceCount: number, offlineSourceCount: number): string 
     : `${total} ${sourceLabel} · all available`;
 }
 
-function rendererStatusLabel(status: BackendStatusDTO | undefined): string {
-  if (!status) return 'Unknown';
-  return status.available ? 'Installed' : 'Unavailable';
-}
-
 export function CompactSettingsPanelView({
   open,
   preferences,
   updatePreferences,
-  connectedOutputs,
   behaviorSettings,
   updateBehaviorSettings,
   behaviorReady,
   loadError,
   saveError,
   rendererStatuses,
-  rendererStatusesLoading,
-  rendererStatusesError,
   sourceCount,
   offlineSourceCount,
   onOpenSources,
@@ -140,12 +84,10 @@ export function CompactSettingsPanelView({
     const cardSize = event.currentTarget.value as WallpaperCardSize;
     updatePreferences((current) => ({ ...current, cardSize }));
   };
-  const updateImageRenderer = (event: ChangeEvent<HTMLSelectElement>) => {
-    const imageBackend = event.currentTarget.value as ImageRenderer;
+  const updateImageRenderer = (imageBackend: ImageRenderer) => {
     updateBehaviorSettings((current) => ({ ...current, imageBackend }));
   };
-  const updateGifRenderer = (event: ChangeEvent<HTMLSelectElement>) => {
-    const gifBackend = event.currentTarget.value as GifRenderer;
+  const updateGifRenderer = (gifBackend: GifRenderer) => {
     updateBehaviorSettings((current) => ({ ...current, gifBackend }));
   };
   const updateFillMode = (event: ChangeEvent<HTMLSelectElement>) => {
@@ -189,29 +131,64 @@ export function CompactSettingsPanelView({
     event.preventDefault();
     onClose();
   };
+  const handleBackdropMouseDown = (event: MouseEvent<HTMLDivElement>) => {
+    if (event.target === event.currentTarget) onClose();
+  };
+  const rendererCard = (
+    renderer: 'awww' | 'mpvpaper',
+    selected: boolean,
+    unavailable: boolean,
+    onClick?: () => void,
+  ) => (
+    <button
+      aria-disabled={onClick ? undefined : true}
+      aria-pressed={selected}
+      className="settings-renderer-card"
+      data-behavior-control={onClick ? true : undefined}
+      data-renderer={renderer}
+      disabled={onClick ? !behaviorReady || unavailable : undefined}
+      tabIndex={onClick ? undefined : -1}
+      type="button"
+      onClick={onClick}
+    >
+      {renderer}
+    </button>
+  );
 
   return (
-    <div onKeyDown={handleKeyDown} style={overlayStyle}>
+    <div
+      className="settings-overlay"
+      data-settings-overlay={true}
+      onKeyDown={handleKeyDown}
+      onMouseDown={handleBackdropMouseDown}
+    >
       <aside
         aria-label="Settings"
         aria-modal="true"
         role="dialog"
-        style={panelStyle}
+        className="settings-panel"
       >
-        <header style={headerStyle}>
+        <header className="settings-panel__header">
           <h2>Settings</h2>
-          <button autoFocus type="button" aria-label="Close settings" onClick={onClose}>
-            Close
+          <button
+            autoFocus
+            aria-label="Close settings"
+            className="settings-panel__close"
+            data-icon-button={true}
+            type="button"
+            onClick={onClose}
+          >
+            <X aria-hidden="true" size={19} />
           </button>
         </header>
 
         <section
           aria-labelledby="settings-appearance-heading"
           data-settings-group="appearance-interaction"
-          style={sectionStyle}
+          className="settings-section"
         >
           <h3 id="settings-appearance-heading">Appearance &amp; interaction</h3>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Theme</span>
             <select aria-label="Theme" value={preferences.theme} onChange={updateTheme}>
               <option value="system">System</option>
@@ -219,7 +196,7 @@ export function CompactSettingsPanelView({
               <option value="dark">Dark</option>
             </select>
           </label>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Apply gesture</span>
             <select
               aria-label="Apply gesture"
@@ -230,7 +207,7 @@ export function CompactSettingsPanelView({
               <option value="double">Double click</option>
             </select>
           </label>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Card size</span>
             <select aria-label="Card size" value={preferences.cardSize} onChange={updateCardSize}>
               <option value="small">Small</option>
@@ -243,81 +220,44 @@ export function CompactSettingsPanelView({
         <section
           aria-labelledby="settings-wallpaper-heading"
           data-settings-group="wallpaper-behavior"
-          style={sectionStyle}
+          className="settings-section"
         >
           <h3 id="settings-wallpaper-heading">Wallpaper behavior</h3>
-          <div style={fieldStyle}>
-            <span>Default display</span>
-            <DisplayTargetSelector
-              ariaLabel="Default display target"
-              connectedOutputs={connectedOutputs}
-              value={preferences.displayTarget}
-              onChange={(displayTarget) => {
-                updatePreferences((current) => ({ ...current, displayTarget }));
-              }}
-            />
-          </div>
           {!behaviorReady && loadError === null ? (
             <p role="status">Loading wallpaper behavior settings…</p>
           ) : null}
           {!behaviorReady && loadError !== null ? (
             <p>Wallpaper behavior controls are disabled until configuration can be read.</p>
           ) : null}
-          {loadError !== null && <p role="alert" style={errorStyle}>{errorMessage(loadError)}</p>}
-          {saveError !== null && <p role="alert" style={errorStyle}>{errorMessage(saveError)}</p>}
-          <div aria-label="Renderer installation status">
-            <strong>Renderer installation status</strong>
-            <ul>
-              {([
-                ['awww', rendererStatuses?.awww],
-                ['mpvpaper', rendererStatuses?.mpvpaper],
-                ['linux-wallpaperengine', rendererStatuses?.linuxWallpaperEngine],
-              ] as const).map(([name, status]) => (
-                <li key={name} title={status?.detail}>
-                  <span>{name}</span>: <span>{rendererStatusLabel(status)}</span>
-                </li>
-              ))}
-            </ul>
-            {rendererStatusesLoading ? <p role="status">Checking renderer installation…</p> : null}
-            {rendererStatusesError ? (
-              <p role="status">Renderer status is Unknown: {rendererStatusesError}</p>
-            ) : null}
+          {loadError !== null && <p role="alert" className="settings-error">{errorMessage(loadError)}</p>}
+          {saveError !== null && <p role="alert" className="settings-error">{errorMessage(saveError)}</p>}
+          <div aria-label="Image" className="settings-renderer-field" role="group">
+            <span>Image</span>
+            <div className="settings-renderer-cards">
+              {rendererCard('awww', behaviorSettings.imageBackend === 'awww', awwwUnavailable,
+                () => updateImageRenderer('awww'))}
+              {rendererCard('mpvpaper', behaviorSettings.imageBackend === 'mpvpaper', mpvpaperUnavailable,
+                () => updateImageRenderer('mpvpaper'))}
+            </div>
           </div>
-          <label style={fieldStyle}>
-            <span>Image renderer</span>
-            <select
-              aria-label="Image renderer"
-              data-behavior-control={true}
-              disabled={!behaviorReady}
-              value={behaviorSettings.imageBackend}
-              onChange={updateImageRenderer}
-            >
-              <option disabled={awwwUnavailable} value="awww">awww renderer</option>
-              <option disabled={mpvpaperUnavailable} value="mpvpaper">mpvpaper renderer</option>
-            </select>
-          </label>
-          <label style={fieldStyle}>
-            <span>GIF renderer</span>
-            <select
-              aria-label="GIF renderer"
-              data-behavior-control={true}
-              disabled={!behaviorReady}
-              value={behaviorSettings.gifBackend}
-              onChange={updateGifRenderer}
-            >
-              <option disabled={awwwUnavailable} value="awww">awww renderer</option>
-              <option disabled={mpvpaperUnavailable} value="mpvpaper">mpvpaper renderer</option>
-            </select>
-          </label>
-          <div style={fieldStyle}>
-            <span>Video renderer</span>
-            <output>
-              mpvpaper (required for video){mpvpaperUnavailable ? ' · unavailable' : ''}
-            </output>
+          <div aria-label="GIF" className="settings-renderer-field" role="group">
+            <span>GIF</span>
+            <div className="settings-renderer-cards">
+              {rendererCard('awww', behaviorSettings.gifBackend === 'awww', awwwUnavailable,
+                () => updateGifRenderer('awww'))}
+              {rendererCard('mpvpaper', behaviorSettings.gifBackend === 'mpvpaper', mpvpaperUnavailable,
+                () => updateGifRenderer('mpvpaper'))}
+            </div>
+          </div>
+          <div aria-label="Video" className="settings-renderer-field" role="group">
+            <span>Video</span>
+            <div className="settings-renderer-cards settings-renderer-cards--single">
+              {rendererCard('mpvpaper', true, mpvpaperUnavailable)}
+            </div>
           </div>
           {usesAwww ? (
             <>
-              <label style={fieldStyle}>
+              <label className="settings-field">
                 <span>Fill behavior</span>
                 <select
                   aria-label="Fill behavior"
@@ -331,7 +271,7 @@ export function CompactSettingsPanelView({
                   <option value="stretch">Stretch</option>
                 </select>
               </label>
-              <label style={fieldStyle}>
+              <label className="settings-field">
                 <span>Transition</span>
                 <select
                   aria-label="awww transition type"
@@ -345,7 +285,7 @@ export function CompactSettingsPanelView({
                   ))}
                 </select>
               </label>
-              <label style={fieldStyle}>
+              <label className="settings-field">
                 <span>Transition duration</span>
                 <input
                   aria-label="awww transition duration"
@@ -359,7 +299,7 @@ export function CompactSettingsPanelView({
                   value={behaviorSettings.awwwTransitionDuration}
                 />
               </label>
-              <label style={fieldStyle}>
+              <label className="settings-field">
                 <span>Transition FPS</span>
                 <input
                   aria-label="awww transition FPS"
@@ -378,7 +318,7 @@ export function CompactSettingsPanelView({
             <p>Fill and transition controls are available when awww handles images or GIFs.</p>
           )}
           <h4>Wallpaper Engine scenes</h4>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Scene scaling</span>
             <select
               aria-label="Wallpaper Engine scaling"
@@ -392,7 +332,7 @@ export function CompactSettingsPanelView({
               ))}
             </select>
           </label>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Scene FPS</span>
             <input
               aria-label="Wallpaper Engine FPS"
@@ -406,7 +346,7 @@ export function CompactSettingsPanelView({
               value={behaviorSettings.lweFps}
             />
           </label>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Mute scene audio</span>
             <input
               aria-label="Mute Wallpaper Engine audio"
@@ -417,7 +357,7 @@ export function CompactSettingsPanelView({
               type="checkbox"
             />
           </label>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Scene volume</span>
             <input
               aria-label="Wallpaper Engine volume"
@@ -432,7 +372,7 @@ export function CompactSettingsPanelView({
             />
           </label>
           <h4>Session restore</h4>
-          <label style={fieldStyle}>
+          <label className="settings-field">
             <span>Restore on login</span>
             <input
               aria-label="Restore on login"
@@ -448,15 +388,15 @@ export function CompactSettingsPanelView({
             startup. This switch allows that command to restore saved display wallpapers.
           </p>
           <p>
-            Renderer availability is checked when applying. Missing dependencies are reported
-            with installation guidance.
+            Availability is checked when applying. Missing dependencies are reported with
+            installation guidance.
           </p>
         </section>
 
         <section
           aria-labelledby="settings-sources-heading"
           data-settings-group="sources"
-          style={sectionStyle}
+          className="settings-section"
         >
           <h3 id="settings-sources-heading">Sources</h3>
           <p>{sourceSummary(sourceCount, offlineSourceCount)}</p>
@@ -476,5 +416,22 @@ export function CompactSettingsPanelView({
 }
 
 export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
+  useEffect(() => {
+    if (!props.open) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== 'Escape' || event.defaultPrevented) return;
+      event.preventDefault();
+      props.onClose();
+    };
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [props.open, props.onClose]);
+
   return CompactSettingsPanelView(props);
 }

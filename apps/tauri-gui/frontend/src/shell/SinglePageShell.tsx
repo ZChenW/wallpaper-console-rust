@@ -820,7 +820,7 @@ export default function SinglePageShell() {
             updatePreferences((current) => ({ ...current, sourceFilter }));
           }}
         >
-          <option value="all">All sources</option>
+          <option value="all">ALL SOURCES</option>
           {catalog.sources.map((source) => (
             <option key={source.id} value={`source:${source.id}`}>
               {source.displayName}{source.availability === 'offline' ? ' · Offline' : ''}
@@ -835,7 +835,7 @@ export default function SinglePageShell() {
             updatePreferences((current) => ({ ...current, typeFilter }));
           }}
         >
-          <option value="usable">All usable</option>
+          <option value="usable">ALL</option>
           <option value="image">Images</option>
           <option value="gif">GIFs</option>
           <option value="video">Videos</option>
@@ -905,15 +905,12 @@ export default function SinglePageShell() {
         open={settingsOpen}
         preferences={preferences}
         updatePreferences={updatePreferences}
-        connectedOutputs={catalog.connectedOutputs}
         behaviorSettings={behavior.settings}
         updateBehaviorSettings={behavior.updateSettings}
         behaviorReady={behavior.ready}
         loadError={behavior.loadError}
         saveError={behavior.saveError}
         rendererStatuses={rendererStatuses.statuses}
-        rendererStatusesLoading={rendererStatuses.loading}
-        rendererStatusesError={rendererStatuses.error}
         sourceCount={catalog.sources.length}
         offlineSourceCount={offlineSourceCount}
         onOpenSources={() => {

@@ -108,7 +108,7 @@ function sourceRow(page: Page, sourceId: number) {
 
 async function removeSource(page: Page, sourceId: number): Promise<void> {
   const row = sourceRow(page, sourceId);
-  await row.getByRole('button', { name: 'Remove', exact: true }).click();
+  await row.getByRole('button', { name: /^Remove / }).click();
   const confirmation = row.getByRole('alertdialog');
   await expect(confirmation).toBeVisible();
   await confirmation.getByRole('button', { name: 'Remove source' }).click();
@@ -252,13 +252,14 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await expect(dialog.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
   await expect(dialog.getByLabel('Theme')).toHaveValue('system');
   await expect(dialog.getByLabel('Apply gesture')).toHaveValue('single');
-  await expect(dialog.getByLabel('Image renderer')).toHaveValue('awww');
-  await expect(dialog.getByLabel('GIF renderer')).toHaveValue('awww');
-  await expect(dialog.getByText('mpvpaper (required for video)')).toBeVisible();
-  const rendererStatus = dialog.getByLabel('Renderer installation status');
-  await expect(rendererStatus).toContainText('awww: Installed');
-  await expect(rendererStatus).toContainText('mpvpaper: Installed');
-  await expect(rendererStatus).toContainText('linux-wallpaperengine: Unavailable');
+  await expect(dialog.getByRole('group', { name: 'Image' }).getByRole('button', { name: 'awww' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('group', { name: 'GIF' }).getByRole('button', { name: 'awww' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByRole('group', { name: 'Video' }).getByRole('button', { name: 'mpvpaper' }))
+    .toHaveAttribute('aria-pressed', 'true');
+  await expect(dialog.getByText('Default display', { exact: true })).toHaveCount(0);
+  await expect(dialog.getByLabel('Renderer installation status')).toHaveCount(0);
   await expect(dialog.getByLabel('Wallpaper Engine scaling')).toBeDisabled();
   await expect(dialog.getByRole('button', { name: 'Manage wallpaper sources' })).toBeVisible();
 
@@ -304,9 +305,10 @@ test('source drawer adds, renames, configures, refreshes, and safely removes sou
   await settings.getByRole('button', { name: 'Manage wallpaper sources' }).click();
 
   const pictures = sourceRow(page, 1);
-  await pictures.getByText('Rename', { exact: true }).click();
-  await pictures.getByLabel('Display name').fill('Art collection');
-  await pictures.getByRole('button', { name: 'Save' }).click();
+  await pictures.getByRole('button', { name: 'Rename Pictures' }).click();
+  const alias = pictures.getByLabel('Alias for Pictures');
+  await alias.fill('Art collection');
+  await alias.press('Enter');
   await expect(sourceRow(page, 1)).toContainText('Art collection');
 
   const recursive = sourceRow(page, 1).getByRole('switch', {
@@ -319,7 +321,7 @@ test('source drawer adds, renames, configures, refreshes, and safely removes sou
   await page.getByRole('button', { name: 'Refresh all' }).click();
   await expect(page.locator('[data-feedback-card="scan"]')).toContainText('All sources refreshed');
 
-  await sourceRow(page, 1).getByRole('button', { name: 'Remove', exact: true }).click();
+  await sourceRow(page, 1).getByRole('button', { name: 'Remove Art collection' }).click();
   const confirmation = sourceRow(page, 1).getByRole('alertdialog');
   await expect(confirmation).toContainText('It does not delete wallpaper files.');
   await confirmation.getByRole('button', { name: 'Cancel' }).click();
@@ -339,7 +341,7 @@ test('source refresh remains busy across close and reopen without a duplicate re
   await openSources(page);
 
   const dialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
-  await sourceRow(page, 1).getByRole('button', { name: 'Refresh', exact: true }).click();
+  await sourceRow(page, 1).getByRole('button', { name: 'Refresh Pictures' }).click();
   await expect(dialog).toHaveAttribute('aria-busy', 'true');
   await expect(dialog.getByRole('status').filter({ hasText: 'Refreshing source' })).toBeVisible();
   await expect.poll(() => dialog.locator('[data-source-mutating="true"]')

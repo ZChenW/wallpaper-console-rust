@@ -71,7 +71,6 @@ function viewProps() {
     open: true,
     preferences: { ...DEFAULT_SHELL_PREFERENCES } as ShellPreferences,
     updatePreferences: (_update: unknown) => undefined,
-    connectedOutputs: ['eDP-1', 'HDMI-A-1'],
     behaviorSettings: { ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS } as WallpaperBehaviorSettings,
     updateBehaviorSettings: (_update: unknown) => undefined,
     behaviorReady: true,
@@ -85,8 +84,6 @@ function viewProps() {
         message: 'linux-wallpaperengine is installed.',
       },
     },
-    rendererStatusesLoading: false,
-    rendererStatusesError: null,
     sourceCount: 4,
     offlineSourceCount: 1,
     onOpenSources: () => undefined,
@@ -99,7 +96,7 @@ test('closed settings panel renders nothing', async () => {
   assert.equal(CompactSettingsPanelView({ ...viewProps(), open: false }), null);
 });
 
-test('settings autofocuses its close action and Escape closes the dialog', async () => {
+test('settings uses an icon close action and closes on Escape or backdrop only', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   let closed = 0;
   const tree = CompactSettingsPanelView({
@@ -111,12 +108,26 @@ test('settings autofocuses its close action and Escape closes the dialog', async
   let prevented = 0;
 
   assert.equal(close.props.autoFocus, true);
+  assert.equal(close.props['data-icon-button'], true);
+  assert.doesNotMatch(renderToStaticMarkup(close), />Close</);
   (overlay.props.onKeyDown as (event: unknown) => void)({
     key: 'Escape',
     preventDefault: () => { prevented += 1; },
   });
   assert.equal(prevented, 1);
   assert.equal(closed, 1);
+
+  const backdrop = {};
+  (overlay.props.onMouseDown as (event: unknown) => void)({
+    currentTarget: backdrop,
+    target: {},
+  });
+  assert.equal(closed, 1, 'clicking inside the dialog does not close settings');
+  (overlay.props.onMouseDown as (event: unknown) => void)({
+    currentTarget: backdrop,
+    target: backdrop,
+  });
+  assert.equal(closed, 2, 'clicking the backdrop closes settings');
 });
 
 test('renders exactly the three compact groups and excludes legacy diagnostics', async () => {
@@ -168,7 +179,7 @@ test('appearance controls update only remembered shell preferences', async () =>
   );
 });
 
-test('wallpaper controls reuse the display selector and expose only compatible renderers', async () => {
+test('wallpaper controls use renderer cards and omit the duplicated display selector', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   let preferences = { ...DEFAULT_SHELL_PREFERENCES } as ShellPreferences;
   let behavior = { ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS } as WallpaperBehaviorSettings;
@@ -183,9 +194,8 @@ test('wallpaper controls reuse the display selector and expose only compatible r
       behavior = typeof update === 'function' ? update(behavior) : update;
     },
   });
-  const [display] = findElements(tree, (element) => element.props['aria-label'] === 'Default display target');
-  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image renderer');
-  const [gif] = findElements(tree, (element) => element.props['aria-label'] === 'GIF renderer');
+  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image');
+  const [gif] = findElements(tree, (element) => element.props['aria-label'] === 'GIF');
   const [fill] = findElements(tree, (element) => element.props['aria-label'] === 'Fill behavior');
   const [transition] = findElements(
     tree,
@@ -201,16 +211,17 @@ test('wallpaper controls reuse the display selector and expose only compatible r
   );
   const markup = renderToStaticMarkup(tree);
 
-  assert.ok(display);
-  (display.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'output:HDMI-A-1' } });
-  (image.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'mpvpaper' } });
-  (gif.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'mpvpaper' } });
+  assert.equal(findElements(tree, (element) => element.props['aria-label'] === 'Default display target').length, 0);
+  const imageMpvpaper = findElements(image, (element) => element.props['data-renderer'] === 'mpvpaper')[0];
+  const gifMpvpaper = findElements(gif, (element) => element.props['data-renderer'] === 'mpvpaper')[0];
+  (imageMpvpaper.props.onClick as () => void)();
+  (gifMpvpaper.props.onClick as () => void)();
   (fill.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'stretch' } });
   (transition.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'wave' } });
   (duration.props.onChange as (event: unknown) => void)({ currentTarget: { value: '2.5' } });
   (transitionFps.props.onChange as (event: unknown) => void)({ currentTarget: { value: '144' } });
 
-  assert.deepEqual(preferences.displayTarget, { kind: 'output', output: 'HDMI-A-1' });
+  assert.deepEqual(preferences.displayTarget, DEFAULT_SHELL_PREFERENCES.displayTarget);
   assert.deepEqual(behavior, {
     ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS,
     imageBackend: 'mpvpaper',
@@ -222,21 +233,25 @@ test('wallpaper controls reuse the display selector and expose only compatible r
   });
   for (const renderer of [image, gif]) {
     assert.deepEqual(
-      findElements(renderer, (element) => element.type === 'option').map((option) => option.props.value),
+      findElements(renderer, (element) => typeof element.props['data-renderer'] === 'string')
+        .map((option) => option.props['data-renderer']),
       ['awww', 'mpvpaper'],
     );
   }
-  assert.match(markup, /Video renderer/);
-  assert.match(markup, /mpvpaper/);
+  const [video] = findElements(tree, (element) => element.props['aria-label'] === 'Video');
+  const videoCards = findElements(video, (element) => typeof element.props['data-renderer'] === 'string');
+  assert.deepEqual(videoCards.map((card) => card.props['data-renderer']), ['mpvpaper']);
+  assert.equal(videoCards[0].props['aria-pressed'], true);
+  assert.equal(videoCards[0].props['aria-disabled'], true);
+  assert.doesNotMatch(markup, /awww renderer|mpvpaper renderer|Image renderer|GIF renderer|Video renderer/i);
   assert.deepEqual(
     findElements(transition, (element) => element.type === 'option')
       .map((option) => option.props.value),
     ['simple', 'fade', 'left', 'right', 'top', 'bottom', 'wipe', 'grow', 'center', 'outer', 'random', 'wave'],
   );
-  assert.equal(findElements(tree, (element) => element.props['aria-label'] === 'Video renderer').length, 0);
 });
 
-test('renderer status is visible and confirmed-missing backends cannot be newly selected', async () => {
+test('renderer diagnostics are hidden while confirmed-missing backend cards stay disabled', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView({
     ...viewProps(),
@@ -254,38 +269,32 @@ test('renderer status is visible and confirmed-missing backends cannot be newly 
     },
   });
   const markup = renderToStaticMarkup(tree);
-  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image renderer');
-  const imageOptions = findElements(image, (element) => element.type === 'option');
+  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image');
+  const imageOptions = findElements(image, (element) => typeof element.props['data-renderer'] === 'string');
   const [lweScaling] = findElements(
     tree,
     (element) => element.props['aria-label'] === 'Wallpaper Engine scaling',
   );
 
-  assert.equal(image.props.value, 'awww', 'a persisted missing renderer remains visible');
-  assert.equal(imageOptions.find((option) => option.props.value === 'awww')?.props.disabled, true);
-  assert.equal(imageOptions.find((option) => option.props.value === 'mpvpaper')?.props.disabled, false);
+  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props['aria-pressed'], true);
+  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'awww')?.props.disabled, true);
+  assert.equal(imageOptions.find((option) => option.props['data-renderer'] === 'mpvpaper')?.props.disabled, false);
   assert.equal(lweScaling.props.disabled, true);
-  assert.match(markup, /Renderer installation status/);
-  assert.match(markup, /awww.*Unavailable/i);
-  assert.match(markup, /mpvpaper.*Installed/i);
-  assert.match(markup, /linux-wallpaperengine.*Unavailable/i);
+  assert.doesNotMatch(markup, /installation status|Installed|Unavailable/i);
 });
 
-test('unknown renderer status stays honest without disabling configuration choices', async () => {
+test('unknown backend availability does not disable configuration choices', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView({
     ...viewProps(),
     rendererStatuses: null,
-    rendererStatusesError: 'probe unavailable',
   });
-  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image renderer');
-  const options = findElements(image, (element) => element.type === 'option');
+  const [image] = findElements(tree, (element) => element.props['aria-label'] === 'Image');
+  const options = findElements(image, (element) => typeof element.props['data-renderer'] === 'string');
   const markup = renderToStaticMarkup(tree);
 
   assert.equal(options.every((option) => option.props.disabled !== true), true);
-  assert.match(markup, /Renderer installation status/);
-  assert.match(markup, /Unknown/);
-  assert.match(markup, /probe unavailable/);
+  assert.doesNotMatch(markup, /installation status|Unknown|probe unavailable/i);
 });
 
 test('awww-specific controls are shown only while awww handles images or GIFs', async () => {
@@ -394,7 +403,7 @@ test('behavior readiness and errors are explicit without disabling unrelated set
   assert.match(markup, /controls are disabled until configuration can be read/);
   assert.match(markup, /could not read config/);
   assert.match(markup, /could not save config/);
-  assert.equal(behaviorControls.length, 11);
+  assert.equal(behaviorControls.length, 13);
   assert.equal(behaviorControls.every((control) => control.props.disabled === true), true);
   assert.equal(theme.props.disabled, undefined);
   assert.ok(findElements(tree, (element) => element.props.role === 'alert').length >= 2);
