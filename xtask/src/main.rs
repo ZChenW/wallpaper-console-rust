@@ -320,10 +320,9 @@ mod tests {
 
     #[test]
     fn frontend_npm_steps_name_existing_package_scripts() {
-        let package_json = std::fs::read_to_string(
-            repo_root().join("apps/tauri-gui/frontend/package.json"),
-        )
-        .expect("frontend package.json must be readable");
+        let package_json =
+            std::fs::read_to_string(repo_root().join("apps/tauri-gui/frontend/package.json"))
+                .expect("frontend package.json must be readable");
         let scripts = package_json_script_names(&package_json);
 
         let missing: Vec<&str> = FRONTEND_STEPS
@@ -364,10 +363,9 @@ mod tests {
 
     #[test]
     fn package_lock_includes_playwright_for_smoke() {
-        let lockfile = std::fs::read_to_string(
-            repo_root().join("apps/tauri-gui/frontend/package-lock.json"),
-        )
-        .expect("frontend package-lock.json must be readable");
+        let lockfile =
+            std::fs::read_to_string(repo_root().join("apps/tauri-gui/frontend/package-lock.json"))
+                .expect("frontend package-lock.json must be readable");
         assert!(
             lockfile.contains("\"node_modules/@playwright/test\"")
                 || lockfile.contains("\"@playwright/test\""),
@@ -377,10 +375,9 @@ mod tests {
 
     #[test]
     fn smoke_script_bootstraps_or_preflights_chromium_before_tests() {
-        let package_json = std::fs::read_to_string(
-            repo_root().join("apps/tauri-gui/frontend/package.json"),
-        )
-        .expect("frontend package.json must be readable");
+        let package_json =
+            std::fs::read_to_string(repo_root().join("apps/tauri-gui/frontend/package.json"))
+                .expect("frontend package.json must be readable");
         let smoke = package_json_script_body(&package_json, "smoke")
             .expect("package.json must declare a smoke script");
 
@@ -440,7 +437,9 @@ mod tests {
         );
         assert!(
             config.contains("vite.mock.config.ts")
-                && (config.contains("cwd:") || config.contains("cwd :") || config.contains("../vite.mock.config.ts")),
+                && (config.contains("cwd:")
+                    || config.contains("cwd :")
+                    || config.contains("../vite.mock.config.ts")),
             "webServer must use a cwd-relative vite mock config path"
         );
     }
@@ -518,7 +517,9 @@ export const ALL_SETTINGS = [
             "must report window drift; output={combined}"
         );
         assert!(
-            (combined.contains("file") || combined.contains("hybrid") || combined.contains("storage_backend"))
+            (combined.contains("file")
+                || combined.contains("hybrid")
+                || combined.contains("storage_backend"))
                 && combined.contains("DRIFT"),
             "must report storage_backend file/hybrid drift; output={combined}"
         );

@@ -657,13 +657,10 @@ impl TmpCleanupSchedule {
             .last_sweeps
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if last_sweeps
-            .get(cache_dir)
-            .is_some_and(|last_sweep| {
-                now.checked_sub(*last_sweep)
-                    .is_some_and(|elapsed| elapsed < interval_secs)
-            })
-        {
+        if last_sweeps.get(cache_dir).is_some_and(|last_sweep| {
+            now.checked_sub(*last_sweep)
+                .is_some_and(|elapsed| elapsed < interval_secs)
+        }) {
             return false;
         }
 
@@ -1319,7 +1316,8 @@ mod tests {
         let media = tempfile::tempdir().unwrap();
         let image_path = media.path().join("wrong-ext.png");
         let img = image::RgbImage::from_pixel(16, 9, image::Rgb([200, 20, 40]));
-        img.save_with_format(&image_path, image::ImageFormat::Jpeg).unwrap();
+        img.save_with_format(&image_path, image::ImageFormat::Jpeg)
+            .unwrap();
 
         let result = thumbnail_for(cache.path(), image_path.to_str().unwrap());
         assert!(
