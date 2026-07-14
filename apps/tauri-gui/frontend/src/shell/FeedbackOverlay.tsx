@@ -44,12 +44,7 @@ const overlayStyle: CSSProperties = {
 const cardStyle: CSSProperties = {
   position: 'relative',
   overflow: 'hidden',
-  border: '1px solid color-mix(in srgb, currentColor 15%, transparent)',
   borderRadius: '0.75rem',
-  background: 'color-mix(in srgb, Canvas 94%, transparent)',
-  color: 'CanvasText',
-  boxShadow: '0 0.75rem 2rem rgb(0 0 0 / 22%)',
-  backdropFilter: 'blur(14px)',
   pointerEvents: 'auto',
 };
 
@@ -214,4 +209,3 @@ export function FeedbackOverlay({
     </aside>
   );
 }
-

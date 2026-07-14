@@ -221,7 +221,7 @@ const rowStyle: CSSProperties = {
   padding: '0.85rem',
   border: '1px solid color-mix(in srgb, currentColor 13%, transparent)',
   borderRadius: '0.7rem',
-  background: 'color-mix(in srgb, CanvasText 2.5%, Canvas)',
+  background: 'var(--source-card-background, color-mix(in srgb, CanvasText 2.5%, Canvas))',
 };
 
 const rowHeaderStyle: CSSProperties = {

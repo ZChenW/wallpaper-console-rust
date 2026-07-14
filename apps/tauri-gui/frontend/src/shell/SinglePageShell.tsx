@@ -795,7 +795,7 @@ export default function SinglePageShell() {
 
   return (
     <div className={`single-page-shell${settingsOpen ? ' settings-open' : ''}`}>
-      <header className="single-page-topbar">
+      <header className="single-page-topbar" data-tauri-drag-region="deep">
         <div className="single-page-brand" aria-label="Wallpaper Console">Wallpaper Console</div>
         <label className="single-page-search">
           <Search size={16} aria-hidden="true" />

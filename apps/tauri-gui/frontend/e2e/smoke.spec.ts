@@ -402,6 +402,42 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await expect(grid).toHaveCSS('overflow-y', 'auto');
 });
 
+test('Glass theme keeps Acrylic blur off wallpaper cards', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+
+  await chooseSelect(page, 'Theme', 'Glass');
+  await expect.poll(() => page.locator('html').getAttribute('data-theme')).toBe('glass');
+
+  const styles = await page.evaluate(() => ({
+    topbarBackdrop: getComputedStyle(document.querySelector('.single-page-topbar')!).backdropFilter,
+    cardBackdrop: getComputedStyle(document.querySelector('.wallpaper-card')!).backdropFilter,
+  }));
+  expect(styles.topbarBackdrop).not.toBe('none');
+  expect(styles.cardBackdrop).toBe('none');
+
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await openSources(page);
+  const sourceBackgrounds = await page.locator('[data-source-id]').evaluateAll((rows) =>
+    rows.slice(0, 2).map((row) => getComputedStyle(row).backgroundColor),
+  );
+  expect(sourceBackgrounds).toHaveLength(2);
+  for (const background of sourceBackgrounds) {
+    const channels = background.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+    expect(channels, `parse source card background ${background}`).toHaveLength(3);
+    expect(channels, `source card background must not be black: ${background}`).not.toEqual([0, 0, 0]);
+    expect(channels[2], `source card background must be blue-grey: ${background}`).toBeGreaterThan(channels[0]);
+  }
+  await page.getByRole('dialog', { name: 'Wallpaper sources' })
+    .getByRole('button', { name: 'Close wallpaper sources' })
+    .click();
+  await openSettings(page);
+  await expect(page.getByRole('dialog', { name: 'Settings' }).getByLabel('Theme'))
+    .toHaveAttribute('data-value', 'glass');
+});
+
 test('source drawer adds, renames, configures, refreshes, and safely removes sources', async ({ page }) => {
   await openApp(page);
   await openSources(page);
