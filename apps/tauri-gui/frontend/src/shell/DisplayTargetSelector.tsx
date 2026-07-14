@@ -1,4 +1,4 @@
-import type { ChangeEvent } from 'react';
+import SelectField from '../components/SelectField.tsx';
 import type { DisplayTarget } from './shellPreferences.ts';
 import {
   buildDisplayTargetModel,
@@ -24,23 +24,19 @@ export default function DisplayTargetSelector({
   const model = buildDisplayTargetModel(connectedOutputs, value);
   if (model.hidden) return null;
 
-  const handleChange = (event: ChangeEvent<HTMLSelectElement>) => {
-    const decoded = displayTargetFromSelectValue(event.currentTarget.value);
+  const handleChange = (value: string) => {
+    const decoded = displayTargetFromSelectValue(value);
     onChange(decoded);
   };
 
   return (
-    <select
+    <SelectField
       aria-label={ariaLabel}
       disabled={disabled}
       value={displayTargetToSelectValue(model.selectedTarget)}
-      onChange={handleChange}
-    >
-      {model.options.map((option) => (
-        <option key={option.value} value={option.value} disabled={option.disabled}>
-          {option.label}
-        </option>
-      ))}
-    </select>
+      options={model.options}
+      onValueChange={handleChange}
+      variant="compact"
+    />
   );
 }

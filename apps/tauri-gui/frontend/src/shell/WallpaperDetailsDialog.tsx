@@ -29,11 +29,7 @@ const dialogStyle: CSSProperties = {
   gap: '1rem',
   overflow: 'auto',
   padding: 'clamp(0.85rem, 2.5vw, 1.25rem)',
-  border: '1px solid color-mix(in srgb, currentColor 16%, transparent)',
   borderRadius: '0.9rem',
-  background: 'Canvas',
-  color: 'CanvasText',
-  boxShadow: '0 1.5rem 4rem rgb(0 0 0 / 38%)',
 };
 
 const headerStyle: CSSProperties = {

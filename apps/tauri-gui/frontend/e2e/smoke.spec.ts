@@ -102,6 +102,11 @@ async function openSources(page: Page): Promise<void> {
   await expect(page.getByRole('dialog', { name: 'Wallpaper sources' })).toBeVisible();
 }
 
+async function chooseSelect(page: Page, label: string, option: string): Promise<void> {
+  await page.getByRole('combobox', { name: label }).click();
+  await page.getByRole('option', { name: option, exact: true }).click();
+}
+
 function sourceRow(page: Page, sourceId: number) {
   return page.locator(`[data-source-id="${sourceId}"]`);
 }
@@ -128,13 +133,33 @@ test('renders one unified wallpaper picker without legacy navigation', async ({ 
   await expect(page.getByLabel('Card size')).toBeVisible();
   await expect(page.getByLabel('Display target')).toBeVisible();
 
-  await expect(page.getByLabel('Source filter')).toHaveCSS('padding-top', '0px');
-  await expect(page.getByLabel('Source filter')).toHaveCSS('padding-bottom', '0px');
-  await expect(page.getByLabel('Card size').locator('option')).toHaveText([
-    'Small',
-    'Medium',
-    'Large',
-  ]);
+  await expect(page.locator('.single-page-topbar select, .single-page-filters select')).toHaveCount(0);
+  await expect(
+    page.locator('.single-page-topbar .select-field-trigger, .single-page-filters .select-field-trigger'),
+  ).toHaveCount(5);
+
+  const sourceFilter = page.getByLabel('Source filter');
+  const favoriteFilter = page.locator('.single-page-favorite-filter');
+  const favoriteCheckbox = page.getByLabel('Favorites');
+  await expect(favoriteFilter).toContainText('FAVORITES');
+  await expect(favoriteFilter).toHaveAttribute('data-active', 'false');
+  await expect(favoriteFilter.locator('svg')).toHaveAttribute('fill', 'none');
+  await expect(favoriteFilter).toHaveCSS(
+    'border-radius',
+    await sourceFilter.evaluate((element) => getComputedStyle(element).borderRadius),
+  );
+  const sourceFilterBox = await sourceFilter.boundingBox();
+  const favoriteFilterBox = await favoriteFilter.boundingBox();
+  expect(favoriteFilterBox?.height).toBe(sourceFilterBox?.height);
+  const inactiveBackground = await favoriteFilter.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  await favoriteCheckbox.check();
+  await expect(favoriteFilter).toHaveAttribute('data-active', 'true');
+  await expect(favoriteFilter.locator('svg')).toHaveAttribute('fill', 'currentColor');
+  expect(await favoriteFilter.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  )).not.toBe(inactiveBackground);
 
   await expect(page.locator('.sidebar')).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
@@ -163,9 +188,9 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
   await openApp(page);
   await waitForGrid(page);
 
-  await page.getByLabel('Source filter').selectOption('source:1');
-  await page.getByLabel('Wallpaper type filter').selectOption('image');
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Source filter', 'Pictures');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
 
   await expect(page.locator('.wallpaper-card').first()).toHaveAttribute(
     'title',
@@ -190,7 +215,7 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
   );
 
   await page.getByLabel('Search wallpapers').fill('');
-  await page.getByLabel('Source filter').selectOption('all');
+  await chooseSelect(page, 'Source filter', 'ALL SOURCES');
   await page.getByLabel('Favorites').check();
   await expect(page.locator('.single-page-count')).toHaveText('1 / 1');
   await expect(page.locator('.wallpaper-card')).toHaveAttribute(
@@ -201,7 +226,7 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
 
 test('card heart adds and removes a favorite without applying the wallpaper', async ({ page }) => {
   await openApp(page);
-  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
 
   const card = page.locator('[data-wallpaper-path="/mock/path/wallpaper-002.jpg"]');
   await expect(card).toBeVisible();
@@ -228,8 +253,8 @@ test('random selection obeys every active filter', async ({ page }) => {
   await openApp(page);
   await waitForGrid(page);
 
-  await page.getByLabel('Source filter').selectOption('source:1');
-  await page.getByLabel('Wallpaper type filter').selectOption('video');
+  await chooseSelect(page, 'Source filter', 'Pictures');
+  await chooseSelect(page, 'Wallpaper type filter', 'Videos');
   await page.getByLabel('Search wallpapers').fill('wallpaper-020');
   await expect(page.locator('.single-page-count')).toHaveText('1 / 1');
 
@@ -242,7 +267,7 @@ test('random selection obeys every active filter', async ({ page }) => {
 
 test('single/double-click setting and display target govern apply requests', async ({ page }) => {
   await openApp(page);
-  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
   await waitForGrid(page);
 
   const firstCard = page.locator('.wallpaper-card').nth(0);
@@ -252,9 +277,9 @@ test('single/double-click setting and display target govern apply requests', asy
   await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: firstPath! });
 
   await openSettings(page);
-  await page.getByLabel('Apply gesture').selectOption('double');
+  await chooseSelect(page, 'Apply gesture', 'Double click');
   await page.getByRole('button', { name: 'Close settings' }).click();
-  await page.getByLabel('Display target').selectOption({ label: 'HDMI-A-1' });
+  await chooseSelect(page, 'Display target', 'HDMI-A-1');
 
   const secondCard = page.locator('.wallpaper-card').nth(1);
   const secondPath = await secondCard.getAttribute('data-wallpaper-path');
@@ -292,8 +317,28 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await expect(dialog.getByRole('heading', { name: 'Appearance & interaction' })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Wallpaper behavior' })).toBeVisible();
   await expect(dialog.getByRole('heading', { name: 'Sources', exact: true })).toBeVisible();
-  await expect(dialog.getByLabel('Theme')).toHaveValue('system');
-  await expect(dialog.getByLabel('Apply gesture')).toHaveValue('single');
+  await expect(dialog.locator('select')).toHaveCount(0);
+  await expect(dialog.locator('.select-field-trigger')).toHaveCount(6);
+  await expect(dialog.getByLabel('Theme')).toHaveAttribute('data-value', 'system');
+  await expect(dialog.getByLabel('Apply gesture')).toHaveAttribute('data-value', 'single');
+
+  await chooseSelect(page, 'Theme', 'Light');
+  await dialog.getByLabel('Theme').click();
+  const selectContent = page.locator('.select-field-content');
+  const lightMenuBackground = await selectContent.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  expect(lightMenuBackground).not.toBe('rgba(0, 0, 0, 0)');
+  expect(lightMenuBackground).not.toBe('rgb(0, 0, 0)');
+  await page.getByRole('option', { name: 'Dark', exact: true }).click();
+  await dialog.getByLabel('Theme').click();
+  const darkMenuBackground = await selectContent.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  expect(darkMenuBackground).not.toBe('rgba(0, 0, 0, 0)');
+  expect(darkMenuBackground).not.toBe('rgb(0, 0, 0)');
+  expect(darkMenuBackground).not.toBe(lightMenuBackground);
+  await page.keyboard.press('Escape');
   await expect(dialog.getByRole('group', { name: 'Image' }).getByRole('button', { name: 'awww' }))
     .toHaveAttribute('aria-pressed', 'true');
   await expect(dialog.getByRole('group', { name: 'GIF' }).getByRole('button', { name: 'awww' }))
@@ -303,7 +348,22 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await expect(dialog.getByText('Default display', { exact: true })).toHaveCount(0);
   await expect(dialog.getByLabel('Renderer installation status')).toHaveCount(0);
   await expect(dialog.getByLabel('Wallpaper Engine scaling')).toBeDisabled();
-  await expect(dialog.getByRole('button', { name: 'Manage wallpaper sources' })).toBeVisible();
+  const sourceManagement = dialog.getByRole('button', { name: 'Manage wallpaper sources' });
+  await expect(sourceManagement).toBeVisible();
+  await expect(sourceManagement).toHaveClass(/settings-navigation-card/);
+  await expect(sourceManagement).toContainText('Wallpaper sources');
+  const sourceManagementBox = await sourceManagement.boundingBox();
+  const sourcesSectionBox = await dialog.locator('[data-settings-group="sources"]').boundingBox();
+  expect(sourceManagementBox?.width).toBe(sourcesSectionBox?.width);
+  const sourceManagementBackground = await sourceManagement.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  expect(sourceManagementBackground).not.toBe('rgba(0, 0, 0, 0)');
+  await sourceManagement.focus();
+  expect(await sourceManagement.evaluate(
+    (element) => getComputedStyle(element).boxShadow,
+  )).not.toBe('none');
+  await expect(dialog.getByText(/\d+ sources? ·/)).toHaveCount(0);
 
   for (const forbidden of [
     'Database',
@@ -315,8 +375,67 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
     await expect(dialog.getByText(forbidden, { exact: true })).toHaveCount(0);
   }
 
-  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await dialog.getByRole('button', { name: 'Manage wallpaper sources' }).click();
+  const sourcesDialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
+  const settingsOverlay = page.locator('[data-settings-overlay]');
+  const settingsDrawer = settingsOverlay.locator('[aria-label="Settings"]');
+  await expect(settingsOverlay).toBeAttached();
+  await expect(settingsOverlay).toHaveAttribute('data-obscured', 'true');
+  await expect(sourcesDialog).toBeVisible();
+  const sourcePanel = page.locator('.source-panel');
+  await expect(sourcePanel).toHaveAttribute('data-presentation-phase', 'open');
+  expect((await sourcesDialog.boundingBox())?.width)
+    .toBeCloseTo((await settingsDrawer.boundingBox())?.width ?? 0, 2);
+  await sourcesDialog.getByRole('button', { name: 'Back to settings' }).click();
+  await expect(sourcePanel).toHaveAttribute('data-presentation-phase', 'exiting');
+  await expect(sourcePanel).toBeHidden({ timeout: 1_000 });
+  await expect(dialog).toBeVisible();
+  await expect(sourceManagement).toBeFocused();
+
+  await sourceManagement.click();
+  await expect(sourcesDialog).toBeVisible();
+  await sourcesDialog.getByRole('button', { name: 'Close wallpaper sources' }).click();
+  expect(await sourcePanel.count()).toBe(0);
+  await expect(settingsOverlay).toBeHidden();
+  await expect(page.getByRole('button', { name: 'Open settings' })).toBeFocused();
+
   await expect(grid).toHaveCSS('overflow-y', 'auto');
+});
+
+test('Glass theme keeps Acrylic blur off wallpaper cards', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await openSettings(page);
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+
+  await chooseSelect(page, 'Theme', 'Glass');
+  await expect.poll(() => page.locator('html').getAttribute('data-theme')).toBe('glass');
+
+  const styles = await page.evaluate(() => ({
+    topbarBackdrop: getComputedStyle(document.querySelector('.single-page-topbar')!).backdropFilter,
+    cardBackdrop: getComputedStyle(document.querySelector('.wallpaper-card')!).backdropFilter,
+  }));
+  expect(styles.topbarBackdrop).not.toBe('none');
+  expect(styles.cardBackdrop).toBe('none');
+
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await openSources(page);
+  const sourceBackgrounds = await page.locator('[data-source-id]').evaluateAll((rows) =>
+    rows.slice(0, 2).map((row) => getComputedStyle(row).backgroundColor),
+  );
+  expect(sourceBackgrounds).toHaveLength(2);
+  for (const background of sourceBackgrounds) {
+    const channels = background.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
+    expect(channels, `parse source card background ${background}`).toHaveLength(3);
+    expect(channels, `source card background must not be black: ${background}`).not.toEqual([0, 0, 0]);
+    expect(channels[2], `source card background must be blue-grey: ${background}`).toBeGreaterThan(channels[0]);
+  }
+  await page.getByRole('dialog', { name: 'Wallpaper sources' })
+    .getByRole('button', { name: 'Close wallpaper sources' })
+    .click();
+  await openSettings(page);
+  await expect(page.getByRole('dialog', { name: 'Settings' }).getByLabel('Theme'))
+    .toHaveAttribute('data-value', 'glass');
 });
 
 test('source drawer adds, renames, configures, refreshes, and safely removes sources', async ({ page }) => {
@@ -346,7 +465,7 @@ test('source drawer adds, renames, configures, refreshes, and safely removes sou
   await page.getByRole('button', { name: 'Close wallpaper sources' }).click();
   await openSettings(page);
   const settings = page.getByRole('dialog', { name: 'Settings' });
-  await expect(settings.getByText('4 sources · 1 offline')).toBeVisible();
+  await expect(settings.getByText(/4 sources · 1 offline/)).toHaveCount(0);
   await settings.getByRole('button', { name: 'Manage wallpaper sources' }).click();
 
   const pictures = sourceRow(page, 1);
@@ -433,7 +552,7 @@ test('source refresh remains busy across close and reopen without a duplicate re
 
 test('unsupported wallpaper context offers only browsing and limitation actions', async ({ page }) => {
   await openApp(page);
-  await page.getByLabel('Wallpaper type filter').selectOption('unsupported');
+  await chooseSelect(page, 'Wallpaper type filter', 'Unsupported');
   await expect(page.locator('.single-page-count')).toHaveText('2 / 2');
 
   const webWallpaper = page.locator('.wallpaper-card').filter({ hasText: 'Web title' });
@@ -455,8 +574,8 @@ test('unsupported wallpaper context offers only browsing and limitation actions'
 
 test('feedback countdown pauses on hover and resumes to automatic dismissal', async ({ page }) => {
   await openApp(page);
-  await page.getByLabel('Wallpaper type filter').selectOption('image');
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
   const card = page.locator('.wallpaper-card').first();
   await expect(card).toBeVisible();
   await card.click({ button: 'right' });
@@ -517,7 +636,7 @@ test('1000+ entry fixture stays virtualized while scrolling, searching, filterin
       control.setThumbnailFailure(`/mock/browser-fixture-${copy}/path/wallpaper-001.jpg`);
     }
   });
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
   await expect(page.locator('.single-page-count')).toHaveText('120 / 1216');
 
   for (let pageIndex = 2; pageIndex <= 9; pageIndex += 1) {
@@ -536,7 +655,7 @@ test('1000+ entry fixture stays virtualized while scrolling, searching, filterin
     .not.toBe(beforeScroll);
   expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
 
-  await page.getByLabel('Wallpaper type filter').selectOption('image');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
   await page.getByLabel('Search wallpapers').fill('wallpaper-001');
   await expect(page.locator('.single-page-count')).toHaveText('8 / 8');
   await expect(page.locator('.wallpaper-card').first().getByText('Preview failed')).toBeVisible();
@@ -549,7 +668,7 @@ test('5000+ entries auto-page near the virtual tail without expanding the DOM', 
     if (!control) throw new Error('mock control is unavailable');
     control.setBrowserFixtureCopies(33);
   });
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
   await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
   expect(await page.locator('.wallpaper-card').count()).toBeLessThan(80);
 
@@ -574,7 +693,7 @@ test('automatic paging fuse stops after one rejected append and manual retry rec
     control.setBrowserFixtureCopies(33);
     control.rejectNextBrowserAppend('mock append transport failure');
   });
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
   await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
 
   await scrollLibraryGrid(page, 'end');
@@ -604,7 +723,7 @@ test('automatic paging fuse stops after one empty append and manual retry recove
     control.setBrowserFixtureCopies(33);
     control.emptyNextBrowserAppend();
   });
-  await page.getByLabel('Library sort').selectOption('nameDesc');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
   await expect(page.locator('.single-page-count')).toHaveText('120 / 5016');
 
   await scrollLibraryGrid(page, 'end');
@@ -637,7 +756,7 @@ test('repair is offered only after integrity verification confirms a fault', asy
     control.injectCommandFailure('sqliteVerify');
     control.setBrowserFixtureCopies(0);
   });
-  await page.getByLabel('Library sort').selectOption('nameAsc');
+  await chooseSelect(page, 'Library sort', 'Name A–Z');
 
   const repair = page.getByRole('alert', { name: 'Library repair' });
   await expect(repair).toBeVisible();

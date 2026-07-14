@@ -386,7 +386,7 @@ pub fn video_thumbnail_path(cd: &ConfigDir, entry: &WallpaperEntry) -> Option<St
 
 /// Get the GUI thumbnail path (400px webp).
 pub fn gui_thumbnail_path(cd: &ConfigDir, entry: &WallpaperEntry) -> Option<String> {
-    let key = gui_thumb_cache_key(entry);
+    let key = gui_thumb_cache_key_v3(entry.path.as_str(), entry.mtime, entry.size);
     let thumb = cd.gui_thumbnail_cache_dir().join(&key);
     if thumb.exists() {
         Some(thumb.to_string_lossy().to_string())
@@ -402,32 +402,23 @@ fn video_thumb_cache_key(entry: &WallpaperEntry) -> String {
     format!("{:x}.jpg", hasher.finish())
 }
 
-fn gui_thumb_cache_key(entry: &WallpaperEntry) -> String {
-    let real = std::fs::canonicalize(entry.path.as_str())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|_| entry.path.to_string());
-    let raw = format!("{}:{}:{}", real, entry.mtime, entry.size);
-    let mut hasher = DefaultHasher::new();
-    raw.hash(&mut hasher);
-    format!("{:x}.webp", hasher.finish())
-}
-
-// ── GUI Thumbnail v2 ───────────────────────────────────────────────────────
+// ── GUI Thumbnail v3 ───────────────────────────────────────────────────────
 //
 // Generates 400px-wide thumbnails with:
+//   - Single-frame output for animated image sources
 //   - Multi-point frame selection for videos (avoids black/title frames)
 //   - Atomic writes (.tmp → rename)
-//   - v2- cache key prefix (invalidates old bad thumbnails)
+//   - v3- cache key prefix (invalidates animated v2 thumbnails)
 
 pub const DEFAULT_FAILURE_TTL_SECS: u64 = 15 * 60;
 const FAILURE_CACHE_DIR_NAME: &str = ".failures";
 
-/// Cache key for a GUI thumbnail (v2 — incompatible with v1 keys).
-pub fn gui_thumb_cache_key_v2(path: &str, mtime: u64, size: u64) -> String {
+/// Cache key for a GUI thumbnail (v3 — incompatible with animated v2 entries).
+pub fn gui_thumb_cache_key_v3(path: &str, mtime: u64, size: u64) -> String {
     let real = std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string());
-    let raw = format!("v2-{}:{}:{}", real, mtime, size);
+    let raw = format!("v3-{}:{}:{}", real, mtime, size);
     let mut hasher = DefaultHasher::new();
     raw.hash(&mut hasher);
     format!("{:x}.webp", hasher.finish())
@@ -442,7 +433,7 @@ pub fn generate_gui_thumbnail(
 ) -> Result<(PathBuf, bool), ThumbnailFailure> {
     std::fs::create_dir_all(cache_dir).map_err(|_| ThumbnailFailure::CacheWriteFailed)?;
 
-    let key = gui_thumb_cache_key_v2(path, mtime, size);
+    let key = gui_thumb_cache_key_v3(path, mtime, size);
     let dst = cache_dir.join(&key);
 
     // Already cached — return immediately.
@@ -710,7 +701,7 @@ pub fn thumbnail_for_with_failure_ttl(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let _ = maybe_cleanup_stale_tmp_thumbnails(cache_dir, current_epoch_secs());
-    let key = gui_thumb_cache_key_v2(path, mtime, size);
+    let key = gui_thumb_cache_key_v3(path, mtime, size);
     let marker = failure_marker_path(cache_dir, &key);
     if let Some(failure) = read_failure_marker(&marker) {
         return ThumbnailResult {
@@ -868,16 +859,21 @@ fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> bool {
         && dst.exists()
 }
 
+fn imagemagick_first_frame_source(src: &str) -> String {
+    format!("{src}[0]")
+}
+
 fn generate_image_thumbnail(src: &str, dst: &Path) -> bool {
     if generate_image_thumbnail_rust(src, dst) {
         return true;
     }
+    let first_frame_source = imagemagick_first_frame_source(src);
     for program in &["magick", "convert"] {
         if !command_exists(program) {
             continue;
         }
         let ok = Command::new(program)
-            .arg(src)
+            .arg(&first_frame_source)
             .args(["-resize", "400x", "-quality", "80", "-auto-orient"])
             .arg(dst)
             .stdout(Stdio::null())
@@ -1075,29 +1071,29 @@ mod tests {
 
     #[test]
     fn cache_key_is_deterministic() {
-        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 1700000000, 12345);
-        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 1700000000, 12345);
+        let key1 = gui_thumb_cache_key_v3("/path/to/file.jpg", 1700000000, 12345);
+        let key2 = gui_thumb_cache_key_v3("/path/to/file.jpg", 1700000000, 12345);
         assert_eq!(key1, key2, "same inputs must produce same cache key");
     }
 
     #[test]
     fn cache_key_changes_with_mtime() {
-        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 12345);
-        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 200, 12345);
+        let key1 = gui_thumb_cache_key_v3("/path/to/file.jpg", 100, 12345);
+        let key2 = gui_thumb_cache_key_v3("/path/to/file.jpg", 200, 12345);
         assert_ne!(key1, key2, "different mtime must produce different key");
     }
 
     #[test]
     fn cache_key_changes_with_size() {
-        let key1 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 100);
-        let key2 = gui_thumb_cache_key_v2("/path/to/file.jpg", 100, 200);
+        let key1 = gui_thumb_cache_key_v3("/path/to/file.jpg", 100, 100);
+        let key2 = gui_thumb_cache_key_v3("/path/to/file.jpg", 100, 200);
         assert_ne!(key1, key2, "different size must produce different key");
     }
 
     #[test]
     fn cache_key_changes_with_path() {
-        let key1 = gui_thumb_cache_key_v2("/a.jpg", 100, 100);
-        let key2 = gui_thumb_cache_key_v2("/b.jpg", 100, 100);
+        let key1 = gui_thumb_cache_key_v3("/a.jpg", 100, 100);
+        let key2 = gui_thumb_cache_key_v3("/b.jpg", 100, 100);
         assert_ne!(key1, key2, "different path must produce different key");
     }
 
@@ -1158,7 +1154,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let key = gui_thumb_cache_key_v2(bad_image.to_str().unwrap(), mtime, size);
+        let key = gui_thumb_cache_key_v3(bad_image.to_str().unwrap(), mtime, size);
         let marker = failure_marker_path(cache.path(), &key);
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         write_failure_marker(
@@ -1191,7 +1187,7 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs();
-        let key = gui_thumb_cache_key_v2(bad_image.to_str().unwrap(), mtime, size);
+        let key = gui_thumb_cache_key_v3(bad_image.to_str().unwrap(), mtime, size);
         let marker = failure_marker_path(cache.path(), &key);
         std::fs::create_dir_all(marker.parent().unwrap()).unwrap();
         write_failure_marker(
@@ -1308,6 +1304,40 @@ mod tests {
             "second call should return cached thumbnail"
         );
         assert!(second.cache_hit);
+    }
+
+    #[test]
+    fn animated_gif_generates_single_frame_gui_thumbnail() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let source = media.path().join("animated.gif");
+        let file = std::fs::File::create(&source).unwrap();
+        let mut encoder = image::codecs::gif::GifEncoder::new(file);
+        let red = image::Frame::new(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([255, 0, 0, 255]),
+        ));
+        let blue = image::Frame::new(image::RgbaImage::from_pixel(
+            8,
+            8,
+            image::Rgba([0, 0, 255, 255]),
+        ));
+        encoder.encode_frames([red, blue]).unwrap();
+
+        let result = thumbnail_for(cache.path(), source.to_str().unwrap());
+        let bytes = std::fs::read(result.thumbnail.expect("thumbnail")).unwrap();
+        assert!(!bytes
+            .windows(4)
+            .any(|chunk| chunk == b"ANIM" || chunk == b"ANMF"));
+    }
+
+    #[test]
+    fn imagemagick_fallback_selects_only_the_first_frame() {
+        assert_eq!(
+            imagemagick_first_frame_source("/tmp/a.gif"),
+            "/tmp/a.gif[0]",
+        );
     }
 
     #[test]

@@ -1,10 +1,11 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { memo, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
 import {
   anchoredScrollTopForLayoutChange,
+  shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
   visibleThumbnailPaths,
@@ -69,7 +70,7 @@ function initialGridLayout(cardSize: WallpaperCardSize): WallpaperGridLayout {
   };
 }
 
-export default function WallpaperGrid({
+function WallpaperGridImpl({
   entries,
   onApply,
   onSelect,
@@ -93,7 +94,6 @@ export default function WallpaperGrid({
   onLoadMore,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
-  const [scrolling, setScrolling] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
 
@@ -102,6 +102,7 @@ export default function WallpaperGrid({
   const [gridLayout, setGridLayout] = useState<WallpaperGridLayout>(() => initialGridLayout(cardSize));
   const colCount = gridLayout.colCount;
   const isScrollingRef = useRef(false);
+  const activeRef = useRef(active);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const pendingScrollTopRef = useRef<number | null>(null);
   const lastEnqueueKeyRef = useRef('');
@@ -110,6 +111,7 @@ export default function WallpaperGrid({
   const entriesLengthRef = useRef(entries.length);
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
+  activeRef.current = active;
 
   const overscan = overscanRowsFor(colCount, true);
 
@@ -167,8 +169,7 @@ export default function WallpaperGrid({
   const beginScrolling = useCallback(() => {
     if (!isScrollingRef.current) {
       isScrollingRef.current = true;
-      setScrolling(true);
-      setRevealPaused(true);
+      setRevealPaused(shouldPauseThumbnailReveal(activeRef.current, true));
     }
     if (scrollIdleTimerRef.current !== null) {
       window.clearTimeout(scrollIdleTimerRef.current);
@@ -176,10 +177,13 @@ export default function WallpaperGrid({
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
-      setScrolling(false);
-      setRevealPaused(false);
+      setRevealPaused(shouldPauseThumbnailReveal(activeRef.current, false));
     }, SCROLL_IDLE_MS);
   }, [setRevealPaused]);
+
+  useEffect(() => {
+    setRevealPaused(shouldPauseThumbnailReveal(active, isScrollingRef.current));
+  }, [active, setRevealPaused]);
 
   const remeasure = useCallback(() => {
     const el = containerRef.current;
@@ -313,6 +317,8 @@ export default function WallpaperGrid({
     beginScrolling();
   }, [beginScrolling]);
 
+  const isScrolling = useCallback(() => isScrollingRef.current, []);
+
   const handleContextMenu = useCallback((e: React.MouseEvent, path: string) => {
     e.preventDefault();
     setContextMenu({ x: e.clientX, y: e.clientY, path });
@@ -376,7 +382,7 @@ export default function WallpaperGrid({
                   favoritePending={favoritePendingPaths.has(e.path)}
                   current={currentPath === e.path}
                   applyAvailable={isEntryApplicable?.(e)}
-                  scrolling={scrolling}
+                  isScrolling={isScrolling}
                 />
               ))}
             </div>
@@ -398,3 +404,5 @@ export default function WallpaperGrid({
     </div>
   );
 }
+
+export default memo(WallpaperGridImpl);

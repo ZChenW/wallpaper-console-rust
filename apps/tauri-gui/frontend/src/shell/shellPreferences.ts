@@ -19,7 +19,7 @@ export type DisplayTarget =
   | { readonly kind: 'output'; readonly output: string };
 
 export type ApplyGesture = 'single' | 'double';
-export type ShellTheme = 'system' | 'light' | 'dark';
+export type ShellTheme = 'system' | 'light' | 'dark' | 'glass';
 
 /**
  * The complete persisted App Shell state. Search, selection, scroll position,
@@ -58,7 +58,7 @@ const TYPE_FILTERS = new Set<LibraryTypeFilter>([
 const SORTS = new Set<LibrarySort>(['recentlyAdded', 'nameAsc', 'nameDesc']);
 const CARD_SIZES = new Set<WallpaperCardSize>(['small', 'medium', 'large']);
 const APPLY_GESTURES = new Set<ApplyGesture>(['single', 'double']);
-const THEMES = new Set<ShellTheme>(['system', 'light', 'dark']);
+const THEMES = new Set<ShellTheme>(['system', 'light', 'dark', 'glass']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

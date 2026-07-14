@@ -82,6 +82,16 @@ test('double-click apply is opt-in and survives persistence', () => {
   );
 });
 
+test('glass theme survives persistence', () => {
+  assert.equal(
+    parseShellPreferences(serializeShellPreferences({
+      ...DEFAULT_SHELL_PREFERENCES,
+      theme: 'glass',
+    })).theme,
+    'glass',
+  );
+});
+
 test('serialization excludes transient shell state even when extra properties reach runtime', () => {
   const runtimeState = {
     ...DEFAULT_SHELL_PREFERENCES,

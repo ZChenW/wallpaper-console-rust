@@ -1,7 +1,8 @@
 import { useEffect, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
-import { X } from 'lucide-react';
+import { ChevronRight, FolderCog, X } from 'lucide-react';
 
 import type { RendererStatusesDTO } from '../api/types.ts';
+import SelectField from '../components/SelectField.tsx';
 import type {
   ApplyGesture,
   ShellPreferences,
@@ -23,6 +24,7 @@ import type { WallpaperCardSize } from '../utils/layout.ts';
 
 export interface CompactSettingsPanelProps {
   readonly open: boolean;
+  readonly obscured?: boolean;
   readonly preferences: ShellPreferences;
   readonly updatePreferences: (update: ShellPreferencesUpdate) => void;
   readonly behaviorSettings: WallpaperBehaviorSettings;
@@ -31,23 +33,12 @@ export interface CompactSettingsPanelProps {
   readonly loadError: Error | null;
   readonly saveError: Error | null;
   readonly rendererStatuses: RendererStatusesDTO | null;
-  readonly sourceCount: number;
-  readonly offlineSourceCount: number;
-  readonly onOpenSources: () => void;
+  readonly onOpenSources: (trigger: HTMLButtonElement) => void;
   readonly onClose: () => void;
 }
 
 function errorMessage(error: Error): string {
   return error.message.trim() || 'Unknown configuration error';
-}
-
-function sourceSummary(sourceCount: number, offlineSourceCount: number): string {
-  const total = Math.max(0, Math.trunc(sourceCount));
-  const offline = Math.min(total, Math.max(0, Math.trunc(offlineSourceCount)));
-  const sourceLabel = total === 1 ? 'source' : 'sources';
-  return offline > 0
-    ? `${total} ${sourceLabel} · ${offline} offline`
-    : `${total} ${sourceLabel} · all available`;
 }
 
 export function lockBodyScroll(body: { style: { overflow: string } }): () => void {
@@ -60,6 +51,7 @@ export function lockBodyScroll(body: { style: { overflow: string } }): () => voi
 
 export function CompactSettingsPanelView({
   open,
+  obscured = false,
   preferences,
   updatePreferences,
   behaviorSettings,
@@ -68,8 +60,6 @@ export function CompactSettingsPanelView({
   loadError,
   saveError,
   rendererStatuses,
-  sourceCount,
-  offlineSourceCount,
   onOpenSources,
   onClose,
 }: CompactSettingsPanelProps) {
@@ -80,16 +70,16 @@ export function CompactSettingsPanelView({
   const awwwUnavailable = rendererStatuses?.awww.available === false;
   const mpvpaperUnavailable = rendererStatuses?.mpvpaper.available === false;
   const lweUnavailable = rendererStatuses?.linuxWallpaperEngine.available === false;
-  const updateTheme = (event: ChangeEvent<HTMLSelectElement>) => {
-    const theme = event.currentTarget.value as ShellTheme;
+  const updateTheme = (value: string) => {
+    const theme = value as ShellTheme;
     updatePreferences((current) => ({ ...current, theme }));
   };
-  const updateGesture = (event: ChangeEvent<HTMLSelectElement>) => {
-    const applyGesture = event.currentTarget.value as ApplyGesture;
+  const updateGesture = (value: string) => {
+    const applyGesture = value as ApplyGesture;
     updatePreferences((current) => ({ ...current, applyGesture }));
   };
-  const updateCardSize = (event: ChangeEvent<HTMLSelectElement>) => {
-    const cardSize = event.currentTarget.value as WallpaperCardSize;
+  const updateCardSize = (value: string) => {
+    const cardSize = value as WallpaperCardSize;
     updatePreferences((current) => ({ ...current, cardSize }));
   };
   const updateImageRenderer = (imageBackend: ImageRenderer) => {
@@ -98,12 +88,12 @@ export function CompactSettingsPanelView({
   const updateGifRenderer = (gifBackend: GifRenderer) => {
     updateBehaviorSettings((current) => ({ ...current, gifBackend }));
   };
-  const updateFillMode = (event: ChangeEvent<HTMLSelectElement>) => {
-    const fillMode = event.currentTarget.value as WallpaperFillMode;
+  const updateFillMode = (value: string) => {
+    const fillMode = value as WallpaperFillMode;
     updateBehaviorSettings((current) => ({ ...current, fillMode }));
   };
-  const updateAwwwTransitionType = (event: ChangeEvent<HTMLSelectElement>) => {
-    const awwwTransitionType = event.currentTarget.value as AwwwTransitionType;
+  const updateAwwwTransitionType = (value: string) => {
+    const awwwTransitionType = value as AwwwTransitionType;
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionType }));
   };
   const updateAwwwTransitionDuration = (event: ChangeEvent<HTMLInputElement>) => {
@@ -114,8 +104,8 @@ export function CompactSettingsPanelView({
     const awwwTransitionFps = Number(event.currentTarget.value);
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionFps }));
   };
-  const updateLweScaling = (event: ChangeEvent<HTMLSelectElement>) => {
-    const lweScaling = event.currentTarget.value as LweScalingMode;
+  const updateLweScaling = (value: string) => {
+    const lweScaling = value as LweScalingMode;
     updateBehaviorSettings((current) => ({ ...current, lweScaling }));
   };
   const updateLweFps = (event: ChangeEvent<HTMLInputElement>) => {
@@ -166,6 +156,7 @@ export function CompactSettingsPanelView({
   return (
     <div
       className="settings-overlay"
+      data-obscured={obscured}
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
@@ -173,7 +164,9 @@ export function CompactSettingsPanelView({
     >
       <aside
         aria-label="Settings"
+        aria-hidden={obscured ? true : undefined}
         aria-modal="true"
+        inert={obscured}
         role="dialog"
         className="settings-panel"
       >
@@ -207,30 +200,45 @@ export function CompactSettingsPanelView({
             <div className="settings-behavior-card__rows">
               <label className="settings-behavior-row">
                 <span>Theme</span>
-                <select aria-label="Theme" value={preferences.theme} onChange={updateTheme}>
-                  <option value="system">System</option>
-                  <option value="light">Light</option>
-                  <option value="dark">Dark</option>
-                </select>
+                <SelectField
+                  aria-label="Theme"
+                  onValueChange={updateTheme}
+                  options={[
+                    { value: 'system', label: 'System' },
+                    { value: 'light', label: 'Light' },
+                    { value: 'dark', label: 'Dark' },
+                    { value: 'glass', label: 'Glass' },
+                  ]}
+                  value={preferences.theme}
+                  variant="settings"
+                />
               </label>
               <label className="settings-behavior-row">
                 <span>Apply gesture</span>
-                <select
+                <SelectField
                   aria-label="Apply gesture"
+                  onValueChange={updateGesture}
+                  options={[
+                    { value: 'single', label: 'Single click' },
+                    { value: 'double', label: 'Double click' },
+                  ]}
                   value={preferences.applyGesture}
-                  onChange={updateGesture}
-                >
-                  <option value="single">Single click</option>
-                  <option value="double">Double click</option>
-                </select>
+                  variant="settings"
+                />
               </label>
               <label className="settings-behavior-row">
                 <span>Card size</span>
-                <select aria-label="Card size" value={preferences.cardSize} onChange={updateCardSize}>
-                  <option value="small">Small</option>
-                  <option value="medium">Medium</option>
-                  <option value="large">Large</option>
-                </select>
+                <SelectField
+                  aria-label="Card size"
+                  onValueChange={updateCardSize}
+                  options={[
+                    { value: 'small', label: 'Small' },
+                    { value: 'medium', label: 'Medium' },
+                    { value: 'large', label: 'Large' },
+                  ]}
+                  value={preferences.cardSize}
+                  variant="settings"
+                />
               </label>
             </div>
           </div>
@@ -309,31 +317,34 @@ export function CompactSettingsPanelView({
               <div className="settings-behavior-card__rows">
                 <label className="settings-behavior-row">
                   <span>Fill behavior</span>
-                  <select
+                  <SelectField
                     aria-label="Fill behavior"
-                    data-behavior-control={true}
+                    dataBehaviorControl={true}
                     disabled={!behaviorReady}
+                    onValueChange={updateFillMode}
+                    options={[
+                      { value: 'crop', label: 'Crop to fill' },
+                      { value: 'fit', label: 'Fit inside' },
+                      { value: 'stretch', label: 'Stretch' },
+                    ]}
                     value={behaviorSettings.fillMode}
-                    onChange={updateFillMode}
-                  >
-                    <option value="crop">Crop to fill</option>
-                    <option value="fit">Fit inside</option>
-                    <option value="stretch">Stretch</option>
-                  </select>
+                    variant="settings"
+                  />
                 </label>
                 <label className="settings-behavior-row">
                   <span>Transition</span>
-                  <select
+                  <SelectField
                     aria-label="awww transition type"
-                    data-behavior-control={true}
+                    dataBehaviorControl={true}
                     disabled={!behaviorReady}
+                    onValueChange={updateAwwwTransitionType}
+                    options={AWWW_TRANSITION_TYPES.map((transitionType) => ({
+                      value: transitionType,
+                      label: transitionType,
+                    }))}
                     value={behaviorSettings.awwwTransitionType}
-                    onChange={updateAwwwTransitionType}
-                  >
-                    {AWWW_TRANSITION_TYPES.map((transitionType) => (
-                      <option key={transitionType} value={transitionType}>{transitionType}</option>
-                    ))}
-                  </select>
+                    variant="settings"
+                  />
                 </label>
                 <label className="settings-behavior-row">
                   <span>Transition duration</span>
@@ -386,17 +397,18 @@ export function CompactSettingsPanelView({
             <div className="settings-behavior-card__rows">
               <label className="settings-behavior-row">
                 <span>Scene scaling</span>
-                <select
+                <SelectField
                   aria-label="Wallpaper Engine scaling"
-                  data-behavior-control={true}
+                  dataBehaviorControl={true}
                   disabled={!behaviorReady || lweUnavailable}
+                  onValueChange={updateLweScaling}
+                  options={LWE_SCALING_MODES.map((scaling) => ({
+                    value: scaling,
+                    label: scaling,
+                  }))}
                   value={behaviorSettings.lweScaling}
-                  onChange={updateLweScaling}
-                >
-                  {LWE_SCALING_MODES.map((scaling) => (
-                    <option key={scaling} value={scaling}>{scaling}</option>
-                  ))}
-                </select>
+                  variant="settings"
+                />
               </label>
               <label className="settings-behavior-row">
                 <span>Scene FPS</span>
@@ -478,15 +490,25 @@ export function CompactSettingsPanelView({
           className="settings-section"
         >
           <h3 id="settings-sources-heading">Sources</h3>
-          <p>{sourceSummary(sourceCount, offlineSourceCount)}</p>
-          <p>Add, refresh, rename, or remove folders in the dedicated source panel.</p>
           <button
             type="button"
             aria-label="Manage wallpaper sources"
+            className="settings-navigation-card"
             data-source-management-action={true}
-            onClick={onOpenSources}
+            onClick={(event) => onOpenSources(event.currentTarget)}
           >
-            Manage sources
+            <span className="settings-navigation-card__icon" aria-hidden="true">
+              <FolderCog size={17} />
+            </span>
+            <span className="settings-navigation-card__copy">
+              <strong>Wallpaper sources</strong>
+              <span>Add, rename, refresh, or remove folders.</span>
+            </span>
+            <ChevronRight
+              aria-hidden="true"
+              className="settings-navigation-card__chevron"
+              size={18}
+            />
           </button>
         </section>
       </aside>
@@ -500,6 +522,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
 
     const unlockBodyScroll = lockBodyScroll(document.body);
     const closeOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (props.obscured) return;
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
       props.onClose();
@@ -509,7 +532,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       unlockBodyScroll();
       document.removeEventListener('keydown', closeOnEscape);
     };
-  }, [props.open, props.onClose]);
+  }, [props.obscured, props.open, props.onClose]);
 
   return CompactSettingsPanelView(props);
 }

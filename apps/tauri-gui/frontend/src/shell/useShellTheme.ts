@@ -3,11 +3,12 @@ import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 
 import type { ShellTheme } from './shellPreferences.ts';
 
-export type ResolvedShellTheme = 'light' | 'dark';
+export type ResolvedShellTheme = 'light' | 'dark' | 'glass';
+type NativeShellTheme = Exclude<ResolvedShellTheme, 'glass'>;
 
 export interface ShellThemeSurface {
   setDocumentTheme(theme: ResolvedShellTheme): void;
-  setWindowTheme(theme: ResolvedShellTheme | null): Promise<void>;
+  setWindowTheme(theme: NativeShellTheme | null): Promise<void>;
 }
 
 export function resolveShellTheme(
@@ -24,7 +25,9 @@ export async function applyShellThemeToSurface(
 ): Promise<void> {
   surface.setDocumentTheme(resolveShellTheme(theme, prefersDark));
   try {
-    await surface.setWindowTheme(theme === 'system' ? null : theme);
+    await surface.setWindowTheme(
+      theme === 'system' ? null : theme === 'glass' ? 'dark' : theme,
+    );
   } catch {
     // Browser, mock, and smoke environments may not expose a Tauri window.
   }

@@ -17,35 +17,35 @@ import {
 } from './useWallpaperBehaviorSettings.ts';
 
 async function importTsxModule(): Promise<typeof import('./CompactSettingsPanel.tsx')> {
-  const selectorSourceUrl = new URL('./DisplayTargetSelector.tsx', import.meta.url);
+  const selectFieldSourceUrl = new URL('../components/SelectField.tsx', import.meta.url);
   const panelSourceUrl = new URL('./CompactSettingsPanel.tsx', import.meta.url);
-  const selectorOutputUrl = new URL(`./.DisplayTargetSelector.test-${randomUUID()}.mjs`, import.meta.url);
+  const selectFieldOutputUrl = new URL(`./.SelectField.test-${randomUUID()}.mjs`, import.meta.url);
   const panelOutputUrl = new URL(`./.CompactSettingsPanel.test-${randomUUID()}.mjs`, import.meta.url);
   const compilerOptions = {
     jsx: ts.JsxEmit.ReactJSX,
     module: ts.ModuleKind.ESNext,
     target: ts.ScriptTarget.ES2022,
   } as const;
-  const selectorOutput = ts.transpileModule(await readFile(selectorSourceUrl, 'utf8'), {
+  const selectFieldOutput = ts.transpileModule(await readFile(selectFieldSourceUrl, 'utf8'), {
     compilerOptions,
-    fileName: selectorSourceUrl.pathname,
+    fileName: selectFieldSourceUrl.pathname,
   }).outputText;
   const panelOutput = ts.transpileModule(await readFile(panelSourceUrl, 'utf8'), {
     compilerOptions,
     fileName: panelSourceUrl.pathname,
   }).outputText.replace(
-    "from './DisplayTargetSelector.tsx';",
-    `from './${selectorOutputUrl.pathname.split('/').at(-1)}';`,
+    "from '../components/SelectField.tsx';",
+    `from './${selectFieldOutputUrl.pathname.split('/').at(-1)}';`,
   );
 
   await Promise.all([
-    writeFile(selectorOutputUrl, selectorOutput, 'utf8'),
+    writeFile(selectFieldOutputUrl, selectFieldOutput, 'utf8'),
     writeFile(panelOutputUrl, panelOutput, 'utf8'),
   ]);
   try {
     return await import(panelOutputUrl.href);
   } finally {
-    await Promise.all([unlink(selectorOutputUrl), unlink(panelOutputUrl)]);
+    await Promise.all([unlink(selectFieldOutputUrl), unlink(panelOutputUrl)]);
   }
 }
 
@@ -57,6 +57,9 @@ function findElements(
 
   const matches = predicate(node) ? [node] : [];
   if (typeof node.type === 'function') {
+    if (Array.isArray(node.props.options) && typeof node.props.onValueChange === 'function') {
+      return matches;
+    }
     const rendered = node.type(node.props) as ReactNode;
     return [...matches, ...findElements(rendered, predicate)];
   }
@@ -84,8 +87,6 @@ function viewProps() {
         message: 'linux-wallpaperengine is installed.',
       },
     },
-    sourceCount: 4,
-    offlineSourceCount: 1,
     onOpenSources: () => undefined,
     onClose: () => undefined,
   };
@@ -141,6 +142,27 @@ test('settings body scroll lock restores the previous overflow value', async () 
   assert.equal(body.style.overflow, 'auto');
 });
 
+test('settings stays mounted but becomes obscured under a child drawer', async () => {
+  const { CompactSettingsPanelView } = await importTsxModule();
+  const regularTree = CompactSettingsPanelView(viewProps());
+  const obscuredTree = CompactSettingsPanelView({ ...viewProps(), obscured: true });
+  const [regularOverlay] = findElements(
+    regularTree,
+    (element) => element.props['data-settings-overlay'] === true,
+  );
+  const [obscuredOverlay] = findElements(
+    obscuredTree,
+    (element) => element.props['data-settings-overlay'] === true,
+  );
+  const [regularDialog] = findElements(regularTree, (element) => element.props.role === 'dialog');
+  const [obscuredDialog] = findElements(obscuredTree, (element) => element.props.role === 'dialog');
+
+  assert.equal(regularOverlay.props['data-obscured'], false);
+  assert.equal(regularDialog.props['aria-hidden'], undefined);
+  assert.equal(obscuredOverlay.props['data-obscured'], true);
+  assert.equal(obscuredDialog.props['aria-hidden'], true);
+});
+
 test('renders exactly the three compact groups and excludes legacy diagnostics', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView(viewProps());
@@ -181,23 +203,26 @@ test('appearance controls update only remembered shell preferences', async () =>
 
   assert.ok(interfaceCard);
   assert.deepEqual(
-    findElements(interfaceCard, (element) => typeof element.props['aria-label'] === 'string')
+    findElements(interfaceCard, (element) => typeof element.props.onValueChange === 'function')
       .map((control) => control.props['aria-label']),
     ['Theme', 'Apply gesture', 'Card size'],
   );
 
-  (theme.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'dark' } });
-  (gesture.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'double' } });
-  (cardSize.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'large' } });
+  (theme.props.onValueChange as (value: string) => void)('dark');
+  (gesture.props.onValueChange as (value: string) => void)('double');
+  (cardSize.props.onValueChange as (value: string) => void)('large');
 
   assert.equal(current.theme, 'dark');
   assert.equal(current.applyGesture, 'double');
   assert.equal(current.cardSize, 'large');
   assert.deepEqual(
-    findElements(tree, (element) => element.props['aria-label'] === 'Theme')
-      .flatMap((select) => findElements(select, (element) => element.type === 'option'))
-      .map((option) => option.props.value),
-    ['system', 'light', 'dark'],
+    theme.props.options,
+    [
+      { value: 'system', label: 'System' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' },
+      { value: 'glass', label: 'Glass' },
+    ],
   );
 });
 
@@ -262,8 +287,8 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
   const gifMpvpaper = findElements(gif, (element) => element.props['data-renderer'] === 'mpvpaper')[0];
   (imageMpvpaper.props.onClick as () => void)();
   (gifMpvpaper.props.onClick as () => void)();
-  (fill.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'stretch' } });
-  (transition.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'wave' } });
+  (fill.props.onValueChange as (value: string) => void)('stretch');
+  (transition.props.onValueChange as (value: string) => void)('wave');
   (duration.props.onChange as (event: unknown) => void)({ currentTarget: { value: '2.5' } });
   (transitionFps.props.onChange as (event: unknown) => void)({ currentTarget: { value: '144' } });
 
@@ -291,8 +316,7 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
   assert.equal(videoCards[0].props['aria-disabled'], true);
   assert.doesNotMatch(markup, /awww renderer|mpvpaper renderer|Image renderer|GIF renderer|Video renderer/i);
   assert.deepEqual(
-    findElements(transition, (element) => element.type === 'option')
-      .map((option) => option.props.value),
+    (transition.props.options as Array<{ value: string }>).map((option) => option.value),
     ['simple', 'fade', 'left', 'right', 'top', 'bottom', 'wipe', 'grow', 'center', 'outer', 'random', 'wave'],
   );
 });
@@ -404,7 +428,7 @@ test('renderer-specific options update Wallpaper Engine audio and login restore 
   assert.ok(volume);
   assert.ok(restore);
   assert.equal(volume.props.disabled, false);
-  (scaling.props.onChange as (event: unknown) => void)({ currentTarget: { value: 'fit' } });
+  (scaling.props.onValueChange as (value: string) => void)('fit');
   (fps.props.onChange as (event: unknown) => void)({ currentTarget: { value: '120' } });
   (mute.props.onChange as (event: unknown) => void)({ currentTarget: { checked: true } });
   (volume.props.onChange as (event: unknown) => void)({ currentTarget: { value: '25' } });
@@ -444,7 +468,11 @@ test('behavior readiness and errors are explicit without disabling unrelated set
     saveError: new Error('could not save config'),
   });
   const markup = renderToStaticMarkup(tree);
-  const behaviorControls = findElements(tree, (element) => element.props['data-behavior-control'] === true);
+  const behaviorControls = findElements(
+    tree,
+    (element) => element.props['data-behavior-control'] === true
+      || element.props.dataBehaviorControl === true,
+  );
   const [theme] = findElements(tree, (element) => element.props['aria-label'] === 'Theme');
 
   assert.doesNotMatch(markup, /Loading wallpaper behavior settings/);
@@ -457,7 +485,7 @@ test('behavior readiness and errors are explicit without disabling unrelated set
   assert.ok(findElements(tree, (element) => element.props.role === 'alert').length >= 2);
 });
 
-test('sources group is a status and one entry point, not duplicated source management', async () => {
+test('sources group has one entry point without a redundant availability summary', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   let opened = 0;
   let closed = 0;
@@ -470,10 +498,15 @@ test('sources group is a status and one entry point, not duplicated source manag
   const [sources] = findElements(tree, (element) => element.props['aria-label'] === 'Manage wallpaper sources');
   const [close] = findElements(tree, (element) => element.props['aria-label'] === 'Close settings');
 
-  assert.match(markup, /4 sources/);
-  assert.match(markup, /1 offline/);
+  assert.doesNotMatch(markup, /4 sources/);
+  assert.doesNotMatch(markup, /1 offline/);
+  assert.equal(sources.props.className, 'settings-navigation-card');
+  const sourceActionMarkup = renderToStaticMarkup(sources);
+  assert.match(sourceActionMarkup, /Wallpaper sources/);
+  assert.match(sourceActionMarkup, /Add, rename, refresh, or remove folders\./);
+  assert.equal(sourceActionMarkup.match(/<svg/g)?.length, 2);
   assert.equal(findElements(tree, (element) => element.props['data-source-management-action'] === true).length, 1);
-  (sources.props.onClick as () => void)();
+  (sources.props.onClick as (event: unknown) => void)({ currentTarget: {} });
   (close.props.onClick as () => void)();
   assert.equal(opened, 1);
   assert.equal(closed, 1);

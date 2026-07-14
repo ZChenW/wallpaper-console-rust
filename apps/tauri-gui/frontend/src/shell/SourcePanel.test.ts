@@ -138,6 +138,47 @@ test('source panel reloads only when an already-opened drawer is reopened', asyn
   assert.equal(transition.reload, false, 'ordinary rerenders while open do not reload');
 });
 
+test('source panel exit accepts one request and respects reduced motion', async () => {
+  const { beginSourcePanelExit } = await importTsxModule();
+
+  assert.deepEqual(beginSourcePanelExit('open', false), {
+    accepted: true,
+    next: 'exiting',
+    delayMs: 160,
+  });
+  assert.deepEqual(beginSourcePanelExit('exiting', false), {
+    accepted: false,
+    next: 'exiting',
+    delayMs: 0,
+  });
+  assert.deepEqual(beginSourcePanelExit('open', true), {
+    accepted: true,
+    next: 'exiting',
+    delayMs: 0,
+  });
+});
+
+test('source drawer backdrop closes only when the backdrop itself is pressed', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const tree = SourcePanelView({
+    ...noopViewProps(),
+    onClose: () => calls.push('close'),
+  });
+  const [backdrop] = findElements(
+    tree,
+    (element) => element.props.className === 'source-panel__backdrop',
+  );
+  const onMouseDown = backdrop.props.onMouseDown as (event: unknown) => void;
+  const backdropTarget = {};
+
+  onMouseDown({ currentTarget: backdropTarget, target: {} });
+  assert.deepEqual(calls, [], 'presses inside the drawer must not close it');
+
+  onMouseDown({ currentTarget: backdropTarget, target: backdropTarget });
+  assert.deepEqual(calls, ['close']);
+});
+
 test('source drawer autofocuses close and Escape closes or dismisses removal first', async () => {
   const { SourcePanelView } = await importTsxModule();
   const calls: string[] = [];
@@ -148,7 +189,10 @@ test('source drawer autofocuses close and Escape closes or dismisses removal fir
   const [dialog] = findElements(tree, (element) => element.props.role === 'dialog');
   const [close] = findElements(tree, (element) => element.props['aria-label'] === 'Close wallpaper sources');
   assert.equal(close.props.autoFocus, true);
-  (dialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  (dialog.props.onKeyDown as (event: unknown) => void)({
+    key: 'Escape',
+    preventDefault: () => undefined,
+  });
   assert.deepEqual(calls, ['close']);
 
   const confirmTree = SourcePanelView({
@@ -158,8 +202,34 @@ test('source drawer autofocuses close and Escape closes or dismisses removal fir
     onCancelRemove: () => calls.push('cancel-remove'),
   });
   const [confirmDialog] = findElements(confirmTree, (element) => element.props.role === 'dialog');
-  (confirmDialog.props.onKeyDown as (event: unknown) => void)({ key: 'Escape' });
+  (confirmDialog.props.onKeyDown as (event: unknown) => void)({
+    key: 'Escape',
+    preventDefault: () => undefined,
+  });
   assert.deepEqual(calls, ['close', 'cancel-remove']);
+});
+
+test('source drawer exposes Back to settings only when a parent destination is provided', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const calls: string[] = [];
+  const nestedTree = SourcePanelView({
+    ...noopViewProps(),
+    onBack: () => calls.push('back'),
+  });
+  const [back] = findElements(
+    nestedTree,
+    (element) => element.props['aria-label'] === 'Back to settings',
+  );
+
+  assert.ok(back);
+  (back.props.onClick as () => void)();
+  assert.deepEqual(calls, ['back']);
+
+  const rootTree = SourcePanelView(noopViewProps());
+  assert.equal(findElements(
+    rootTree,
+    (element) => element.props['aria-label'] === 'Back to settings',
+  ).length, 0);
 });
 
 test('renders a compact accessible drawer with source kind and honest availability', async () => {
@@ -179,6 +249,20 @@ test('renders a compact accessible drawer with source kind and honest availabili
   assert.match(markup, /data-source-id="41"/);
   assert.match(markup, /data-source-id="77"/);
   assert.match(markup, /aria-label="Close wallpaper sources"/);
+});
+
+test('source rows route their background through the theme token with the system colour fallback', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const tree = SourcePanelView(noopViewProps());
+  const rows = findElements(tree, (element) => element.props['data-source-id'] !== undefined);
+
+  assert.equal(rows.length, sources.length);
+  for (const row of rows) {
+    assert.equal(
+      (row.props.style as React.CSSProperties).background,
+      'var(--source-card-background, color-mix(in srgb, CanvasText 2.5%, Canvas))',
+    );
+  }
 });
 
 test('renders loading, load failure with retry, and empty-library states', async () => {
