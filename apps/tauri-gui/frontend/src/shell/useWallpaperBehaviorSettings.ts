@@ -2,7 +2,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from 'react';
 
@@ -105,6 +104,11 @@ export type WallpaperBehaviorSettingsUpdate =
 export interface WallpaperBehaviorSaveQueue {
   readonly latestError: Error | null;
   enqueue(settings: WallpaperBehaviorSettings): Promise<void>;
+}
+
+export interface WallpaperBehaviorPersistence {
+  reset(settings: WallpaperBehaviorSettings | null): void;
+  persist(settings: WallpaperBehaviorSettings): Promise<void>;
 }
 
 export interface UseWallpaperBehaviorSettingsResult {
@@ -349,6 +353,26 @@ export function createWallpaperBehaviorSaveQueue(
   return queue;
 }
 
+export function createWallpaperBehaviorPersistence(
+  saveQueue: WallpaperBehaviorSaveQueue,
+): WallpaperBehaviorPersistence {
+  let persistedSnapshot: string | null = null;
+
+  return {
+    reset(value) {
+      persistedSnapshot = value === null ? null : settingsSnapshot(value);
+    },
+    async persist(value) {
+      if (persistedSnapshot === null) return;
+      const snapshot = settingsSnapshot(value);
+      if (snapshot === persistedSnapshot) return;
+
+      await saveQueue.enqueue(value);
+      persistedSnapshot = snapshot;
+    },
+  };
+}
+
 export function useWallpaperBehaviorSettings(
   client: WallpaperBehaviorSettingsClient,
 ): UseWallpaperBehaviorSettingsResult {
@@ -356,15 +380,18 @@ export function useWallpaperBehaviorSettings(
   const [ready, setReady] = useState(false);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [saveError, setSaveError] = useState<Error | null>(null);
-  const persistedSnapshotRef = useRef<string | null>(null);
   const saveQueue = useMemo(
     () => createWallpaperBehaviorSaveQueue(client, setSaveError),
     [client],
   );
+  const persistence = useMemo(
+    () => createWallpaperBehaviorPersistence(saveQueue),
+    [saveQueue],
+  );
 
   useEffect(() => {
     let active = true;
-    persistedSnapshotRef.current = null;
+    persistence.reset(null);
     setReady(false);
     setLoadError(null);
     setSaveError(null);
@@ -372,7 +399,7 @@ export function useWallpaperBehaviorSettings(
     void loadWallpaperBehaviorSettings(client).then(
       (loaded) => {
         if (!active) return;
-        persistedSnapshotRef.current = settingsSnapshot(loaded);
+        persistence.reset(loaded);
         setSettings(loaded);
         setReady(true);
       },
@@ -381,7 +408,7 @@ export function useWallpaperBehaviorSettings(
         const fallback = defaultSettings();
         // Keep fallback values render-only. Treating them as loaded would let a
         // later edit overwrite unread real configuration with defaults.
-        persistedSnapshotRef.current = null;
+        persistence.reset(null);
         setSettings(fallback);
         setLoadError(errorFromUnknown(failure, 'Failed to load wallpaper behavior settings.'));
         setReady(false);
@@ -391,17 +418,14 @@ export function useWallpaperBehaviorSettings(
     return () => {
       active = false;
     };
-  }, [client]);
+  }, [client, persistence]);
 
   useEffect(() => {
     // Initial defaults are render-only. Writes begin only after a successful
     // load established an exact persisted baseline.
-    if (!ready || persistedSnapshotRef.current === null) return;
-    const snapshot = settingsSnapshot(settings);
-    if (snapshot === persistedSnapshotRef.current) return;
-    persistedSnapshotRef.current = snapshot;
-    void saveQueue.enqueue(settings).catch(() => {});
-  }, [ready, saveQueue, settings]);
+    if (!ready) return;
+    void persistence.persist(settings).catch(() => {});
+  }, [persistence, ready, settings]);
 
   const updateSettings = useCallback((update: WallpaperBehaviorSettingsUpdate) => {
     // React can evaluate functional updaters more than once in StrictMode, so

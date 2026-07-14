@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS,
   WALLPAPER_BEHAVIOR_CONFIG_KEYS,
+  createWallpaperBehaviorPersistence,
   createWallpaperBehaviorSaveQueue,
   loadWallpaperBehaviorSettings,
   normalizeWallpaperBehaviorConfig,
@@ -290,4 +291,34 @@ test('save queue reports only the latest request failure and recovers on a newer
   await recovery;
   assert.equal(queue.latestError, null);
   assert.deepEqual(observed, ['latest transport failure', null]);
+});
+
+test('persistence retries an unchanged snapshot after failure and confirms it only on success', async () => {
+  let attempts = 0;
+  const client: WallpaperBehaviorSettingsClient = {
+    configGetMany: async () => ({}),
+    configSet: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('temporary write failure');
+      return ok;
+    },
+  };
+  const persistence = createWallpaperBehaviorPersistence(
+    createWallpaperBehaviorSaveQueue(client),
+  );
+  const changed = settings({ imageBackend: 'mpvpaper' });
+  persistence.reset(settings());
+
+  await assert.rejects(persistence.persist(changed), /temporary write failure/);
+  assert.equal(attempts, 1);
+
+  await persistence.persist({ ...changed });
+  assert.equal(attempts, 1 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length);
+
+  await persistence.persist({ ...changed });
+  assert.equal(
+    attempts,
+    1 + WALLPAPER_BEHAVIOR_CONFIG_KEYS.length,
+    'a successful write becomes the new persisted baseline',
+  );
 });
