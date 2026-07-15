@@ -274,43 +274,43 @@ select:focus, input:focus { border-color: #555; }
 
 :root[data-theme="glass"] {
   color-scheme: dark;
-  --font-dashboard: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
-  --bg: #0b151d;
-  --panel: rgb(24 43 55 / 72%);
-  --panel-alt: #142630;
-  --panel-hover: rgb(42 70 84 / 74%);
-  --surface: rgb(20 39 51 / 76%);
-  --surface-muted: rgb(27 50 63 / 62%);
+  --bg: #0d0d12;
+  --panel: rgb(255 255 255 / 9%);
+  --panel-alt: rgb(255 255 255 / 5%);
+  --panel-hover: rgb(255 255 255 / 15%);
+  --surface: rgb(255 255 255 / 7%);
+  --surface-muted: rgb(255 255 255 / 5%);
   --source-card-background: var(--surface-muted);
-  --text: #dce9ed;
-  --text-muted: #91a7af;
-  --text-soft: #6f8790;
-  --border: rgb(134 180 193 / 25%);
-  --border-strong: rgb(134 198 213 / 40%);
-  --border-subtle: rgb(134 180 193 / 16%);
-  --primary-bg: rgb(51 177 198 / 16%);
-  --primary-bg-hover: rgb(51 177 198 / 24%);
-  --primary: #62d9e9;
-  --primary-strong: #94ebf4;
-  --primary-foreground: #071a20;
-  --danger-bg: rgb(116 47 58 / 44%);
-  --danger-bg-hover: rgb(139 56 69 / 54%);
-  --danger: #ff9da8;
-  --success-bg: rgb(30 88 67 / 40%);
-  --success-border: rgb(93 181 142 / 45%);
-  --success: #7ed6ad;
-  --warning-bg: rgb(105 82 30 / 42%);
-  --warning: #e4c374;
-  --shadow: rgb(2 9 13 / 62%);
-  --wallpaper-details-border: rgb(137 197 210 / 30%);
-  --wallpaper-details-background: rgb(19 38 50 / 82%);
+  --text: #f5f5f7;
+  --text-muted: #b9b9c0;
+  --text-soft: #8e8e96;
+  --border: rgb(255 255 255 / 14%);
+  --border-strong: rgb(255 255 255 / 24%);
+  --border-subtle: rgb(255 255 255 / 9%);
+  /* #0071e3: white text reaches ~4.70:1 (WCAG AA); stock iOS #0a84ff is ~3.65:1 */
+  --primary: #0071e3;
+  --primary-strong: #0a84ff;
+  --primary-foreground: #ffffff;
+  --primary-bg: rgb(10 132 255 / 16%);
+  --primary-bg-hover: rgb(10 132 255 / 26%);
+  --danger: #ff6961;
+  --danger-bg: rgb(255 69 58 / 18%);
+  --danger-bg-hover: rgb(255 69 58 / 28%);
+  --success: #30d158;
+  --success-bg: rgb(48 209 88 / 16%);
+  --success-border: rgb(48 209 88 / 40%);
+  --warning: #ffd60a;
+  --warning-bg: rgb(255 214 10 / 14%);
+  --shadow: rgb(0 0 0 / 55%);
+  --wallpaper-details-border: rgb(255 255 255 / 14%);
+  --wallpaper-details-background: rgb(28 28 34 / 62%);
   --wallpaper-details-color: var(--text);
-  --wallpaper-details-shadow: 0 1.5rem 4rem rgb(0 7 11 / 52%);
-  --feedback-card-border: rgb(137 197 210 / 28%);
-  --feedback-card-background: rgb(19 38 50 / 80%);
+  --wallpaper-details-shadow: 0 1.5rem 4rem rgb(0 0 0 / 55%);
+  --feedback-card-border: rgb(255 255 255 / 14%);
+  --feedback-card-background: rgb(28 28 34 / 62%);
   --feedback-card-color: var(--text);
-  --feedback-card-shadow: 0 0.75rem 2rem rgb(0 7 11 / 40%);
-  --feedback-card-backdrop-filter: blur(18px);
+  --feedback-card-shadow: 0 0.75rem 2rem rgb(0 0 0 / 45%);
+  --feedback-card-backdrop-filter: blur(24px) saturate(180%);
 }
 
 body {
@@ -434,39 +434,42 @@ input:focus {
 
 :root[data-theme="glass"] .single-page-shell {
   background:
-    radial-gradient(circle at 14% 4%, rgb(46 164 187 / 18%), transparent 34rem),
-    radial-gradient(circle at 88% 12%, rgb(80 108 151 / 16%), transparent 38rem),
+    radial-gradient(circle at 16% 0%, rgb(10 132 255 / 14%), transparent 34rem),
+    radial-gradient(circle at 86% 8%, rgb(191 90 242 / 10%), transparent 38rem),
     var(--bg);
-}
-
-:root[data-theme="glass"] :is(
-  .single-page-brand,
-  .single-page-topbar :is(button, input, select, label, .select-field-trigger),
-  .single-page-filters,
-  .single-page-statusbar,
-  .wallpaper-name,
-  .wallpaper-meta,
-  .wallpaper-badge,
-  .btn,
-  .select-field-trigger,
-  .select-field-item,
-  .context-menu button,
-  .single-page-favorite-filter,
-  .settings-behavior-category,
-  .settings-behavior-card > :is(h4, h5),
-  .settings-behavior-row > span:first-child,
-  .settings-behavior-row > :is(select, input, output, .select-field-trigger),
-  .settings-renderer-card,
-  .settings-number-control :is(input, [data-control-unit]),
-  .settings-navigation-card__copy strong,
-  .wallpaper-details :is(dt, dd)
-) {
-  font-family: var(--font-dashboard);
 }
 
 :root[data-theme="glass"] :is(button, input, select, [role="button"], [role="menuitem"], [tabindex]:not([tabindex="-1"])):focus-visible {
   outline: 2px solid var(--primary);
   outline-offset: 2px;
+}
+
+:root[data-theme="glass"] :is(
+  .btn,
+  .select-field-trigger,
+  .single-page-search,
+  .single-page-icon-button,
+  .single-page-filters :is(select, .select-field-trigger--compact),
+  select,
+  input[type="text"],
+  input[type="number"],
+  input[type="search"]
+) {
+  border-radius: 999px;
+}
+
+:root[data-theme="glass"] :is(.settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
+  border-radius: 1.25rem;
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 10%), rgb(255 255 255 / 3%) 40%, rgb(255 255 255 / 6%)),
+    rgb(22 22 30 / 55%);
+  border: 1px solid rgb(255 255 255 / 12%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 22%),
+    inset 0 -1px 0 rgb(255 255 255 / 5%),
+    0 8px 32px rgb(0 0 0 / 35%);
+  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(24px) saturate(180%);
 }
 
 .single-page-topbar {
@@ -482,29 +485,38 @@ input:focus {
 }
 
 :root[data-theme="glass"] .single-page-topbar {
-  background: rgb(17 34 45 / 72%);
-  -webkit-backdrop-filter: blur(16px);
-  backdrop-filter: blur(16px);
-}
-
-:root[data-theme="glass"] :is(.settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
-  -webkit-backdrop-filter: blur(18px);
-  backdrop-filter: blur(18px);
+  background:
+    linear-gradient(135deg, rgb(255 255 255 / 10%), rgb(255 255 255 / 3%) 40%, rgb(255 255 255 / 6%)),
+    rgb(22 22 30 / 55%);
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 22%),
+    inset 0 -1px 0 rgb(255 255 255 / 5%),
+    0 8px 32px rgb(0 0 0 / 35%);
+  -webkit-backdrop-filter: blur(20px) saturate(180%);
+  backdrop-filter: blur(20px) saturate(180%);
 }
 
 :root[data-theme="glass"] .wallpaper-card {
-  background: rgb(22 41 52 / 72%);
+  background: rgb(255 255 255 / 6%);
+  border-color: rgb(255 255 255 / 10%);
+  border-radius: 1rem;
+}
+
+:root[data-theme="glass"] .wallpaper-card:hover {
+  border-color: var(--primary);
+  box-shadow: 0 6px 24px rgb(0 0 0 / 30%);
 }
 
 @supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
   :root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
-    background: #13232f;
+    background: #1c1c22;
   }
 }
 
 @media (prefers-reduced-transparency: reduce) {
   :root[data-theme="glass"] {
-    --surface-muted: #13232f;
+    --surface-muted: #1c1c22;
   }
 
   :root[data-theme="glass"] .single-page-shell {
@@ -512,13 +524,13 @@ input:focus {
   }
 
   :root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
-    background: #13232f;
+    background: #1c1c22;
     -webkit-backdrop-filter: none;
     backdrop-filter: none;
   }
 
   :root[data-theme="glass"] .wallpaper-card {
-    background: #13232f;
+    background: #1c1c22;
   }
 }
 

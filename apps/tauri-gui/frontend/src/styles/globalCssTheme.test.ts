@@ -36,71 +36,71 @@ function atRuleBody(css: string, atRule: string): string {
   assert.fail(`unterminated CSS at-rule: ${atRule}`);
 }
 
-test('glass theme provides restrained dashboard tokens and two static glows', async () => {
+/** Collect every rule whose selector is under the glass theme scope. */
+function glassScopedRules(css: string): Array<{ selector: string; body: string }> {
+  const rules: Array<{ selector: string; body: string }> = [];
+  for (const match of css.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const selector = match[1].trim();
+    if (selector.includes('[data-theme="glass"]') || selector.includes("[data-theme='glass']")) {
+      rules.push({ selector, body: match[2] });
+    }
+  }
+  return rules;
+}
+
+test('liquid glass theme provides iOS blue tokens and two static aurora glows', async () => {
   const { css } = await sources();
   const theme = ruleBody(css, ':root[data-theme="glass"]');
   const shell = ruleBody(css, ':root[data-theme="glass"] .single-page-shell');
   const body = ruleBody(css, 'body');
-  const dashboardFontDeclaration = 'font-family: var(--font-dashboard);';
-  const declarationStart = css.indexOf(dashboardFontDeclaration);
-
-  assert.notEqual(declarationStart, -1, 'missing scoped dashboard font declaration');
-  const selectorStart = css.lastIndexOf('}', declarationStart) + 1;
-  const selectorEnd = css.lastIndexOf('{', declarationStart);
-  const dashboardSelector = css.slice(selectorStart, selectorEnd);
 
   assert.match(theme, /color-scheme:\s*dark/);
-  assert.match(theme, /--bg:\s*#[0-9a-f]{6}/i);
-  assert.match(theme, /--primary:\s*#[0-9a-f]{6}/i);
-  const foreground = theme.match(/--primary-foreground:\s*#([0-9a-f]{6})/i)?.[1];
-  assert.ok(foreground, 'Glass theme needs a primary foreground token');
-  const foregroundChannels = foreground.match(/../g)?.map((channel) => Number.parseInt(channel, 16)) ?? [];
-  assert.ok(foregroundChannels.every((channel) => channel < 64), 'Glass primary foreground must be dark');
+  assert.match(theme, /--bg:\s*#0d0d12/i);
+  assert.match(theme, /--primary:\s*#0071e3/i);
+  assert.match(theme, /--primary-strong:\s*#0a84ff/i);
+  assert.match(theme, /--primary-foreground:\s*#ffffff/i);
+  assert.match(theme, /--panel:\s*rgb\(255 255 255 \/ 9%\)/);
+  assert.match(theme, /--text:\s*#f5f5f7/i);
+  assert.match(theme, /--wallpaper-details-background:\s*rgb\(28 28 34 \/ 62%\)/);
+  assert.match(theme, /--feedback-card-background:\s*rgb\(28 28 34 \/ 62%\)/);
+  assert.match(theme, /--feedback-card-backdrop-filter:\s*blur\(24px\) saturate\(180%\)/);
   assert.ok((css.match(/--primary-foreground:/g) ?? []).length >= 3, 'all theme groups need a primary foreground');
   assert.match(css, /\.btn\.primary\s*\{[^}]*color:\s*var\(--primary-foreground,\s*#fff\)/);
-  assert.match(theme, /--font-dashboard:\s*'JetBrains Mono',\s*'IBM Plex Mono',\s*ui-monospace/);
+  assert.doesNotMatch(theme, /--font-dashboard/);
   assert.match(body, /font-family:\s*-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif/);
   assert.doesNotMatch(body, /font-dashboard|dashboard-font|monospace/);
-  for (const selector of [
-    '.single-page-brand',
-    '.single-page-topbar',
-    '.single-page-filters',
-    '.single-page-statusbar',
-    '.wallpaper-name',
-    '.wallpaper-meta',
-    '.wallpaper-badge',
-    '.btn',
-    '.select-field-trigger',
-    '.select-field-item',
-    '.context-menu button',
-    '.single-page-favorite-filter',
-    '.settings-behavior-category',
-    '.settings-behavior-row',
-    '.settings-renderer-card',
-    '.settings-number-control :is(input, [data-control-unit])',
-    '.settings-navigation-card__copy strong',
-    '.wallpaper-details :is(dt, dd)',
-  ]) {
-    assert.ok(dashboardSelector.includes(selector), `dashboard font selector missing ${selector}`);
+
+  for (const { selector, body: rule } of glassScopedRules(css)) {
+    assert.doesNotMatch(
+      rule,
+      /(?:^|[;\s])font-family\s*:/,
+      `glass scope must not override font-family in ${selector}`,
+    );
   }
-  assert.doesNotMatch(
-    dashboardSelector,
-    /(?:^|[,\s(])(?:body|p|details)(?=[,\s)>])|settings-error|feedback-overlay__card/,
-  );
+
   assert.equal((shell.match(/radial-gradient\(/g) ?? []).length, 2);
+  assert.match(shell, /rgb\(10 132 255 \/ 14%\)/);
+  assert.match(shell, /rgb\(191 90 242 \/ 10%\)/);
   assert.doesNotMatch(shell, /animation|transition/);
 });
 
-test('glass blur is limited to the topbar and approved floating surfaces', async () => {
+test('liquid glass blur is limited to the topbar and approved floating surfaces', async () => {
   const { css } = await sources();
   const topbar = ruleBody(css, ':root[data-theme="glass"] .single-page-topbar');
-  const floating = ruleBody(css, ':root[data-theme="glass"] :is(.settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card)');
+  const floating = ruleBody(
+    css,
+    ':root[data-theme="glass"] :is(.settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card)',
+  );
   const feedbackCard = ruleBody(css, '.feedback-overlay__card');
+  const card = ruleBody(css, ':root[data-theme="glass"] .wallpaper-card');
 
-  assert.match(topbar, /backdrop-filter:\s*blur\(16px\)/);
-  assert.match(topbar, /-webkit-backdrop-filter:\s*blur\(16px\)/);
-  assert.match(floating, /backdrop-filter:\s*blur\(18px\)/);
-  assert.match(floating, /-webkit-backdrop-filter:\s*blur\(18px\)/);
+  assert.match(topbar, /backdrop-filter:\s*blur\(20px\) saturate\(180%\)/);
+  assert.match(topbar, /-webkit-backdrop-filter:\s*blur\(20px\) saturate\(180%\)/);
+  assert.match(topbar, /inset 0 1px 0 rgb\(255 255 255 \/ 22%\)/);
+  assert.match(floating, /backdrop-filter:\s*blur\(24px\) saturate\(180%\)/);
+  assert.match(floating, /-webkit-backdrop-filter:\s*blur\(24px\) saturate\(180%\)/);
+  assert.match(floating, /inset 0 1px 0 rgb\(255 255 255 \/ 22%\)/);
+  assert.match(floating, /saturate\(180%\)/);
   assert.match(feedbackCard, /backdrop-filter:\s*var\(--feedback-card-backdrop-filter\)/);
   assert.match(feedbackCard, /-webkit-backdrop-filter:\s*var\(--feedback-card-backdrop-filter\)/);
 
@@ -109,25 +109,29 @@ test('glass blur is limited to the topbar and approved floating surfaces', async
     if (!selector.includes('.wallpaper-card')) continue;
     assert.doesNotMatch(body, /(?:^|[;\s])(?:-webkit-)?backdrop-filter\s*:/, `card blur in ${selector.trim()}`);
   }
-  assert.match(ruleBody(css, ':root[data-theme="glass"] .wallpaper-card'), /background:\s*rgba?\(/);
+  assert.match(card, /background:\s*rgb\(255 255 255 \/ 6%\)/);
+  assert.match(card, /border-radius:\s*1rem/);
 });
 
-test('Glass accessibility modes remove transparency and decorative effects', async () => {
+test('Liquid Glass accessibility modes remove transparency and decorative effects', async () => {
   const { css } = await sources();
   const theme = ruleBody(css, ':root[data-theme="glass"]');
   const reduced = atRuleBody(css, '@media (prefers-reduced-transparency: reduce)');
   const reducedTheme = ruleBody(reduced, ':root[data-theme="glass"]');
   const reducedShell = ruleBody(reduced, ':root[data-theme="glass"] .single-page-shell');
-  const reducedSurfaces = ruleBody(reduced, ':root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card)');
+  const reducedSurfaces = ruleBody(
+    reduced,
+    ':root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card)',
+  );
   const forced = atRuleBody(css, '@media (forced-colors: active)');
   const forcedTheme = ruleBody(forced, ':root[data-theme="glass"]');
   const forcedPrimaryButton = ruleBody(forced, ':root[data-theme="glass"] .btn.primary');
 
   assert.match(theme, /--source-card-background:\s*var\(--surface-muted\)/);
-  assert.match(reducedTheme, /--surface-muted:\s*#13232f/);
+  assert.match(reducedTheme, /--surface-muted:\s*#1c1c22/);
   assert.match(reducedShell, /background:\s*var\(--bg\)/);
   assert.doesNotMatch(reducedShell, /gradient/);
-  assert.match(reducedSurfaces, /background:\s*#13232f/);
+  assert.match(reducedSurfaces, /background:\s*#1c1c22/);
   assert.match(reducedSurfaces, /backdrop-filter:\s*none/);
   assert.match(reducedSurfaces, /-webkit-backdrop-filter:\s*none/);
   assert.match(forcedTheme, /--surface-muted:\s*Canvas/);
@@ -144,7 +148,7 @@ test('Glass accessibility modes remove transparency and decorative effects', asy
   assert.match(forcedPrimaryButton, /color:\s*Canvas/);
 });
 
-test('Glass keyboard focus uses a visible cyan ring with separation', async () => {
+test('Liquid Glass keyboard focus uses a visible iOS-blue ring with separation', async () => {
   const { css } = await sources();
   const focus = ruleBody(
     css,
@@ -155,11 +159,11 @@ test('Glass keyboard focus uses a visible cyan ring with separation', async () =
   assert.match(focus, /outline-offset:\s*2px/);
 });
 
-test('glass has an opaque fallback when backdrop filtering is unavailable', async () => {
+test('liquid glass has an opaque fallback when backdrop filtering is unavailable', async () => {
   const { css } = await sources();
 
   assert.match(css, /@supports\s+not\s+\(\(backdrop-filter:/);
-  assert.match(css, /background:\s*#13232f/);
+  assert.match(css, /background:\s*#1c1c22/);
 });
 
 test('dialog and feedback skin lives in CSS while inline layout remains', async () => {

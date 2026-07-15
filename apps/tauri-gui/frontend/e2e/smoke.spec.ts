@@ -402,7 +402,7 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await expect(grid).toHaveCSS('overflow-y', 'auto');
 });
 
-test('Glass theme keeps Acrylic blur off wallpaper cards', async ({ page }) => {
+test('Liquid Glass keeps blur off wallpaper cards and uses white-glass source cards', async ({ page }) => {
   await openApp(page);
   await waitForGrid(page);
   await openSettings(page);
@@ -416,6 +416,7 @@ test('Glass theme keeps Acrylic blur off wallpaper cards', async ({ page }) => {
     cardBackdrop: getComputedStyle(document.querySelector('.wallpaper-card')!).backdropFilter,
   }));
   expect(styles.topbarBackdrop).not.toBe('none');
+  expect(styles.topbarBackdrop).toMatch(/blur\(/);
   expect(styles.cardBackdrop).toBe('none');
 
   await dialog.getByRole('button', { name: 'Close settings' }).click();
@@ -428,7 +429,9 @@ test('Glass theme keeps Acrylic blur off wallpaper cards', async ({ page }) => {
     const channels = background.match(/[\d.]+/g)?.slice(0, 3).map(Number) ?? [];
     expect(channels, `parse source card background ${background}`).toHaveLength(3);
     expect(channels, `source card background must not be black: ${background}`).not.toEqual([0, 0, 0]);
-    expect(channels[2], `source card background must be blue-grey: ${background}`).toBeGreaterThan(channels[0]);
+    // White-glass surface: neutral RGB (equal channels), not the old teal dashboard tint.
+    expect(channels[0], `source card background must be neutral white-glass: ${background}`).toBe(channels[1]);
+    expect(channels[1], `source card background must be neutral white-glass: ${background}`).toBe(channels[2]);
   }
   await page.getByRole('dialog', { name: 'Wallpaper sources' })
     .getByRole('button', { name: 'Close wallpaper sources' })
