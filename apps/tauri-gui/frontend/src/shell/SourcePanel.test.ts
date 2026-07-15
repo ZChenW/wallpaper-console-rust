@@ -251,6 +251,20 @@ test('renders a compact accessible drawer with source kind and honest availabili
   assert.match(markup, /aria-label="Close wallpaper sources"/);
 });
 
+test('source rows route their background through the theme token with the system colour fallback', async () => {
+  const { SourcePanelView } = await importTsxModule();
+  const tree = SourcePanelView(noopViewProps());
+  const rows = findElements(tree, (element) => element.props['data-source-id'] !== undefined);
+
+  assert.equal(rows.length, sources.length);
+  for (const row of rows) {
+    assert.equal(
+      (row.props.style as React.CSSProperties).background,
+      'var(--source-card-background, color-mix(in srgb, CanvasText 2.5%, Canvas))',
+    );
+  }
+});
+
 test('renders loading, load failure with retry, and empty-library states', async () => {
   const { SourcePanelView } = await importTsxModule();
 

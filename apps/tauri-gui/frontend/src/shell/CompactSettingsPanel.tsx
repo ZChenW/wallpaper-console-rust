@@ -207,6 +207,7 @@ export function CompactSettingsPanelView({
                     { value: 'system', label: 'System' },
                     { value: 'light', label: 'Light' },
                     { value: 'dark', label: 'Dark' },
+                    { value: 'glass', label: 'Glass' },
                   ]}
                   value={preferences.theme}
                   variant="settings"

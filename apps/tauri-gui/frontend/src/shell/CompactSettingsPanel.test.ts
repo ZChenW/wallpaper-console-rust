@@ -216,8 +216,13 @@ test('appearance controls update only remembered shell preferences', async () =>
   assert.equal(current.applyGesture, 'double');
   assert.equal(current.cardSize, 'large');
   assert.deepEqual(
-    (theme.props.options as Array<{ value: string }>).map((option) => option.value),
-    ['system', 'light', 'dark'],
+    theme.props.options,
+    [
+      { value: 'system', label: 'System' },
+      { value: 'light', label: 'Light' },
+      { value: 'dark', label: 'Dark' },
+      { value: 'glass', label: 'Glass' },
+    ],
   );
 });
 

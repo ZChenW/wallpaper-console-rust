@@ -211,6 +211,7 @@ select:focus, input:focus { border-color: #555; }
   --primary-bg-hover: #dceaff;
   --primary: #2563eb;
   --primary-strong: #1d4ed8;
+  --primary-foreground: #ffffff;
   --danger-bg: #fff1f1;
   --danger-bg-hover: #ffe1e1;
   --danger: #dc2626;
@@ -220,6 +221,15 @@ select:focus, input:focus { border-color: #555; }
   --warning-bg: #fff7dc;
   --warning: #a16207;
   --shadow: rgba(15, 23, 42, 0.14);
+  --wallpaper-details-border: color-mix(in srgb, currentColor 16%, transparent);
+  --wallpaper-details-background: Canvas;
+  --wallpaper-details-color: CanvasText;
+  --wallpaper-details-shadow: 0 1.5rem 4rem rgb(0 0 0 / 38%);
+  --feedback-card-border: color-mix(in srgb, currentColor 15%, transparent);
+  --feedback-card-background: color-mix(in srgb, Canvas 94%, transparent);
+  --feedback-card-color: CanvasText;
+  --feedback-card-shadow: 0 0.75rem 2rem rgb(0 0 0 / 22%);
+  --feedback-card-backdrop-filter: blur(14px);
 }
 
 :root[data-theme="dark"],
@@ -241,6 +251,7 @@ select:focus, input:focus { border-color: #555; }
   --primary-bg-hover: #1d3151;
   --primary: #7eafff;
   --primary-strong: #a8c8ff;
+  --primary-foreground: #ffffff;
   --danger-bg: #3b1f24;
   --danger-bg-hover: #4b252c;
   --danger: #ff9b9b;
@@ -250,11 +261,77 @@ select:focus, input:focus { border-color: #555; }
   --warning-bg: #342b17;
   --warning: #e5bd62;
   --shadow: rgba(0, 0, 0, 0.5);
+  --wallpaper-details-border: color-mix(in srgb, currentColor 16%, transparent);
+  --wallpaper-details-background: Canvas;
+  --wallpaper-details-color: CanvasText;
+  --wallpaper-details-shadow: 0 1.5rem 4rem rgb(0 0 0 / 38%);
+  --feedback-card-border: color-mix(in srgb, currentColor 15%, transparent);
+  --feedback-card-background: color-mix(in srgb, Canvas 94%, transparent);
+  --feedback-card-color: CanvasText;
+  --feedback-card-shadow: 0 0.75rem 2rem rgb(0 0 0 / 22%);
+  --feedback-card-backdrop-filter: blur(14px);
+}
+
+:root[data-theme="glass"] {
+  color-scheme: dark;
+  --font-dashboard: 'JetBrains Mono', 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', monospace;
+  --bg: #0b151d;
+  --panel: rgb(24 43 55 / 72%);
+  --panel-alt: #142630;
+  --panel-hover: rgb(42 70 84 / 74%);
+  --surface: rgb(20 39 51 / 76%);
+  --surface-muted: rgb(27 50 63 / 62%);
+  --source-card-background: var(--surface-muted);
+  --text: #dce9ed;
+  --text-muted: #91a7af;
+  --text-soft: #6f8790;
+  --border: rgb(134 180 193 / 25%);
+  --border-strong: rgb(134 198 213 / 40%);
+  --border-subtle: rgb(134 180 193 / 16%);
+  --primary-bg: rgb(51 177 198 / 16%);
+  --primary-bg-hover: rgb(51 177 198 / 24%);
+  --primary: #62d9e9;
+  --primary-strong: #94ebf4;
+  --primary-foreground: #071a20;
+  --danger-bg: rgb(116 47 58 / 44%);
+  --danger-bg-hover: rgb(139 56 69 / 54%);
+  --danger: #ff9da8;
+  --success-bg: rgb(30 88 67 / 40%);
+  --success-border: rgb(93 181 142 / 45%);
+  --success: #7ed6ad;
+  --warning-bg: rgb(105 82 30 / 42%);
+  --warning: #e4c374;
+  --shadow: rgb(2 9 13 / 62%);
+  --wallpaper-details-border: rgb(137 197 210 / 30%);
+  --wallpaper-details-background: rgb(19 38 50 / 82%);
+  --wallpaper-details-color: var(--text);
+  --wallpaper-details-shadow: 0 1.5rem 4rem rgb(0 7 11 / 52%);
+  --feedback-card-border: rgb(137 197 210 / 28%);
+  --feedback-card-background: rgb(19 38 50 / 80%);
+  --feedback-card-color: var(--text);
+  --feedback-card-shadow: 0 0.75rem 2rem rgb(0 7 11 / 40%);
+  --feedback-card-backdrop-filter: blur(18px);
 }
 
 body {
   color: var(--text);
   background: var(--bg);
+}
+
+.wallpaper-details {
+  border: 1px solid var(--wallpaper-details-border);
+  background: var(--wallpaper-details-background);
+  color: var(--wallpaper-details-color);
+  box-shadow: var(--wallpaper-details-shadow);
+}
+
+.feedback-overlay__card {
+  border: 1px solid var(--feedback-card-border);
+  background: var(--feedback-card-background);
+  color: var(--feedback-card-color);
+  box-shadow: var(--feedback-card-shadow);
+  -webkit-backdrop-filter: var(--feedback-card-backdrop-filter);
+  backdrop-filter: var(--feedback-card-backdrop-filter);
 }
 
 .wallpaper-name,
@@ -289,7 +366,7 @@ input:focus {
 .btn.primary {
   background: var(--primary);
   border-color: var(--primary);
-  color: #ffffff;
+  color: var(--primary-foreground, #fff);
 }
 
 .btn.primary:hover {
@@ -355,6 +432,43 @@ input:focus {
     var(--bg);
 }
 
+:root[data-theme="glass"] .single-page-shell {
+  background:
+    radial-gradient(circle at 14% 4%, rgb(46 164 187 / 18%), transparent 34rem),
+    radial-gradient(circle at 88% 12%, rgb(80 108 151 / 16%), transparent 38rem),
+    var(--bg);
+}
+
+:root[data-theme="glass"] :is(
+  .single-page-brand,
+  .single-page-topbar :is(button, input, select, label, .select-field-trigger),
+  .single-page-filters,
+  .single-page-statusbar,
+  .wallpaper-name,
+  .wallpaper-meta,
+  .wallpaper-badge,
+  .btn,
+  .select-field-trigger,
+  .select-field-item,
+  .context-menu button,
+  .single-page-favorite-filter,
+  .settings-behavior-category,
+  .settings-behavior-card > :is(h4, h5),
+  .settings-behavior-row > span:first-child,
+  .settings-behavior-row > :is(select, input, output, .select-field-trigger),
+  .settings-renderer-card,
+  .settings-number-control :is(input, [data-control-unit]),
+  .settings-navigation-card__copy strong,
+  .wallpaper-details :is(dt, dd)
+) {
+  font-family: var(--font-dashboard);
+}
+
+:root[data-theme="glass"] :is(button, input, select, [role="button"], [role="menuitem"], [tabindex]:not([tabindex="-1"])):focus-visible {
+  outline: 2px solid var(--primary);
+  outline-offset: 2px;
+}
+
 .single-page-topbar {
   display: grid;
   grid-template-columns: auto minmax(12rem, 38rem) auto auto auto;
@@ -365,6 +479,97 @@ input:focus {
   background: color-mix(in srgb, var(--panel) 94%, transparent);
   box-shadow: 0 0.2rem 1.2rem color-mix(in srgb, var(--shadow) 55%, transparent);
   -webkit-app-region: drag;
+}
+
+:root[data-theme="glass"] .single-page-topbar {
+  background: rgb(17 34 45 / 72%);
+  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(16px);
+}
+
+:root[data-theme="glass"] :is(.settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
+  -webkit-backdrop-filter: blur(18px);
+  backdrop-filter: blur(18px);
+}
+
+:root[data-theme="glass"] .wallpaper-card {
+  background: rgb(22 41 52 / 72%);
+}
+
+@supports not ((backdrop-filter: blur(1px)) or (-webkit-backdrop-filter: blur(1px))) {
+  :root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
+    background: #13232f;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  :root[data-theme="glass"] {
+    --surface-muted: #13232f;
+  }
+
+  :root[data-theme="glass"] .single-page-shell {
+    background: var(--bg);
+  }
+
+  :root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
+    background: #13232f;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  :root[data-theme="glass"] .wallpaper-card {
+    background: #13232f;
+  }
+}
+
+@media (forced-colors: active) {
+  :root[data-theme="glass"] {
+    --bg: Canvas;
+    --panel: Canvas;
+    --panel-alt: Canvas;
+    --panel-hover: Canvas;
+    --surface: Canvas;
+    --surface-muted: Canvas;
+    --text: CanvasText;
+    --text-muted: CanvasText;
+    --text-soft: CanvasText;
+    --border: ButtonText;
+    --border-strong: ButtonText;
+    --border-subtle: ButtonText;
+    --primary: ButtonText;
+    --primary-strong: ButtonText;
+    --primary-foreground: Canvas;
+  }
+
+  :root[data-theme="glass"] .single-page-shell {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: none;
+  }
+
+  :root[data-theme="glass"] :is(.single-page-topbar, .settings-panel, .source-panel, .select-field-content, .context-menu, .wallpaper-details, .feedback-overlay__card) {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: none;
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  :root[data-theme="glass"] .wallpaper-card {
+    background: Canvas;
+    color: CanvasText;
+    box-shadow: none;
+  }
+
+  :root[data-theme="glass"] :is(.btn, .context-menu button) {
+    color: ButtonText;
+  }
+
+  :root[data-theme="glass"] .btn.primary {
+    background: ButtonText;
+    border-color: ButtonText;
+    color: Canvas;
+  }
 }
 
 .single-page-brand {

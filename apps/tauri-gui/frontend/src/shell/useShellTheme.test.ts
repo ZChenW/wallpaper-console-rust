@@ -26,6 +26,21 @@ test('theme application updates document palette and delegates system window chr
   ]);
 });
 
+test('glass uses the glass document palette with dark native window chrome', async () => {
+  assert.equal(resolveShellTheme('glass', false), 'glass');
+
+  const events: unknown[][] = [];
+  await applyShellThemeToSurface('glass', false, {
+    setDocumentTheme: (theme) => events.push(['document', theme]),
+    setWindowTheme: async (theme) => { events.push(['window', theme]); },
+  });
+
+  assert.deepEqual(events, [
+    ['document', 'glass'],
+    ['window', 'dark'],
+  ]);
+});
+
 test('missing Tauri window chrome does not prevent document theming', async () => {
   const documentThemes: string[] = [];
   await applyShellThemeToSurface('dark', false, {
