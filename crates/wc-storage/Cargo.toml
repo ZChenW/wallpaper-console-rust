@@ -5,14 +5,14 @@ edition.workspace = true
 
 [dependencies]
 wc-core.workspace = true
+wc-config.workspace = true
 wc-scan.workspace = true
-anyhow.workspace = true
-thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rusqlite.workspace = true
 camino.workspace = true
 fs2.workspace = true
+log = { workspace = true }
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -2,6 +2,7 @@ mod common;
 mod database;
 mod files;
 mod library;
+pub mod path_guard;
 mod scan;
 mod settings;
 mod sources;

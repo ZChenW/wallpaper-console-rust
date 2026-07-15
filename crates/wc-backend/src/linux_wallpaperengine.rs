@@ -2,6 +2,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
 use wc_core::types::FileType;
 use wc_storage::StorageApi;
@@ -293,6 +295,8 @@ fn apply_with_target_args(
     let _ = s.config_set("lwe_last_exit_status", "");
 
     s.config_set(PID_CONFIG_KEY, &child.id().to_string())?;
+    // Detach a reaper so LWE exit (or PGID kill from stop) does not leave a zombie.
+    crate::process_control::detach_and_reap_child(child, "wc-lwe-reaper");
     Ok(())
 }
 
@@ -525,7 +529,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
 
         // Set a known old PID.
@@ -575,7 +579,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
 
         // Set a known old PID.
@@ -635,7 +639,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
 
         // Simulate current backend being mpvpaper (not LWE).
@@ -692,7 +696,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         let scene = tmp.path().join("scene");
         std::fs::create_dir_all(&scene).unwrap();

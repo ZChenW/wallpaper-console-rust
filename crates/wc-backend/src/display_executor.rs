@@ -3,21 +3,24 @@
 //! Does not read or write `display_state` — callers commit intended mappings
 //! only after every action succeeds, and reconcile after destructive stops
 //! when a later action fails. Stop runs only when present in the list.
+//!
+//! Cross-backend visual handoff is planned upstream (`wc_app::display_plan`):
+//! replacement emits an explicit Stop before Apply so this executor never keeps
+//! a stale renderer. See plan tests such as
+//! `cross_backend_target_replacement_requires_explicit_stop_before_apply`.
 
 use std::collections::HashSet;
 
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 use crate::apply_stage::{self, ApplyStageReporter};
-use crate::awww::{normalize_awww_resize, normalize_awww_transition_type};
-use crate::mpvpaper::normalize_mpvpaper_options;
+use crate::driver;
 use crate::runtime::BackendRuntime;
-use crate::target_commands::{
-    build_awww_img_command_for_scope, build_awww_instant_command_for_scope,
-    build_mpvpaper_launch_command_for_output, ExecutionScope,
-};
+use crate::target_commands::ExecutionScope;
 
 /// Execution context shared across a display action list.
 #[derive(Debug, Clone)]
@@ -186,13 +189,15 @@ pub fn execute_display_actions(
                 }
                 if let Err(failure) = apply_backend(
                     s,
-                    *backend,
-                    path,
-                    scope,
-                    *use_instant || saw_stop,
+                    &ApplyBackendRequest {
+                        backend: *backend,
+                        path,
+                        scope,
+                        after_stop: *use_instant || saw_stop,
+                        request_id,
+                    },
                     runtime,
                     reporter,
-                    request_id,
                 ) {
                     for stop in failure.completed_stops {
                         report.record_stop(stop);
@@ -245,40 +250,52 @@ fn stop_backend(
     backend: Backend,
     runtime: &mut dyn BackendRuntime,
 ) -> Result<(), WcError> {
-    match backend {
-        Backend::Awww => runtime.stop_awww_checked(),
-        Backend::Mpvpaper => runtime.stop_mpvpaper_checked(),
-        Backend::LinuxWallpaperEngine => runtime.stop_lwe_checked(Some(s)),
-        Backend::Unsupported => Ok(()),
+    match crate::driver::driver_for(backend) {
+        Some(driver) => driver.stop_checked(runtime, Some(s)),
+        None => Ok(()),
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ApplyBackendRequest<'a> {
+    backend: Backend,
+    path: &'a str,
+    scope: &'a ExecutionScope,
+    after_stop: bool,
+    request_id: Option<&'a str>,
+}
+
 fn apply_backend(
     s: &StorageApi,
-    backend: Backend,
-    path: &str,
-    scope: &ExecutionScope,
-    after_stop: bool,
+    req: &ApplyBackendRequest<'_>,
     runtime: &mut dyn BackendRuntime,
     reporter: &mut dyn ApplyStageReporter,
-    request_id: Option<&str>,
 ) -> Result<(), ApplyBackendFailure> {
-    let p = std::path::Path::new(path);
-    match backend {
-        Backend::Unsupported => Err(WcError::UnsupportedFileType(path.to_string()).into()),
+    let p = std::path::Path::new(req.path);
+    match req.backend {
+        Backend::Unsupported => Err(WcError::UnsupportedFileType(req.path.to_string()).into()),
         Backend::Awww => {
             if !p.is_file() {
                 return Err(WcError::NotRegularFile(p.to_path_buf()).into());
             }
-            apply_awww(s, path, scope, after_stop, runtime, reporter, request_id)
-                .map_err(Into::into)
+            driver::apply_awww(
+                s,
+                &driver::AwwwApplyRequest {
+                    path: req.path,
+                    scope: req.scope,
+                    use_instant: req.after_stop,
+                    clear_state_hint: false,
+                    request_id: req.request_id,
+                },
+                runtime,
+                Some(reporter),
+            )
+            .map_err(Into::into)
         }
         Backend::Mpvpaper => {
             if !p.is_file() {
                 return Err(WcError::NotRegularFile(p.to_path_buf()).into());
             }
-            let outputs = scope.named_outputs().ok_or_else(|| {
+            let outputs = req.scope.named_outputs().ok_or_else(|| {
                 ApplyBackendFailure::from(WcError::Other(
                     "mpvpaper apply requires a named single-output execution scope".into(),
                 ))
@@ -290,10 +307,10 @@ fn apply_backend(
                 ))
                 .into());
             }
-            apply_mpvpaper(s, path, &outputs[0], runtime)
+            apply_mpvpaper(s, req.path, &outputs[0], runtime)
         }
         Backend::LinuxWallpaperEngine => {
-            let outputs = match scope {
+            let outputs = match req.scope {
                 ExecutionScope::AllDisplays => {
                     return Err(WcError::Other(
                         "linux-wallpaperengine apply requires explicit named outputs".into(),
@@ -302,8 +319,8 @@ fn apply_backend(
                 }
                 ExecutionScope::Named(outputs) => outputs.as_slice(),
             };
-            apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, request_id);
-            let project = crate::linux_wallpaperengine::project_from_path(path)
+            apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, req.request_id);
+            let project = crate::linux_wallpaperengine::project_from_path(req.path)
                 .map_err(ApplyBackendFailure::from)?;
             runtime
                 .apply_lwe_to_outputs(s, &project, outputs)
@@ -311,7 +328,7 @@ fn apply_backend(
             apply_stage::report_stage(
                 reporter,
                 apply_stage::ApplyStage::WaitRendererAlive,
-                request_id,
+                req.request_id,
             );
             Ok(())
         }
@@ -335,74 +352,6 @@ impl From<WcError> for ApplyBackendFailure {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_awww(
-    s: &StorageApi,
-    path: &str,
-    scope: &ExecutionScope,
-    after_stop: bool,
-    runtime: &mut dyn BackendRuntime,
-    reporter: &mut dyn ApplyStageReporter,
-    request_id: Option<&str>,
-) -> Result<(), WcError> {
-    apply_stage::report_stage(
-        reporter,
-        apply_stage::ApplyStage::EnsureAwwwDaemon,
-        request_id,
-    );
-    runtime.ensure_awww_daemon_running()?;
-    apply_stage::report_stage(
-        reporter,
-        apply_stage::ApplyStage::AwwwSocketReady,
-        request_id,
-    );
-
-    let fps_raw = s.config_get("wallpaper_transition_fps", "60");
-    let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
-    let resize_raw = s.config_get("awww_resize", "crop");
-    let resize = normalize_awww_resize(&resize_raw);
-
-    let mut cmd = if after_stop {
-        build_awww_instant_command_for_scope(path, resize, &fps, scope)?
-    } else {
-        let transition_raw = s.config_get("awww_transition_type", "fade");
-        let transition_type = normalize_awww_transition_type(&transition_raw);
-        let duration_raw = s.config_get("awww_transition_duration", "1");
-        let duration =
-            wc_core::config_normalizer::normalize_awww_transition_duration(&duration_raw);
-        let mut cmd = build_awww_img_command_for_scope(
-            path,
-            resize,
-            transition_type,
-            &duration,
-            &fps,
-            scope,
-        )?;
-        cmd.arg("--filter").arg("Lanczos3");
-        cmd
-    };
-
-    let output = runtime
-        .command_output(&mut cmd)
-        .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            "no renderer output".into()
-        };
-        return Err(WcError::Other(format!(
-            "awww apply failed with status {}: {}",
-            output.status, detail
-        )));
-    }
-    Ok(())
-}
-
 fn apply_mpvpaper(
     s: &StorageApi,
     path: &str,
@@ -410,19 +359,12 @@ fn apply_mpvpaper(
     runtime: &mut dyn BackendRuntime,
 ) -> Result<(), ApplyBackendFailure> {
     let previous_pids = runtime.mpvpaper_pids().map_err(ApplyBackendFailure::from)?;
-    let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
-    let opts = normalize_mpvpaper_options(&opts_raw);
-    let mut cmd = build_mpvpaper_launch_command_for_output(opts, output, path)
-        .map_err(ApplyBackendFailure::from)?;
-    let status = runtime.command_status(&mut cmd).map_err(|e| {
-        ApplyBackendFailure::from(WcError::Other(format!("mpvpaper failed: {}", e)))
-    })?;
-    if !status.success() {
-        return Err(WcError::Other("mpvpaper failed to apply wallpaper".into()).into());
-    }
-    let pid = match runtime.wait_for_mpvpaper_ready(&previous_pids) {
+    let pid = match driver::launch_mpvpaper(s, path, output, &previous_pids, runtime) {
         Ok(pid) => pid,
-        Err(error) => {
+        Err(driver::MpvpaperApplyError::Start(error)) => {
+            return Err(ApplyBackendFailure::from(error));
+        }
+        Err(driver::MpvpaperApplyError::Ready(error)) => {
             return Err(mpvpaper_cleanup_failure(runtime, error));
         }
     };
@@ -469,145 +411,9 @@ mod tests {
     use super::*;
     use crate::apply_stage::NoopReporter;
     use crate::runtime::AwwwReadiness;
-    use std::cell::RefCell;
+    use crate::test_support::FakeRuntime;
     use std::process::Command;
     use wc_core::config::ConfigDir;
-
-    #[derive(Default)]
-    struct FakeRuntime {
-        missing_backend: Option<Backend>,
-        stop_awww_count: usize,
-        stop_mpvpaper_count: usize,
-        stop_lwe_count: usize,
-        command_output_success: bool,
-        command_status_success: bool,
-        command_output_args: Vec<Vec<String>>,
-        command_status_args: Vec<Vec<String>>,
-        mpvpaper_ready_pid: Option<u32>,
-        running_mpvpaper_pids: Vec<u32>,
-        mpvpaper_readiness_error: Option<String>,
-        dead_mpvpaper_pids: Vec<u32>,
-        awww_readiness_sequence: RefCell<Vec<AwwwReadiness>>,
-        lwe_apply_calls: Vec<(String, Vec<String>)>,
-        lwe_apply_error: Option<String>,
-    }
-
-    impl BackendRuntime for FakeRuntime {
-        fn ensure_backend_available(
-            &mut self,
-            backend: Backend,
-            _storage: &StorageApi,
-        ) -> Result<(), WcError> {
-            if self.missing_backend == Some(backend) {
-                Err(WcError::BackendNotFound(backend.as_str().into()))
-            } else {
-                Ok(())
-            }
-        }
-
-        fn command_output(
-            &mut self,
-            command: &mut Command,
-        ) -> Result<std::process::Output, WcError> {
-            self.command_output_args.push(
-                command
-                    .get_args()
-                    .map(|a| a.to_string_lossy().to_string())
-                    .collect(),
-            );
-            let program = if self.command_output_success {
-                "true"
-            } else {
-                "false"
-            };
-            std::process::Command::new(program)
-                .output()
-                .map_err(|e| WcError::Other(format!("fake command failed: {e}")))
-        }
-
-        fn command_status(
-            &mut self,
-            command: &mut Command,
-        ) -> Result<std::process::ExitStatus, WcError> {
-            self.command_status_args.push(
-                command
-                    .get_args()
-                    .map(|a| a.to_string_lossy().to_string())
-                    .collect(),
-            );
-            let program = if self.command_status_success {
-                "true"
-            } else {
-                "false"
-            };
-            std::process::Command::new(program)
-                .status()
-                .map_err(|e| WcError::Other(format!("fake command failed: {e}")))
-        }
-
-        fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
-            Ok(self.running_mpvpaper_pids.clone())
-        }
-
-        fn wait_for_mpvpaper_ready(&mut self, _previous_pids: &[u32]) -> Result<u32, WcError> {
-            match &self.mpvpaper_readiness_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(self.mpvpaper_ready_pid.unwrap_or(42)),
-            }
-        }
-
-        fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
-            Ok(!self.dead_mpvpaper_pids.contains(&pid))
-        }
-
-        fn stop_awww(&mut self) {
-            self.stop_awww_count += 1;
-        }
-
-        fn stop_mpvpaper(&mut self) {
-            self.stop_mpvpaper_count += 1;
-            self.running_mpvpaper_pids.clear();
-        }
-
-        fn stop_lwe(&mut self, _s: Option<&StorageApi>) {
-            self.stop_lwe_count += 1;
-        }
-
-        fn apply_lwe_to_outputs(
-            &mut self,
-            _s: &StorageApi,
-            project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
-            outputs: &[String],
-        ) -> Result<(), WcError> {
-            self.lwe_apply_calls
-                .push((project.project_path.clone(), outputs.to_vec()));
-            if let Some(message) = &self.lwe_apply_error {
-                return Err(WcError::Other(message.clone()));
-            }
-            Ok(())
-        }
-
-        fn awww_socket_ready(&mut self) -> AwwwReadiness {
-            let mut seq = self.awww_readiness_sequence.borrow_mut();
-            if seq.len() > 1 {
-                seq.remove(0)
-            } else if !seq.is_empty() {
-                seq[0].clone()
-            } else {
-                AwwwReadiness::Ready
-            }
-        }
-
-        fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
-                Ok(())
-            } else {
-                Err(WcError::Other("awww socket not ready".into()))
-            }
-        }
-
-        fn clear_awww_state_hint(&mut self) {}
-    }
 
     fn temp_storage() -> (tempfile::TempDir, StorageApi) {
         let tmp = tempfile::tempdir().unwrap();
@@ -615,7 +421,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         (tmp, s)
     }

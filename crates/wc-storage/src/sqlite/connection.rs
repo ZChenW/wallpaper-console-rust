@@ -1,10 +1,15 @@
-use std::fs::{File, OpenOptions};
 use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
 use std::time::Duration;
 
+use crate::sqlite_err;
 use fs2::FileExt;
 use rusqlite::Connection;
+use std::fs::{File, OpenOptions};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -13,7 +18,7 @@ pub const RUNTIME_BUSY_TIMEOUT_MS: u64 = 5000;
 fn apply_busy_timeout(connection: &Connection) -> Result<(), WcError> {
     connection
         .busy_timeout(Duration::from_millis(RUNTIME_BUSY_TIMEOUT_MS))
-        .map_err(|error| WcError::Sqlite(error.to_string()))
+        .map_err(sqlite_err)
 }
 
 /// Apply the connection-local invariants required by all runtime queries.
@@ -24,37 +29,92 @@ pub fn apply_runtime_pragmas(connection: &Connection) -> Result<(), WcError> {
             "PRAGMA foreign_keys = ON;
              PRAGMA journal_mode = WAL;",
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 
-pub struct RuntimeConnection {
-    connection: Option<Connection>,
+/// Process-wide generation bump used to discard leased/cached runtime
+/// connections before exclusive maintenance or schema work.
+static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
+static RUNTIME_CONNECTION_CACHE: Mutex<Option<CachedRuntimeConnection>> = Mutex::new(None);
+
+struct CachedRuntimeConnection {
+    generation: u64,
+    db_path: PathBuf,
+    supported_schema_version: i64,
+    /// Bootstrap/migrate connections hold an exclusive schema lock and must
+    /// never re-enter the idle cache.
+    cacheable: bool,
+    connection: Connection,
+    /// Held for the connection lifetime so DB replacement stays blocked.
     _schema_guard: MaintenanceGuard,
     _maintenance_guard: MaintenanceGuard,
+}
+
+/// Drop any idle cached runtime connection so its shared file locks release.
+///
+/// Active leases keep their locks until they drop; a generation bump prevents
+/// those leases from returning a stale connection to the cache afterward.
+/// Exclusive maintenance / schema lock acquisition calls this first so the
+/// same process does not deadlock itself on a cached shared lock.
+pub fn invalidate_cached_connections() {
+    CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
+    let mut cache = RUNTIME_CONNECTION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    *cache = None;
+}
+
+fn lock_runtime_cache() -> std::sync::MutexGuard<'static, Option<CachedRuntimeConnection>> {
+    RUNTIME_CONNECTION_CACHE
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+pub struct RuntimeConnection {
+    cached: Option<CachedRuntimeConnection>,
 }
 
 impl Deref for RuntimeConnection {
     type Target = Connection;
 
     fn deref(&self) -> &Self::Target {
-        self.connection
+        &self
+            .cached
             .as_ref()
             .expect("runtime SQLite connection is available until drop")
+            .connection
     }
 }
 
 impl DerefMut for RuntimeConnection {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.connection
+        &mut self
+            .cached
             .as_mut()
             .expect("runtime SQLite connection is available until drop")
+            .connection
     }
 }
 
 impl Drop for RuntimeConnection {
     fn drop(&mut self) {
-        drop(self.connection.take());
+        let Some(entry) = self.cached.take() else {
+            return;
+        };
+        if !entry.cacheable {
+            return;
+        }
+        let current = CACHE_GENERATION.load(Ordering::SeqCst);
+        if entry.generation != current {
+            // Invalidated while leased: drop connection + unlock.
+            return;
+        }
+        let mut cache = lock_runtime_cache();
+        if cache.is_none() {
+            *cache = Some(entry);
+        }
+        // Otherwise another live connection already occupies the slot; drop.
     }
 }
 
@@ -94,12 +154,21 @@ fn acquire_shared_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
 }
 
 pub(super) fn acquire_maintenance_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
+    // Release any idle cached shared locks before blocking for exclusive.
+    invalidate_cached_connections();
     let file = open_lock(cd, maintenance_lock_path(cd))?;
     FileExt::lock_exclusive(&file).map_err(WcError::Io)?;
     Ok(MaintenanceGuard { file })
 }
 
+#[cfg(test)]
+pub(crate) fn take_exclusive_maintenance_lock(cd: &ConfigDir) -> Result<(), WcError> {
+    let _guard = acquire_maintenance_lock(cd)?;
+    Ok(())
+}
+
 fn acquire_schema_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
+    invalidate_cached_connections();
     let file = open_lock(cd, schema_lock_path(cd))?;
     FileExt::lock_exclusive(&file).map_err(WcError::Io)?;
     Ok(MaintenanceGuard { file })
@@ -111,15 +180,9 @@ fn acquire_schema_shared_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcErro
     Ok(MaintenanceGuard { file })
 }
 
-fn runtime_connection(
-    connection: Connection,
-    schema_guard: MaintenanceGuard,
-    maintenance_guard: MaintenanceGuard,
-) -> RuntimeConnection {
+fn runtime_connection(cached: CachedRuntimeConnection) -> RuntimeConnection {
     RuntimeConnection {
-        connection: Some(connection),
-        _schema_guard: schema_guard,
-        _maintenance_guard: maintenance_guard,
+        cached: Some(cached),
     }
 }
 
@@ -133,20 +196,25 @@ pub(super) fn open_or_create_connection(cd: &ConfigDir) -> Result<RuntimeConnect
     // Serialize that write phase without weakening the shared maintenance lock
     // that prevents a database replacement after this connection opens.
     let schema_guard = acquire_schema_lock(cd)?;
-    let connection =
-        Connection::open(cd.db_path()).map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let connection = Connection::open(cd.db_path()).map_err(sqlite_err)?;
     // Schema initialization can write. Apply the wait policy before callers
     // inspect/migrate the schema, without changing a future-version database.
     apply_busy_timeout(&connection)?;
-    Ok(runtime_connection(connection, schema_guard, guard))
+    Ok(runtime_connection(CachedRuntimeConnection {
+        generation: CACHE_GENERATION.load(Ordering::SeqCst),
+        db_path: cd.db_path(),
+        supported_schema_version: i64::MIN,
+        cacheable: false,
+        connection,
+        _schema_guard: schema_guard,
+        _maintenance_guard: guard,
+    }))
 }
 
 pub(super) fn open_runtime_connection(
     cd: &ConfigDir,
     supported_schema_version: i64,
 ) -> Result<RuntimeConnection, WcError> {
-    let guard = acquire_shared_lock(cd)?;
-    let schema_guard = acquire_schema_shared_lock(cd)?;
     let db_path = cd.db_path();
     if !db_path.exists() {
         return Err(WcError::Sqlite(format!(
@@ -154,12 +222,36 @@ pub(super) fn open_runtime_connection(
             db_path.display()
         )));
     }
-    let connection =
-        Connection::open(&db_path).map_err(|error| WcError::Sqlite(error.to_string()))?;
+
+    {
+        let mut cache = lock_runtime_cache();
+        if let Some(entry) = cache.take() {
+            let current = CACHE_GENERATION.load(Ordering::SeqCst);
+            if entry.generation == current
+                && entry.db_path == db_path
+                && entry.supported_schema_version == supported_schema_version
+            {
+                return Ok(runtime_connection(entry));
+            }
+            // Path/version/generation mismatch: drop and open fresh below.
+        }
+    }
+
+    let guard = acquire_shared_lock(cd)?;
+    let schema_guard = acquire_schema_shared_lock(cd)?;
+    // Re-check existence after waiting for locks: a maintenance replace may
+    // have removed/replaced the file while we were blocked.
+    if !db_path.exists() {
+        return Err(WcError::Sqlite(format!(
+            "database not found: {}",
+            db_path.display()
+        )));
+    }
+    let connection = Connection::open(&db_path).map_err(sqlite_err)?;
     apply_busy_timeout(&connection)?;
     let schema_version = connection
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if schema_version > supported_schema_version {
         return Err(WcError::Sqlite(format!(
             "database schema version {schema_version} is newer than supported version {supported_schema_version}"
@@ -168,7 +260,15 @@ pub(super) fn open_runtime_connection(
     apply_runtime_pragmas(&connection)?;
     #[cfg(test)]
     RUNTIME_CONNECTION_OPEN_COUNT.with(|count| count.set(count.get() + 1));
-    Ok(runtime_connection(connection, schema_guard, guard))
+    Ok(runtime_connection(CachedRuntimeConnection {
+        generation: CACHE_GENERATION.load(Ordering::SeqCst),
+        db_path,
+        supported_schema_version,
+        cacheable: true,
+        connection,
+        _schema_guard: schema_guard,
+        _maintenance_guard: guard,
+    }))
 }
 
 #[cfg(test)]
@@ -189,12 +289,16 @@ pub(crate) fn runtime_connection_open_count() -> usize {
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::{self, RecvTimeoutError};
+    use std::sync::Mutex as StdMutex;
     use std::time::Duration;
 
     use rusqlite::Connection;
     use wc_core::config::ConfigDir;
 
     use super::*;
+
+    // Process-wide runtime cache is shared across tests; serialize cache-sensitive cases.
+    static CACHE_TEST_LOCK: StdMutex<()> = StdMutex::new(());
 
     fn config_dir() -> (tempfile::TempDir, ConfigDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -218,8 +322,11 @@ mod tests {
 
     #[test]
     fn runtime_connection_holds_shared_lock_until_connection_drop() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_connections();
         let (_tmp, cd) = config_dir();
         create_probe_db(&cd, "old");
+        // Keep the lease alive (not returned to cache) while exclusive waits.
         let runtime = open_runtime_connection(&cd, 0).unwrap();
 
         let competing_cd = ConfigDir {
@@ -246,6 +353,8 @@ mod tests {
 
     #[test]
     fn runtime_connection_holds_schema_shared_lock_until_connection_drop() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_connections();
         let (_tmp, cd) = config_dir();
         create_probe_db(&cd, "old");
         let runtime = open_runtime_connection(&cd, 0).unwrap();
@@ -283,6 +392,8 @@ mod tests {
 
     #[test]
     fn exclusive_lock_blocks_runtime_open_until_after_database_replacement() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        invalidate_cached_connections();
         let (_tmp, cd) = config_dir();
         create_probe_db(&cd, "old");
 
@@ -321,5 +432,72 @@ mod tests {
             "new"
         );
         opener.join().unwrap();
+    }
+
+    #[test]
+    fn runtime_connection_cache_reuses_same_db_path() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, cd) = config_dir();
+        create_probe_db(&cd, "cached");
+        invalidate_cached_connections();
+        reset_runtime_connection_open_count();
+
+        {
+            let conn = open_runtime_connection(&cd, 0).unwrap();
+            let value: String = conn
+                .query_row("SELECT value FROM probe", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, "cached");
+        }
+        {
+            let conn = open_runtime_connection(&cd, 0).unwrap();
+            let value: String = conn
+                .query_row("SELECT value FROM probe", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(value, "cached");
+        }
+
+        assert_eq!(
+            runtime_connection_open_count(),
+            1,
+            "second open of the same db must reuse the cached connection"
+        );
+    }
+
+    #[test]
+    fn cached_connection_releases_shared_lock_when_maintenance_starts() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, cd) = config_dir();
+        create_probe_db(&cd, "old");
+        invalidate_cached_connections();
+
+        {
+            let _conn = open_runtime_connection(&cd, 0).unwrap();
+        }
+        // Idle cache still holds shared locks until exclusive acquisition
+        // invalidates it.
+        let guard = acquire_maintenance_lock(&cd)
+            .expect("maintenance must invalidate the idle cache and take exclusive");
+        drop(guard);
+    }
+
+    #[test]
+    fn invalidate_prevents_stale_cache_return_after_lease() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, cd) = config_dir();
+        create_probe_db(&cd, "old");
+        invalidate_cached_connections();
+        reset_runtime_connection_open_count();
+
+        let leased = open_runtime_connection(&cd, 0).unwrap();
+        invalidate_cached_connections();
+        drop(leased);
+
+        let _again = open_runtime_connection(&cd, 0).unwrap();
+        assert_eq!(
+            runtime_connection_open_count(),
+            2,
+            "invalidated lease must not return to cache"
+        );
     }
 }

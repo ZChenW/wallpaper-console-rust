@@ -283,17 +283,17 @@ fn preview_video(cd: &ConfigDir, file: &str, ext: &str) {
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn config_preview_metadata(cd: &ConfigDir) -> String {
-    wc_core::config::read_config_value(&cd.path, "preview_metadata", "compact")
+    wc_config::read_config_value(&cd.path, "preview_metadata", "compact")
 }
 
 fn config_backend_for_ext(cd: &ConfigDir, ext: &str) -> String {
     match ext {
         "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
-            wc_core::config::read_config_value(&cd.path, "image_backend", "awww")
+            wc_config::read_config_value(&cd.path, "image_backend", "awww")
         }
-        "gif" => wc_core::config::read_config_value(&cd.path, "gif_backend", "awww"),
+        "gif" => wc_config::read_config_value(&cd.path, "gif_backend", "awww"),
         "mp4" | "webm" | "mkv" | "mov" => {
-            wc_core::config::read_config_value(&cd.path, "video_backend", "mpvpaper")
+            wc_config::read_config_value(&cd.path, "video_backend", "mpvpaper")
         }
         _ => "?".to_string(),
     }
@@ -367,39 +367,6 @@ fn command_exists(cmd: &str) -> bool {
         guard.insert(cmd.to_string(), exists);
     }
     exists
-}
-
-// ── Retained from original (thumbnail path helpers) ────────────────────────
-
-use wc_core::types::WallpaperEntry;
-
-/// Get the cached video thumbnail path for an entry.
-pub fn video_thumbnail_path(cd: &ConfigDir, entry: &WallpaperEntry) -> Option<String> {
-    let key = video_thumb_cache_key(entry);
-    let thumb = cd.preview_cache_dir().join(&key);
-    if thumb.exists() {
-        Some(thumb.to_string_lossy().to_string())
-    } else {
-        None
-    }
-}
-
-/// Get the GUI thumbnail path (400px webp).
-pub fn gui_thumbnail_path(cd: &ConfigDir, entry: &WallpaperEntry) -> Option<String> {
-    let key = gui_thumb_cache_key_v3(entry.path.as_str(), entry.mtime, entry.size);
-    let thumb = cd.gui_thumbnail_cache_dir().join(&key);
-    if thumb.exists() {
-        Some(thumb.to_string_lossy().to_string())
-    } else {
-        None
-    }
-}
-
-fn video_thumb_cache_key(entry: &WallpaperEntry) -> String {
-    let raw = format!("{}:{}", entry.path, entry.mtime);
-    let mut hasher = DefaultHasher::new();
-    raw.hash(&mut hasher);
-    format!("{:x}.jpg", hasher.finish())
 }
 
 // ── GUI Thumbnail v3 ───────────────────────────────────────────────────────
@@ -483,7 +450,6 @@ pub struct ThumbnailResult {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ThumbnailFailure {
     Unsupported,
-    Timeout,
     ProbeFailed,
     CacheWriteFailed,
     MissingFile,
@@ -493,7 +459,6 @@ impl ThumbnailFailure {
     pub fn as_str(&self) -> &'static str {
         match self {
             ThumbnailFailure::Unsupported => "unsupported",
-            ThumbnailFailure::Timeout => "timeout",
             ThumbnailFailure::ProbeFailed => "probe_failed",
             ThumbnailFailure::CacheWriteFailed => "cache_write_failed",
             ThumbnailFailure::MissingFile => "missing_file",
@@ -503,7 +468,6 @@ impl ThumbnailFailure {
     fn from_str(value: &str) -> Option<Self> {
         match value {
             "unsupported" => Some(ThumbnailFailure::Unsupported),
-            "timeout" => Some(ThumbnailFailure::Timeout),
             "probe_failed" => Some(ThumbnailFailure::ProbeFailed),
             "cache_write_failed" => Some(ThumbnailFailure::CacheWriteFailed),
             "missing_file" => Some(ThumbnailFailure::MissingFile),
@@ -900,14 +864,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
         return false;
     }
 
-    // Candidate timestamps: 25%, 50%, 10%, 5s, 75%.
-    let candidates: Vec<f64> = vec![
-        duration * 0.25,
-        duration * 0.50,
-        duration * 0.10,
-        5.0_f64.min(duration * 0.8),
-        duration * 0.75,
-    ];
+    // Candidate timestamps: prefer 25%, then 50%. Stop at the first usable frame.
+    let candidates: Vec<f64> = vec![duration * 0.25, duration * 0.50];
 
     // Try ffmpegthumbnailer first (fast, good defaults).
     if command_exists("ffmpegthumbnailer") {
@@ -1037,32 +995,30 @@ fn get_video_duration(path: &str) -> Option<f64> {
 }
 
 /// Quick check: is this frame too dark, too bright, or too flat?
-/// Uses identify fx:mean and fx:standard_deviation (0..1 range).
+/// Uses in-memory mean/stddev over decoded pixels (0..1 range), matching the
+/// former ImageMagick `identify` fx thresholds without spawning a process.
 fn frame_has_content(path: &Path) -> bool {
-    if !command_exists("identify") {
+    let Ok(img) = image::open(path) else {
         return true; // can't check, accept it
+    };
+    let rgb = img.to_rgb8();
+    let pixels = rgb.as_raw();
+    if pixels.is_empty() {
+        return true;
     }
-    let out = Command::new("identify")
-        .args([
-            "-format",
-            "%[fx:mean] %[fx:standard_deviation]",
-            path.to_str().unwrap_or(""),
-        ])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout).to_string();
-            let parts: Vec<f64> = s
-                .split_whitespace()
-                .filter_map(|v| v.parse().ok())
-                .collect();
-            let mean = parts.first().copied().unwrap_or(0.5);
-            let stddev = parts.get(1).copied().unwrap_or(0.1);
-            // Reject very dark (< 0.06), very bright (> 0.94), or flat (< 0.015 stddev).
-            mean > 0.06 && mean < 0.94 && stddev > 0.015
-        }
-        _ => true, // can't check, accept it
+    let mut sum = 0.0_f64;
+    let mut sum_sq = 0.0_f64;
+    let samples = pixels.len() as f64;
+    for &channel in pixels {
+        let v = f64::from(channel) / 255.0;
+        sum += v;
+        sum_sq += v * v;
     }
+    let mean = sum / samples;
+    let variance = (sum_sq / samples) - (mean * mean);
+    let stddev = variance.max(0.0).sqrt();
+    // Reject very dark (< 0.06), very bright (> 0.94), or flat (< 0.015 stddev).
+    mean > 0.06 && mean < 0.94 && stddev > 0.015
 }
 
 #[cfg(test)]

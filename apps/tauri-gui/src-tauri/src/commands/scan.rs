@@ -1,8 +1,9 @@
 use std::sync::{Mutex, OnceLock};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 
-use wc_app::library_refresh::{
-    refresh_library_source, refresh_library_sources, LibraryRefreshError, LibraryRefreshReport,
-};
+use wc_app::library_refresh::{refresh_library_source, LibraryRefreshError, LibraryRefreshReport};
+use wc_app::library_rescan::{run_library_rescan, LibraryRescanError, LibraryRescanReport};
 use wc_scan::{ScanControl, ScanStats, SourceScanEvent};
 use wc_storage::SourceRecord;
 
@@ -340,9 +341,9 @@ fn index_sources_with_event_control<F>(
 where
     F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
 {
-    finish_refresh(
+    finish_rescan(
         storage,
-        refresh_library_sources(storage, |source, event| on_event(source, event)),
+        run_library_rescan(storage, |source, event| on_event(source, event)),
     )
 }
 
@@ -358,6 +359,35 @@ where
         storage,
         refresh_library_source(storage, source_id, |source, event| on_event(source, event)),
     )
+}
+
+fn finish_rescan(
+    storage: &wc_storage::StorageApi,
+    rescan: Result<LibraryRescanReport, LibraryRescanError>,
+) -> Result<IndexSourcesResult, String> {
+    match rescan {
+        Ok(report) => {
+            let refresh = report.refresh.unwrap_or_default();
+            let unique_library_count = report.snapshot_count;
+            apply_refresh_report_to_progress(&refresh, unique_library_count);
+            Ok(index_result_from_report(&refresh, unique_library_count))
+        }
+        Err(LibraryRescanError::Refresh(LibraryRefreshError::Cancelled { report, .. })) => {
+            let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
+                .unwrap_or(report.indexed);
+            apply_refresh_report_to_progress(&report, unique_library_count);
+            Err("scan cancelled".to_string())
+        }
+        Err(LibraryRescanError::Refresh(LibraryRefreshError::Storage {
+            report, error, ..
+        })) => {
+            let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
+                .unwrap_or(report.indexed);
+            apply_refresh_report_to_progress(&report, unique_library_count);
+            Err(error.to_string())
+        }
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 fn finish_refresh(
@@ -411,6 +441,41 @@ pub(crate) fn index_source_by_id(
     index_source_with_event_control(storage, source_id, |source, event| {
         update_scan_progress(&mut progress, source, event)
     })
+}
+
+/// Discover/add Wallpaper Engine workshop roots, then run a full library rescan with live progress.
+pub(crate) fn scan_steam_workshop_and_index(
+    storage: &wc_storage::StorageApi,
+    home: &std::path::Path,
+) -> Result<String, String> {
+    update_scan_stage("adding Wallpaper Engine sources");
+    if scan_cancelled()? {
+        return Err("scan cancelled".to_string());
+    }
+    let mut progress = LiveScanProgress::default();
+    let report =
+        wc_app::sources_maintenance::scan_steam_workshop(storage, home, true, |source, event| {
+            update_scan_progress(&mut progress, source, event)
+        })
+        .map_err(|error| error.to_string())?;
+
+    if report.roots.is_empty() {
+        return Ok(
+            "No Wallpaper Engine workshop directory found. Install or download Wallpaper Engine workshop content in Steam, then scan again."
+                .to_string(),
+        );
+    }
+
+    let rescan = report
+        .rescan
+        .ok_or_else(|| "steam workshop scan did not produce a library rescan report".to_string())?;
+    let index_result = finish_rescan(storage, Ok(rescan))?;
+    Ok(format!(
+        "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s). {}",
+        report.roots.len(),
+        report.added_paths.len(),
+        format_index_sources_message(&index_result)
+    ))
 }
 
 pub(crate) fn run_startup_source_refresh_with<SourceCount, Refresh>(

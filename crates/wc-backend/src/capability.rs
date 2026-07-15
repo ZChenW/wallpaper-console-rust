@@ -181,12 +181,7 @@ pub fn apply_output_groups(
 
 /// Capability matrix entry for a backend, if the backend is supported.
 pub fn capability_for(backend: Backend) -> Option<BackendCapability> {
-    match backend {
-        Backend::Awww => Some(awww_capability()),
-        Backend::Mpvpaper => Some(mpvpaper_capability()),
-        Backend::LinuxWallpaperEngine => Some(lwe_capability()),
-        Backend::Unsupported => None,
-    }
+    crate::driver::driver_for(backend).map(|driver| driver.capability())
 }
 
 /// All supported backend capability declarations.
@@ -199,64 +194,6 @@ pub fn all_capabilities() -> Vec<BackendCapability> {
     .into_iter()
     .filter_map(capability_for)
     .collect()
-}
-
-fn awww_capability() -> BackendCapability {
-    BackendCapability {
-        backend: Backend::Awww,
-        output_target_mode: OutputTargetMode::NamedOutputs,
-        output_target_evidence: Evidence::CliVerified,
-        all_displays: AllDisplaysTargeting::OmitMeansAll,
-        all_displays_evidence: Evidence::CliVerified,
-        stop_scope: StopScope::DaemonWide,
-        stop_scope_evidence: Evidence::ImplementationLimit,
-        multi_instance: MultiInstanceSupport::SharedDaemon,
-        // CLI: `awww img` talks to `awww-daemon`; `--outputs` retargets within that daemon.
-        multi_instance_evidence: Evidence::CliVerified,
-        same_target_replacement: SameTargetReplacement::InPlace,
-        same_target_replacement_evidence: Evidence::CliVerified,
-        cross_output_coexistence: CrossOutputCoexistence::Unknown,
-        cross_output_coexistence_evidence: Evidence::Unknown,
-    }
-}
-
-fn mpvpaper_capability() -> BackendCapability {
-    BackendCapability {
-        backend: Backend::Mpvpaper,
-        output_target_mode: OutputTargetMode::SingleOutputPerProcess,
-        output_target_evidence: Evidence::CliVerified,
-        all_displays: AllDisplaysTargeting::OneProcessPerOutput,
-        all_displays_evidence: Evidence::CliVerified,
-        stop_scope: StopScope::AllMatchingProcesses,
-        stop_scope_evidence: Evidence::ImplementationLimit,
-        multi_instance: MultiInstanceSupport::SeparateProcessesUnverified,
-        multi_instance_evidence: Evidence::Unverified,
-        // One process per output: replacing without Stop would leave a stale process.
-        same_target_replacement: SameTargetReplacement::StopThenApply,
-        same_target_replacement_evidence: Evidence::ImplementationLimit,
-        cross_output_coexistence: CrossOutputCoexistence::Unknown,
-        cross_output_coexistence_evidence: Evidence::Unknown,
-    }
-}
-
-fn lwe_capability() -> BackendCapability {
-    BackendCapability {
-        backend: Backend::LinuxWallpaperEngine,
-        output_target_mode: OutputTargetMode::RepeatedScreenRootPairs,
-        output_target_evidence: Evidence::CliVerified,
-        all_displays: AllDisplaysTargeting::SingleProcessMultiOutput,
-        all_displays_evidence: Evidence::CliVerified,
-        // stop() clears the tracked PGID then residual-pkills all matching processes.
-        stop_scope: StopScope::AllMatchingProcesses,
-        stop_scope_evidence: Evidence::ImplementationLimit,
-        multi_instance: MultiInstanceSupport::SingleProcessUnverified,
-        multi_instance_evidence: Evidence::Unverified,
-        // Apply path replaces the managed tracked process as part of apply.
-        same_target_replacement: SameTargetReplacement::ManagedHandoff,
-        same_target_replacement_evidence: Evidence::ImplementationLimit,
-        cross_output_coexistence: CrossOutputCoexistence::Unknown,
-        cross_output_coexistence_evidence: Evidence::Unknown,
-    }
 }
 
 #[cfg(test)]

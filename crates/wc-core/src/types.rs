@@ -27,6 +27,10 @@ impl FileType {
 }
 
 /// Backend used to display wallpapers.
+///
+/// Stable identity for routing. Per-backend behavior lives in
+/// `wc_backend::driver` (`BackendDriver` + `driver_for`). Adding a variant
+/// also requires a driver impl, planner routing, and storage whitelist updates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Backend {
@@ -70,12 +74,6 @@ impl StorageBackend {
     pub fn as_str(&self) -> &'static str {
         "sqlite"
     }
-}
-
-/// Runtime storage is SQLite-only. Legacy values are accepted for migration
-/// compatibility but normalize to SQLite before use.
-pub fn normalize_storage_backend(_raw: &str) -> StorageBackend {
-    StorageBackend::Sqlite
 }
 
 /// Wallpaper Engine project-level metadata.

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 
 use super::common::{fail, format_bytes, ok, storage, CommandResult, ScanProgressDto};
 

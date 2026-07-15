@@ -196,32 +196,46 @@ pub fn observe_runtime_wallpapers_with(
             {
                 return unknown(output, &reason);
             }
-            match saved.backend {
-                "awww" => {
-                    let outputs = match &awww {
-                        AwwwEvidence::Ready(outputs) => outputs,
-                        AwwwEvidence::Unavailable(error) | AwwwEvidence::Ambiguous(error) => {
-                            return unknown(output, &format!("awww runtime query failed: {error}"));
-                        }
-                    };
-                    match outputs.get(output) {
-                        Some(AwwwOutputEvidence::Image(path)) if path == saved.wallpaper_path => {
-                            RuntimeWallpaperObservation {
-                                output: output.clone(),
-                                wallpaper_path: Some(path.clone()),
-                                status: RuntimeObservationStatus::Confirmed,
-                                reason: None,
+            match crate::driver::driver_for_persisted_name(saved.backend) {
+                Some(driver) => match driver.backend() {
+                    wc_core::types::Backend::Awww => {
+                        let outputs = match &awww {
+                            AwwwEvidence::Ready(outputs) => outputs,
+                            AwwwEvidence::Unavailable(error) | AwwwEvidence::Ambiguous(error) => {
+                                return unknown(
+                                    output,
+                                    &format!("awww runtime query failed: {error}"),
+                                );
                             }
+                        };
+                        match outputs.get(output) {
+                            Some(AwwwOutputEvidence::Image(path))
+                                if path == saved.wallpaper_path =>
+                            {
+                                RuntimeWallpaperObservation {
+                                    output: output.clone(),
+                                    wallpaper_path: Some(path.clone()),
+                                    status: RuntimeObservationStatus::Confirmed,
+                                    reason: None,
+                                }
+                            }
+                            Some(AwwwOutputEvidence::Color) => {
+                                unknown(output, "awww is displaying a color instead of an image.")
+                            }
+                            _ => unknown(output, "awww did not confirm the saved wallpaper path."),
                         }
-                        Some(AwwwOutputEvidence::Color) => {
-                            unknown(output, "awww is displaying a color instead of an image.")
-                        }
-                        _ => unknown(output, "awww did not confirm the saved wallpaper path."),
                     }
-                }
-                "mpvpaper" => observe_mpvpaper(output, saved.wallpaper_path, &mpvpaper),
-                "linux-wallpaperengine" => observe_lwe(output, saved.wallpaper_path, &lwe),
-                _ => unknown(output, "Saved renderer has no matching runtime evidence."),
+                    wc_core::types::Backend::Mpvpaper => {
+                        observe_mpvpaper(output, saved.wallpaper_path, &mpvpaper)
+                    }
+                    wc_core::types::Backend::LinuxWallpaperEngine => {
+                        observe_lwe(output, saved.wallpaper_path, &lwe)
+                    }
+                    wc_core::types::Backend::Unsupported => {
+                        unknown(output, "Saved renderer has no matching runtime evidence.")
+                    }
+                },
+                None => unknown(output, "Saved renderer has no matching runtime evidence."),
             }
         })
         .collect()

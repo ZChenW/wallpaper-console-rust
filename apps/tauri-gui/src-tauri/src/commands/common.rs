@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::sync::{Mutex, OnceLock};
 
+use wc_config::ConfigDirExt;
 use wc_core::types::{FileType, WallpaperEntry};
 use wc_storage::StorageApi;
 

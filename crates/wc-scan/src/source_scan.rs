@@ -491,16 +491,27 @@ where
         return Err(SourceScanOutcome::Cancelled(*stats));
     }
 
-    if let Err(message) = validate_we_project_json(&project_dir) {
+    let project_json = match read_valid_we_project_json(&project_dir) {
+        Ok(value) => value,
+        Err(message) => {
+            return Err(SourceScanOutcome::Incomplete(ScanFailure {
+                path: project_dir,
+                kind: ScanFailureKind::InvalidWallpaperEngineProject,
+                message,
+                stats: *stats,
+            }));
+        }
+    };
+    let Some(info) = crate::we_project_info_from_json(&project_dir, &project_json) else {
         return Err(SourceScanOutcome::Incomplete(ScanFailure {
             path: project_dir,
-            kind: ScanFailureKind::InvalidWallpaperEngineProject,
-            message,
+            kind: ScanFailureKind::CandidateUnavailable,
+            message: "Wallpaper Engine project could not be indexed".to_string(),
             stats: *stats,
         }));
-    }
+    };
     let (entry, metadata_reused) =
-        crate::make_we_project_entry_cached(&project_dir, prior_metadata);
+        crate::make_we_project_entry_from_info(project_dir.clone(), info, prior_metadata);
     let Some(entry) = entry else {
         return Err(SourceScanOutcome::Incomplete(ScanFailure {
             path: project_dir,
@@ -539,12 +550,11 @@ fn is_workshop_project_directory(path: &Path) -> bool {
         .is_some_and(|name| !name.is_empty() && name.chars().all(|ch| ch.is_ascii_digit()))
 }
 
-fn validate_we_project_json(project_dir: &Path) -> Result<(), String> {
+fn read_valid_we_project_json(project_dir: &Path) -> Result<serde_json::Value, String> {
     let project_json = project_dir.join("project.json");
     let contents = std::fs::read_to_string(&project_json)
         .map_err(|error| format!("cannot read {}: {error}", project_json.display()))?;
-    serde_json::from_str::<serde_json::Value>(&contents)
-        .map(|_| ())
+    serde_json::from_str(&contents)
         .map_err(|error| format!("invalid {}: {error}", project_json.display()))
 }
 

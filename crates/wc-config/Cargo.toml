@@ -1,14 +1,10 @@
 [package]
-name = "wc-scan"
+name = "wc-config"
 version.workspace = true
 edition.workspace = true
 
 [dependencies]
 wc-core.workspace = true
-anyhow.workspace = true
-walkdir.workspace = true
-serde_json.workspace = true
-camino.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

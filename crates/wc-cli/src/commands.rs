@@ -1,3 +1,4 @@
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_storage::StorageApi;
 

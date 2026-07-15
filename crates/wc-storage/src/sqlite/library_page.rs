@@ -1,6 +1,9 @@
+use crate::sqlite_err;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
 use std::collections::HashMap;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
@@ -143,7 +146,7 @@ pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     let conn = open_runtime_connection(cd)?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(count as usize)
 }
 
@@ -168,7 +171,7 @@ pub fn source_backed_library_count(cd: &ConfigDir) -> Result<usize, WcError> {
             [],
             |row| row.get(0),
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(count.max(0) as usize)
 }
 
@@ -254,7 +257,7 @@ fn library_page_sqlite_with_scope(
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         let sql = format!(
             "SELECT path, type, ext, backend, size, mtime, resolution,
@@ -264,9 +267,7 @@ fn library_page_sqlite_with_scope(
              ORDER BY {order_by}
              LIMIT ?1 OFFSET ?2"
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(sqlite_err)?;
         let items = stmt
             .query_map(
                 params![
@@ -275,9 +276,9 @@ fn library_page_sqlite_with_scope(
                 ],
                 wallpaper_entry_from_row,
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         Ok(LibraryPage {
             total: total.max(0) as usize,
@@ -313,7 +314,7 @@ fn library_page_sqlite_with_scope(
                 params![&fts],
                 |row| row.get(0),
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         let sql = format!(
             "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
@@ -324,9 +325,7 @@ fn library_page_sqlite_with_scope(
              ORDER BY {order_by}
              LIMIT ?2 OFFSET ?3"
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(sqlite_err)?;
         let items = stmt
             .query_map(
                 params![
@@ -336,9 +335,9 @@ fn library_page_sqlite_with_scope(
                 ],
                 wallpaper_entry_from_row,
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         Ok(LibraryPage {
             total: total.max(0) as usize,
@@ -506,9 +505,7 @@ fn hydrate_browser_sources(
          WHERE membership.wallpaper_id IN ({placeholders})
          ORDER BY membership.wallpaper_id ASC, source.id ASC"
     );
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut statement = conn.prepare(&sql).map_err(sqlite_err)?;
     let rows = statement
         .query_map(params_from_iter(ids.iter()), |row| {
             Ok((
@@ -519,10 +516,10 @@ fn hydrate_browser_sources(
                 },
             ))
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut sources_by_wallpaper = HashMap::<i64, Vec<LibraryBrowserSource>>::new();
     for row in rows {
-        let (wallpaper_id, source) = row.map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let (wallpaper_id, source) = row.map_err(sqlite_err)?;
         sources_by_wallpaper
             .entry(wallpaper_id)
             .or_default()
@@ -553,9 +550,7 @@ where
     let conn = open_runtime_connection(cd)?;
     // rusqlite's default unchecked transaction is DEFERRED. The count is the
     // first read and pins the snapshot used by row selection and source hydration.
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
     let predicate = browser_predicate(query);
     let total = transaction
         .query_row(
@@ -563,7 +558,7 @@ where
             params_from_iter(predicate.params.iter()),
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     after_count();
 
@@ -587,20 +582,16 @@ where
         browser_order_by(query.sort)
     );
     let mut items = {
-        let mut statement = transaction
-            .prepare(&sql)
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let mut statement = transaction.prepare(&sql).map_err(sqlite_err)?;
         let items = statement
             .query_map(params_from_iter(page_params.iter()), browser_item_from_row)
-            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         items
     };
     hydrate_browser_sources(&transaction, &mut items)?;
-    transaction
-        .commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    transaction.commit().map_err(sqlite_err)?;
 
     Ok(LibraryBrowserPage {
         total: total.max(0) as usize,
@@ -638,31 +629,43 @@ pub fn browser_library_random(
         return Ok(None);
     }
     let conn = open_runtime_connection(cd)?;
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
     let predicate = browser_predicate(query);
+    let count_sql = format!("SELECT COUNT(*) FROM wallpapers w {}", predicate.where_sql);
+    let count: i64 = transaction
+        .query_row(
+            &count_sql,
+            params_from_iter(predicate.params.iter()),
+            |row| row.get(0),
+        )
+        .map_err(sqlite_err)?;
+    if count <= 0 {
+        transaction.commit().map_err(sqlite_err)?;
+        return Ok(None);
+    }
+    // Uniform offset over the filtered set. Filtered rowids are not contiguous,
+    // so COUNT+OFFSET is safer than probing random rowids.
+    let offset: i64 = transaction
+        .query_row("SELECT abs(random()) % ?1", [count], |row| row.get(0))
+        .map_err(sqlite_err)?;
     let sql = format!(
         "{BROWSER_ITEM_SELECT}
          {}
-         ORDER BY RANDOM()
-         LIMIT 1",
-        predicate.where_sql
+         ORDER BY w.id
+         LIMIT 1 OFFSET ?{}",
+        predicate.where_sql,
+        predicate.params.len() + 1
     );
+    let mut params = predicate.params;
+    params.push(Value::Integer(offset));
     let mut item = transaction
-        .query_row(
-            &sql,
-            params_from_iter(predicate.params.iter()),
-            browser_item_from_row,
-        )
+        .query_row(&sql, params_from_iter(params.iter()), browser_item_from_row)
         .optional()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if let Some(item) = item.as_mut() {
         hydrate_browser_sources(&transaction, std::slice::from_mut(item))?;
     }
-    transaction
-        .commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    transaction.commit().map_err(sqlite_err)?;
     Ok(item)
 }
 
@@ -696,14 +699,14 @@ fn library_counts_sqlite_with_scope(
         .prepare(&format!(
             "SELECT type, COUNT(*) FROM wallpapers {where_sql} GROUP BY type"
         ))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     for row in rows {
-        let (kind, count) = row.map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let (kind, count) = row.map_err(sqlite_err)?;
         let count = count.max(0) as usize;
         counts.total += count;
         match kind.as_str() {
@@ -733,7 +736,7 @@ pub fn favorites_page_sqlite(
             [],
             |row| row.get(0),
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut stmt = conn
         .prepare(
             "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
@@ -743,7 +746,7 @@ pub fn favorites_page_sqlite(
              ORDER BY w.mtime DESC, w.path ASC
              LIMIT ?1 OFFSET ?2",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let items = stmt
         .query_map(
             params![
@@ -752,9 +755,9 @@ pub fn favorites_page_sqlite(
             ],
             wallpaper_entry_from_row,
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(LibraryPage {
         total: total.max(0) as usize,
         items,
@@ -1641,6 +1644,61 @@ mod browser_tests {
             20,
         );
         assert!(browser_library_random(&cd, &impossible).unwrap().is_none());
+    }
+
+    #[test]
+    fn browser_random_count_offset_covers_all_filtered_rows() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for id in 1..=5_i64 {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/walls/img-{id}.jpg"),
+                "image",
+                "Title",
+                "",
+                "2025-01-01",
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+        insert_browser_wallpaper(
+            &conn,
+            99,
+            "/walls/video.mp4",
+            "video",
+            "Skip",
+            "",
+            "2025-01-01",
+            "",
+            "",
+        );
+        attach(&conn, 99, 1);
+
+        let matching = query(
+            None,
+            LibraryBrowserType::Image,
+            false,
+            "",
+            LibraryBrowserSort::RecentlyAdded,
+            0,
+            20,
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..80 {
+            let item = browser_library_random(&cd, &matching)
+                .unwrap()
+                .expect("filtered library must yield a row");
+            assert_ne!(item.wallpaper_id, 99, "type filter must exclude video");
+            seen.insert(item.wallpaper_id);
+        }
+        assert_eq!(
+            seen,
+            [1, 2, 3, 4, 5].into_iter().collect(),
+            "count+offset random must be able to hit every filtered row"
+        );
     }
 
     #[test]

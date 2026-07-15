@@ -1,4 +1,6 @@
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::types::{Backend, FileType};
 
 use crate::apply_stage_labels::ApplyStageContext;
@@ -60,7 +62,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         (tmp, crate::AppService::from_config_dir(cd))
     }
 

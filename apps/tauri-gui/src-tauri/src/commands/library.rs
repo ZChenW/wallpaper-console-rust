@@ -26,19 +26,6 @@ fn library_count_for_storage(s: &wc_storage::StorageApi) -> Result<LibraryCountD
 }
 
 #[tauri::command]
-pub async fn library_page(
-    source: String,
-    filter: String,
-    sort: String,
-    search: String,
-    offset: usize,
-    limit: usize,
-) -> Result<LibraryPageDto, String> {
-    let _ = source;
-    library_page_gui(filter, sort, search, offset, limit).await
-}
-
-#[tauri::command]
 pub async fn library_page_gui(
     filter: String,
     sort: String,
@@ -319,6 +306,8 @@ pub async fn library_source_status() -> Result<LibrarySourceStatusDto, String> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(test)]
+    use wc_config::ConfigDirExt;
     use wc_core::types::FileType;
 
     fn browser_fixture() -> (tempfile::TempDir, wc_storage::StorageApi, i64) {
@@ -558,7 +547,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = wc_storage::StorageApi::new(cd);
         let log_path = s.cd.path.join("library-page-last.log");
 

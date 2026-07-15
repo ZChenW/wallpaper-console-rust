@@ -2,20 +2,17 @@
 
 pub mod flat;
 pub mod sqlite;
+mod sqlite_error;
 pub mod tsv;
 pub mod we_compat;
 
 pub use sqlite::{SourceAvailability, SourceKind, SourceRecord};
+pub(crate) use sqlite_error::sqlite_err;
 
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::StorageBackend;
-
-/// Runtime storage is SQLite-only. Legacy flat files may still be imported
-/// during initialization.
-pub fn storage_backend_mode(_config_dir: &std::path::Path) -> StorageBackend {
-    StorageBackend::Sqlite
-}
 
 /// Unified storage API. All reads and writes go through SQLite.
 pub struct StorageApi {
@@ -32,7 +29,7 @@ impl StorageApi {
         cd.init()?;
 
         sqlite::ensure_or_import_legacy_flat(&cd)?;
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
         sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
 
         Ok(StorageApi {
@@ -48,13 +45,6 @@ impl StorageApi {
         Self::try_new(cd).expect("storage initialization failed")
     }
 
-    /// Re-read the backend mode from config (after config-set).
-    pub fn refresh_mode(&mut self) {
-        self.mode = StorageBackend::Sqlite;
-        wc_core::config::write_config_value(&self.cd.path, "storage_backend", "sqlite").ok();
-        sqlite::sqlite_config_set(&self.cd, "storage_backend", "sqlite").ok();
-    }
-
     // ── Reads (always SQLite) ─────────────────────────────────────────
 
     pub fn config_get(&self, key: &str, default: &str) -> String {
@@ -67,27 +57,76 @@ impl StorageApi {
     /// Load renderer preferences once and clamp them to the compatibility
     /// matrix defined by `wc-core`.
     pub fn backend_routing(&self) -> wc_core::backend_routing::BackendRouting {
-        let image = self.config_get("image_backend", "awww");
-        let gif = self.config_get("gif_backend", "awww");
-        let video = self.config_get("video_backend", "mpvpaper");
+        let (image, gif, video) =
+            if self.cd.db_path().exists() || sqlite::try_ensure_sqlite_db(&self.cd).is_ok() {
+                match sqlite::open_runtime_connection(&self.cd) {
+                    Ok(conn) => {
+                        let read = |key: &str, default: &str| -> String {
+                            match conn.query_row(
+                                "SELECT value FROM config WHERE key=?1",
+                                [key],
+                                |row| row.get::<_, String>(0),
+                            ) {
+                                Ok(value) => value,
+                                Err(rusqlite::Error::QueryReturnedNoRows) => default.to_string(),
+                                Err(err) => {
+                                    log::warn!("backend_routing({key}): read failed: {err}");
+                                    default.to_string()
+                                }
+                            }
+                        };
+                        (
+                            read("image_backend", "awww"),
+                            read("gif_backend", "awww"),
+                            read("video_backend", "mpvpaper"),
+                        )
+                    }
+                    Err(err) => {
+                        log::warn!("backend_routing: open connection failed: {err}");
+                        (
+                            "awww".to_string(),
+                            "awww".to_string(),
+                            "mpvpaper".to_string(),
+                        )
+                    }
+                }
+            } else {
+                (
+                    "awww".to_string(),
+                    "awww".to_string(),
+                    "mpvpaper".to_string(),
+                )
+            };
         wc_core::backend_routing::BackendRouting::from_raw(&image, &gif, &video)
     }
 
     fn _sqlite_config_get(&self, key: &str, default: &str) -> String {
-        if sqlite::try_ensure_sqlite_db(&self.cd).is_err() {
-            return default.to_string();
-        }
-        let db = self.cd.db_path();
-        if !db.exists() {
-            return default.to_string();
+        // Avoid try_ensure on the hot path: it takes an exclusive schema lock and
+        // would invalidate the process-wide runtime connection cache on every read.
+        // Startup paths (StorageApi::try_new) already bootstrap the database.
+        if !self.cd.db_path().exists() {
+            if let Err(err) = sqlite::try_ensure_sqlite_db(&self.cd) {
+                log::warn!("config_get({key}): failed to ensure sqlite db: {err}");
+                return default.to_string();
+            }
         }
         match sqlite::open_runtime_connection(&self.cd) {
-            Ok(conn) => conn
-                .query_row("SELECT value FROM config WHERE key=?1", [key], |row| {
+            Ok(conn) => {
+                match conn.query_row("SELECT value FROM config WHERE key=?1", [key], |row| {
                     row.get::<_, String>(0)
-                })
-                .unwrap_or_else(|_| default.to_string()),
-            _ => default.to_string(),
+                }) {
+                    Ok(value) => value,
+                    Err(rusqlite::Error::QueryReturnedNoRows) => default.to_string(),
+                    Err(err) => {
+                        log::warn!("config_get({key}): read failed: {err}");
+                        default.to_string()
+                    }
+                }
+            }
+            Err(err) => {
+                log::warn!("config_get({key}): open connection failed: {err}");
+                default.to_string()
+            }
         }
     }
 
@@ -96,21 +135,25 @@ impl StorageApi {
     }
 
     pub fn favorites_list(&self) -> Result<Vec<String>, WcError> {
-        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        if !self.cd.db_path().exists() {
+            sqlite::try_ensure_sqlite_db(&self.cd)?;
+        }
         let conn = sqlite::open_runtime_connection(&self.cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM favorites ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let result: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         Ok(result)
     }
 
     pub fn current_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        if !self.cd.db_path().exists() {
+            sqlite::try_ensure_sqlite_db(&self.cd)?;
+        }
         let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
@@ -120,7 +163,9 @@ impl StorageApi {
     }
 
     pub fn last_backend_read(&self) -> Result<Option<String>, WcError> {
-        sqlite::try_ensure_sqlite_db(&self.cd)?;
+        if !self.cd.db_path().exists() {
+            sqlite::try_ensure_sqlite_db(&self.cd)?;
+        }
         let conn = sqlite::open_runtime_connection(&self.cd)?;
         Ok(conn
             .query_row(
@@ -136,7 +181,9 @@ impl StorageApi {
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), WcError> {
         let value = wc_core::config_normalizer::normalize_config_value(key, value);
         sqlite::sqlite_config_set(&self.cd, key, &value)?;
-        wc_core::config::write_config_value(&self.cd.path, key, &value).ok();
+        if let Err(err) = wc_config::write_config_value(&self.cd.path, key, &value) {
+            log::warn!("config_set({key}): flat config write failed: {err}");
+        }
         Ok(())
     }
 
@@ -471,13 +518,6 @@ mod tests {
     }
 
     #[test]
-    fn storage_backend_mode_defaults_to_sqlite_when_config_missing() {
-        let tmp = tempfile::tempdir().unwrap();
-
-        assert_eq!(storage_backend_mode(tmp.path()), StorageBackend::Sqlite);
-    }
-
-    #[test]
     fn sqlite_config_get_reads_keys_with_apostrophes() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
@@ -717,7 +757,7 @@ mod tests {
         assert_eq!(storage.mode, StorageBackend::Sqlite);
         assert_eq!(storage.config_get("storage_backend", "file"), "sqlite");
         assert_eq!(
-            wc_core::config::read_config_value(&storage.cd.path, "storage_backend", "file"),
+            wc_config::read_config_value(&storage.cd.path, "storage_backend", "file"),
             "sqlite"
         );
     }
@@ -753,7 +793,7 @@ mod tests {
 
         assert_eq!(storage.config_get("storage_backend", "missing"), "sqlite");
         assert_eq!(
-            wc_core::config::read_config_value(&storage.cd.path, "storage_backend", "missing"),
+            wc_config::read_config_value(&storage.cd.path, "storage_backend", "missing"),
             "sqlite"
         );
     }
@@ -843,6 +883,59 @@ mod tests {
             routing.backend_for(wc_core::types::FileType::Video),
             wc_core::types::Backend::Mpvpaper
         );
+    }
+
+    #[test]
+    fn repeated_config_and_page_reads_reuse_runtime_connection() {
+        use sqlite::{
+            browser_library_page, invalidate_cached_connections,
+            reset_runtime_connection_open_count, runtime_connection_open_count, LibraryBrowserPage,
+            LibraryBrowserQuery, LibraryBrowserSort, LibraryBrowserType,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageApi::new(ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage.config_set("image_backend", "awww").unwrap();
+        storage.config_set("gif_backend", "awww").unwrap();
+        storage.config_set("video_backend", "mpvpaper").unwrap();
+
+        invalidate_cached_connections();
+        reset_runtime_connection_open_count();
+
+        assert_eq!(storage.config_get("image_backend", "missing"), "awww");
+        assert_eq!(storage.config_get("gif_backend", "missing"), "awww");
+        assert_eq!(storage.config_get("video_backend", "missing"), "mpvpaper");
+        let _routing = storage.backend_routing();
+
+        let page: LibraryBrowserPage = browser_library_page(
+            &storage.cd,
+            &LibraryBrowserQuery {
+                source_id: None,
+                type_filter: LibraryBrowserType::Usable,
+                favorites_only: false,
+                search: String::new(),
+                sort: LibraryBrowserSort::RecentlyAdded,
+                offset: 0,
+                limit: 20,
+            },
+        )
+        .unwrap();
+        assert_eq!(page.total, 0);
+
+        let opens_after_reads = runtime_connection_open_count();
+        assert!(
+            opens_after_reads >= 1,
+            "expected at least one runtime open, got {opens_after_reads}"
+        );
+        assert!(
+            opens_after_reads < 8,
+            "repeated config/page reads should reuse the cached connection, opened {opens_after_reads} times"
+        );
+
+        // Maintenance must be able to take exclusive after invalidating the idle cache.
+        sqlite::take_exclusive_maintenance_lock(&storage.cd).unwrap();
     }
 
     #[test]

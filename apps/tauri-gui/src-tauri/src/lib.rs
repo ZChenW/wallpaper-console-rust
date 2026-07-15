@@ -1,5 +1,7 @@
 mod commands;
 
+pub use commands::path_guard::{ensure_path_in_config_dir, ensure_path_in_sources};
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -47,7 +49,6 @@ pub fn run() {
             commands::favorite_remove,
             commands::favorites_page,
             commands::library_count,
-            commands::library_page,
             commands::library_page_gui,
             commands::library_browser_page,
             commands::library_browser_random,

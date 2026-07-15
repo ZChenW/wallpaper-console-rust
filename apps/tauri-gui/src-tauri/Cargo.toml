@@ -27,6 +27,7 @@ tauri = { version = "2.11.2", features = ["protocol-asset"] }
 tauri-plugin-log = "2"
 rusqlite.workspace = true
 wc-core.workspace = true
+wc-config.workspace = true
 wc-storage.workspace = true
 wc-scan.workspace = true
 camino.workspace = true

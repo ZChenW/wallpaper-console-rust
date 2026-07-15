@@ -6,9 +6,26 @@
 //! Diagnostics (pgrep failures) are emitted to stderr. In a Tauri context
 //! stderr may not be captured; this is best-effort diagnostic output.
 
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+/// Move a long-lived `Child` into a detached background thread that `wait`s
+/// so the process is reaped when it exits (or is killed elsewhere).
+///
+/// Rust's `Child` drop does not wait for a still-running process; without this,
+/// an exit leaves a zombie until the GUI process itself exits.
+pub(crate) fn detach_and_reap_child(mut child: Child, thread_name: &str) {
+    let pid = child.id();
+    if let Err(error) = std::thread::Builder::new()
+        .name(thread_name.to_string())
+        .spawn(move || {
+            let _ = child.wait();
+        })
+    {
+        eprintln!("wc-backend: failed to start reaper thread {thread_name} for pid {pid}: {error}");
+    }
+}
 
 /// Operations that interact with OS processes.
 pub(crate) trait ProcessControl {
@@ -189,6 +206,53 @@ pub(crate) mod test_support {
     use super::*;
     use std::cell::RefCell;
     use std::collections::HashMap;
+    use std::process::Command;
+
+    /// Parse the single-character state field from `/proc/<pid>/stat`.
+    #[cfg(unix)]
+    fn proc_state(pid: u32) -> Option<char> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        // Format: `pid (comm) state ...` — comm may contain spaces/parens.
+        let close = stat.rfind(')')?;
+        stat[close + 1..].trim_start().chars().next()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn detach_and_reap_child_prevents_zombie() {
+        // Use a short-lived but not-instant process. `Child::drop` only
+        // `try_wait`s; dropping while still running leaves a zombie after exit.
+        let child = Command::new("/bin/sleep")
+            .arg("0.2")
+            .spawn()
+            .expect("/bin/sleep should spawn");
+        let pid = child.id();
+        // Still running when detached — Drop alone would not wait.
+        assert!(
+            matches!(proc_state(pid), Some(state) if state != 'Z'),
+            "child must still be alive when handed to the reaper"
+        );
+        detach_and_reap_child(child, "wc-test-reaper");
+
+        // Poll until the process is fully gone (reaped), not stuck as zombie.
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            match proc_state(pid) {
+                None => return,
+                Some('Z') => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!("pid {pid} remained a zombie after detach_and_reap_child");
+                    }
+                }
+                Some(state) => {
+                    if std::time::Instant::now() >= deadline {
+                        panic!("pid {pid} still present with unexpected state {state:?}");
+                    }
+                }
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     /// In-memory process registry for testing without real OS processes.
     pub(crate) struct FakeProcessControl {

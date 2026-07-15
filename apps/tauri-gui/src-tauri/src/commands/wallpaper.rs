@@ -2,10 +2,11 @@ use super::common::{
     fail, ok, storage, BackendStatusDto, CommandErrorDto, CommandResult, StatusDto, WeDebugInfoDto,
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
 use wc_backend::runtime::BackendRuntime;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget, ALL_DISPLAYS_TARGET_KEY};
 use wc_storage::StorageApi;
@@ -386,9 +387,12 @@ fn stop_with_storage(s: &StorageApi) -> CommandResult {
 
 #[tauri::command]
 pub async fn stop() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => stop_with_storage(s),
-        Err(e) => fail(e),
+    tauri::async_runtime::spawn_blocking(|| {
+        with_renderer_state_lock(&APPLY_LOCK, || match storage() {
+            Ok(s) => Ok(stop_with_storage(s)),
+            Err(e) => Ok(fail(e)),
+        })
+        .unwrap_or_else(fail)
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
@@ -396,12 +400,15 @@ pub async fn stop() -> CommandResult {
 
 #[tauri::command]
 pub async fn restore() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_backend::restore_clean(s) {
-            Ok(()) => ok("Restored wallpaper."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
+    tauri::async_runtime::spawn_blocking(|| {
+        with_renderer_state_lock(&APPLY_LOCK, || match storage() {
+            Ok(s) => match wc_backend::restore_clean(s) {
+                Ok(()) => Ok(ok("Restored wallpaper.")),
+                Err(e) => Ok(fail(e.to_string())),
+            },
+            Err(e) => Ok(fail(e)),
+        })
+        .unwrap_or_else(fail)
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
@@ -554,6 +561,8 @@ pub async fn apply_to_display(
 pub async fn restore_displays(request: Option<TargetedRestoreRequestDto>) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
+            // Display discovery may invoke compositor CLIs. Keep it outside the
+            // renderer lock so a wedged compositor probe cannot block applies.
             let known_outputs = match resolve_restore_outputs(request.as_ref()) {
                 Ok(o) => o,
                 Err(err) => {
@@ -572,10 +581,13 @@ pub async fn restore_displays(request: Option<TargetedRestoreRequestDto>) -> Com
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
-            match service.restore_displays(&known_outputs) {
-                Ok(()) => ok("Restored display wallpapers."),
-                Err(err) => command_error_from_app_error(err),
-            }
+            with_renderer_state_lock(&APPLY_LOCK, || {
+                match service.restore_displays(&known_outputs) {
+                    Ok(()) => Ok(ok("Restored display wallpapers.")),
+                    Err(err) => Ok(command_error_from_app_error(err)),
+                }
+            })
+            .unwrap_or_else(fail)
         }
         Err(e) => fail(e),
     })
@@ -596,37 +608,8 @@ fn resolve_restore_outputs_with<F>(
 where
     F: FnOnce() -> Result<Vec<String>, String>,
 {
-    let discovered_outputs = discover()?;
-    validate_known_outputs(&discovered_outputs)?;
-
-    if let Some(TargetedRestoreRequestDto {
-        outputs: Some(outputs),
-    }) = request
-    {
-        validate_known_outputs(outputs)?;
-        let explicit: HashSet<_> = outputs.iter().map(String::as_str).collect();
-        let discovered: HashSet<_> = discovered_outputs.iter().map(String::as_str).collect();
-        if explicit != discovered {
-            return Err(
-                "explicit display outputs must exactly match discovered connected outputs".into(),
-            );
-        }
-    }
-
-    Ok(discovered_outputs)
-}
-
-fn validate_known_outputs(outputs: &[String]) -> Result<(), String> {
-    let mut seen = HashSet::new();
-    for output in outputs {
-        if output.trim().is_empty() {
-            return Err(format!("blank display output: {output:?}"));
-        }
-        if !seen.insert(output.as_str()) {
-            return Err(format!("duplicate display output: {output}"));
-        }
-    }
-    Ok(())
+    let explicit = request.and_then(|req| req.outputs.as_deref());
+    wc_app::display_target::resolve_known_outputs_with(explicit, discover)
 }
 
 fn execute_display_apply_and_format(
@@ -787,20 +770,7 @@ where
 }
 
 fn parse_display_target(raw: Option<&str>) -> Result<wc_app::DisplayTarget, String> {
-    let Some(raw) = raw else {
-        return Ok(wc_app::DisplayTarget::AllDisplays);
-    };
-    let value = raw.trim();
-    if value.is_empty() {
-        return Err("display target must not be blank".into());
-    }
-    if value.eq_ignore_ascii_case("all")
-        || value.eq_ignore_ascii_case("all displays")
-        || value == ALL_DISPLAYS_TARGET_KEY
-    {
-        return Ok(wc_app::DisplayTarget::AllDisplays);
-    }
-    Ok(wc_app::DisplayTarget::Output(value.to_string()))
+    wc_app::display_target::parse_display_target(raw)
 }
 
 /// Discover connected outputs via the active compositor, with awww retained
@@ -906,7 +876,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let storage = wc_storage::StorageApi::new(cd);
         storage.current_write("/walls/current.jpg").unwrap();
         storage.last_backend_write("awww").unwrap();
@@ -930,7 +900,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let storage = wc_storage::StorageApi::new(cd);
         storage
             .display_state_upsert(
@@ -974,7 +944,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let storage = wc_storage::StorageApi::new(cd);
         storage
             .display_state_upsert(

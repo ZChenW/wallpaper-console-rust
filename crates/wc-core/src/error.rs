@@ -14,9 +14,6 @@ pub enum WcError {
     #[error("HOME is not set; cannot resolve config directory")]
     HomeNotSet,
 
-    #[error("config directory not found: {0}")]
-    ConfigDirNotFound(PathBuf),
-
     #[error("unsupported file type: {0}")]
     UnsupportedFileType(String),
 
@@ -25,9 +22,6 @@ pub enum WcError {
 
     #[error("not a regular file: {0}")]
     NotRegularFile(PathBuf),
-
-    #[error("no previous wallpaper to restore")]
-    NoPreviousWallpaper,
 
     #[error("wallpaper no longer exists: {0}")]
     WallpaperMissing(PathBuf),
@@ -51,5 +45,11 @@ pub enum WcError {
 impl From<String> for WcError {
     fn from(s: String) -> Self {
         WcError::Other(s)
+    }
+}
+
+impl From<&str> for WcError {
+    fn from(s: &str) -> Self {
+        WcError::Other(s.to_string())
     }
 }

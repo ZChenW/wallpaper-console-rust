@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use wc_config::ConfigDirExt;
 
 use super::common::{fail, ok, storage, CommandErrorDto, CommandResult};
+use super::path_guard;
 
 fn integrity_failure(errors: Vec<String>) -> CommandResult {
     let detail = format!(
@@ -98,12 +99,22 @@ pub async fn sqlite_backup() -> CommandResult {
 
 #[tauri::command]
 pub async fn sqlite_restore(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match wc_storage::sqlite::restore(&s.cd, &PathBuf::from(path)) {
-            Ok(()) => ok("Restore complete."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
+    tauri::async_runtime::spawn_blocking(move || {
+        // Frontend exposes an arbitrary path argument (future file picker / CLI),
+        // so allow any existing file that has a valid SQLite header rather than
+        // restricting to config-dir/backups (backup() writes siblings of wallpapers.db).
+        let backup_path = match path_guard::ensure_sqlite_restore_file(std::path::Path::new(&path))
+        {
+            Ok(path) => path,
+            Err(e) => return fail(e),
+        };
+        match storage() {
+            Ok(s) => match wc_storage::sqlite::restore(&s.cd, &backup_path) {
+                Ok(()) => ok("Restore complete."),
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        }
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))

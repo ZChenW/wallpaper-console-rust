@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/wc-core",
+    "crates/wc-config",
     "crates/wc-storage",
     "crates/wc-scan",
     "crates/wc-backend",
@@ -34,8 +35,10 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 which = "7"
 fs2 = "0.4.3"
+log = "0.4"
 
 wc-core = { path = "crates/wc-core" }
+wc-config = { path = "crates/wc-config" }
 wc-storage = { path = "crates/wc-storage" }
 wc-scan = { path = "crates/wc-scan" }
 wc-backend = { path = "crates/wc-backend" }

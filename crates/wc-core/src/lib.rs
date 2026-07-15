@@ -1,4 +1,4 @@
-//! wc-core — domain types, config resolution, formats, backend routing, errors.
+//! wc-core — domain types, config path helpers, formats, backend routing, errors.
 
 pub mod backend_routing;
 pub mod config;
@@ -9,6 +9,7 @@ pub mod types;
 
 pub use config::ConfigDir;
 pub use error::WcError;
-// FormatRegistry not yet defined — reserved for future extension
-mod tests;
 pub use types::{FileType, WallpaperEntry};
+
+#[cfg(test)]
+mod tests;

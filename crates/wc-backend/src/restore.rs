@@ -60,10 +60,6 @@ fn fallback_for_restore_entry(
     }
 }
 
-pub fn restore(s: &StorageApi) -> Result<(), WcError> {
-    restore_clean(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

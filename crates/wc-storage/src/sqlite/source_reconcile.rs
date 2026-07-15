@@ -1,6 +1,9 @@
 use std::path::Path;
 
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_scan::{CompleteSourceScan, ScanSourceKind};
@@ -84,7 +87,7 @@ where
     let mut conn = open_runtime_connection(cd)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     let source_config = tx
         .query_row(
@@ -99,7 +102,7 @@ where
             },
         )
         .optional()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let Some((source_path, source_kind, source_recursive)) = source_config else {
         return Err(WcError::Other(format!("source id {source_id} not found")));
     };
@@ -138,7 +141,7 @@ where
              unsupported_reason TEXT NOT NULL
          );",
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
     for entry in snapshot.entries() {
         let project = entry.project.as_ref();
@@ -188,14 +191,14 @@ where
                     .unwrap_or(""),
             ],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     }
 
     let indexed = tx
         .query_row("SELECT COUNT(*) FROM wc_source_scan_stage", [], |row| {
             row.get::<_, i64>(0)
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let wallpapers_added = tx
         .query_row(
             "SELECT COUNT(*)
@@ -205,7 +208,7 @@ where
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let memberships_added = tx
         .query_row(
             "SELECT COUNT(*)
@@ -218,7 +221,7 @@ where
             params![source_id],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     tx.execute(
         "INSERT INTO wallpapers
@@ -244,7 +247,7 @@ where
              last_seen = excluded.last_seen",
         [],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
     tx.execute(
         "INSERT INTO wallpaper_sources (wallpaper_id, source_id, last_seen_at)
          SELECT wallpaper.id, ?1, datetime('now')
@@ -255,7 +258,7 @@ where
              last_seen_at = excluded.last_seen_at",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
     let removed_memberships = {
         let mut statement = tx
@@ -270,7 +273,7 @@ where
                    )
                  ORDER BY wallpaper.id",
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = statement
             .query_map(params![source_id], |row| {
                 Ok((
@@ -279,9 +282,9 @@ where
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
     tx.execute(
@@ -295,7 +298,7 @@ where
            )",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
     let mut report = SourceReconcileReport {
         indexed: indexed.max(0) as usize,
@@ -311,19 +314,19 @@ where
                 params![wallpaper_id],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if remaining_memberships != 0 || path_presence(Path::new(&path)) != PathPresence::Missing {
             continue;
         }
         report.favorites_removed += tx
             .execute("DELETE FROM favorites WHERE path = ?1", params![path])
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         report.wallpapers_removed += tx
             .execute(
                 "DELETE FROM wallpapers WHERE id = ?1",
                 params![wallpaper_id],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if !workshop_id.is_empty() {
             report.removed_we_workshop_ids.push(workshop_id);
         }
@@ -335,10 +338,9 @@ where
         "UPDATE sources SET availability = 'available' WHERE id = ?1",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
     before_commit(&tx)?;
-    tx.commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(report)
 }
 

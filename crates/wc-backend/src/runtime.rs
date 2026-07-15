@@ -164,7 +164,9 @@ where
         }
         sleep(std::time::Duration::from_millis(50));
     }
-    unreachable!()
+    Err(WcError::Other(
+        "mpvpaper still running after stop: readiness poll exhausted".into(),
+    ))
 }
 
 impl BackendRuntime for SystemBackendRuntime {
@@ -173,29 +175,10 @@ impl BackendRuntime for SystemBackendRuntime {
         backend: wc_core::types::Backend,
         storage: &StorageApi,
     ) -> Result<(), WcError> {
-        let required = match backend {
-            wc_core::types::Backend::Awww => &["awww", "awww-daemon"][..],
-            wc_core::types::Backend::Mpvpaper => &["mpvpaper"][..],
-            wc_core::types::Backend::LinuxWallpaperEngine
-            | wc_core::types::Backend::Unsupported => &[][..],
-        };
-        for command in required {
-            if which::which(command).is_err() {
-                return Err(WcError::BackendNotFound((*command).to_string()));
-            }
+        match crate::driver::driver_for(backend) {
+            Some(driver) => driver.ensure_available(storage),
+            None => Ok(()),
         }
-        if backend == wc_core::types::Backend::LinuxWallpaperEngine {
-            let config =
-                crate::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(storage);
-            if !config.enabled {
-                return Err(WcError::Other(
-                    "linux-wallpaperengine is disabled; enable it in Wallpaper settings before applying a scene"
-                        .into(),
-                ));
-            }
-            crate::linux_wallpaperengine::ensure_binary_available(&config)?;
-        }
-        Ok(())
     }
 
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {

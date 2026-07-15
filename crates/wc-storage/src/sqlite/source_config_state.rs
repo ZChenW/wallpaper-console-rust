@@ -1,4 +1,7 @@
+use crate::sqlite_err;
 use rusqlite::params;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -8,12 +11,6 @@ use super::schema::{open_runtime_connection, try_ensure_sqlite_db};
 /// Auto-creates the database if it does not exist.
 pub fn sqlite_source_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
     super::sources::source_create(cd, path).map(|(_, created)| created)
-}
-
-/// Remove a source directly from the SQLite sources table.
-/// Auto-creates the database if it does not exist.
-pub fn sqlite_source_remove(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    super::sources::source_remove_exact_path_compat(cd, path)
 }
 
 /// Remove all source rows that normalize to the same WE root or canonical path as `path`.
@@ -28,7 +25,7 @@ pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), W
         "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
         params![key, value],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -40,7 +37,7 @@ pub fn sqlite_favorite_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> 
             "INSERT OR IGNORE INTO favorites (path) VALUES (?1)",
             params![path],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(n > 0)
 }
 
@@ -48,7 +45,7 @@ pub fn sqlite_favorite_remove(cd: &ConfigDir, path: &str) -> Result<(), WcError>
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
     conn.execute("DELETE FROM favorites WHERE path = ?1", params![path])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -59,7 +56,7 @@ pub fn sqlite_state_write(cd: &ConfigDir, key: &str, value: &str) -> Result<(), 
         "INSERT OR REPLACE INTO state (key, value) VALUES (?1, ?2)",
         params![key, value],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -67,7 +64,7 @@ pub fn sqlite_state_delete(cd: &ConfigDir, key: &str) -> Result<(), WcError> {
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
     conn.execute("DELETE FROM state WHERE key = ?1", params![key])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 

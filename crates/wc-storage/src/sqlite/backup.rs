@@ -2,7 +2,10 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OpenFlags};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -72,12 +75,12 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
     }
     let mut foreign_keys = conn
         .prepare("PRAGMA foreign_key_check")
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if foreign_keys
         .query([])
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .next()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .is_some()
     {
         errors.push("foreign_keys".into());
@@ -88,15 +91,15 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
 
     // Config — compatibility copy only; drift is a warning.
     {
-        let flat_cfg = wc_core::config::parse_config_file(&cd.config_path())?;
+        let flat_cfg = wc_config::parse_config_file(&cd.config_path())?;
         let mut stmt = conn
             .prepare("SELECT key, value FROM config ORDER BY key")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let db_rows: Vec<(String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let db_cfg: std::collections::HashMap<String, String> = db_rows.into_iter().collect();
         if flat_cfg != db_cfg {
             warnings.push("config".into());
@@ -109,12 +112,12 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         flat_src.sort();
         let mut stmt = conn
             .prepare("SELECT path FROM sources ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let db_src: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         if flat_src != db_src {
             warnings.push("sources".into());
         }
@@ -127,12 +130,12 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         flat_fav.sort();
         let mut stmt = conn
             .prepare("SELECT path FROM favorites ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let db_fav: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         if flat_fav != db_fav {
             warnings.push("favorites (legacy flat compat)".into());
         }
@@ -143,12 +146,12 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         let flat_hist = flat::history_list(cd)?;
         let mut stmt = conn
             .prepare("SELECT path FROM history ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let db_hist: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let flat_norm = canonical_unique_sorted(&flat_hist);
         let db_norm = canonical_unique_sorted(&db_hist);
         if flat_norm != db_norm {
@@ -165,7 +168,7 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
             }) {
                 Ok(v) => v,
                 Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
-                Err(e) => return Err(WcError::Sqlite(e.to_string())),
+                Err(e) => return Err(sqlite_err(e)),
             };
         if flat_cur != db_cur {
             warnings.push("current (legacy flat compat)".into());
@@ -182,7 +185,7 @@ pub fn verify(cd: &ConfigDir) -> Result<VerifyResult, WcError> {
         ) {
             Ok(v) => v,
             Err(rusqlite::Error::QueryReturnedNoRows) => String::new(),
-            Err(e) => return Err(WcError::Sqlite(e.to_string())),
+            Err(e) => return Err(sqlite_err(e)),
         };
         if flat_be != db_be {
             warnings.push("last_backend (legacy flat compat)".into());
@@ -319,15 +322,13 @@ fn reserve_visible_database_backup(
 }
 
 fn close_connection(connection: Connection) -> Result<(), WcError> {
-    connection
-        .close()
-        .map_err(|(_, error)| WcError::Sqlite(error.to_string()))
+    connection.close().map_err(|(_, error)| sqlite_err(error))
 }
 
 fn database_version(connection: &Connection) -> Result<i64, WcError> {
     connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
-        .map_err(|error| WcError::Sqlite(error.to_string()))
+        .map_err(sqlite_err)
 }
 
 fn reject_future_schema(connection: &Connection) -> Result<i64, WcError> {
@@ -345,7 +346,7 @@ fn vacuum_into(connection: &Connection, destination: &Path) -> Result<(), WcErro
     connection
         .execute("VACUUM INTO ?1", params![destination])
         .map(|_| ())
-        .map_err(|error| WcError::Sqlite(error.to_string()))
+        .map_err(sqlite_err)
 }
 
 fn checkpoint_wal(connection: &Connection, context: &str) -> Result<(), WcError> {
@@ -353,7 +354,7 @@ fn checkpoint_wal(connection: &Connection, context: &str) -> Result<(), WcError>
         .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| {
             Ok((row.get(0)?, row.get(1)?, row.get(2)?))
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if busy != 0 {
         return Err(WcError::Other(format!(
             "{context}: WAL checkpoint remained busy"
@@ -374,7 +375,7 @@ fn table_exists(connection: &Connection, schema: &str, table: &str) -> Result<bo
     connection
         .query_row(&sql, [table], |row| row.get::<_, i64>(0))
         .map(|count| count > 0)
-        .map_err(|error| WcError::Sqlite(error.to_string()))
+        .map_err(sqlite_err)
 }
 
 fn table_columns(
@@ -390,14 +391,12 @@ fn table_columns(
         quote_identifier(schema),
         quote_identifier(table)
     );
-    let mut statement = connection
-        .prepare(&sql)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut statement = connection.prepare(&sql).map_err(sqlite_err)?;
     let columns = statement
         .query_map([], |row| row.get(1))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(columns)
 }
 
@@ -440,9 +439,7 @@ fn copy_common_table_columns(
         table_name = quote_identifier(table),
         source_schema = quote_identifier(source_schema),
     );
-    connection
-        .execute(&sql, [])
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    connection.execute(&sql, []).map_err(sqlite_err)?;
     Ok(true)
 }
 
@@ -452,21 +449,19 @@ fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(
             "ATTACH DATABASE ?1 AS source_db",
             [source_path.to_string_lossy()],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let source_has_memberships = table_exists(connection, "source_db", "wallpaper_sources")?;
     connection
         .execute_batch("PRAGMA foreign_keys = OFF;")
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    let transaction = connection
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
+    let transaction = connection.unchecked_transaction().map_err(sqlite_err)?;
     for table in CURRENT_PERSISTENT_TABLES {
         copy_common_table_columns(&transaction, "source_db", table)?;
     }
     if table_exists(&transaction, "source_db", "sqlite_sequence")? {
         transaction
             .execute("DELETE FROM main.sqlite_sequence", [])
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         transaction
             .execute(
                 "INSERT INTO main.sqlite_sequence (name, seq)
@@ -474,14 +469,12 @@ fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(
                  WHERE name IN ('sources', 'wallpapers', 'favorites', 'history')",
                 [],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
     }
-    transaction
-        .commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    transaction.commit().map_err(sqlite_err)?;
     connection
         .execute_batch("PRAGMA foreign_keys = ON; DETACH DATABASE source_db;")
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     if !source_has_memberships {
         connection
@@ -491,7 +484,7 @@ fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(
                  SELECT id, source_id, last_seen FROM wallpapers WHERE source_id IS NOT NULL",
                 [],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
     }
     rebuild_wallpapers_fts(connection)?;
     connection
@@ -500,29 +493,29 @@ fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(
              VALUES ('schema_version', ?1)",
             [CURRENT_SCHEMA_VERSION.to_string()],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     connection
         .execute(
             "INSERT OR REPLACE INTO db_meta (key, value)
              VALUES ('fts_schema_version', ?1)",
             [FTS_SCHEMA_VERSION],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     connection
         .pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 
 fn integrity_check(connection: &Connection, context: &str) -> Result<(), WcError> {
     let mut statement = connection
         .prepare("PRAGMA integrity_check")
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let results = statement
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if results.as_slice() != ["ok"] {
         return Err(WcError::Other(format!(
             "{context}: integrity_check failed: {}",
@@ -550,12 +543,12 @@ fn validate_current_database(connection: &Connection, context: &str) -> Result<(
     integrity_check(connection, context)?;
     let mut foreign_keys = connection
         .prepare("PRAGMA foreign_key_check")
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if foreign_keys
         .query([])
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .next()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .is_some()
     {
         return Err(WcError::Other(format!(
@@ -575,7 +568,7 @@ fn validate_current_database(connection: &Connection, context: &str) -> Result<(
             [],
             |row| row.get(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if schema_marker != CURRENT_SCHEMA_VERSION.to_string() {
         return Err(WcError::Other(format!(
             "{context}: schema marker is {schema_marker}, expected {CURRENT_SCHEMA_VERSION}"
@@ -593,11 +586,11 @@ fn finalize_temporary_database(
     checkpoint_wal(&connection, context)?;
     let journal_mode: String = connection
         .pragma_query_value(None, "journal_mode", |row| row.get(0))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if !journal_mode.eq_ignore_ascii_case("delete") {
         connection
             .execute_batch("PRAGMA journal_mode = DELETE;")
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
     }
     close_connection(connection)?;
     remove_database_sidecars(path)
@@ -647,16 +640,16 @@ where
         .map_err(|error| WcError::Other(format!("not a valid SQLite database: {error}")))?;
     source
         .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     validate_restore_source(&source, "restore source")?;
     vacuum_into(&source, &temporary.path)?;
     close_connection(source)?;
 
     let candidate = Connection::open_with_flags(&temporary.path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     candidate
         .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if database_version(&candidate)? < CURRENT_SCHEMA_VERSION {
         create_schema(&candidate)?;
     }
@@ -684,11 +677,10 @@ fn migrate_repair_source_if_needed(
     let migrated =
         reserve_empty_temporary_database(|| unique_database_sibling(db_path, "repair-source.tmp"))?;
     std::fs::copy(backup_path, &migrated.path).map_err(WcError::Io)?;
-    let connection =
-        Connection::open(&migrated.path).map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let connection = Connection::open(&migrated.path).map_err(sqlite_err)?;
     connection
         .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     create_schema(&connection)?;
     finalize_temporary_database(connection, &migrated.path, "repair migration source")?;
     Ok(Some(migrated))
@@ -723,10 +715,10 @@ where
         ));
     }
 
-    let source = Connection::open(&db_path).map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let source = Connection::open(&db_path).map_err(sqlite_err)?;
     source
         .busy_timeout(Duration::from_secs(5))
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let source_version = reject_future_schema(&source)?;
 
     let backup = reserve_visible_database_backup(&db_path, "bak")?;
@@ -743,8 +735,7 @@ where
         .unwrap_or(&backup_path);
 
     let temporary = reserve_empty_temporary_database(&mut next_temporary_path)?;
-    let rebuilt =
-        Connection::open(&temporary.path).map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let rebuilt = Connection::open(&temporary.path).map_err(sqlite_err)?;
     create_schema(&rebuilt)?;
     copy_persistent_data(&rebuilt, copy_source_path)?;
     finalize_temporary_database(rebuilt, &temporary.path, "repair candidate")?;
@@ -793,12 +784,12 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     {
         let mut stmt = conn
             .prepare("SELECT key, value FROM config ORDER BY key")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows: Vec<(String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let content: String = rows.iter().map(|(k, v)| format!("{}={}\n", k, v)).collect();
         std::fs::write(tmp_dir.join("config"), content).map_err(WcError::Io)?;
     }
@@ -807,12 +798,12 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     {
         let mut stmt = conn
             .prepare("SELECT path FROM sources ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join("sources"), content).map_err(WcError::Io)?;
     }
@@ -821,12 +812,12 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     {
         let mut stmt = conn
             .prepare("SELECT path FROM favorites ORDER BY path")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let content = rows.join("\n") + "\n";
         std::fs::write(tmp_dir.join("favorites"), content).map_err(WcError::Io)?;
     }
@@ -835,12 +826,12 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
     {
         let mut stmt = conn
             .prepare("SELECT path FROM history ORDER BY id DESC")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let mut rows: Vec<String> = stmt
             .query_map([], |row| row.get(0))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         // Canonical dedup to avoid writing duplicate paths that
         // would cause verify() false positives after export.
         let mut seen = std::collections::HashSet::new();
@@ -858,7 +849,7 @@ pub fn export_flat(cd: &ConfigDir) -> Result<(), WcError> {
         ) {
             Ok(v) => Some(v),
             Err(rusqlite::Error::QueryReturnedNoRows) => None,
-            Err(e) => return Err(WcError::Sqlite(e.to_string())),
+            Err(e) => return Err(sqlite_err(e)),
         };
         let content = val.map(|v| v + "\n").unwrap_or_default();
         std::fs::write(tmp_dir.join(file), content).map_err(WcError::Io)?;
@@ -895,7 +886,7 @@ pub fn backup(cd: &ConfigDir) -> Result<String, WcError> {
         consistent_backup(&source, &backup_file.path)?;
         let candidate =
             Connection::open_with_flags(&backup_file.path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+                .map_err(sqlite_err)?;
         finalize_temporary_database(candidate, &backup_file.path, "backup candidate")
     })();
     drop(source);
@@ -918,10 +909,10 @@ pub fn restore(cd: &ConfigDir, backup_path: &Path) -> Result<(), WcError> {
 
     if db_path.exists() {
         let current = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         current
             .busy_timeout(Duration::from_secs(5))
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         reject_future_schema(&current)?;
         let previous_file = reserve_visible_database_backup(&db_path, "pre-restore")?;
         consistent_backup(&current, &previous_file.path)?;
@@ -1163,7 +1154,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         flat::sources_add(&cd, "/walls").unwrap();
         flat::favorites_add(&cd, "/walls/a.jpg").unwrap();
         flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
@@ -1183,10 +1174,10 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
-        wc_core::config::write_config_value(&cd.path, "test_key", "new_value").unwrap();
+        wc_config::write_config_value(&cd.path, "test_key", "new_value").unwrap();
 
         let result = crate::sqlite::verify(&cd).unwrap();
         assert!(
@@ -1203,7 +1194,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
         flat::sources_add(&cd, "/extra-source").unwrap();
@@ -1223,7 +1214,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
         flat::favorites_add(&cd, "/extra-fav.jpg").unwrap();
@@ -1259,7 +1250,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         flat::history_add(&cd, "/walls/a.jpg", 100).unwrap();
         flat::history_add(&cd, "/walls/b.jpg", 100).unwrap();
         flat::sources_add(&cd, "/walls").unwrap();
@@ -1291,7 +1282,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
         // Insert a wallpaper so there is a real mismatch with corrupted FTS
@@ -1312,7 +1303,7 @@ mod tests {
         }
 
         // Config drift (warning) + FTS drift (fatal)
-        wc_core::config::write_config_value(&cd.path, "extra_config", "val").unwrap();
+        wc_config::write_config_value(&cd.path, "extra_config", "val").unwrap();
 
         let result = crate::sqlite::verify(&cd).unwrap();
         assert!(
@@ -1329,7 +1320,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::migrate_to_sqlite(&cd).unwrap();
 
         // Corrupt the schema by dropping the config table.
@@ -1431,7 +1422,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         crate::sqlite::ensure_sqlite_db(&cd);
         let conn = rusqlite::Connection::open(cd.db_path()).unwrap();
         conn.execute(
@@ -1463,7 +1454,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
 
         // Use the same path written twice — both canonicalise identically
         let path_a = tmp.path().join("a.jpg");
@@ -1502,7 +1493,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
 
         let real = tmp.path().join("real.jpg");
         std::fs::write(&real, b"x").unwrap();
@@ -1543,7 +1534,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         flat::sources_add(&cd, "/walls").unwrap();
 
         // Migrate with one history entry
@@ -3247,7 +3238,7 @@ mod tests {
                         "INSERT INTO config (key, value) VALUES ('new-inode-writer', 'committed')",
                         [],
                     )
-                    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+                    .map_err(sqlite_err)?;
                 Ok::<_, WcError>(())
             })();
             writer_tx

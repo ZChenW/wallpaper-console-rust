@@ -5,8 +5,8 @@ edition.workspace = true
 
 [dependencies]
 wc-core.workspace = true
+wc-config.workspace = true
 anyhow.workspace = true
-serde_json.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
 
 [dev-dependencies]

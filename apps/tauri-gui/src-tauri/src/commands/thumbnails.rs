@@ -1,11 +1,13 @@
 use super::common::{
     fail, format_bytes, ok, storage, CommandResult, ThumbnailCacheDto, ThumbnailDto,
 };
+use super::path_guard;
 
 #[tauri::command]
 pub async fn thumbnail_for(path: String) -> Result<ThumbnailDto, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let s = storage()?;
+        path_guard::ensure_command_wallpaper_path(&path, s)?;
         let mode = s.config_get("gui_thumbnail_mode", "cache");
         if mode == "icon" {
             return Ok(ThumbnailDto {
