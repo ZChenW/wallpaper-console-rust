@@ -125,6 +125,7 @@ impl std::fmt::Display for DisplayExecFailure {
 impl std::error::Error for DisplayExecFailure {}
 
 /// Execute planned display actions without persisting display_state.
+#[allow(clippy::result_large_err)]
 pub fn execute_display_actions(
     s: &StorageApi,
     actions: &[DisplayExecAction],

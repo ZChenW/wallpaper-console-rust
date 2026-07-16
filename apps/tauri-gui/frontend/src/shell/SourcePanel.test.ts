@@ -144,7 +144,7 @@ test('source panel exit accepts one request and respects reduced motion', async 
   assert.deepEqual(beginSourcePanelExit('open', false), {
     accepted: true,
     next: 'exiting',
-    delayMs: 160,
+    delayMs: 180,
   });
   assert.deepEqual(beginSourcePanelExit('exiting', false), {
     accepted: false,

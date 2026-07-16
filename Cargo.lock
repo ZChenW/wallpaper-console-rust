@@ -4373,6 +4373,8 @@ name = "wallpaper-console-tauri"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "fs2",
+ "libc",
  "log",
  "rusqlite",
  "serde",
@@ -4530,6 +4532,8 @@ name = "wc-app"
 version = "0.1.0"
 dependencies = [
  "camino",
+ "fs2",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -4560,6 +4564,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
+ "fs2",
  "rand",
  "rusqlite",
  "serde_json",

@@ -253,10 +253,13 @@ pub fn source_create(cd: &ConfigDir, path: &str) -> Result<(SourceRecord, bool),
             .map_err(sqlite_err)?;
         rows
     };
-    let matching_ids: Vec<i64> = rows
+    let matching_rows: Vec<(i64, String)> = rows
         .into_iter()
-        .filter_map(|(id, candidate)| (current_source_identity(&candidate) == path).then_some(id))
+        .filter(|(_, candidate)| current_source_identity(candidate) == path)
         .collect();
+    let matching_ids: Vec<i64> = matching_rows.iter().map(|(id, _)| *id).collect();
+    let visible_changed =
+        matching_rows.is_empty() || matching_rows.len() > 1 || matching_rows[0].1 != path;
 
     let (id, created) = if matching_ids.is_empty() {
         tx.execute(
@@ -309,6 +312,9 @@ pub fn source_create(cd: &ConfigDir, path: &str) -> Result<(SourceRecord, bool),
         (survivor_id, false)
     };
     let source = source_get_from_conn(&tx, id)?;
+    if visible_changed {
+        super::bump_library_revision(&tx)?;
+    }
     tx.commit().map_err(sqlite_err)?;
     Ok((source, created))
 }
@@ -320,14 +326,23 @@ pub fn source_rename(cd: &ConfigDir, id: i64, display_name: &str) -> Result<Sour
             "source display name must not be blank".into(),
         ));
     }
-    let conn = source_connection(cd)?;
-    source_get_from_conn(&conn, id)?;
-    conn.execute(
-        "UPDATE sources SET display_name = ?1 WHERE id = ?2",
-        params![display_name, id],
-    )
-    .map_err(sqlite_err)?;
-    source_get_from_conn(&conn, id)
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    source_get_from_conn(&tx, id)?;
+    let changed = tx
+        .execute(
+            "UPDATE sources SET display_name = ?1 WHERE id = ?2 AND display_name != ?1",
+            params![display_name, id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_set_recursive(
@@ -335,19 +350,28 @@ pub fn source_set_recursive(
     id: i64,
     recursive: bool,
 ) -> Result<SourceRecord, WcError> {
-    let conn = source_connection(cd)?;
-    let source = source_get_from_conn(&conn, id)?;
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    let source = source_get_from_conn(&tx, id)?;
     if source.kind == SourceKind::WallpaperEngineWorkshop {
         return Err(WcError::Other(
             "Wallpaper Engine Workshop recursion is managed by its specialized scanner".into(),
         ));
     }
-    conn.execute(
-        "UPDATE sources SET recursive = ?1 WHERE id = ?2",
-        params![recursive, id],
-    )
-    .map_err(sqlite_err)?;
-    source_get_from_conn(&conn, id)
+    let changed = tx
+        .execute(
+            "UPDATE sources SET recursive = ?1 WHERE id = ?2 AND recursive != ?1",
+            params![recursive, id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_set_availability(
@@ -355,14 +379,23 @@ pub fn source_set_availability(
     id: i64,
     availability: SourceAvailability,
 ) -> Result<SourceRecord, WcError> {
-    let conn = source_connection(cd)?;
-    source_get_from_conn(&conn, id)?;
-    conn.execute(
-        "UPDATE sources SET availability = ?1 WHERE id = ?2",
-        params![availability.as_str(), id],
-    )
-    .map_err(sqlite_err)?;
-    source_get_from_conn(&conn, id)
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    source_get_from_conn(&tx, id)?;
+    let changed = tx
+        .execute(
+            "UPDATE sources SET availability = ?1 WHERE id = ?2 AND availability != ?1",
+            params![availability.as_str(), id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_remove_by_id(cd: &ConfigDir, id: i64) -> Result<SourceRecord, WcError> {
@@ -389,6 +422,7 @@ where
     .map_err(sqlite_err)?;
     tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
         .map_err(sqlite_err)?;
+    super::bump_library_revision(&tx)?;
     before_commit(&tx)?;
     tx.commit().map_err(sqlite_err)?;
     Ok(source)
@@ -446,6 +480,9 @@ pub(crate) fn source_remove_canonical_compat(cd: &ConfigDir, path: &str) -> Resu
         tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
             .map_err(sqlite_err)?;
     }
+    if !ids.is_empty() {
+        super::bump_library_revision(&tx)?;
+    }
     tx.commit().map_err(sqlite_err)?;
     Ok(!ids.is_empty())
 }
@@ -456,6 +493,35 @@ mod tests {
     use wc_core::config::ConfigDir;
 
     use super::*;
+
+    fn revision(cd: &ConfigDir) -> u64 {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        crate::sqlite::read_library_revision(&conn).unwrap()
+    }
+
+    #[test]
+    fn source_visible_transactions_each_bump_revision_exactly_once() {
+        let (tmp, cd) = storage();
+        let path = tmp.path().join("revision-walls");
+        std::fs::create_dir(&path).unwrap();
+
+        let (source, created) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        assert!(created);
+        assert_eq!(revision(&cd), 1);
+        let (_, created) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        assert!(!created);
+        assert_eq!(revision(&cd), 1);
+        source_rename(&cd, source.id, "Curated").unwrap();
+        assert_eq!(revision(&cd), 2);
+        source_rename(&cd, source.id, "Curated").unwrap();
+        assert_eq!(revision(&cd), 2);
+        source_set_availability(&cd, source.id, SourceAvailability::Offline).unwrap();
+        assert_eq!(revision(&cd), 3);
+        source_set_recursive(&cd, source.id, false).unwrap();
+        assert_eq!(revision(&cd), 4);
+        source_remove_by_id(&cd, source.id).unwrap();
+        assert_eq!(revision(&cd), 5);
+    }
 
     fn storage() -> (tempfile::TempDir, ConfigDir) {
         let tmp = tempfile::tempdir().unwrap();

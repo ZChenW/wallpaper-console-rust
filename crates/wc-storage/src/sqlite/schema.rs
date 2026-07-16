@@ -12,10 +12,10 @@ use wc_core::error::WcError;
 use crate::flat;
 
 use super::connection::{
-    acquire_maintenance_lock, open_or_create_connection,
+    acquire_maintenance_lock, invalidate_cached_connections, open_or_create_connection,
     open_runtime_connection as open_runtime_connection_with_version,
 };
-pub use super::connection::{apply_runtime_pragmas, RuntimeConnection, RUNTIME_BUSY_TIMEOUT_MS};
+pub use super::connection::{apply_runtime_pragmas, RuntimeConnection};
 
 const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_wallpapers_path ON wallpapers(path);
@@ -27,7 +27,7 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_added_at ON wallpapers(added_at DESC, id DESC);
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "config",
     "sources",
@@ -37,6 +37,7 @@ pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "history",
     "state",
     "display_state",
+    "source_refresh_state",
     "db_meta",
 ];
 
@@ -55,9 +56,10 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sqlite_err)?;
     if version > CURRENT_SCHEMA_VERSION {
-        return Err(WcError::Sqlite(format!(
-            "database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
-        )));
+        return Err(WcError::SchemaTooNew {
+            supported: CURRENT_SCHEMA_VERSION,
+            observed: version,
+        });
     }
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
@@ -133,6 +135,26 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS source_refresh_state (
+            source_id             INTEGER PRIMARY KEY
+                                  REFERENCES sources(id) ON DELETE CASCADE,
+            last_success_at       INTEGER,
+            dirty                INTEGER NOT NULL DEFAULT 1 CHECK (dirty IN (0, 1)),
+            failure_category     TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+            next_retry_at         INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS library_fts_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'ready')),
+            revision INTEGER NOT NULL,
+            next_wallpaper_id INTEGER NOT NULL
+        ) STRICT;
+        INSERT OR IGNORE INTO library_fts_state
+            (singleton, status, revision, next_wallpaper_id)
+            VALUES (1, 'pending', -1, 0);
+
         CREATE VIRTUAL TABLE IF NOT EXISTS wallpapers_fts USING fts5(
             path,
             title,
@@ -174,6 +196,11 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
                 .map_err(sqlite_err)?;
         }
         ensure_v3_columns(&tx)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO db_meta (key, value) VALUES ('library_revision', '0')",
+            [],
+        )
+        .map_err(sqlite_err)?;
         if version < CURRENT_SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
                 .map_err(sqlite_err)?;
@@ -197,6 +224,11 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         return Err(err);
     }
     tx.commit().map_err(sqlite_err)?;
+
+    // Browser FTS is derived state. Builds without trigram support or a
+    // corrupt derived index continue with exact LIKE search and can rebuild
+    // later without blocking database open/migration.
+    let _ = super::library_fts::create_library_fts_schema(conn);
 
     super::display_state::ensure_display_state(conn)?;
     Ok(())
@@ -1587,6 +1619,24 @@ fn try_ensure_sqlite_db_with_seam(
     cd: &ConfigDir,
     before_create_schema: impl FnOnce(),
 ) -> Result<(), WcError> {
+    // Same-version fast path: if the DB file already exists, probe its
+    // version under a shared schema lock first. Only fall through to
+    // exclusive when the schema is older or the probe fails for a
+    // non-SchemaTooNew reason.
+    if cd.db_path().exists() {
+        match try_warm_ensure_sqlite_db(cd) {
+            Ok(true) => return Ok(()),
+            // `false` is the only signal that an older schema needs the
+            // exclusive migration path. Lock/IO/SQLite failures are not
+            // evidence of an old schema and must remain bounded.
+            Ok(false) => {
+                invalidate_cached_connections();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Fresh database or older schema requiring migration: acquire exclusive
+    // schema lock and bootstrap/migrate.
     let conn = open_or_create_connection(cd)?;
     before_create_schema();
     create_schema(&conn)?;
@@ -1615,6 +1665,20 @@ fn ensure_or_import_legacy_flat_with_seam(
     before_migrate: impl FnOnce(),
 ) -> Result<bool, WcError> {
     if cd.db_path().exists() {
+        // Same-version fast path: inspect the schema version without
+        // acquiring an exclusive schema lock. Only enter the full
+        // migration path when the DB needs an upgrade.
+        match try_warm_ensure_sqlite_db(cd) {
+            Ok(true) => return Ok(false),
+            Ok(false) => {}
+            // A failed shared warm probe must not be retried through the
+            // exclusive migration path. In particular this avoids turning a
+            // two-second contention timeout into a roughly nine-second one.
+            Err(error) => return Err(error),
+        }
+        // DB exists but the fast path rejected it (wrong version or
+        // validation failure). Fall through to the full migration path
+        // which acquires exclusive schema lock and repairs/migrates.
         try_ensure_sqlite_db(cd)?;
         return Ok(false);
     }
@@ -1634,9 +1698,131 @@ fn ensure_or_import_legacy_flat_with_seam(
     }
 }
 
+/// Inexpensive warm-start check: opens the DB with shared locks only,
+/// verifies the schema version is current, applies runtime PRAGMAs, and
+/// returns `Ok(true)` when no migration work is required. Returns
+/// `Ok(false)` or an error when the DB needs the full migration path.
+fn try_warm_ensure_sqlite_db(cd: &ConfigDir) -> Result<bool, WcError> {
+    use super::connection::open_runtime_connection as open_runtime;
+    let conn = open_runtime(cd, CURRENT_SCHEMA_VERSION)?;
+    let version = conn
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(sqlite_err)?;
+    if version == CURRENT_SCHEMA_VERSION {
+        apply_runtime_pragmas(&conn)?;
+        Ok(true)
+    } else {
+        // Older schema — drop the shared lock so the caller can acquire
+        // exclusive and migrate.
+        drop(conn);
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_refresh_state_table_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'source_refresh_state'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fresh_v6_schema_initializes_revision_refresh_and_derived_search_state() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(CURRENT_SCHEMA_VERSION, 6);
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
+        assert!(source_refresh_state_table_exists(&conn));
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM library_fts_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn v3_migration_preserves_data_and_initializes_library_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v3_schema(&conn);
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/walls/kept.jpg')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM favorites WHERE path = '/walls/kept.jpg'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn v4_migration_adds_source_refresh_state_without_changing_library_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute("DROP TABLE source_refresh_state", []).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '41' WHERE key = 'library_revision'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '4' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(source_refresh_state_table_exists(&conn));
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 41);
+    }
+
+    fn create_v3_schema(conn: &Connection) {
+        create_schema(conn).unwrap();
+        conn.execute("DELETE FROM db_meta WHERE key = 'library_revision'", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
 
     #[test]
     fn schema_normalization_ignores_formatting_and_comments_but_not_constraint_tokens() {
@@ -1956,7 +2142,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v3_schema_has_author_and_generated_filename() {
+    fn fresh_schema_has_author_and_generated_filename() {
         let conn = Connection::open_in_memory().unwrap();
 
         create_schema(&conn).unwrap();
@@ -1964,7 +2150,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            CURRENT_SCHEMA_VERSION
         );
         let columns = {
             let mut stmt = conn.prepare("PRAGMA table_xinfo(wallpapers)").unwrap();
@@ -2944,5 +3130,351 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn ensure_or_import_legacy_flat_returns_schema_too_new_without_acquiring_exclusive_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        // Hold a shared schema lock to prove ensure_or_import_legacy_flat
+        // does NOT block waiting for exclusive access.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let result = ensure_or_import_legacy_flat(&cd);
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        match result {
+            Err(WcError::SchemaTooNew {
+                supported,
+                observed,
+            }) => {
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(observed, future_version);
+            }
+            other => panic!(
+                "expected SchemaTooNew, got {:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "SchemaTooNew must return immediately (took {elapsed:?}), not block on exclusive lock"
+        );
+
+        // Database must be unchanged.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, future_version);
+    }
+
+    #[test]
+    fn try_new_returns_schema_too_new_without_writing_config() {
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let path = cd.path.clone();
+        let started = std::time::Instant::now();
+        let result = crate::StorageApi::try_new(ConfigDir { path });
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(WcError::SchemaTooNew {
+                supported,
+                observed,
+            }) => {
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(observed, future_version);
+            }
+            other => panic!(
+                "expected SchemaTooNew, got {:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "try_new must return SchemaTooNew quickly (took {elapsed:?})"
+        );
+
+        // Database version must be unchanged.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, future_version);
+    }
+
+    // ── Same-version fast path tests ─────────────────────────────────────
+
+    #[test]
+    fn same_version_try_ensure_uses_shared_lock_not_exclusive() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold a shared schema lock from a separate thread.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        // Same-version try_ensure_sqlite_db must use the fast path (shared
+        // schema lock) and complete quickly without blocking on exclusive.
+        let started = Instant::now();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "same-version try_ensure must use shared lock (fast path), took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn same_version_write_paths_succeed_under_shared_schema_lock() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold a shared schema lock from a separate thread.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        // Each write path calls try_ensure_sqlite_db internally — after the
+        // fast-path fix, none should request exclusive schema lock.
+        let started = Instant::now();
+        crate::sqlite::sqlite_config_set(&cd, "test_key", "test_value").unwrap();
+        crate::sqlite::sqlite_favorite_add(&cd, "/walls/fast.jpg").unwrap();
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "same-version writes must use shared lock, took {elapsed:?}"
+        );
+
+        // Verify the writes actually persisted.
+        let conn = open_runtime_connection(&cd).unwrap();
+        let config_val: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'test_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(config_val, "test_value");
+        let fav_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM favorites WHERE path = '/walls/fast.jpg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fav_count, 1);
+    }
+
+    #[test]
+    fn older_schema_migration_acquires_exclusive_and_completes_quickly() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        // Create a v1-schema database.
+        {
+            let conn = Connection::open(cd.db_path()).unwrap();
+            create_v1_schema(&conn);
+            conn.execute("INSERT INTO sources (id, path) VALUES (1, '/walls')", [])
+                .unwrap();
+            insert_v1_wallpaper(&conn, "/walls/a.jpg", Some(1));
+        }
+
+        let started = Instant::now();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "older schema migration must complete <1s, took {elapsed:?}"
+        );
+
+        // Verify migration actually happened.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn exclusive_maintenance_blocks_ordinary_runtime_open_with_typed_timeout() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold exclusive maintenance lock for the duration of this test.
+        let _guard = crate::sqlite::connection::acquire_maintenance_lock(&cd).unwrap();
+
+        // Ordinary runtime open should time out with typed LockTimeout.
+        let started = Instant::now();
+        let result = open_runtime_connection(&cd);
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(WcError::LockTimeout {
+                category,
+                operation,
+                stage,
+                waited,
+                deadline,
+            }) => {
+                assert_eq!(category, wc_core::error::LockCategory::Maintenance);
+                assert_eq!(operation, wc_core::error::LockOperation::Shared);
+                assert!(
+                    stage.contains("runtime"),
+                    "stage should mention runtime, got: {stage}"
+                );
+                assert!(
+                    waited >= Duration::from_millis(1500),
+                    "should wait ~2s, waited {waited:?}"
+                );
+                assert!(
+                    deadline >= Duration::from_secs(2),
+                    "deadline should be ~2s, got {deadline:?}"
+                );
+            }
+            other => panic!(
+                "expected LockTimeout after ~2s, got {:?} after {elapsed:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "should have waited ~2s, only took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn warm_ensure_propagates_maintenance_timeout_without_exclusive_retry() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let _guard = crate::sqlite::connection::acquire_maintenance_lock(&cd).unwrap();
+
+        for operation in [
+            try_ensure_sqlite_db as fn(&ConfigDir) -> Result<(), WcError>,
+            |cd| ensure_or_import_legacy_flat(cd).map(|_| ()),
+        ] {
+            let started = Instant::now();
+            let error = operation(&cd).unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    error,
+                    WcError::LockTimeout {
+                        category: wc_core::error::LockCategory::Maintenance,
+                        operation: wc_core::error::LockOperation::Shared,
+                        ..
+                    }
+                ),
+                "unexpected warm-probe error: {error}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(1_500),
+                "returned too early: {elapsed:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "warm probe appears to have retried through the exclusive path: {elapsed:?}"
+            );
+        }
     }
 }

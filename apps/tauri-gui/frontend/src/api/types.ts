@@ -42,7 +42,7 @@ export interface LibraryBrowserQueryDTO {
   favoritesOnly: boolean;
   search: string;
   sort: LibraryBrowserSort;
-  offset: number;
+  cursor?: string | null;
   limit: number;
 }
 
@@ -60,8 +60,27 @@ export interface LibraryBrowserItemDTO extends WallpaperDTO {
 }
 
 export interface LibraryBrowserPageDTO {
-  total: number;
+  revision: number;
+  nextCursor: string | null;
+  total: number | null;
   items: LibraryBrowserItemDTO[];
+}
+
+export interface LibraryBrowserTotalDTO {
+  revision: number;
+  total: number;
+}
+
+export interface LibraryQueryErrorDTO {
+  kind: 'revision_changed' | 'invalid_cursor' | 'query_timeout' | 'storage_error' | 'join_error';
+  message: string;
+}
+
+export function isRevisionChangedError(error: unknown): error is LibraryQueryErrorDTO {
+  return typeof error === 'object'
+    && error !== null
+    && 'kind' in error
+    && (error as { kind?: unknown }).kind === 'revision_changed';
 }
 
 export interface LibrarySourceStatusDTO {
@@ -289,7 +308,12 @@ export interface WallpaperConsoleApi {
     limit: number,
   ): Promise<LibraryPageDTO>;
   libraryBrowserPage(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO>;
+  libraryBrowserTotal(
+    query: LibraryBrowserQueryDTO,
+    expectedRevision: number,
+  ): Promise<LibraryBrowserTotalDTO>;
   libraryBrowserRandom(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserItemDTO | null>;
+  libraryWallpaperExists(wallpaperId: number): Promise<boolean>;
   rescan(): Promise<CommandResult>;
   scanProgress(): Promise<ScanProgressDTO>;
   scanCancel(): Promise<CommandResult>;
@@ -333,5 +357,6 @@ export interface WallpaperConsoleApi {
   openPath(path: string): Promise<CommandResult>;
   revealInFileManager(path: string): Promise<CommandResult>;
   browseDirectory(): Promise<string>;
+  libraryReady(): Promise<void>;
   exportDiagnostics(): Promise<CommandResult>;
 }

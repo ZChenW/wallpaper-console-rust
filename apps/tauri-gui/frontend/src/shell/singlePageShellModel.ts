@@ -28,6 +28,34 @@ export function reconcileSelectedEntry<T extends { readonly path: string }>(
   return entryByPath.get(selected.path) ?? null;
 }
 
+/**
+ * Refresh selection metadata by stable wallpaper ID. If a replacement page
+ * does not contain a previously selected deep-page item, retain the last
+ * known selection until deletion is independently confirmed.
+ */
+export function reconcileSelectedEntryByStableId<
+  T extends { readonly wallpaperId: number },
+>(selected: T | null, entries: readonly T[]): T | null {
+  if (!selected) return null;
+  return entries.find((entry) => entry.wallpaperId === selected.wallpaperId) ?? selected;
+}
+
+/**
+ * Compute the effective source filter to use for the Library browser,
+ * verification, and reset key.
+ *
+ * When the source catalog has an error, the effective filter is forced to
+ * `all` so that the Library still renders content. The persisted preference
+ * is NOT overwritten — this is purely a runtime override.
+ */
+export function effectiveSourceFilter(
+  persisted: SourceFilter,
+  sourceError: string | undefined,
+): SourceFilter {
+  if (sourceError !== undefined && sourceError.length > 0) return { kind: 'all' };
+  return persisted;
+}
+
 /** A failed source read is an error state, never evidence of a fresh install. */
 export function shouldOfferFirstRun(
   sources: readonly SourceDTO[],

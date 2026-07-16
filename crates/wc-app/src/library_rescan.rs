@@ -8,6 +8,7 @@ use std::io::{self, BufWriter, ErrorKind, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
+use fs2::FileExt;
 #[cfg(test)]
 use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
@@ -35,6 +36,10 @@ pub enum LibraryRescanError {
     Storage(WcError),
     Refresh(LibraryRefreshError),
     Snapshot(String),
+    ScanBusy {
+        source_id: Option<i64>,
+        waited: Duration,
+    },
 }
 
 impl fmt::Display for LibraryRescanError {
@@ -44,6 +49,16 @@ impl fmt::Display for LibraryRescanError {
             Self::Storage(error) => write!(formatter, "{error}"),
             Self::Refresh(error) => write!(formatter, "{error}"),
             Self::Snapshot(message) => write!(formatter, "{message}"),
+            Self::ScanBusy { source_id, waited } => match source_id {
+                Some(source_id) => write!(
+                    formatter,
+                    "scan_busy: source {source_id} is already being scanned (waited {waited:?})"
+                ),
+                None => write!(
+                    formatter,
+                    "scan_busy: another library scan is active (waited {waited:?})"
+                ),
+            },
         }
     }
 }
@@ -55,8 +70,66 @@ impl std::error::Error for LibraryRescanError {
             Self::Storage(error) => Some(error),
             Self::Refresh(error) => Some(error),
             Self::Snapshot(_) => None,
+            Self::ScanBusy { .. } => None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanLockIntent {
+    Background,
+    Manual,
+}
+
+const MANUAL_SCAN_LOCK_DEADLINE: Duration = Duration::from_secs(2);
+const SCAN_LOCK_POLL: Duration = Duration::from_millis(25);
+
+fn open_scan_lock(storage: &StorageApi, name: &str) -> Result<File, LibraryRescanError> {
+    std::fs::create_dir_all(&storage.cd.path)?;
+    OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(storage.cd.path.join(name))
+        .map_err(LibraryRescanError::Io)
+}
+
+fn acquire_scan_lock(
+    lock: File,
+    source_id: Option<i64>,
+    intent: ScanLockIntent,
+) -> Result<Option<File>, LibraryRescanError> {
+    let started = std::time::Instant::now();
+    loop {
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => return Ok(Some(lock)),
+            Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                if intent == ScanLockIntent::Background {
+                    return Ok(None);
+                }
+                let waited = started.elapsed();
+                if waited >= MANUAL_SCAN_LOCK_DEADLINE {
+                    return Err(LibraryRescanError::ScanBusy { source_id, waited });
+                }
+                std::thread::sleep(
+                    SCAN_LOCK_POLL.min(MANUAL_SCAN_LOCK_DEADLINE.saturating_sub(waited)),
+                );
+            }
+            Err(error) => return Err(LibraryRescanError::Io(error)),
+        }
+    }
+}
+
+/// Acquire a source-scoped scan lock. Background work never waits; manual GUI
+/// and CLI work waits for at most two seconds and then returns `scan_busy`.
+pub fn acquire_source_scan_lock(
+    storage: &StorageApi,
+    source_id: i64,
+    intent: ScanLockIntent,
+) -> Result<Option<File>, LibraryRescanError> {
+    let lock = open_scan_lock(storage, &format!(".library.source.{source_id}.lock"))?;
+    acquire_scan_lock(lock, Some(source_id), intent)
 }
 
 impl From<io::Error> for LibraryRescanError {
@@ -83,16 +156,14 @@ pub fn library_dirty_marker_path(storage: &StorageApi) -> PathBuf {
 }
 
 /// Exclusive file lock serializing CLI and GUI rescans against the same config dir.
-pub fn acquire_rescan_lock(storage: &StorageApi) -> io::Result<File> {
-    std::fs::create_dir_all(&storage.cd.path)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(storage.cd.path.join(".library.rescan.lock"))?;
-    lock.lock()?;
-    Ok(lock)
+pub fn acquire_rescan_lock(storage: &StorageApi) -> Result<File, LibraryRescanError> {
+    let lock = open_scan_lock(storage, ".library.rescan.lock")?;
+    acquire_scan_lock(lock, None, ScanLockIntent::Manual)?.ok_or({
+        LibraryRescanError::ScanBusy {
+            source_id: None,
+            waited: Duration::ZERO,
+        }
+    })
 }
 
 /// Create `library.dirty` if absent. Existing markers are left untouched.
@@ -144,35 +215,14 @@ fn write_library_tsv_entry<W: Write>(writer: &mut W, entry: &WallpaperEntry) -> 
 
 fn sqlite_library_snapshot(
     storage: &StorageApi,
-) -> Result<Vec<WallpaperEntry>, LibraryRescanError> {
+) -> Result<(u64, Vec<WallpaperEntry>), LibraryRescanError> {
     ensure_dirty_sqlite_is_readable(storage)?;
-    let total = wc_storage::sqlite::source_backed_library_count(&storage.cd)?;
-    if total == 0 {
-        return Ok(Vec::new());
-    }
-    let page = wc_storage::sqlite::source_backed_library_page_sqlite(
-        &storage.cd,
-        &wc_storage::sqlite::LibraryPageQuery {
-            filter: wc_storage::sqlite::LibraryFilter::All,
-            sort: wc_storage::sqlite::LibrarySort::Name,
-            search: String::new(),
-            offset: 0,
-            limit: total,
-        },
-    )?;
-    if page.total != total || page.items.len() != total {
-        return Err(LibraryRescanError::Snapshot(format!(
-            "SQLite library snapshot changed while reading (expected {total}, found {} of {})",
-            page.items.len(),
-            page.total
-        )));
-    }
-    Ok(page.items)
+    wc_storage::sqlite::source_backed_library_snapshot(&storage.cd).map_err(Into::into)
 }
 
 /// Export source-backed SQLite library rows to `library.tsv` and clear the dirty marker.
 pub fn write_legacy_tsv_snapshot(storage: &StorageApi) -> Result<usize, LibraryRescanError> {
-    let entries = sqlite_library_snapshot(storage)?;
+    let (revision, entries) = sqlite_library_snapshot(storage)?;
     let tsv_path = storage.cd.library_tsv_path();
     let tsv_tmp = tsv_path.with_extension("tsv.tmp");
     let write_result = (|| -> Result<(), LibraryRescanError> {
@@ -183,17 +233,20 @@ pub fn write_legacy_tsv_snapshot(storage: &StorageApi) -> Result<usize, LibraryR
         }
         writer.flush()?;
         drop(writer);
-        std::fs::rename(&tsv_tmp, &tsv_path)?;
+        wc_storage::sqlite::with_library_revision_publish_guard(&storage.cd, revision, || {
+            std::fs::rename(&tsv_tmp, &tsv_path).map_err(wc_core::error::WcError::Io)?;
+            let dirty = library_dirty_marker_path(storage);
+            if dirty.exists() {
+                std::fs::remove_file(dirty).map_err(wc_core::error::WcError::Io)?;
+            }
+            Ok(())
+        })?;
         Ok(())
     })();
     if write_result.is_err() {
         let _ = std::fs::remove_file(&tsv_tmp);
     }
     write_result?;
-    let dirty = library_dirty_marker_path(storage);
-    if dirty.exists() {
-        std::fs::remove_file(dirty)?;
-    }
     Ok(entries.len())
 }
 
@@ -309,6 +362,39 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         second.join().unwrap();
+    }
+
+    #[test]
+    fn background_source_lock_skips_immediately_on_contention() {
+        let (_tmp, storage) = storage();
+        let first = acquire_source_scan_lock(&storage, 7, ScanLockIntent::Manual)
+            .unwrap()
+            .expect("manual lock should acquire");
+        let started = std::time::Instant::now();
+        let second = acquire_source_scan_lock(&storage, 7, ScanLockIntent::Background).unwrap();
+        assert!(second.is_none());
+        assert!(started.elapsed() < Duration::from_millis(100));
+        drop(first);
+    }
+
+    #[test]
+    fn manual_source_lock_returns_scan_busy_after_two_seconds() {
+        let (_tmp, storage) = storage();
+        let first = acquire_source_scan_lock(&storage, 9, ScanLockIntent::Manual)
+            .unwrap()
+            .expect("manual lock should acquire");
+        let started = std::time::Instant::now();
+        let error = acquire_source_scan_lock(&storage, 9, ScanLockIntent::Manual).unwrap_err();
+        assert!(matches!(
+            error,
+            LibraryRescanError::ScanBusy {
+                source_id: Some(9),
+                ..
+            }
+        ));
+        assert!(started.elapsed() >= Duration::from_secs(2));
+        assert!(started.elapsed() < Duration::from_millis(2_300));
+        drop(first);
     }
 
     #[test]

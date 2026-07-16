@@ -334,6 +334,35 @@ body {
   backdrop-filter: var(--feedback-card-backdrop-filter);
 }
 
+.feedback-overlay__card::before {
+  position: absolute;
+  z-index: 1;
+  inset-block: 0;
+  inset-inline-start: 0;
+  width: 0.25rem;
+  background: var(--feedback-accent);
+  content: "";
+  pointer-events: none;
+}
+
+.feedback-overlay__progress-fill {
+  display: block;
+  border-start-start-radius: 0.2rem;
+  transform-origin: left center;
+  animation: feedback-countdown-shrink var(--feedback-duration) linear forwards;
+  will-change: transform;
+}
+
+.feedback-overlay__progress-track {
+  width: calc(100% - 0.25rem);
+  margin-inline-start: 0.25rem;
+}
+
+@keyframes feedback-countdown-shrink {
+  from { transform: scaleX(1); }
+  to { transform: scaleX(0); }
+}
+
 .wallpaper-name,
 .context-menu button,
 .btn {
@@ -415,6 +444,12 @@ input:focus {
     animation-iteration-count: 1 !important;
     transition-duration: 1ms !important;
   }
+
+  .feedback-overlay__progress-fill {
+    animation: none !important;
+    transform: scaleX(var(--feedback-progress, 0));
+    will-change: auto;
+  }
 }
 
 /* ── Single-page wallpaper picker ─────────────────────────────────── */
@@ -444,6 +479,10 @@ input:focus {
   outline-offset: 2px;
 }
 
+:root[data-theme="glass"] .single-page-search input[type="search"]:focus-visible {
+  outline: none;
+}
+
 :root[data-theme="glass"] :is(
   .btn,
   .select-field-trigger,
@@ -470,6 +509,12 @@ input:focus {
     0 8px 32px rgb(0 0 0 / 35%);
   -webkit-backdrop-filter: blur(24px) saturate(180%);
   backdrop-filter: blur(24px) saturate(180%);
+}
+
+/* Side panels sit flush against the window right edge — only round the inner side. */
+:root[data-theme="glass"] :is(.settings-panel, .source-panel) {
+  border-radius: 1.25rem 0 0 1.25rem;
+  border-inline-end: none;
 }
 
 .single-page-topbar {
@@ -582,6 +627,11 @@ input:focus {
     border-color: ButtonText;
     color: Canvas;
   }
+
+  :root[data-theme="glass"] .single-page-search input[type="search"]:focus-visible {
+    outline: 2px solid ButtonText;
+    outline-offset: 2px;
+  }
 }
 
 .single-page-brand {
@@ -607,8 +657,10 @@ input:focus {
 }
 
 .single-page-search:focus-within {
-  border-color: var(--primary);
-  box-shadow: 0 0 0 0.18rem color-mix(in srgb, var(--primary) 16%, transparent);
+  border-color: color-mix(in srgb, var(--primary) 50%, var(--border));
+  box-shadow:
+    inset 0 1px 0 color-mix(in srgb, var(--text) 8%, transparent),
+    0 0 0.75rem color-mix(in srgb, var(--primary) 9%, transparent);
 }
 
 .single-page-search input[type="search"] {
@@ -877,6 +929,14 @@ input:focus {
   justify-content: flex-end;
   overflow: hidden;
   background: rgb(0 0 0 / 58%);
+  opacity: 0;
+  visibility: hidden;
+  animation: overlay-fade-in 200ms ease both;
+}
+
+.settings-overlay[data-presentation-phase="exiting"] {
+  animation: overlay-fade-out 180ms ease both;
+  pointer-events: none;
 }
 
 .settings-overlay[data-obscured="true"] {
@@ -887,6 +947,9 @@ input:focus {
   z-index: 1200;
   overflow: hidden;
   background: rgb(0 0 0 / 58%);
+  opacity: 0;
+  visibility: hidden;
+  animation: overlay-fade-in 200ms ease both;
 }
 
 .source-panel__backdrop--layered {
@@ -894,50 +957,58 @@ input:focus {
 }
 
 .source-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
   width: min(30rem, 100%);
   border-inline-start: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
   box-shadow: -0.75rem 0 2rem rgb(0 0 0 / 36%);
   backface-visibility: hidden;
+  transform: translateX(100%);
   transform-origin: right center;
   will-change: transform;
+  visibility: hidden;
 }
 
 .source-panel[data-presentation-phase="open"] {
-  animation: source-panel-enter 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  animation: source-panel-enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
 }
 
 .source-panel[data-presentation-phase="exiting"] {
-  animation: source-panel-exit 160ms cubic-bezier(0.4, 0, 1, 1) both;
+  animation: source-panel-exit 180ms cubic-bezier(0.4, 0, 1, 1) both;
   pointer-events: none;
 }
 
 @keyframes source-panel-enter {
   from {
+    visibility: visible;
     transform: translateX(100%);
   }
   to {
+    visibility: visible;
     transform: translateX(0);
   }
 }
 
 @keyframes source-panel-exit {
   from {
+    visibility: visible;
     transform: translateX(0);
   }
   to {
+    visibility: visible;
     transform: translateX(100%);
   }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .source-panel[data-presentation-phase] {
-    animation: none !important;
-  }
-}
-
 .settings-panel {
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
   width: min(30rem, 100%);
   height: 100%;
   overflow-y: auto;
@@ -945,6 +1016,45 @@ input:focus {
   background: var(--surface);
   color: var(--text);
   box-shadow: -0.75rem 0 2rem rgb(0 0 0 / 36%);
+  transform: translateX(100%);
+  visibility: hidden;
+  animation: settings-panel-enter 200ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.settings-overlay[data-presentation-phase="exiting"] .settings-panel {
+  animation: settings-panel-exit 180ms cubic-bezier(0.4, 0, 1, 1) both;
+}
+
+@keyframes overlay-fade-in {
+  from { visibility: visible; opacity: 0; }
+  to { visibility: visible; opacity: 1; }
+}
+
+@keyframes overlay-fade-out {
+  from { visibility: visible; opacity: 1; }
+  to { visibility: visible; opacity: 0; }
+}
+
+@keyframes settings-panel-enter {
+  from { visibility: visible; transform: translateX(100%); }
+  to { visibility: visible; transform: translateX(0); }
+}
+
+@keyframes settings-panel-exit {
+  from { visibility: visible; transform: translateX(0); }
+  to { visibility: visible; transform: translateX(100%); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .source-panel[data-presentation-phase],
+  .settings-panel,
+  .settings-overlay,
+  .settings-overlay[data-presentation-phase="exiting"],
+  .settings-overlay[data-presentation-phase="exiting"] .settings-panel,
+  .source-panel__backdrop {
+    animation: none !important;
+    visibility: visible !important;
+  }
 }
 
 .settings-panel__header {
@@ -1430,17 +1540,6 @@ input:focus {
 .wallpaper-card.pending {
   border-color: var(--warning);
   box-shadow: inset 0 0 0 1px var(--warning);
-}
-
-.wallpaper-card.current {
-  border-color: var(--success);
-  box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--success) 75%, transparent);
-}
-
-.wallpaper-card.selected.current {
-  box-shadow:
-    inset 0 0 0 2px color-mix(in srgb, var(--success) 75%, transparent),
-    0 0 0 2px var(--primary);
 }
 
 .scan-activity,

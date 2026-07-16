@@ -97,9 +97,11 @@ test('library browser invokes use one camelCase query object', async () => {
 
   await api.libraryBrowserPage(query);
   await api.libraryBrowserRandom(query);
+  await api.libraryWallpaperExists(42);
 
   assert.deepEqual(calls, [
     { command: 'library_browser_page', args: { query } },
     { command: 'library_browser_random', args: { query } },
+    { command: 'library_wallpaper_exists', args: { wallpaperId: 42 } },
   ]);
 });

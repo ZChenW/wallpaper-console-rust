@@ -429,7 +429,7 @@ fn copy_common_table_columns(
         .join(", ");
     let filter = if table == "db_meta" {
         " WHERE key NOT IN
-          ('schema_version', 'fts_schema_version', 'fts_rebuilt_at')"
+          ('schema_version', 'fts_schema_version', 'fts_rebuilt_at', 'library_revision')"
     } else {
         ""
     };
@@ -444,6 +444,10 @@ fn copy_common_table_columns(
 }
 
 fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(), WcError> {
+    let source_revision = {
+        let source = Connection::open(source_path).map_err(sqlite_err)?;
+        crate::sqlite::read_library_revision(&source)?
+    };
     connection
         .execute(
             "ATTACH DATABASE ?1 AS source_db",
@@ -499,6 +503,12 @@ fn copy_persistent_data(connection: &Connection, source_path: &Path) -> Result<(
             "INSERT OR REPLACE INTO db_meta (key, value)
              VALUES ('fts_schema_version', ?1)",
             [FTS_SCHEMA_VERSION],
+        )
+        .map_err(sqlite_err)?;
+    connection
+        .execute(
+            "UPDATE db_meta SET value = ?1 WHERE key = 'library_revision'",
+            [source_revision.to_string()],
         )
         .map_err(sqlite_err)?;
     connection
@@ -735,9 +745,12 @@ where
         .unwrap_or(&backup_path);
 
     let temporary = reserve_empty_temporary_database(&mut next_temporary_path)?;
-    let rebuilt = Connection::open(&temporary.path).map_err(sqlite_err)?;
+    let mut rebuilt = Connection::open(&temporary.path).map_err(sqlite_err)?;
     create_schema(&rebuilt)?;
     copy_persistent_data(&rebuilt, copy_source_path)?;
+    let transaction = rebuilt.transaction().map_err(sqlite_err)?;
+    crate::sqlite::bump_library_revision(&transaction)?;
+    transaction.commit().map_err(sqlite_err)?;
     finalize_temporary_database(rebuilt, &temporary.path, "repair candidate")?;
     temporary.publish(&db_path)
 }
@@ -907,6 +920,8 @@ pub fn restore(cd: &ConfigDir, backup_path: &Path) -> Result<(), WcError> {
     let candidate = stage_restore_candidate(&db_path, backup_path)?;
     let _maintenance = acquire_maintenance_lock(cd)?;
 
+    let mut current_revision = 0;
+
     if db_path.exists() {
         let current = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)
             .map_err(sqlite_err)?;
@@ -914,6 +929,7 @@ pub fn restore(cd: &ConfigDir, backup_path: &Path) -> Result<(), WcError> {
             .busy_timeout(Duration::from_secs(5))
             .map_err(sqlite_err)?;
         reject_future_schema(&current)?;
+        current_revision = crate::sqlite::read_library_revision(&current)?;
         let previous_file = reserve_visible_database_backup(&db_path, "pre-restore")?;
         consistent_backup(&current, &previous_file.path)?;
         checkpoint_wal(&current, "restore current database")?;
@@ -922,12 +938,73 @@ pub fn restore(cd: &ConfigDir, backup_path: &Path) -> Result<(), WcError> {
         let _previous_path = previous_file.preserve();
     }
     remove_database_sidecars(&db_path)?;
+    let mut staged = Connection::open(&candidate.path).map_err(sqlite_err)?;
+    let candidate_revision = crate::sqlite::read_library_revision(&staged)?;
+    let transaction = staged.transaction().map_err(sqlite_err)?;
+    transaction
+        .execute(
+            "UPDATE db_meta SET value = ?1 WHERE key = 'library_revision'",
+            [(current_revision.max(candidate_revision) + 1).to_string()],
+        )
+        .map_err(sqlite_err)?;
+    transaction.commit().map_err(sqlite_err)?;
+    finalize_temporary_database(staged, &candidate.path, "restore candidate revision")?;
     candidate.publish(&db_path)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn revision(path: &Path) -> u64 {
+        let connection = Connection::open(path).unwrap();
+        crate::sqlite::read_library_revision(&connection).unwrap()
+    }
+
+    #[test]
+    fn backup_preserves_revision_and_restore_publishes_one_new_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+        crate::sqlite::sqlite_favorite_add(&cd, "/walls/a.jpg").unwrap();
+        assert_eq!(revision(&cd.db_path()), 1);
+
+        let backup_path = PathBuf::from(backup(&cd).unwrap());
+        assert_eq!(revision(&backup_path), 1);
+        crate::sqlite::sqlite_favorite_add(&cd, "/walls/b.jpg").unwrap();
+        assert_eq!(revision(&cd.db_path()), 2);
+
+        restore(&cd, &backup_path).unwrap();
+
+        assert_eq!(revision(&cd.db_path()), 3);
+        let restored = Connection::open(cd.db_path()).unwrap();
+        assert_eq!(
+            restored
+                .query_row("SELECT COUNT(*) FROM favorites", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn repair_publishes_one_new_library_revision() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+        crate::sqlite::sqlite_favorite_add(&cd, "/walls/a.jpg").unwrap();
+
+        repair(&cd).unwrap();
+
+        assert_eq!(revision(&cd.db_path()), 2);
+    }
 
     fn restore_validation_fixture() -> (tempfile::TempDir, ConfigDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -1126,12 +1203,23 @@ mod tests {
                 ),
             ),
             (
+                "source_refresh_state",
+                query_rows(
+                    conn,
+                    "SELECT source_id, last_success_at, dirty, failure_category,
+                            consecutive_failures, next_retry_at
+                     FROM source_refresh_state ORDER BY source_id",
+                    6,
+                ),
+            ),
+            (
                 "db_meta",
                 query_rows(
                     conn,
                     "SELECT key, value, updated_at FROM db_meta
                      WHERE key NOT IN
-                         ('schema_version', 'fts_schema_version', 'fts_rebuilt_at')
+                         ('schema_version', 'fts_schema_version', 'fts_rebuilt_at',
+                          'library_revision')
                      ORDER BY key",
                     3,
                 ),
@@ -1909,6 +1997,14 @@ mod tests {
             "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
              VALUES ('DP-9', '/sources/workshop/123', 'linux-wallpaperengine',
                      '2025-03-03T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source_refresh_state
+             (source_id, last_success_at, dirty, failure_category,
+              consecutive_failures, next_retry_at)
+             VALUES (41, 1738541106, 1, 'offline', 3, 1738541406)",
             [],
         )
         .unwrap();
@@ -3096,6 +3192,14 @@ mod tests {
             "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
              VALUES ('DP-7', '/workshop/content/431960/123', 'linux-wallpaperengine',
                      '2025-04-07T00:00:00Z')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO source_refresh_state
+             (source_id, last_success_at, dirty, failure_category,
+              consecutive_failures, next_retry_at)
+             VALUES (41, 1743984000, 0, NULL, 0, NULL)",
             [],
         )
         .unwrap();

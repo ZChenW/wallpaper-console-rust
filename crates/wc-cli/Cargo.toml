@@ -17,6 +17,7 @@ wc-app.workspace = true
 wc-preview.workspace = true
 clap.workspace = true
 anyhow.workspace = true
+fs2.workspace = true
 serde_json.workspace = true
 rand.workspace = true
 rusqlite.workspace = true

@@ -159,6 +159,33 @@ test('Liquid Glass keyboard focus uses a visible iOS-blue ring with separation',
   assert.match(focus, /outline-offset:\s*2px/);
 });
 
+test('search focus uses a hairline micro-glow without losing forced-colors visibility', async () => {
+  const { css } = await sources();
+  const wrapperFocus = ruleBody(css, '.single-page-search:focus-within');
+  const inputFocus = ruleBody(
+    css,
+    ':root[data-theme="glass"] .single-page-search input[type="search"]:focus-visible',
+  );
+  const forced = atRuleBody(css, '@media (forced-colors: active)');
+  const forcedInputFocus = ruleBody(
+    forced,
+    ':root[data-theme="glass"] .single-page-search input[type="search"]:focus-visible',
+  );
+
+  assert.match(
+    wrapperFocus,
+    /border-color:\s*color-mix\(in srgb, var\(--primary\) 50%, var\(--border\)\)/,
+  );
+  assert.match(
+    wrapperFocus,
+    /0 0 0\.75rem color-mix\(in srgb, var\(--primary\) 9%, transparent\)/,
+  );
+  assert.doesNotMatch(wrapperFocus, /0 0 0 0\.18rem/);
+  assert.match(inputFocus, /outline:\s*none/);
+  assert.match(forcedInputFocus, /outline:\s*2px solid ButtonText/);
+  assert.match(forcedInputFocus, /outline-offset:\s*2px/);
+});
+
 test('liquid glass has an opaque fallback when backdrop filtering is unavailable', async () => {
   const { css } = await sources();
 

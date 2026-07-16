@@ -1,6 +1,7 @@
 pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
+mod command_probe;
 pub mod display_apply;
 mod display_discovery;
 pub mod display_plan;
@@ -8,6 +9,8 @@ pub mod display_restore;
 pub mod display_target;
 pub mod library_refresh;
 pub mod library_rescan;
+pub mod scan_worker;
+pub mod scan_worker_snapshot;
 pub mod sources_maintenance;
 
 #[cfg(test)]

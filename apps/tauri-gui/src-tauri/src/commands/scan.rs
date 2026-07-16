@@ -213,6 +213,55 @@ struct LiveScanProgress {
     current: ScanStats,
 }
 
+pub(crate) struct BackgroundScanPresentation {
+    owned: bool,
+    progress: LiveScanProgress,
+}
+
+pub(crate) fn begin_background_scan() -> BackgroundScanPresentation {
+    BackgroundScanPresentation {
+        owned: matches!(
+            try_mark_scan_started("building library"),
+            Ok(ScanStartOutcome::Started)
+        ),
+        progress: LiveScanProgress::default(),
+    }
+}
+
+impl BackgroundScanPresentation {
+    pub(crate) fn observe(
+        &mut self,
+        source: &SourceRecord,
+        event: &SourceScanEvent,
+    ) -> ScanControl {
+        if self.owned {
+            update_scan_progress(&mut self.progress, source, event)
+        } else {
+            ScanControl::Continue
+        }
+    }
+
+    pub(crate) fn finish(
+        self,
+        result: &Result<LibraryRefreshReport, LibraryRefreshError>,
+        storage: &wc_storage::StorageApi,
+    ) {
+        if !self.owned {
+            return;
+        }
+        match result {
+            Ok(report) => {
+                let total = wc_storage::sqlite::source_backed_library_counts_sqlite(&storage.cd)
+                    .map(|counts| counts.total)
+                    .unwrap_or(0);
+                apply_refresh_report_to_progress(report, total);
+                finish_scan_success();
+            }
+            Err(error) => finish_scan_error(&error.to_string()),
+        }
+    }
+}
+
 impl LiveScanProgress {
     fn observe(&mut self, source: &SourceRecord, event: &SourceScanEvent) -> ScanStats {
         if self.current_source_id != Some(source.id) {
@@ -413,6 +462,10 @@ fn finish_refresh(
             apply_refresh_report_to_progress(&report, unique_library_count);
             Err(error.to_string())
         }
+        Err(LibraryRefreshError::ScanBusy { source_id, waited }) => Err(format!(
+            "source {source_id} is already being scanned (waited {} ms)",
+            waited.as_millis()
+        )),
     }
 }
 
@@ -523,6 +576,7 @@ pub(crate) fn run_configured_source_startup_refresh(
     )
 }
 
+#[allow(dead_code)]
 pub(crate) fn schedule_startup_source_refresh() {
     tauri::async_runtime::spawn(async {
         let worker = tauri::async_runtime::spawn_blocking(|| {
@@ -557,8 +611,12 @@ pub(crate) fn schedule_startup_source_refresh() {
 }
 
 #[tauri::command]
-pub async fn rescan() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn rescan(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    service.manual_refresh_all_requested();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         if let Err(err) = mark_scan_started("starting scan") {
             return fail(err);
         }
@@ -571,6 +629,7 @@ pub async fn rescan() -> CommandResult {
 
         match result {
             Ok(msg) => {
+                service.invalidate_local_write();
                 finish_scan_success();
                 ok(msg)
             }
@@ -581,7 +640,7 @@ pub async fn rescan() -> CommandResult {
         }
     })
     .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+    .unwrap_or_else(|e| fail(e.to_string())))
 }
 
 #[tauri::command]

@@ -124,6 +124,18 @@ function FeedbackCard({
   const progressPercent = progress === null ? null : Math.round(progress * 100);
   const severityLabel = severityLabels[notice.severity];
   const accentColour = severityColours[notice.severity];
+  const feedbackCardStyle = {
+    ...cardStyle,
+    '--feedback-accent': accentColour,
+  } as CSSProperties;
+  const progressFillStyle = progress === null ? undefined : {
+    width: '100%',
+    height: '100%',
+    background: accentColour,
+    animationPlayState: notice.pausedRemainingMs === null ? 'running' : 'paused',
+    '--feedback-duration': `${notice.durationMs ?? 0}ms`,
+    '--feedback-progress': progress,
+  } as CSSProperties;
 
   return (
     <section
@@ -134,7 +146,7 @@ function FeedbackCard({
       onMouseEnter={() => dispatch({ type: 'pause', channel: notice.channel, nowMs })}
       onMouseLeave={() => dispatch({ type: 'resume', channel: notice.channel, nowMs })}
       role={notice.severity === 'error' ? 'alert' : 'status'}
-      style={{ ...cardStyle, borderInlineStart: `0.25rem solid ${accentColour}` }}
+      style={feedbackCardStyle}
     >
       <div style={bodyStyle}>
         <span style={{ ...severityStyle, color: accentColour }}>
@@ -163,19 +175,15 @@ function FeedbackCard({
           aria-valuemax={100}
           aria-valuemin={0}
           aria-valuenow={progressPercent}
+          className="feedback-overlay__progress-track"
           data-feedback-progress={notice.channel}
           role="progressbar"
           style={progressTrackStyle}
         >
           <span
             aria-hidden="true"
-            style={{
-              display: 'block',
-              width: `${progressPercent}%`,
-              height: '100%',
-              background: accentColour,
-              transition: 'width 100ms linear',
-            }}
+            className="feedback-overlay__progress-fill"
+            style={progressFillStyle}
           />
         </div>
       )}
@@ -200,7 +208,7 @@ export function FeedbackOverlay({
       {state.notices.map((notice) => (
         <FeedbackCard
           dispatch={dispatch}
-          key={notice.channel}
+          key={`${notice.channel}:${notice.openedAtMs}`}
           notice={notice}
           nowMs={nowMs}
           technicalDetails={technicalDetails[notice.channel]}

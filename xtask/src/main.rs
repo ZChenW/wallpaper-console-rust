@@ -57,6 +57,20 @@ const RUST_STEPS: &[Step] = &[
         program: "cargo",
         args: &["test", "--workspace"],
     },
+    Step {
+        name: "Library 10k performance gate",
+        cwd: StepCwd::RepoRoot,
+        program: "cargo",
+        args: &[
+            "test",
+            "-p",
+            "wc-storage",
+            "--test",
+            "library_browser_perf",
+            "--",
+            "--nocapture",
+        ],
+    },
 ];
 
 const FRONTEND_STEPS: &[Step] = &[
@@ -84,6 +98,12 @@ const FRONTEND_STEPS: &[Step] = &[
         cwd: StepCwd::Frontend,
         program: "npm",
         args: &["run", "smoke"],
+    },
+    Step {
+        name: "Frontend Library performance gate",
+        cwd: StepCwd::Frontend,
+        program: "npm",
+        args: &["run", "perf:library"],
     },
 ];
 

@@ -43,7 +43,7 @@ export function beginSourcePanelExit(
   return {
     accepted: true,
     next: 'exiting',
-    delayMs: reducedMotion ? 0 : 160,
+    delayMs: reducedMotion ? 0 : 180,
   };
 }
 
@@ -878,42 +878,50 @@ export function SourcePanel({
   });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
   const [renameEditor, setRenameEditor] = useState<RenameEditor | null>(null);
+
+  const [prevOpen, setPrevOpen] = useState(open);
+  const [shouldRender, setShouldRender] = useState(open);
   const [presentationPhase, setPresentationPhase] = useState<SourcePanelPresentationPhase>('open');
-  const presentationPhaseRef = useRef<SourcePanelPresentationPhase>('open');
   const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
 
-  useEffect(() => {
-    const wasOpen = visibility.current.open;
-    const transition = transitionSourcePanelVisibility(visibility.current, open);
-    visibility.current = transition.next;
-    if (open && !wasOpen) {
-      presentationPhaseRef.current = 'open';
+  // Synchronously adjust state when open changes during render
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) {
+      if (exitTimerRef.current !== null) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = null;
+      }
+      setShouldRender(true);
       setPresentationPhase('open');
+
+      const wasOpen = visibility.current.open;
+      const transition = transitionSourcePanelVisibility(visibility.current, true);
+      visibility.current = transition.next;
+      if (transition.reload) void reload();
+    } else {
+      const wasOpen = visibility.current.open;
+      const transition = transitionSourcePanelVisibility(visibility.current, false);
+      visibility.current = transition.next;
+
+      const reducedMotion = typeof window !== 'undefined'
+        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+      setPresentationPhase('exiting');
+      if (reducedMotion) {
+        setShouldRender(false);
+      } else {
+        exitTimerRef.current = setTimeout(() => {
+          exitTimerRef.current = null;
+          setShouldRender(false);
+        }, 180);
+      }
     }
-    if (transition.reload) void reload();
-  }, [open, reload]);
+  }
 
   useEffect(() => () => {
     if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
-  }, []);
-
-  const requestExit = useCallback((destination: () => void) => {
-    const reducedMotion = typeof window !== 'undefined'
-      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
-    const transition = beginSourcePanelExit(presentationPhaseRef.current, reducedMotion);
-    if (!transition.accepted) return;
-
-    presentationPhaseRef.current = transition.next;
-    setPresentationPhase(transition.next);
-    if (transition.delayMs === 0) {
-      destination();
-      return;
-    }
-    exitTimerRef.current = setTimeout(() => {
-      exitTimerRef.current = null;
-      destination();
-    }, transition.delayMs);
   }, []);
 
   useEffect(() => {
@@ -993,12 +1001,14 @@ export function SourcePanel({
     );
   }, [onNotice, onScanFinished, onScanStarted, scanWallpaperEngine]);
 
+  if (!shouldRender) return null;
+
   return (
     <SourcePanelView
       loadError={loadError}
       loading={loading}
       editingSourceId={renameEditor?.sourceId ?? null}
-      onBack={onBack ? () => requestExit(onBack) : undefined}
+      onBack={onBack}
       onAdd={handleAdd}
       onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
@@ -1013,7 +1023,7 @@ export function SourcePanel({
       onScanWallpaperEngine={handleScanWallpaperEngine}
       onSetRecursive={handleSetRecursive}
       onStartRename={(source) => setRenameEditor({ sourceId: source.id, draft: source.displayName })}
-      open={open}
+      open={shouldRender}
       pendingOperation={pendingOperation}
       presentationPhase={presentationPhase}
       renameDraft={renameEditor?.draft ?? ''}

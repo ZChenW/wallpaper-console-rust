@@ -223,7 +223,11 @@ pub(crate) enum Commands {
 }
 
 fn main() -> anyhow::Result<()> {
-    let cli = Cli::parse();
+    let args = std::env::args().collect::<Vec<_>>();
+    if let Some(exit_code) = wc_app::scan_worker::try_run_worker_mode(&args) {
+        std::process::exit(exit_code);
+    }
+    let cli = Cli::parse_from(args);
     commands::run(cli.command)
 }
 

@@ -4,10 +4,12 @@ import test from 'node:test';
 import {
   animatedPreviewPath,
   anchoredScrollTopForLayoutChange,
+  captureStableViewportAnchor,
   previewAssetPath,
   shouldPauseThumbnailReveal,
   shouldStartAnimatedHover,
   shouldRequestNextPage,
+  restoreStableViewportAnchor,
   visibleThumbnailPaths,
 } from './wallpaperGridHelpers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
@@ -138,4 +140,14 @@ test('next page is requested only near the loaded virtual tail', () => {
     hasMore: true,
     loadingMore: false,
   }), false);
+});
+
+test('stable wallpaper ID restores the viewport across revision replacement', () => {
+  const before = [1, 2, 3, 4, 5, 6].map((wallpaperId) => ({ wallpaperId }));
+  const anchor = captureStableViewportAnchor(before, 2, 100, 225);
+  assert.deepEqual(anchor, { wallpaperId: 5, rowOffset: 25 });
+
+  const after = [9, 5, 6, 7].map((wallpaperId) => ({ wallpaperId }));
+  assert.equal(restoreStableViewportAnchor(after, anchor, 2, 100), 25);
+  assert.equal(restoreStableViewportAnchor([{ wallpaperId: 9 }], anchor, 2, 100), null);
 });

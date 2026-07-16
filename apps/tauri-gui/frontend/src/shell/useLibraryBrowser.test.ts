@@ -19,13 +19,13 @@ const criteria = {
 };
 
 test('browser query maps remembered filters while paging stays owned by the paging hook', () => {
-  assert.deepEqual(createLibraryBrowserQuery(criteria, 240, 120), {
+  assert.deepEqual(createLibraryBrowserQuery(criteria, 'opaque-cursor', 120), {
     sourceId: 17,
     typeFilter: 'weScene',
     favoritesOnly: true,
     search: 'neon   city',
     sort: 'nameDesc',
-    offset: 240,
+    cursor: 'opaque-cursor',
     limit: 120,
   });
 });
@@ -34,24 +34,24 @@ test('all-sources query omits sourceId instead of inventing a sentinel', () => {
   assert.deepEqual(createLibraryBrowserQuery({
     ...criteria,
     sourceFilter: { kind: 'all' },
-  }, 0, 60), {
+  }, null, 60), {
     typeFilter: 'weScene',
     favoritesOnly: true,
     search: 'neon   city',
     sort: 'nameDesc',
-    offset: 0,
+    cursor: null,
     limit: 60,
   });
 });
 
-test('random query uses the same filters and has no relationship to the visible page offset', () => {
+test('random query uses the same filters without a paging cursor', () => {
   assert.deepEqual(createRandomLibraryBrowserQuery(criteria), {
     sourceId: 17,
     typeFilter: 'weScene',
     favoritesOnly: true,
     search: 'neon   city',
     sort: 'nameDesc',
-    offset: 0,
+    cursor: null,
     limit: 1,
   });
 });

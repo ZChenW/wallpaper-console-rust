@@ -20,6 +20,40 @@ export interface NextPageRequestState {
   readonly loadingMore: boolean;
 }
 
+export interface StableViewportAnchor {
+  readonly wallpaperId: number;
+  readonly rowOffset: number;
+}
+
+export function captureStableViewportAnchor<T extends { readonly wallpaperId: number }>(
+  entries: readonly T[],
+  columns: number,
+  rowHeight: number,
+  scrollTop: number,
+): StableViewportAnchor | null {
+  const safeColumns = Math.max(1, columns);
+  const safeRowHeight = Math.max(1, rowHeight);
+  const top = Math.max(0, scrollTop);
+  const row = Math.floor(top / safeRowHeight);
+  const entry = entries[row * safeColumns];
+  return entry
+    ? { wallpaperId: entry.wallpaperId, rowOffset: top - row * safeRowHeight }
+    : null;
+}
+
+export function restoreStableViewportAnchor<T extends { readonly wallpaperId: number }>(
+  entries: readonly T[],
+  anchor: StableViewportAnchor | null,
+  columns: number,
+  rowHeight: number,
+): number | null {
+  if (!anchor) return null;
+  const index = entries.findIndex((entry) => entry.wallpaperId === anchor.wallpaperId);
+  if (index < 0) return null;
+  return Math.floor(index / Math.max(1, columns)) * Math.max(1, rowHeight)
+    + anchor.rowOffset;
+}
+
 const NEXT_PAGE_PREFETCH_ROWS = 2;
 
 export function shouldPauseThumbnailReveal(active: boolean, scrolling: boolean): boolean {

@@ -12,6 +12,8 @@ wc-config.workspace = true
 wc-scan.workspace = true
 wc-storage.workspace = true
 wc-backend.workspace = true
+libc.workspace = true
+fs2.workspace = true
 
 [dev-dependencies]
 camino.workspace = true

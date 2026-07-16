@@ -1,4 +1,4 @@
-import { useEffect, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { ChevronRight, FolderCog, X } from 'lucide-react';
 
 import type { RendererStatusesDTO } from '../api/types.ts';
@@ -52,6 +52,7 @@ export function lockBodyScroll(body: { style: { overflow: string } }): () => voi
 export function CompactSettingsPanelView({
   open,
   obscured = false,
+  presentationPhase = 'open',
   preferences,
   updatePreferences,
   behaviorSettings,
@@ -62,7 +63,7 @@ export function CompactSettingsPanelView({
   rendererStatuses,
   onOpenSources,
   onClose,
-}: CompactSettingsPanelProps) {
+}: CompactSettingsPanelProps & { readonly presentationPhase?: 'open' | 'exiting' }) {
   if (!open) return null;
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
@@ -157,6 +158,7 @@ export function CompactSettingsPanelView({
     <div
       className="settings-overlay"
       data-obscured={obscured}
+      data-presentation-phase={presentationPhase}
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
@@ -517,6 +519,42 @@ export function CompactSettingsPanelView({
 }
 
 export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
+  const [prevOpen, setPrevOpen] = useState(props.open);
+  const [shouldRender, setShouldRender] = useState(props.open);
+  const [presentationPhase, setPresentationPhase] = useState<'open' | 'exiting'>('open');
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Synchronously adjust state when props.open changes during render
+  if (props.open !== prevOpen) {
+    setPrevOpen(props.open);
+    if (props.open) {
+      if (exitTimerRef.current !== null) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = null;
+      }
+      setShouldRender(true);
+      setPresentationPhase('open');
+    } else {
+      setPresentationPhase('exiting');
+      const reducedMotion = typeof window !== 'undefined'
+        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+      if (reducedMotion) {
+        setShouldRender(false);
+      } else {
+        exitTimerRef.current = setTimeout(() => {
+          exitTimerRef.current = null;
+          setShouldRender(false);
+        }, 180);
+      }
+    }
+  }
+
+  // Clean up exit timer on unmount.
+  useEffect(() => () => {
+    if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+  }, []);
+
   useEffect(() => {
     if (!props.open) return undefined;
 
@@ -525,7 +563,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       if (props.obscured) return;
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
-      props.onClose();
+      props.onClose(); // Set settingsOpen to false immediately
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => {
@@ -534,5 +572,12 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
     };
   }, [props.obscured, props.open, props.onClose]);
 
-  return CompactSettingsPanelView(props);
+  if (!shouldRender) return null;
+
+  return CompactSettingsPanelView({
+    ...props,
+    open: shouldRender,
+    onClose: props.onClose, // Trigger immediate close on click
+    presentationPhase,
+  });
 }

@@ -29,7 +29,12 @@ const item: BrowserWallpaper = {
 // Compile-time contract: rich items flow through page, loader, hook state,
 // lookup map, append, and reload while legacy callers keep default types.
 function typecheckGenericPagingContract() {
-  const page: WallpaperPageDTO<BrowserWallpaper> = { total: 1, items: [item] };
+  const page: WallpaperPageDTO<BrowserWallpaper> = {
+    revision: 1,
+    nextCursor: null,
+    total: 1,
+    items: [item],
+  };
   const loader: WallpaperPageLoader<BrowserWallpaper> = async () => page;
   const rich = usePagedWallpapers<BrowserWallpaper>({
     pageSize: 120,
@@ -42,11 +47,16 @@ function typecheckGenericPagingContract() {
   const entries: BrowserWallpaper[] = rich.entries;
   const found: BrowserWallpaper | undefined = rich.entryByPath.get('/wall/1.jpg');
   rich.setEntries((previous: BrowserWallpaper[]) => previous);
-  void rich.load(true, entries.length);
+  void rich.load(true, 'cursor');
   void rich.reload();
   void found;
 
-  const legacyPage: WallpaperPageDTO = { total: 0, items: [] };
+  const legacyPage: WallpaperPageDTO = {
+    revision: 1,
+    nextCursor: null,
+    total: 0,
+    items: [],
+  };
   const legacyLoader: WallpaperPageLoader = async () => legacyPage;
   void legacyLoader;
 }

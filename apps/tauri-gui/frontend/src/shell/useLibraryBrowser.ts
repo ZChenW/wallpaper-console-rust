@@ -5,9 +5,13 @@ import type {
   LibraryBrowserItemDTO,
   LibraryBrowserPageDTO,
   LibraryBrowserQueryDTO,
+  LibraryBrowserTotalDTO,
   WallpaperConsoleApi,
 } from '../api/types.ts';
-import { usePagedWallpapers } from '../hooks/usePagedWallpapers.ts';
+import {
+  usePagedWallpapers,
+  type WallpaperPageDTO,
+} from '../hooks/usePagedWallpapers.ts';
 import { DEFAULT_LIBRARY_PAGE_SIZE } from './libraryQueryState.ts';
 import type {
   LibrarySort,
@@ -25,6 +29,10 @@ export interface LibraryBrowserCriteria {
 
 export interface LibraryBrowserApi {
   libraryBrowserPage(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO>;
+  libraryBrowserTotal(
+    query: LibraryBrowserQueryDTO,
+    expectedRevision: number,
+  ): Promise<LibraryBrowserTotalDTO>;
   libraryBrowserRandom(query: LibraryBrowserQueryDTO): Promise<LibraryBrowserItemDTO | null>;
 }
 
@@ -41,7 +49,7 @@ function normalizedSearch(search: string): string {
 
 export function createLibraryBrowserQuery(
   criteria: LibraryBrowserCriteria,
-  offset: number,
+  cursor: string | null,
   limit: number,
 ): LibraryBrowserQueryDTO {
   const query: LibraryBrowserQueryDTO = {
@@ -49,7 +57,7 @@ export function createLibraryBrowserQuery(
     favoritesOnly: criteria.favoritesOnly,
     search: normalizedSearch(criteria.search),
     sort: criteria.sort,
-    offset,
+    cursor,
     limit,
   };
   if (criteria.sourceFilter.kind === 'source') {
@@ -61,7 +69,7 @@ export function createLibraryBrowserQuery(
 export function createRandomLibraryBrowserQuery(
   criteria: LibraryBrowserCriteria,
 ): LibraryBrowserQueryDTO {
-  return createLibraryBrowserQuery(criteria, 0, 1);
+  return createLibraryBrowserQuery(criteria, null, 1);
 }
 
 export function formatRandomWallpaperError(error: unknown): string {
@@ -148,14 +156,34 @@ export function useLibraryBrowser({
   }), [debouncedSearch, favoritesOnly, sort, sourceId, typeFilter]);
 
   const loadPage = useCallback(
-    (offset: number, limit: number) => browserApi.libraryBrowserPage(
-      createLibraryBrowserQuery(criteria(), offset, limit),
+    (cursor: string | null, limit: number) => browserApi.libraryBrowserPage(
+      createLibraryBrowserQuery(criteria(), cursor, limit),
     ),
     [browserApi, criteria],
   );
-  const markCriteriaResolved = useCallback(() => {
+  const [exactTotal, setExactTotal] = useState<{
+    criteriaKey: string;
+    revision: number;
+    total: number;
+  } | null>(null);
+  const totalRequestKeyRef = useRef<string | null>(null);
+  const totalRequestSeq = useRef(0);
+  const markCriteriaResolved = useCallback((page: WallpaperPageDTO<LibraryBrowserItemDTO>) => {
     setResolvedCriteriaKey(criteriaKey);
-  }, [criteriaKey]);
+    const requestKey = `${criteriaKey}:${page.revision}`;
+    if (totalRequestKeyRef.current === requestKey) return;
+    totalRequestKeyRef.current = requestKey;
+    const requestId = ++totalRequestSeq.current;
+    void browserApi.libraryBrowserTotal(
+      createLibraryBrowserQuery(criteria(), null, pageSize),
+      page.revision,
+    ).then((result) => {
+      if (requestId !== totalRequestSeq.current || result.revision !== page.revision) return;
+      setExactTotal({ criteriaKey, revision: result.revision, total: result.total });
+    }, () => {
+      if (requestId === totalRequestSeq.current) totalRequestKeyRef.current = null;
+    });
+  }, [browserApi, criteria, criteriaKey, pageSize]);
 
   const pages = usePagedWallpapers<LibraryBrowserItemDTO>({
     pageSize,
@@ -163,6 +191,12 @@ export function useLibraryBrowser({
     refreshEvent,
     onPage: markCriteriaResolved,
   });
+
+  useEffect(() => {
+    totalRequestSeq.current += 1;
+    totalRequestKeyRef.current = null;
+    setExactTotal(null);
+  }, [criteriaKey]);
 
   const [randomPending, setRandomPending] = useState(false);
   const [randomError, setRandomError] = useState<string | null>(null);
@@ -212,6 +246,16 @@ export function useLibraryBrowser({
 
   return {
     ...pages,
+    total: exactTotal
+      && exactTotal.criteriaKey === criteriaKey
+      && exactTotal.revision === pages.revision
+      ? exactTotal.total
+      : pages.entries.length,
+    totalKnown: Boolean(
+      exactTotal
+      && exactTotal.criteriaKey === criteriaKey
+      && exactTotal.revision === pages.revision,
+    ),
     emptyConfirmed: isCurrentQueryEmpty(
       pages.emptyConfirmed,
       resolvedCriteriaKey,

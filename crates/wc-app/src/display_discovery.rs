@@ -1,14 +1,10 @@
 use std::collections::HashSet;
-use std::process::Command;
+use std::time::{Duration, Instant};
 
+#[cfg(test)]
+use crate::command_probe::ProbeOutput;
+use crate::command_probe::{run_probe, ProbeError, ProbeErrorKind};
 use crate::AppError;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct ProbeOutput {
-    pub(crate) success: bool,
-    pub(crate) stdout: String,
-    pub(crate) stderr: String,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PrimaryProbe {
@@ -18,16 +14,55 @@ enum PrimaryProbe {
     Xrandr,
 }
 
+/// Maximum time budget for the primary compositor probe.
+const PRIMARY_PROBE_DEADLINE: Duration = Duration::from_millis(1500);
+
+/// Shared time budget for all display probes combined.
+const OVERALL_DISPLAY_DEADLINE: Duration = Duration::from_secs(3);
+
 /// Discover the output names exposed by the active compositor/session.
 ///
 /// Compositor IPC is preferred because it remains available when no wallpaper
 /// renderer is running. `awww query` is retained only as a compatibility
 /// fallback for sessions without a supported compositor probe.
+///
+/// The primary compositor probe gets at most 1.5 seconds. All probes combined
+/// have a 3-second overall deadline. Timed-out children are killed and reaped.
 pub fn discover_connected_outputs() -> Result<Vec<String>, AppError> {
-    discover_connected_outputs_with(|name| std::env::var(name).ok(), run_probe)
+    discover_connected_outputs_with_deadline(|name| std::env::var(name).ok())
 }
 
-pub(crate) fn discover_connected_outputs_with<E, R>(
+fn discover_connected_outputs_with_deadline<E>(env: E) -> Result<Vec<String>, AppError>
+where
+    E: Fn(&str) -> Option<String>,
+{
+    let mut failures = Vec::new();
+    let overall_deadline = Instant::now() + OVERALL_DISPLAY_DEADLINE;
+
+    if let Some(probe) = select_primary_probe(&env) {
+        let primary_budget = remaining_until(overall_deadline).min(PRIMARY_PROBE_DEADLINE);
+        if primary_budget > Duration::ZERO {
+            match run_primary_probe_with_deadline(probe, primary_budget) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(error),
+            }
+        }
+    }
+
+    match run_awww_probe_with_absolute_deadline(overall_deadline, &mut failures) {
+        Ok(outputs) => Ok(outputs),
+        Err(()) => Err(discovery_error(failures)),
+    }
+}
+
+// ── test-only injection seam ──────────────────────────────────────────
+//
+// The production code uses `command_probe::run_probe` with real deadlines.
+// Tests inject a mock `run` callback to exercise parsers and fallback logic
+// without spawning real compositor CLIs.
+
+#[cfg(test)]
+pub(crate) fn discover_connected_outputs_with_mock<E, R>(
     env: E,
     mut run: R,
 ) -> Result<Vec<String>, AppError>
@@ -38,32 +73,341 @@ where
     let mut failures = Vec::new();
 
     if let Some(probe) = select_primary_probe(&env) {
-        match run_primary_probe(probe, &mut run) {
+        match run_primary_probe_with_mock(probe, &mut run) {
             Ok(outputs) => return Ok(outputs),
             Err(error) => failures.push(error),
         }
     }
 
-    match run_awww_probe(&mut run, &mut failures) {
+    match run_awww_probe_with_mock(&mut run, &mut failures) {
         Ok(outputs) => Ok(outputs),
         Err(()) => Err(discovery_error(failures)),
     }
 }
 
-fn run_probe(program: &str, args: &[&str]) -> Result<ProbeOutput, String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .map_err(|error| format!("could not execute {program}: {error}"))?;
-    let stdout = String::from_utf8(output.stdout)
-        .map_err(|error| format!("{program} returned non-UTF-8 stdout: {error}"))?;
-    let stderr = String::from_utf8(output.stderr)
-        .map_err(|error| format!("{program} returned non-UTF-8 stderr: {error}"))?;
-    Ok(ProbeOutput {
-        success: output.status.success(),
-        stdout,
-        stderr: stderr.trim().to_string(),
-    })
+#[cfg(test)]
+fn run_primary_probe_with_mock<R>(probe: PrimaryProbe, run: &mut R) -> Result<Vec<String>, String>
+where
+    R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
+{
+    let (label, program, args): (&str, &str, &[&str]) = match probe {
+        PrimaryProbe::Niri => ("niri", "niri", &["msg", "-j", "outputs"]),
+        PrimaryProbe::Hyprland => ("hyprland", "hyprctl", &["-j", "monitors"]),
+        PrimaryProbe::Sway => ("sway", "swaymsg", &["-t", "get_outputs", "-r"]),
+        PrimaryProbe::Xrandr => ("xrandr", "xrandr", &["--query"]),
+    };
+    let output = run(program, args).map_err(|error| format!("{label}: {error}"))?;
+    if !output.success {
+        return Err(format!(
+            "{label}: {}",
+            command_failure_detail(&output.stderr)
+        ));
+    }
+    let parsed = match probe {
+        PrimaryProbe::Niri => parse_niri_outputs(&output.stdout),
+        PrimaryProbe::Hyprland => parse_hyprland_outputs(&output.stdout),
+        PrimaryProbe::Sway => parse_sway_outputs(&output.stdout),
+        PrimaryProbe::Xrandr => parse_xrandr_outputs(&output.stdout),
+    };
+    parsed.map_err(|error| format!("{label}: {error}"))
+}
+
+#[cfg(test)]
+fn run_awww_probe_with_mock<R>(run: &mut R, failures: &mut Vec<String>) -> Result<Vec<String>, ()>
+where
+    R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
+{
+    match run("awww", &["query", "--json"]) {
+        Ok(output) if output.success => match parse_awww_query_json(&output.stdout) {
+            Ok(outputs) => return Ok(outputs),
+            Err(error) => failures.push(format!("awww json: {error}")),
+        },
+        Ok(output) => failures.push(format!(
+            "awww json: {}",
+            command_failure_detail(&output.stderr)
+        )),
+        Err(error) => failures.push(format!("awww json: {error}")),
+    }
+
+    match run("awww", &["query"]) {
+        Ok(output) if output.success => match parse_awww_query_text(&output.stdout) {
+            Ok(outputs) => return Ok(outputs),
+            Err(error) => failures.push(format!("awww text: {error}")),
+        },
+        Ok(output) => failures.push(format!(
+            "awww text: {}",
+            command_failure_detail(&output.stderr)
+        )),
+        Err(error) => failures.push(format!("awww text: {error}")),
+    }
+
+    Err(())
+}
+
+// ── test-only budget seam that exercises real run_probe ───────────────
+//
+// Spawns `sh -c <script>` instead of real compositor CLIs, but honours the
+// same absolute-deadline budget sharing as the production path.  Tests use
+// this to verify timing behaviour without depending on installed compositors.
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn discover_with_script_probes<E>(
+    env: E,
+    primary_script: &str,
+    awww_json_script: &str,
+    awww_text_script: &str,
+) -> Result<Vec<String>, AppError>
+where
+    E: Fn(&str) -> Option<String>,
+{
+    let mut failures = Vec::new();
+    let overall_deadline = Instant::now() + OVERALL_DISPLAY_DEADLINE;
+
+    if let Some(probe) = select_primary_probe(&env) {
+        let primary_budget = remaining_until(overall_deadline).min(PRIMARY_PROBE_DEADLINE);
+        if primary_budget > Duration::ZERO {
+            let label = match probe {
+                PrimaryProbe::Niri => "niri",
+                PrimaryProbe::Hyprland => "hyprland",
+                PrimaryProbe::Sway => "sway",
+                PrimaryProbe::Xrandr => "xrandr",
+            };
+            match run_probe("sh", &["-c", primary_script], primary_budget) {
+                Ok(output) if output.success => {
+                    let parsed = match probe {
+                        PrimaryProbe::Niri => parse_niri_outputs(&output.stdout),
+                        PrimaryProbe::Hyprland => parse_hyprland_outputs(&output.stdout),
+                        PrimaryProbe::Sway => parse_sway_outputs(&output.stdout),
+                        PrimaryProbe::Xrandr => parse_xrandr_outputs(&output.stdout),
+                    };
+                    match parsed {
+                        Ok(outputs) => return Ok(outputs),
+                        Err(error) => failures.push(format!("{label}: {error}")),
+                    }
+                }
+                Ok(output) => failures.push(format!(
+                    "{label}: {}",
+                    command_failure_detail(&output.stderr)
+                )),
+                Err(error) => failures.push(format!("{label}: {}", probe_error_detail(&error))),
+            }
+        }
+    }
+
+    // awww --json: use whatever remains of the overall deadline.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        match run_probe("sh", &["-c", awww_json_script], remaining) {
+            Ok(output) if output.success => match parse_awww_query_json(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww json: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww json: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww json: {}", probe_error_detail(&error))),
+        }
+    }
+
+    // awww plain text: recalculate remaining; skip spawn if budget exhausted.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        match run_probe("sh", &["-c", awww_text_script], remaining) {
+            Ok(output) if output.success => match parse_awww_query_text(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww text: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww text: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww text: {}", probe_error_detail(&error))),
+        }
+    }
+
+    Err(discovery_error(failures))
+}
+
+// ── test-only budget-traced seam ──────────────────────────────────────
+//
+// Like `discover_with_script_probes` but records every budget passed to
+// `run_probe` so tests can verify budget-sharing invariants.
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ProbeBudgetRecord {
+    pub label: &'static str,
+    pub budget: Duration,
+    pub remaining_at_call: Duration,
+}
+
+#[cfg(test)]
+pub(crate) fn discover_with_script_probes_traced<E>(
+    env: E,
+    primary_script: &str,
+    awww_json_script: &str,
+    awww_text_script: &str,
+    budgets: &mut Vec<ProbeBudgetRecord>,
+) -> Result<Vec<String>, AppError>
+where
+    E: Fn(&str) -> Option<String>,
+{
+    let mut failures = Vec::new();
+    let overall_deadline = Instant::now() + OVERALL_DISPLAY_DEADLINE;
+
+    if let Some(probe) = select_primary_probe(&env) {
+        let primary_budget = remaining_until(overall_deadline).min(PRIMARY_PROBE_DEADLINE);
+        if primary_budget > Duration::ZERO {
+            let label = match probe {
+                PrimaryProbe::Niri => "niri",
+                PrimaryProbe::Hyprland => "hyprland",
+                PrimaryProbe::Sway => "sway",
+                PrimaryProbe::Xrandr => "xrandr",
+            };
+            budgets.push(ProbeBudgetRecord {
+                label,
+                budget: primary_budget,
+                remaining_at_call: remaining_until(overall_deadline),
+            });
+            match run_probe("sh", &["-c", primary_script], primary_budget) {
+                Ok(output) if output.success => {
+                    let parsed = match probe {
+                        PrimaryProbe::Niri => parse_niri_outputs(&output.stdout),
+                        PrimaryProbe::Hyprland => parse_hyprland_outputs(&output.stdout),
+                        PrimaryProbe::Sway => parse_sway_outputs(&output.stdout),
+                        PrimaryProbe::Xrandr => parse_xrandr_outputs(&output.stdout),
+                    };
+                    match parsed {
+                        Ok(outputs) => return Ok(outputs),
+                        Err(error) => failures.push(format!("{label}: {error}")),
+                    }
+                }
+                Ok(output) => failures.push(format!(
+                    "{label}: {}",
+                    command_failure_detail(&output.stderr)
+                )),
+                Err(error) => failures.push(format!("{label}: {}", probe_error_detail(&error))),
+            }
+        }
+    }
+
+    // awww --json: use whatever remains of the overall deadline.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        budgets.push(ProbeBudgetRecord {
+            label: "awww json",
+            budget: remaining,
+            remaining_at_call: remaining,
+        });
+        match run_probe("sh", &["-c", awww_json_script], remaining) {
+            Ok(output) if output.success => match parse_awww_query_json(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww json: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww json: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww json: {}", probe_error_detail(&error))),
+        }
+    }
+
+    // awww plain text: recalculate remaining; skip spawn if budget exhausted.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        budgets.push(ProbeBudgetRecord {
+            label: "awww text",
+            budget: remaining,
+            remaining_at_call: remaining,
+        });
+        match run_probe("sh", &["-c", awww_text_script], remaining) {
+            Ok(output) if output.success => match parse_awww_query_text(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww text: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww text: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww text: {}", probe_error_detail(&error))),
+        }
+    }
+
+    Err(discovery_error(failures))
+}
+
+// ── production path with deadlines ────────────────────────────────────
+
+fn run_primary_probe_with_deadline(
+    probe: PrimaryProbe,
+    deadline: Duration,
+) -> Result<Vec<String>, String> {
+    let (label, program, args): (&str, &str, &[&str]) = match probe {
+        PrimaryProbe::Niri => ("niri", "niri", &["msg", "-j", "outputs"]),
+        PrimaryProbe::Hyprland => ("hyprland", "hyprctl", &["-j", "monitors"]),
+        PrimaryProbe::Sway => ("sway", "swaymsg", &["-t", "get_outputs", "-r"]),
+        PrimaryProbe::Xrandr => ("xrandr", "xrandr", &["--query"]),
+    };
+    let output = run_probe(program, args, deadline)
+        .map_err(|error| format!("{label}: {}", probe_error_detail(&error)))?;
+    if !output.success {
+        return Err(format!(
+            "{label}: {}",
+            command_failure_detail(&output.stderr)
+        ));
+    }
+    let parsed = match probe {
+        PrimaryProbe::Niri => parse_niri_outputs(&output.stdout),
+        PrimaryProbe::Hyprland => parse_hyprland_outputs(&output.stdout),
+        PrimaryProbe::Sway => parse_sway_outputs(&output.stdout),
+        PrimaryProbe::Xrandr => parse_xrandr_outputs(&output.stdout),
+    };
+    parsed.map_err(|error| format!("{label}: {error}"))
+}
+
+fn run_awww_probe_with_absolute_deadline(
+    overall_deadline: Instant,
+    failures: &mut Vec<String>,
+) -> Result<Vec<String>, ()> {
+    // awww --json: use whatever remains of the overall deadline.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        match run_probe("awww", &["query", "--json"], remaining) {
+            Ok(output) if output.success => match parse_awww_query_json(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww json: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww json: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww json: {}", probe_error_detail(&error))),
+        }
+    }
+
+    // awww plain text: recalculate remaining; skip spawn if budget exhausted.
+    let remaining = remaining_until(overall_deadline);
+    if remaining > Duration::ZERO {
+        match run_probe("awww", &["query"], remaining) {
+            Ok(output) if output.success => match parse_awww_query_text(&output.stdout) {
+                Ok(outputs) => return Ok(outputs),
+                Err(error) => failures.push(format!("awww text: {error}")),
+            },
+            Ok(output) => failures.push(format!(
+                "awww text: {}",
+                command_failure_detail(&output.stderr)
+            )),
+            Err(error) => failures.push(format!("awww text: {}", probe_error_detail(&error))),
+        }
+    }
+
+    Err(())
+}
+
+fn remaining_until(deadline: Instant) -> Duration {
+    deadline.saturating_duration_since(Instant::now())
 }
 
 fn select_primary_probe<E>(env: &E) -> Option<PrimaryProbe>
@@ -98,61 +442,50 @@ fn desktop_component(desktop: &str, expected: &str) -> bool {
         .any(|part| part.trim() == expected)
 }
 
-fn run_primary_probe<R>(probe: PrimaryProbe, run: &mut R) -> Result<Vec<String>, String>
-where
-    R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
-{
-    let (label, program, args): (&str, &str, &[&str]) = match probe {
-        PrimaryProbe::Niri => ("niri", "niri", &["msg", "-j", "outputs"]),
-        PrimaryProbe::Hyprland => ("hyprland", "hyprctl", &["-j", "monitors"]),
-        PrimaryProbe::Sway => ("sway", "swaymsg", &["-t", "get_outputs", "-r"]),
-        PrimaryProbe::Xrandr => ("xrandr", "xrandr", &["--query"]),
-    };
-    let output = run(program, args).map_err(|error| format!("{label}: {error}"))?;
-    if !output.success {
-        return Err(format!(
-            "{label}: {}",
-            command_failure_detail(&output.stderr)
-        ));
+/// Format a [`ProbeError`] for display in a failure chain.
+///
+/// The caller is responsible for adding any context label (e.g. "niri: ",
+/// "awww json: "). This function produces the diagnostic payload without a
+/// redundant label prefix.
+fn probe_error_detail(error: &ProbeError) -> String {
+    match &error.kind {
+        ProbeErrorKind::TimedOut { deadline } => {
+            format!(
+                "timed out after {deadline:?}{}",
+                error
+                    .partial_stderr
+                    .lines()
+                    .next()
+                    .map(|line| format!(": {line}"))
+                    .unwrap_or_default()
+            )
+        }
+        ProbeErrorKind::NonZeroExit { exit_code } => {
+            format!(
+                "exit code {exit_code}{}",
+                error
+                    .partial_stderr
+                    .lines()
+                    .next()
+                    .map(|line| format!(": {line}"))
+                    .unwrap_or_default()
+            )
+        }
+        ProbeErrorKind::SpawnFailed { reason } => {
+            format!("could not execute: {reason}")
+        }
+        ProbeErrorKind::InvalidUtf8 { stream } => {
+            format!(
+                "{stream} output is not valid UTF-8{}",
+                error
+                    .partial_stderr
+                    .lines()
+                    .next()
+                    .map(|line| format!(" (stderr: {line})"))
+                    .unwrap_or_default()
+            )
+        }
     }
-    let parsed = match probe {
-        PrimaryProbe::Niri => parse_niri_outputs(&output.stdout),
-        PrimaryProbe::Hyprland => parse_hyprland_outputs(&output.stdout),
-        PrimaryProbe::Sway => parse_sway_outputs(&output.stdout),
-        PrimaryProbe::Xrandr => parse_xrandr_outputs(&output.stdout),
-    };
-    parsed.map_err(|error| format!("{label}: {error}"))
-}
-
-fn run_awww_probe<R>(run: &mut R, failures: &mut Vec<String>) -> Result<Vec<String>, ()>
-where
-    R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
-{
-    match run("awww", &["query", "--json"]) {
-        Ok(output) if output.success => match parse_awww_query_json(&output.stdout) {
-            Ok(outputs) => return Ok(outputs),
-            Err(error) => failures.push(format!("awww json: {error}")),
-        },
-        Ok(output) => failures.push(format!(
-            "awww json: {}",
-            command_failure_detail(&output.stderr)
-        )),
-        Err(error) => failures.push(format!("awww json: {error}")),
-    }
-
-    match run("awww", &["query"]) {
-        Ok(output) if output.success => match parse_awww_query_text(&output.stdout) {
-            Ok(outputs) => return Ok(outputs),
-            Err(error) => failures.push(format!("awww text: {error}")),
-        },
-        Ok(output) => failures.push(format!(
-            "awww text: {}",
-            command_failure_detail(&output.stderr)
-        )),
-        Err(error) => failures.push(format!("awww text: {error}")),
-    }
-
-    Err(())
 }
 
 fn command_failure_detail(stderr: &str) -> String {

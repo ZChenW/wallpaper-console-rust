@@ -28,9 +28,15 @@ impl StorageApi {
     pub fn try_new(cd: ConfigDir) -> Result<Self, WcError> {
         cd.init()?;
 
-        sqlite::ensure_or_import_legacy_flat(&cd)?;
-        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
-        sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
+        let imported = sqlite::ensure_or_import_legacy_flat(&cd)?;
+
+        // Only rewrite config on cold-start (imported) or first-run paths.
+        // Warm same-version starts must not hold exclusive schema lock or
+        // rewrite persistent configuration.
+        if imported || !cd.db_path().exists() {
+            wc_config::write_config_value(&cd.path, "storage_backend", "sqlite")?;
+            sqlite::sqlite_config_set(&cd, "storage_backend", "sqlite")?;
+        }
 
         Ok(StorageApi {
             cd,
@@ -917,12 +923,12 @@ mod tests {
                 favorites_only: false,
                 search: String::new(),
                 sort: LibraryBrowserSort::RecentlyAdded,
-                offset: 0,
+                cursor: None,
                 limit: 20,
             },
         )
         .unwrap();
-        assert_eq!(page.total, 0);
+        assert_eq!(page.total, None);
 
         let opens_after_reads = runtime_connection_open_count();
         assert!(

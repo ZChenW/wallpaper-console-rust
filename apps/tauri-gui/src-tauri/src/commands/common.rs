@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use wc_config::ConfigDirExt;
 use wc_core::types::{FileType, WallpaperEntry};
@@ -142,7 +142,8 @@ pub struct LibraryBrowserQueryDto {
     pub favorites_only: bool,
     pub search: String,
     pub sort: String,
-    pub offset: usize,
+    #[serde(default)]
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -168,8 +169,38 @@ pub struct LibraryBrowserItemDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LibraryBrowserPageDto {
-    pub total: usize,
+    pub revision: u64,
+    pub next_cursor: Option<String>,
+    pub total: Option<usize>,
     pub items: Vec<LibraryBrowserItemDto>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryBrowserTotalDto {
+    pub revision: u64,
+    pub total: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LibraryQueryErrorDto {
+    pub kind: &'static str,
+    pub message: String,
+}
+
+impl From<wc_core::error::WcError> for LibraryQueryErrorDto {
+    fn from(error: wc_core::error::WcError) -> Self {
+        let kind = match &error {
+            wc_core::error::WcError::RevisionChanged { .. } => "revision_changed",
+            wc_core::error::WcError::InvalidCursor { .. } => "invalid_cursor",
+            _ => "storage_error",
+        };
+        Self {
+            kind,
+            message: error.to_string(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -238,16 +269,145 @@ pub struct WeDebugInfoDto {
 
 pub type CommandResult = CommandResultDto;
 
+/// Single-flight initialization cell.
+///
+/// Each initialization attempt is represented by an `Arc<Attempt>`. The
+/// leader creates a fresh `Attempt`, transitions the global state to
+/// `InProgress(arc)`, releases the lock, and runs the initializer.
+///
+/// Concurrent callers see `InProgress(arc)`, clone the `Arc`, drop the
+/// global lock, and wait on that **specific** attempt's condvar. When the
+/// leader finishes it writes the outcome into the `Attempt`, notifies
+/// waiters on the attempt's own condvar, and clears the global state back
+/// to `Empty` (only if it still points to the same `Arc`).
+///
+/// This per-attempt isolation guarantees that old waiters always receive
+/// their batch's outcome, even if a fresh caller starts a new attempt
+/// before all old waiters have woken up.
 struct StorageCell {
     storage: OnceLock<StorageApi>,
-    initialization_lock: Mutex<()>,
+    state: std::sync::Mutex<AttemptState>,
+}
+
+struct Attempt {
+    /// `None` while in progress, `Some(Ok(()))` on success,
+    /// `Some(Err(msg))` on failure.
+    outcome: Mutex<Option<Result<(), String>>>,
+    condvar: std::sync::Condvar,
+}
+
+impl Attempt {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            outcome: Mutex::new(None),
+            condvar: std::sync::Condvar::new(),
+        })
+    }
+}
+
+enum AttemptState {
+    Empty,
+    InProgress(Arc<Attempt>),
 }
 
 impl StorageCell {
     const fn new() -> Self {
         Self {
             storage: OnceLock::new(),
-            initialization_lock: Mutex::new(()),
+            state: Mutex::new(AttemptState::Empty),
+        }
+    }
+
+    /// Shared implementation. Hooks are no-ops in production and may be
+    /// overridden in `#[cfg(test)]` builds via `get_or_init_with_test_hooks`.
+    fn get_or_init_inner(
+        &self,
+        initializer: impl FnOnce() -> Result<StorageApi, String>,
+        on_wait_joined: &(dyn Fn() + Send + Sync),
+        on_before_read_outcome: &(dyn Fn() + Send + Sync),
+    ) -> Result<&StorageApi, String> {
+        // ── Fast path ──────────────────────────────────────────────────
+        if let Some(storage) = self.storage.get() {
+            return Ok(storage);
+        }
+
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+
+        loop {
+            match &*state {
+                AttemptState::Empty => {
+                    let attempt = Attempt::new();
+                    *state = AttemptState::InProgress(Arc::clone(&attempt));
+                    drop(state); // release the global mutex before I/O
+
+                    match initializer() {
+                        Ok(storage) => {
+                            let stored = self.storage.get_or_init(|| storage);
+                            {
+                                let mut outcome =
+                                    attempt.outcome.lock().unwrap_or_else(|e| e.into_inner());
+                                *outcome = Some(Ok(()));
+                            }
+                            attempt.condvar.notify_all();
+                            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if let AttemptState::InProgress(ref a) = *s {
+                                if Arc::ptr_eq(a, &attempt) {
+                                    *s = AttemptState::Empty;
+                                }
+                            }
+                            return Ok(stored);
+                        }
+                        Err(error) => {
+                            {
+                                let mut outcome =
+                                    attempt.outcome.lock().unwrap_or_else(|e| e.into_inner());
+                                *outcome = Some(Err(error.clone()));
+                            }
+                            attempt.condvar.notify_all();
+                            let mut s = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                            if let AttemptState::InProgress(ref a) = *s {
+                                if Arc::ptr_eq(a, &attempt) {
+                                    *s = AttemptState::Empty;
+                                }
+                            }
+                            return Err(error);
+                        }
+                    }
+                }
+                AttemptState::InProgress(attempt) => {
+                    // Clone the Arc so we wait on THIS attempt's condvar.
+                    let attempt = Arc::clone(attempt);
+                    drop(state);
+
+                    // Test seam: the waiter has cloned the attempt and released
+                    // the global lock — it is now joined to this batch.
+                    on_wait_joined();
+
+                    // Test seam: pause before the waiter reads the outcome, so
+                    // tests can interleave a second attempt before old waiters
+                    // observe the result.
+                    on_before_read_outcome();
+
+                    let mut outcome = attempt.outcome.lock().unwrap_or_else(|e| e.into_inner());
+                    while outcome.is_none() {
+                        outcome = attempt
+                            .condvar
+                            .wait(outcome)
+                            .unwrap_or_else(|e| e.into_inner());
+                    }
+                    match outcome.as_ref().unwrap() {
+                        Ok(()) => {
+                            if let Some(storage) = self.storage.get() {
+                                return Ok(storage);
+                            }
+                            state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+                        }
+                        Err(msg) => {
+                            return Err(msg.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -255,20 +415,17 @@ impl StorageCell {
         &self,
         initializer: impl FnOnce() -> Result<StorageApi, String>,
     ) -> Result<&StorageApi, String> {
-        if let Some(storage) = self.storage.get() {
-            return Ok(storage);
-        }
+        self.get_or_init_inner(initializer, &|| {}, &|| {})
+    }
 
-        let _initialization_guard = self
-            .initialization_lock
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(storage) = self.storage.get() {
-            return Ok(storage);
-        }
-
-        let storage = initializer()?;
-        Ok(self.storage.get_or_init(|| storage))
+    #[cfg(test)]
+    fn get_or_init_with_test_hooks(
+        &self,
+        initializer: impl FnOnce() -> Result<StorageApi, String>,
+        on_wait_joined: &(dyn Fn() + Send + Sync),
+        on_before_read_outcome: &(dyn Fn() + Send + Sync),
+    ) -> Result<&StorageApi, String> {
+        self.get_or_init_inner(initializer, on_wait_joined, on_before_read_outcome)
     }
 }
 
@@ -472,7 +629,7 @@ mod tests {
     use camino::Utf8PathBuf;
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Barrier,
+        mpsc, Barrier,
     };
     use wc_core::types::{Backend, FileType, WallpaperEntry, WallpaperProject};
 
@@ -565,6 +722,262 @@ mod tests {
 
         assert_eq!(initializer_calls.load(Ordering::SeqCst), 1);
         assert!(handles.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    /// 16 threads simultaneously enter a **failing** initializer.
+    /// The initializer must be called exactly **once** and all 16 threads must
+    /// receive the **same** error.
+    ///
+    /// The `waited` flag inside `get_or_init_with` ensures that callers who
+    /// blocked on the condvar (same batch) receive the cached error while a
+    /// fresh caller clears the failure and retries.
+    #[test]
+    fn storage_cell_single_flight_failure_16_threads() {
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+        let barrier = Barrier::new(16);
+
+        let errors: Vec<String> = std::thread::scope(|scope| {
+            let mut threads = Vec::with_capacity(16);
+            for _ in 0..16 {
+                let cell = &cell;
+                let initializer_calls = &initializer_calls;
+                let barrier = &barrier;
+                threads.push(scope.spawn(move || {
+                    barrier.wait();
+                    match cell.get_or_init_with(|| {
+                        // Brief sleep gives other threads time to enter
+                        // condvar.wait before the leader finishes.
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        initializer_calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<StorageApi, _>("shared initialization failure".to_string())
+                    }) {
+                        Err(e) => e,
+                        Ok(_) => panic!("expected error"),
+                    }
+                }));
+            }
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+
+        // The initializer must have been called exactly once.
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 1);
+        // All 16 threads must receive the same error message.
+        assert!(errors.iter().all(|e| e == "shared initialization failure"));
+        assert_eq!(errors.len(), 16);
+    }
+
+    /// After a failed batch, the next explicit attempt (new `get_or_init_with`
+    /// call) clears the cached failure and can succeed.  Once it succeeds the
+    /// result is reused.
+    #[test]
+    fn storage_cell_recovers_after_failed_batch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+
+        // First: failing batch (single-flight failure).
+        let barrier = Barrier::new(8);
+        let errors: Vec<String> = std::thread::scope(|scope| {
+            let mut threads = Vec::with_capacity(8);
+            for _ in 0..8 {
+                let cell = &cell;
+                let initializer_calls = &initializer_calls;
+                let barrier = &barrier;
+                threads.push(scope.spawn(move || {
+                    barrier.wait();
+                    match cell.get_or_init_with(|| {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                        initializer_calls.fetch_add(1, Ordering::SeqCst);
+                        Err::<StorageApi, _>("batch 1 failure".to_string())
+                    }) {
+                        Err(e) => e,
+                        Ok(_) => panic!("expected error"),
+                    }
+                }));
+            }
+            threads.into_iter().map(|t| t.join().unwrap()).collect()
+        });
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(errors.len(), 8);
+        assert!(errors.iter().all(|e| e == "batch 1 failure"));
+
+        // Second: new explicit attempt — must succeed.
+        let config_path = tmp.path().join("config");
+        let second = cell
+            .get_or_init_with(|| {
+                initializer_calls.fetch_add(1, Ordering::SeqCst);
+                StorageApi::try_new(wc_core::ConfigDir {
+                    path: config_path.clone(),
+                })
+                .map_err(|e| e.to_string())
+            })
+            .unwrap();
+
+        // Third: result is reused without calling the initializer.
+        let third = cell
+            .get_or_init_with(|| panic!("success value must be reused"))
+            .unwrap();
+
+        // Total calls: 1 (failed batch) + 1 (recovery) = 2.
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 2);
+        assert!(std::ptr::eq(second, third));
+    }
+
+    /// Deterministic test: after the first (failing) leader finishes, a second
+    /// (succeeding) attempt starts **before** old waiters have read their
+    /// outcome. With per-attempt `Arc<Attempt>` isolation the old waiters still
+    /// observe the **first** batch's error (not the second batch's success),
+    /// and each batch's initializer fires exactly once.
+    ///
+    /// ## Deterministic interleaving
+    ///
+    /// 1. All 8 threads enter `get_or_init_with_test_hooks`. One becomes leader,
+    ///    7 become waiters.
+    /// 2. Each waiter clones the old `Arc<Attempt>`, drops the global lock, and
+    ///    fires `on_wait_joined` (sends to a channel). The leader's initializer
+    ///    blocks until all 7 `on_wait_joined` signals arrive — this guarantees
+    ///    every waiter has been joined to the **first** batch.
+    /// 3. Each waiter then fires `on_before_read_outcome` (pauses on a barrier)
+    ///    — they are suspended *before* they lock the attempt's outcome mutex,
+    ///    so the leader can still write the outcome.
+    /// 4. The leader's initializer unblocks after all 7 joins, returns `Err`,
+    ///    writes the outcome, notifies the condvar, and clears global state.
+    /// 5. The main thread now starts a **second** (successful) attempt — new
+    ///    `Arc<Attempt>`, new initializer — while the old waiters are still
+    ///    paused at the barrier.
+    /// 6. The main thread releases the barrier. Old waiters unpause, lock the
+    ///    *old* attempt's outcome, see `Some(Err(…))`, and return the error
+    ///    without ever touching the condvar.
+    ///
+    /// No sleeps — the interleaving is purely enforced by the channel + barrier.
+    /// `recv_timeout` on every channel receive protects against permanent hangs.
+    #[test]
+    fn storage_cell_per_attempt_isolation_old_waiters_not_affected_by_new_attempt() {
+        let cell = StorageCell::new();
+        let initializer_calls = AtomicUsize::new(0);
+        const TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+        // Channel: waiters signal they have joined the batch.
+        let (joined_tx, joined_rx) = mpsc::channel::<()>();
+        let joined_rx = std::sync::Arc::new(Mutex::new(joined_rx));
+
+        // Barrier: olds waiters pause here before reading outcome.
+        // 7 waiters + 1 main thread = 8 parties.
+        let pause_before_read = std::sync::Arc::new(Barrier::new(8));
+
+        // Thread-safe outcome collector.
+        let waiter_outcomes = Mutex::new(Vec::<Result<(), String>>::new());
+
+        // All 8 threads rendezvous here before calling get_or_init_with_test_hooks.
+        let enter_barrier = Barrier::new(8);
+
+        // Channel to signal "leader has fully finished (outcome written, state
+        // cleared)" so the main thread can safely start the second attempt.
+        // Unbounded so sends never block; only the leader reaches the send point
+        // before the pause barrier is released.
+        let (leader_done_tx, leader_done_rx) = mpsc::channel::<()>();
+
+        std::thread::scope(|scope| {
+            let mut handles = Vec::with_capacity(8);
+            for _ in 0..8 {
+                let cell = &cell;
+                let initializer_calls = &initializer_calls;
+                let enter_barrier = &enter_barrier;
+                let pause_before_read = Arc::clone(&pause_before_read);
+                let joined_tx = joined_tx.clone();
+                let waiter_outcomes = &waiter_outcomes;
+                let joined_rx = Arc::clone(&joined_rx);
+                let leader_done_tx = leader_done_tx.clone();
+
+                handles.push(scope.spawn(move || {
+                    enter_barrier.wait();
+
+                    let on_wait_joined: &(dyn Fn() + Send + Sync) = &|| {
+                        joined_tx.send(()).unwrap();
+                    };
+                    let on_before_read: &(dyn Fn() + Send + Sync) = &|| {
+                        pause_before_read.wait();
+                    };
+
+                    let outcome = cell.get_or_init_with_test_hooks(
+                        || {
+                            initializer_calls.fetch_add(1, Ordering::SeqCst);
+                            // Wait until all 7 waiters have joined the batch.
+                            for _ in 0..7 {
+                                joined_rx
+                                    .lock()
+                                    .unwrap()
+                                    .recv_timeout(TIMEOUT)
+                                    .expect("timed out waiting for waiters to join");
+                            }
+                            Err::<StorageApi, _>("batch1_fatal_error".to_string())
+                        },
+                        on_wait_joined,
+                        on_before_read,
+                    );
+
+                    // Only the leader reaches this point before the pause
+                    // barrier is released — all waiters are blocked inside
+                    // on_before_read_outcome. At this point the leader has
+                    // written the outcome, notified condvar, and cleared
+                    // global state back to Empty.
+                    let _ = leader_done_tx.send(());
+
+                    let mapped = match outcome {
+                        Ok(_) => Ok(()),
+                        Err(msg) => Err(msg),
+                    };
+                    waiter_outcomes.lock().unwrap().push(mapped);
+                }));
+            }
+
+            // Drop the main thread's sender so the channel can eventually close.
+            drop(leader_done_tx);
+
+            // ── Wait for the leader to finish completely ────────────────
+            leader_done_rx
+                .recv_timeout(TIMEOUT)
+                .expect("timed out waiting for leader to finish batch 1");
+
+            // ── Start second (successful) attempt while old waiters ─────
+            // are still paused at on_before_read_outcome. Global state is
+            // now Empty so this creates a brand-new Arc<Attempt>.
+            let tmp = tempfile::tempdir().unwrap();
+            let config_path = tmp.path().join("config");
+            let _second = cell.get_or_init_with(|| {
+                initializer_calls.fetch_add(1, Ordering::SeqCst);
+                StorageApi::try_new(wc_core::ConfigDir { path: config_path })
+                    .map_err(|e| e.to_string())
+            });
+
+            // ── Release the barrier — old waiters now read old outcome ──
+            pause_before_read.wait();
+
+            for h in handles {
+                h.join().unwrap();
+            }
+        });
+
+        // ── Assertions ──────────────────────────────────────────────────
+        let outcomes = waiter_outcomes.lock().unwrap();
+        assert_eq!(outcomes.len(), 8, "all 8 threads must record an outcome");
+
+        // ALL waiters (including those that paused) must see batch1_fatal_error.
+        for (i, outcome) in outcomes.iter().enumerate() {
+            assert!(
+                outcome.is_err(),
+                "waiter {i} should see error, got {outcome:?}"
+            );
+            assert_eq!(
+                outcome.as_ref().unwrap_err(),
+                "batch1_fatal_error",
+                "waiter {i} should see batch1 error"
+            );
+        }
+
+        // Initializer called exactly twice: once for batch1, once for batch2.
+        assert_eq!(initializer_calls.load(Ordering::SeqCst), 2);
     }
 
     #[test]

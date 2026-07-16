@@ -2,7 +2,7 @@ use std::ops::{Deref, DerefMut};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::sqlite_err;
 use fs2::FileExt;
@@ -11,9 +11,18 @@ use std::fs::{File, OpenOptions};
 #[cfg(test)]
 use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
-use wc_core::error::WcError;
+use wc_core::error::{LockCategory, LockOperation, WcError};
 
 pub const RUNTIME_BUSY_TIMEOUT_MS: u64 = 5000;
+
+/// Default deadline for ordinary read/write lock acquisition.
+const ORDINARY_LOCK_DEADLINE: Duration = Duration::from_secs(2);
+
+/// Deadline for schema/repair/restore/replacement lock acquisition.
+const MAINTENANCE_LOCK_DEADLINE: Duration = Duration::from_secs(5);
+
+/// Poll interval for try_lock retries.
+const LOCK_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 fn apply_busy_timeout(connection: &Connection) -> Result<(), WcError> {
     connection
@@ -33,11 +42,53 @@ pub fn apply_runtime_pragmas(connection: &Connection) -> Result<(), WcError> {
     Ok(())
 }
 
+/// Deadline-based file-lock acquisition that polls `try_lock_shared` or
+/// `try_lock_exclusive` until the deadline, returning a typed error on timeout.
+fn acquire_lock_with_deadline(
+    file: &File,
+    shared: bool,
+    deadline: Duration,
+    category: LockCategory,
+    stage: &'static str,
+) -> Result<(), WcError> {
+    let operation = if shared {
+        LockOperation::Shared
+    } else {
+        LockOperation::Exclusive
+    };
+    let started = Instant::now();
+    loop {
+        let result: Result<(), std::io::Error> = if shared {
+            file.try_lock_shared().map_err(|e| e.into())
+        } else {
+            file.try_lock_exclusive()
+        };
+        match result {
+            Ok(()) => return Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                let waited = started.elapsed();
+                if waited >= deadline {
+                    return Err(WcError::LockTimeout {
+                        category,
+                        operation,
+                        stage,
+                        waited,
+                        deadline,
+                    });
+                }
+                std::thread::sleep(LOCK_POLL_INTERVAL.min(deadline.saturating_sub(waited)));
+            }
+            Err(err) => return Err(WcError::Io(err)),
+        }
+    }
+}
+
 /// Process-wide generation bump used to discard leased/cached runtime
 /// connections before exclusive maintenance or schema work.
 static CACHE_GENERATION: AtomicU64 = AtomicU64::new(0);
 static RUNTIME_CONNECTION_CACHE: Mutex<Option<CachedRuntimeConnection>> = Mutex::new(None);
 
+#[derive(Debug)]
 struct CachedRuntimeConnection {
     generation: u64,
     db_path: PathBuf,
@@ -71,6 +122,7 @@ fn lock_runtime_cache() -> std::sync::MutexGuard<'static, Option<CachedRuntimeCo
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+#[derive(Debug)]
 pub struct RuntimeConnection {
     cached: Option<CachedRuntimeConnection>,
 }
@@ -118,6 +170,7 @@ impl Drop for RuntimeConnection {
     }
 }
 
+#[derive(Debug)]
 pub(super) struct MaintenanceGuard {
     file: File,
 }
@@ -149,7 +202,13 @@ fn open_lock(cd: &ConfigDir, path: PathBuf) -> Result<File, WcError> {
 
 fn acquire_shared_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
     let file = open_lock(cd, maintenance_lock_path(cd))?;
-    FileExt::lock_shared(&file).map_err(WcError::Io)?;
+    acquire_lock_with_deadline(
+        &file,
+        true,
+        ORDINARY_LOCK_DEADLINE,
+        LockCategory::Maintenance,
+        "runtime_shared",
+    )?;
     Ok(MaintenanceGuard { file })
 }
 
@@ -157,7 +216,13 @@ pub(super) fn acquire_maintenance_lock(cd: &ConfigDir) -> Result<MaintenanceGuar
     // Release any idle cached shared locks before blocking for exclusive.
     invalidate_cached_connections();
     let file = open_lock(cd, maintenance_lock_path(cd))?;
-    FileExt::lock_exclusive(&file).map_err(WcError::Io)?;
+    acquire_lock_with_deadline(
+        &file,
+        false,
+        MAINTENANCE_LOCK_DEADLINE,
+        LockCategory::Maintenance,
+        "maintenance_exclusive",
+    )?;
     Ok(MaintenanceGuard { file })
 }
 
@@ -170,13 +235,25 @@ pub(crate) fn take_exclusive_maintenance_lock(cd: &ConfigDir) -> Result<(), WcEr
 fn acquire_schema_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
     invalidate_cached_connections();
     let file = open_lock(cd, schema_lock_path(cd))?;
-    FileExt::lock_exclusive(&file).map_err(WcError::Io)?;
+    acquire_lock_with_deadline(
+        &file,
+        false,
+        MAINTENANCE_LOCK_DEADLINE,
+        LockCategory::Schema,
+        "schema_exclusive",
+    )?;
     Ok(MaintenanceGuard { file })
 }
 
-fn acquire_schema_shared_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
+pub(super) fn acquire_schema_shared_lock(cd: &ConfigDir) -> Result<MaintenanceGuard, WcError> {
     let file = open_lock(cd, schema_lock_path(cd))?;
-    FileExt::lock_shared(&file).map_err(WcError::Io)?;
+    acquire_lock_with_deadline(
+        &file,
+        true,
+        ORDINARY_LOCK_DEADLINE,
+        LockCategory::Schema,
+        "schema_shared",
+    )?;
     Ok(MaintenanceGuard { file })
 }
 
@@ -237,6 +314,9 @@ pub(super) fn open_runtime_connection(
         }
     }
 
+    // Same-version open uses a shared schema lock (fast path). Schema
+    // migration would require exclusivity, but a same-version call must not
+    // request it — only bootstrap/migration/repair paths do.
     let guard = acquire_shared_lock(cd)?;
     let schema_guard = acquire_schema_shared_lock(cd)?;
     // Re-check existence after waiting for locks: a maintenance replace may
@@ -253,9 +333,10 @@ pub(super) fn open_runtime_connection(
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
         .map_err(sqlite_err)?;
     if schema_version > supported_schema_version {
-        return Err(WcError::Sqlite(format!(
-            "database schema version {schema_version} is newer than supported version {supported_schema_version}"
-        )));
+        return Err(WcError::SchemaTooNew {
+            supported: supported_schema_version,
+            observed: schema_version,
+        });
     }
     apply_runtime_pragmas(&connection)?;
     #[cfg(test)]
@@ -321,6 +402,203 @@ mod tests {
     }
 
     #[test]
+    fn lock_timeout_returns_typed_error_with_category_and_operation() {
+        use std::fs::OpenOptions;
+        use std::sync::mpsc;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("test.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+
+        // Hold an exclusive lock from a separate thread so the polling
+        // acquisition in THIS thread will see WouldBlock.
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            file.lock_exclusive().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(file);
+        });
+        held_rx.recv().unwrap();
+
+        // Open a second handle to the same file and try to acquire.
+        let second_file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let short_deadline = Duration::from_millis(100);
+        let result = acquire_lock_with_deadline(
+            &second_file,
+            false,
+            short_deadline,
+            LockCategory::Maintenance,
+            "test_lock_timeout",
+        );
+
+        let err = result.unwrap_err();
+        match err {
+            WcError::LockTimeout {
+                category,
+                operation,
+                stage,
+                waited,
+                deadline,
+            } => {
+                assert_eq!(category, LockCategory::Maintenance);
+                assert_eq!(operation, LockOperation::Exclusive);
+                assert_eq!(stage, "test_lock_timeout");
+                assert!(
+                    waited >= short_deadline,
+                    "waited={waited:?} deadline={deadline:?}"
+                );
+                assert_eq!(deadline, short_deadline);
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    #[test]
+    fn shared_lock_succeeds_when_no_exclusive_holder() {
+        use std::fs::OpenOptions;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("test.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+
+        acquire_lock_with_deadline(
+            &file,
+            true,
+            ORDINARY_LOCK_DEADLINE,
+            LockCategory::Maintenance,
+            "test_shared_lock",
+        )
+        .expect("shared lock on unheld file must succeed immediately");
+        file.unlock().unwrap();
+    }
+
+    #[test]
+    fn schema_and_maintenance_locks_carry_correct_stage_in_lock_timeout() {
+        use std::fs::OpenOptions;
+        use std::sync::mpsc;
+
+        // ── Schema-lock timeout carries schema_exclusive stage ──
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("schema_test.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            file.lock_exclusive().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(file);
+        });
+        held_rx.recv().unwrap();
+
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let err = acquire_lock_with_deadline(
+            &second,
+            false,
+            Duration::from_millis(50),
+            LockCategory::Schema,
+            "schema_bootstrap",
+        )
+        .unwrap_err();
+        match err {
+            WcError::LockTimeout {
+                category,
+                operation,
+                stage,
+                ..
+            } => {
+                assert_eq!(category, LockCategory::Schema);
+                assert_eq!(operation, LockOperation::Exclusive);
+                assert_eq!(stage, "schema_bootstrap");
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+
+        // ── Maintenance-lock timeout carries maintenance_exclusive stage ──
+        let lock_path = tmp.path().join("maint_test.lock");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&lock_path)
+            .unwrap();
+
+        let (held_tx, held_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let holder = std::thread::spawn(move || {
+            file.lock_exclusive().unwrap();
+            held_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(file);
+        });
+        held_rx.recv().unwrap();
+
+        let second = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        let err = acquire_lock_with_deadline(
+            &second,
+            false,
+            Duration::from_millis(50),
+            LockCategory::Maintenance,
+            "maintenance_replace",
+        )
+        .unwrap_err();
+        match err {
+            WcError::LockTimeout {
+                category,
+                operation,
+                stage,
+                ..
+            } => {
+                assert_eq!(category, LockCategory::Maintenance);
+                assert_eq!(operation, LockOperation::Exclusive);
+                assert_eq!(stage, "maintenance_replace");
+            }
+            other => panic!("expected LockTimeout, got {other}"),
+        }
+        release_tx.send(()).unwrap();
+        holder.join().unwrap();
+    }
+
+    #[test]
     fn runtime_connection_holds_shared_lock_until_connection_drop() {
         let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         invalidate_cached_connections();
@@ -345,7 +623,7 @@ mod tests {
 
         drop(runtime);
         let guard = rx
-            .recv_timeout(Duration::from_secs(2))
+            .recv_timeout(Duration::from_secs(6))
             .expect("exclusive maintenance must proceed after RuntimeConnection drops");
         drop(guard);
         waiter.join().unwrap();
@@ -375,7 +653,7 @@ mod tests {
         let guard = match early {
             Ok(guard) => guard,
             Err(RecvTimeoutError::Timeout) => rx
-                .recv_timeout(Duration::from_secs(2))
+                .recv_timeout(Duration::from_secs(6))
                 .expect("exclusive schema work must proceed after RuntimeConnection drops"),
             Err(RecvTimeoutError::Disconnected) => {
                 panic!("exclusive schema lock waiter disconnected")
@@ -427,7 +705,7 @@ mod tests {
         drop(maintenance);
 
         assert_eq!(
-            rx.recv_timeout(Duration::from_secs(2))
+            rx.recv_timeout(Duration::from_secs(5))
                 .expect("runtime open must resume after maintenance unlock"),
             "new"
         );
@@ -439,29 +717,34 @@ mod tests {
         let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let (_tmp, cd) = config_dir();
         create_probe_db(&cd, "cached");
-        invalidate_cached_connections();
-        reset_runtime_connection_open_count();
+        // Other tests legitimately invalidate the process-wide cache while
+        // running in parallel. Retry until this assertion gets an undisturbed
+        // generation rather than treating an unrelated maintenance test as a
+        // cache miss in this one.
+        for _ in 0..32 {
+            invalidate_cached_connections();
+            let generation = CACHE_GENERATION.load(Ordering::SeqCst);
+            reset_runtime_connection_open_count();
 
-        {
-            let conn = open_runtime_connection(&cd, 0).unwrap();
-            let value: String = conn
-                .query_row("SELECT value FROM probe", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(value, "cached");
-        }
-        {
-            let conn = open_runtime_connection(&cd, 0).unwrap();
-            let value: String = conn
-                .query_row("SELECT value FROM probe", [], |row| row.get(0))
-                .unwrap();
-            assert_eq!(value, "cached");
+            for _ in 0..2 {
+                let conn = open_runtime_connection(&cd, 0).unwrap();
+                let value: String = conn
+                    .query_row("SELECT value FROM probe", [], |row| row.get(0))
+                    .unwrap();
+                assert_eq!(value, "cached");
+            }
+
+            if CACHE_GENERATION.load(Ordering::SeqCst) == generation {
+                assert_eq!(
+                    runtime_connection_open_count(),
+                    1,
+                    "second open of the same db must reuse the cached connection"
+                );
+                return;
+            }
         }
 
-        assert_eq!(
-            runtime_connection_open_count(),
-            1,
-            "second open of the same db must reuse the cached connection"
-        );
+        panic!("runtime cache generation did not remain stable long enough to test reuse");
     }
 
     #[test]
@@ -499,5 +782,70 @@ mod tests {
             2,
             "invalidated lease must not return to cache"
         );
+    }
+
+    #[test]
+    fn same_version_open_uses_shared_schema_lock_not_exclusive() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, cd) = config_dir();
+        create_probe_db(&cd, "test");
+
+        // Open a connection and keep it alive.
+        let runtime = open_runtime_connection(&cd, 0).unwrap();
+
+        // A second same-version open should acquire shared schema lock and succeed
+        // (whereas if it requested exclusive schema lock it would block).
+        let competing_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (tx, rx) = mpsc::channel();
+        let opener = std::thread::spawn(move || {
+            let conn = open_runtime_connection(&competing_cd, 0);
+            tx.send(conn.is_ok()).unwrap();
+        });
+
+        let opened = rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("same-version open should complete quickly");
+        assert!(
+            opened,
+            "same-version open must succeed while another holds shared schema lock"
+        );
+
+        drop(runtime);
+        opener.join().unwrap();
+    }
+
+    #[test]
+    fn future_schema_returns_schema_too_new_not_generic_sqlite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = crate::sqlite::schema::CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE probe (value TEXT NOT NULL);
+             PRAGMA user_version = 0;",
+        )
+        .unwrap();
+        // Mark it as a future version.
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let err = open_runtime_connection(&cd, crate::sqlite::schema::CURRENT_SCHEMA_VERSION)
+            .unwrap_err();
+        match err {
+            WcError::SchemaTooNew {
+                supported,
+                observed,
+            } => {
+                assert_eq!(supported, crate::sqlite::schema::CURRENT_SCHEMA_VERSION);
+                assert_eq!(observed, future_version);
+            }
+            other => panic!("expected SchemaTooNew, got {other}"),
+        }
     }
 }

@@ -7,6 +7,7 @@ import {
   useState,
 } from 'react';
 import { FolderPlus, Heart, Search, Settings, Shuffle } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
 
 import { api } from '../api/bridge.ts';
 import type {
@@ -45,11 +46,13 @@ import { RuntimeObservationController } from './runtimeObservationController.ts'
 import {
   canChooseRandomWallpaper,
   currentWallpaperLabel,
-  reconcileSelectedEntry,
+  effectiveSourceFilter,
+  reconcileSelectedEntryByStableId,
   reconcileSourceFilter,
   shouldOfferFirstRun,
   targetArgument,
 } from './singlePageShellModel.ts';
+
 import type {
   LibrarySort,
   LibraryTypeFilter,
@@ -70,6 +73,14 @@ import {
   shouldVerifyLibraryIntegrity,
   verifyLibraryIntegrity,
 } from './libraryRepair.ts';
+import {
+  createLibraryReadyGate,
+  createLibraryWatchdog,
+  shouldSignalLibraryPaint,
+} from './startupWatchdog.ts';
+
+const LIBRARY_REVISION_EVENT = 'library-revision-changed';
+const LIBRARY_REFRESH_EVENT = 'wallpaper-console:library-revision-changed';
 
 function commandDetails(result: CommandResult): string {
   return [
@@ -138,8 +149,15 @@ export default function SinglePageShell() {
   const [firstRunSuggestionReload, setFirstRunSuggestionReload] = useState(0);
   const [libraryRepairFault, setLibraryRepairFault] = useState<LibraryRepairFault | null>(null);
   const [libraryRepairPending, setLibraryRepairPending] = useState(false);
+  const [initialRequestTimedOut, setInitialRequestTimedOut] = useState(false);
+  const [watchdogRetryCount, setWatchdogRetryCount] = useState(0);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
   const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+
+  // ── startup controllers (stable across renders) ─────────────────────────
+  const libraryWatchdog = useRef(createLibraryWatchdog()).current;
+  const libraryReadyGate = useRef(createLibraryReadyGate()).current;
+  const WATCHDOG_MS = 500;
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -226,20 +244,108 @@ export default function SinglePageShell() {
     };
   }, [firstRunEligible, firstRunSuggestionReload]);
 
+  // ── effective source filter ──────────────────────────────────────────
+  // When the source catalog has an error, the effective filter is forced to
+  // 'all' so the Library can still render. The persisted preference is NOT
+  // overwritten — only the runtime value passed to the browser changes.
+  const effectiveSrcFilter = effectiveSourceFilter(
+    preferences.sourceFilter,
+    catalog.errors.sources,
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<number>(LIBRARY_REVISION_EVENT, () => {
+      window.dispatchEvent(new Event(LIBRARY_REFRESH_EVENT));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => {
+      // Browser-only tests and the mock frontend do not provide Tauri events.
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const browser = useLibraryBrowser({
-    sourceFilter: preferences.sourceFilter,
+    sourceFilter: effectiveSrcFilter,
     typeFilter: preferences.typeFilter,
     favoritesOnly: preferences.favoritesOnly,
     sort: preferences.sort,
     search,
+    refreshEvent: LIBRARY_REFRESH_EVENT,
   });
+
+  // ── library_ready signal ────────────────────────────────────────────
+  // Sent exactly once after the first Library paint (cards, empty, error, or
+  // timeout retry state). Uses a pure gate so the "exactly once" guarantee is
+  // testable without mounting the full shell.
+  const libraryPaintActive = shouldSignalLibraryPaint({
+    initialLoading: browser.initialLoading,
+    hasEntries: browser.entries.length > 0,
+    emptyConfirmed: browser.emptyConfirmed,
+    loadError: browser.loadError,
+    timedOut: initialRequestTimedOut,
+  });
+  useEffect(() => {
+    if (!libraryReadyGate.shouldSignal({
+      initialLoading: browser.initialLoading,
+      hasEntries: browser.entries.length > 0,
+      emptyConfirmed: browser.emptyConfirmed,
+      loadError: browser.loadError,
+      timedOut: initialRequestTimedOut,
+    })) return;
+    libraryReadyGate.markCalled();
+    void api.libraryReady().catch(() => {
+      // library_ready is fire-and-forget; the backend handles idempotency.
+    });
+  }, [
+    browser.emptyConfirmed,
+    browser.entries.length,
+    browser.initialLoading,
+    browser.loadError,
+    initialRequestTimedOut,
+    libraryReadyGate,
+  ]);
+
+  // ── initial request watchdog (500 ms) ──────────────────────────────────
+  // If the first browser request never resolves (perpetual loading),
+  // surface an interactive retry after a bounded wait. Each retry arms a
+  // fresh 500 ms watchdog even when browser.initialLoading stays true.
+  const armWatchdog = useCallback(() => {
+    return libraryWatchdog.arm(WATCHDOG_MS, () => {
+      setInitialRequestTimedOut(true);
+    });
+  }, [libraryWatchdog]);
+  const watchdogCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!libraryPaintActive) {
+      watchdogCleanupRef.current = armWatchdog();
+    } else {
+      // Loading resolved normally — disarm.
+      if (watchdogCleanupRef.current) {
+        watchdogCleanupRef.current();
+        watchdogCleanupRef.current = null;
+      }
+    }
+    return () => {
+      if (watchdogCleanupRef.current) {
+        watchdogCleanupRef.current();
+        watchdogCleanupRef.current = null;
+      }
+    };
+  }, [libraryPaintActive, armWatchdog, watchdogRetryCount]);
+
   const libraryVerificationRequest = useRef(0);
   const shouldVerifyLibrary = shouldVerifyLibraryIntegrity({
     browserLoadError: browser.loadError,
     sourceLoadError: Boolean(catalog.errors.sources),
     sourceCount: catalog.sources.length,
     emptyConfirmed: browser.emptyConfirmed,
-    sourceFilter: preferences.sourceFilter,
+    sourceFilter: effectiveSrcFilter,
     typeFilter: preferences.typeFilter,
     favoritesOnly: preferences.favoritesOnly,
     search: browser.debouncedSearch,
@@ -442,8 +548,41 @@ export default function SinglePageShell() {
   }, [catalog.ready, catalog.sources, preferences.sourceFilter, updatePreferences]);
 
   useEffect(() => {
-    setSelectedEntry((current) => reconcileSelectedEntry(current, browser.entryByPath));
-  }, [browser.entryByPath, browser.replaceCount]);
+    setSelectedEntry((current) => reconcileSelectedEntryByStableId(current, browser.entries));
+  }, [browser.entries, browser.replaceCount]);
+
+  const selectedExistenceRequest = useRef(0);
+  useEffect(() => {
+    const selected = selectedEntry;
+    const requestId = ++selectedExistenceRequest.current;
+    if (!selected || browser.entries.some((entry) => entry.wallpaperId === selected.wallpaperId)) {
+      return undefined;
+    }
+    void api.libraryWallpaperExists(selected.wallpaperId).then(
+      (exists) => {
+        if (exists || selectedExistenceRequest.current !== requestId) return;
+        setSelectedEntry((current) => (
+          current?.wallpaperId === selected.wallpaperId ? null : current
+        ));
+        setDetailsEntry((current) => (
+          current?.wallpaperId === selected.wallpaperId ? null : current
+        ));
+        showNotice({
+          channel: 'system',
+          severity: 'info',
+          message: 'The selected wallpaper is no longer in Library.',
+        });
+      },
+      () => {
+        // An existence probe is advisory. Preserve selection on transport failures.
+      },
+    );
+    return () => {
+      if (selectedExistenceRequest.current === requestId) {
+        selectedExistenceRequest.current += 1;
+      }
+    };
+  }, [browser.entries, browser.replaceCount, selectedEntry, showNotice]);
 
   const previousScanRunning = useRef(false);
   useEffect(() => {
@@ -453,18 +592,6 @@ export default function SinglePageShell() {
     }
     previousScanRunning.current = running;
   }, [catalog.reloadSources, scan.progress?.running]);
-
-  // A startup refresh can finish between the initial idle probe and the next
-  // poll. One delayed reconciliation closes that small observation window.
-  const startupReconciled = useRef(false);
-  useEffect(() => {
-    if (!catalog.ready || startupReconciled.current) return undefined;
-    startupReconciled.current = true;
-    const timer = window.setTimeout(() => {
-      void Promise.allSettled([reloadLibraryRef.current(), catalog.reloadSources()]);
-    }, 2_250);
-    return () => window.clearTimeout(timer);
-  }, [catalog.ready, catalog.reloadSources]);
 
   const lastScanError = useRef<string | null>(null);
   useEffect(() => {
@@ -485,7 +612,9 @@ export default function SinglePageShell() {
     showNotice({
       channel: 'settings',
       severity: 'warning',
-      message: 'Some interface preferences could not be saved.',
+      message: preferencesSaveError
+        ? 'Some interface preferences could not be saved.'
+        : 'Saved interface preferences could not be loaded; defaults are in use.',
       technicalDetails: error.message,
     });
   }, [preferencesLoadError, preferencesSaveError, showNotice]);
@@ -644,7 +773,7 @@ export default function SinglePageShell() {
 
   const scanRunning = scan.progress?.running === true || scan.scanState.kind === 'running';
   const resetKey = [
-    sourceFilterValue(preferences.sourceFilter),
+    sourceFilterValue(effectiveSrcFilter),
     preferences.typeFilter,
     preferences.favoritesOnly ? 'favorites' : 'all',
     preferences.sort,
@@ -652,19 +781,25 @@ export default function SinglePageShell() {
   ].join('|');
 
   const renderLibrary = () => {
-    if (!preferencesReady || !catalog.ready || browser.initialLoading) {
-      return <div className="single-page-empty" role="status">Loading wallpaper library…</div>;
-    }
-    if (catalog.errors.sources && catalog.sources.length === 0) {
+    // Library loads independently of preferences, catalog, and display probes.
+    // A failure in any of those services only disables the relevant controls.
+    if (initialRequestTimedOut
+      && browser.entries.length === 0
+      && !browser.emptyConfirmed
+      && !browser.loadError) {
       return (
-        <section className="single-page-empty" role="alert">
-          <h2>Could not load wallpaper sources</h2>
-          <p>{catalog.errors.sources}</p>
-          <button className="btn" type="button" onClick={() => void catalog.reloadSources()}>
-            Retry
-          </button>
-        </section>
+        <div className="single-page-empty" role="alert">
+          <p>Loading wallpaper library is taking longer than expected.</p>
+          <button className="btn" type="button" onClick={() => {
+            setInitialRequestTimedOut(false);
+            setWatchdogRetryCount((c) => c + 1);
+            void browser.reload();
+          }}>Retry</button>
+        </div>
       );
+    }
+    if (browser.initialLoading) {
+      return <div className="single-page-empty" role="status">Loading wallpaper library…</div>;
     }
     if (shouldOfferFirstRun(catalog.sources, catalog.errors.sources)) {
       return (
@@ -730,11 +865,11 @@ export default function SinglePageShell() {
             pendingPath={applyQueue.pendingPath ?? applyQueue.activePath ?? null}
             currentPath={currentPath}
             isEntryApplicable={isLibraryEntryApplicable}
-            hasMore={browser.entries.length < browser.total && !browser.automaticAppendPaused}
+            hasMore={browser.hasMore && !browser.automaticAppendPaused}
             loadingMore={browser.appending}
             onLoadMore={browser.loadMore}
           />
-          {!browser.refreshing && browser.entries.length < browser.total ? (
+          {!browser.refreshing && browser.hasMore ? (
             <div className="single-page-load-more">
               <button
                 className="btn"
@@ -749,7 +884,9 @@ export default function SinglePageShell() {
                   ? 'Loading more…'
                   : browser.automaticAppendPaused
                     ? 'Retry loading more'
-                    : `Load more · ${browser.total - browser.entries.length} remaining`}
+                    : browser.totalKnown
+                      ? `Load more · ${Math.max(0, browser.total - browser.entries.length)} remaining`
+                      : 'Load more'}
               </button>
             </div>
           ) : null}
@@ -844,9 +981,16 @@ export default function SinglePageShell() {
       </header>
 
       <div className="single-page-filters" aria-label="Library filters">
+        {catalog.errors.sources ? (
+          <details className="single-page-source-warning">
+            <summary>Source list unavailable</summary>
+            <p>{catalog.errors.sources}</p>
+          </details>
+        ) : null}
         <SelectField
           aria-label="Source filter"
-          value={sourceFilterValue(preferences.sourceFilter)}
+          value={sourceFilterValue(effectiveSrcFilter)}
+          disabled={Boolean(catalog.errors.sources)}
           options={[
             { value: 'all', label: 'ALL SOURCES' },
             ...catalog.sources.map((source) => ({
@@ -925,7 +1069,9 @@ export default function SinglePageShell() {
           variant="compact"
         />
         <span className="single-page-count" aria-live="polite">
-          {browser.entries.length} / {browser.total}
+          {browser.totalKnown
+            ? `${browser.entries.length} / ${browser.total}`
+            : `${browser.entries.length} loaded`}
         </span>
       </div>
 

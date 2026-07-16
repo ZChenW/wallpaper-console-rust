@@ -5,6 +5,8 @@ import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
 import {
   anchoredScrollTopForLayoutChange,
+  captureStableViewportAnchor,
+  restoreStableViewportAnchor,
   shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
@@ -107,6 +109,9 @@ function WallpaperGridImpl({
   const pendingScrollTopRef = useRef<number | null>(null);
   const lastEnqueueKeyRef = useRef('');
   const suppressScrollPauseRef = useRef(false);
+  const viewportAnchorRef = useRef<ReturnType<typeof captureStableViewportAnchor>>(null);
+  const previousEntriesRef = useRef(entries);
+  const previousEntriesResetKeyRef = useRef(resetKey);
   const colCountRef = useRef(colCount);
   const entriesLengthRef = useRef(entries.length);
   colCountRef.current = colCount;
@@ -254,6 +259,27 @@ function WallpaperGridImpl({
     }
   }, [resetKey, active, virtualizer]);
 
+  useEffect(() => {
+    const previous = previousEntriesRef.current;
+    previousEntriesRef.current = entries;
+    const criteriaChanged = shouldResetScroll(previousEntriesResetKeyRef.current, resetKey);
+    previousEntriesResetKeyRef.current = resetKey;
+    if (previous === entries || criteriaChanged) return;
+    const nextTop = restoreStableViewportAnchor(
+      entries,
+      viewportAnchorRef.current,
+      colCount,
+      gridLayout.rowHeight,
+    );
+    const el = containerRef.current;
+    if (nextTop === null || !el) return;
+    suppressScrollPauseRef.current = true;
+    el.scrollTop = nextTop;
+    requestAnimationFrame(() => {
+      suppressScrollPauseRef.current = false;
+    });
+  }, [colCount, entries, gridLayout.rowHeight, resetKey]);
+
   const shouldSampleGridMetrics =
     import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
 
@@ -314,8 +340,17 @@ function WallpaperGridImpl({
 
   const handleScroll = useCallback(() => {
     if (suppressScrollPauseRef.current) return;
+    const el = containerRef.current;
+    if (el) {
+      viewportAnchorRef.current = captureStableViewportAnchor(
+        entries,
+        colCount,
+        gridLayout.rowHeight,
+        el.scrollTop,
+      );
+    }
     beginScrolling();
-  }, [beginScrolling]);
+  }, [beginScrolling, colCount, entries, gridLayout.rowHeight]);
 
   const isScrolling = useCallback(() => isScrollingRef.current, []);
 

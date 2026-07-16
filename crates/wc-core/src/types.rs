@@ -77,7 +77,7 @@ impl StorageBackend {
 }
 
 /// Wallpaper Engine project-level metadata.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WallpaperProject {
     pub project_type: String,
     pub preview_path: Option<String>,
@@ -89,7 +89,7 @@ pub struct WallpaperProject {
 }
 
 /// A single library entry (matches library.tsv row shape).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WallpaperEntry {
     pub path: Utf8PathBuf,
     pub file_type: FileType,

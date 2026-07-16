@@ -1,7 +1,7 @@
 use super::common::{
     dto_from_entry_with_routing, fail, ok, storage, CommandResult, LibraryBrowserItemDto,
-    LibraryBrowserPageDto, LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryCountDto,
-    LibraryPageDto, LibrarySourceStatusDto,
+    LibraryBrowserPageDto, LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryBrowserTotalDto,
+    LibraryCountDto, LibraryPageDto, LibraryQueryErrorDto, LibrarySourceStatusDto,
 };
 
 #[tauri::command]
@@ -79,7 +79,7 @@ fn library_page_for_storage(
 
 fn browser_query_from_dto(
     query: LibraryBrowserQueryDto,
-) -> Result<wc_storage::sqlite::LibraryBrowserQuery, String> {
+) -> Result<wc_storage::sqlite::LibraryBrowserQuery, wc_core::error::WcError> {
     let type_filter = match query.type_filter.as_str() {
         "usable" => wc_storage::sqlite::LibraryBrowserType::Usable,
         "image" => wc_storage::sqlite::LibraryBrowserType::Image,
@@ -88,9 +88,9 @@ fn browser_query_from_dto(
         "weScene" => wc_storage::sqlite::LibraryBrowserType::WeScene,
         "unsupported" => wc_storage::sqlite::LibraryBrowserType::Unsupported,
         other => {
-            return Err(format!(
+            return Err(wc_core::error::WcError::Other(format!(
                 "unknown library browser type: {other}; expected usable, image, gif, video, weScene, or unsupported"
-            ))
+            )))
         }
     };
     let sort = match query.sort.as_str() {
@@ -98,9 +98,9 @@ fn browser_query_from_dto(
         "nameAsc" => wc_storage::sqlite::LibraryBrowserSort::NameAsc,
         "nameDesc" => wc_storage::sqlite::LibraryBrowserSort::NameDesc,
         other => {
-            return Err(format!(
+            return Err(wc_core::error::WcError::Other(format!(
             "unknown library browser sort: {other}; expected recentlyAdded, nameAsc, or nameDesc"
-        ))
+        )))
         }
     };
     Ok(wc_storage::sqlite::LibraryBrowserQuery {
@@ -109,7 +109,7 @@ fn browser_query_from_dto(
         favorites_only: query.favorites_only,
         search: query.search,
         sort,
-        offset: query.offset,
+        cursor: query.cursor,
         limit: query.limit,
     })
 }
@@ -135,15 +135,17 @@ fn browser_item_dto(
     }
 }
 
+#[cfg(test)]
 fn library_browser_page_for_storage(
     s: &wc_storage::StorageApi,
     query: LibraryBrowserQueryDto,
-) -> Result<LibraryBrowserPageDto, String> {
+) -> Result<LibraryBrowserPageDto, wc_core::error::WcError> {
     let query = browser_query_from_dto(query)?;
-    let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)
-        .map_err(|error| error.to_string())?;
+    let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)?;
     let routing = s.backend_routing();
     Ok(LibraryBrowserPageDto {
+        revision: page.revision,
+        next_cursor: page.next_cursor,
         total: page.total,
         items: page
             .items
@@ -153,11 +155,33 @@ fn library_browser_page_for_storage(
     })
 }
 
+fn library_browser_page_for_service(
+    service: &crate::library_service::LibraryService,
+    s: &wc_storage::StorageApi,
+    query: LibraryBrowserQueryDto,
+) -> Result<LibraryBrowserPageDto, crate::library_service::LibraryServiceError> {
+    let query =
+        browser_query_from_dto(query).map_err(crate::library_service::LibraryServiceError::from)?;
+    let page = service.page(&s.cd, &query)?;
+    let routing = s.backend_routing();
+    Ok(LibraryBrowserPageDto {
+        revision: page.revision,
+        next_cursor: page.next_cursor.clone(),
+        total: page.total,
+        items: page
+            .items
+            .iter()
+            .cloned()
+            .map(|item| browser_item_dto(item, &routing))
+            .collect(),
+    })
+}
+
 fn library_browser_random_for_storage(
     s: &wc_storage::StorageApi,
     query: LibraryBrowserQueryDto,
 ) -> Result<Option<LibraryBrowserItemDto>, String> {
-    let query = browser_query_from_dto(query)?;
+    let query = browser_query_from_dto(query).map_err(|error| error.to_string())?;
     let routing = s.backend_routing();
     wc_storage::sqlite::browser_library_random(&s.cd, &query)
         .map(|item| item.map(|item| browser_item_dto(item, &routing)))
@@ -166,14 +190,56 @@ fn library_browser_random_for_storage(
 
 #[tauri::command]
 pub async fn library_browser_page(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
     query: LibraryBrowserQueryDto,
-) -> Result<LibraryBrowserPageDto, String> {
+) -> Result<LibraryBrowserPageDto, LibraryQueryErrorDto> {
+    let service = state.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let s = storage()?;
-        library_browser_page_for_storage(s, query)
+        let s = storage().map_err(|message| LibraryQueryErrorDto {
+            kind: "storage_error",
+            message,
+        })?;
+        library_browser_page_for_service(&service, s, query).map_err(|error| LibraryQueryErrorDto {
+            kind: error.kind,
+            message: error.message,
+        })
     })
     .await
-    .map_err(|error| error.to_string())?
+    .map_err(|error| LibraryQueryErrorDto {
+        kind: "join_error",
+        message: error.to_string(),
+    })?
+}
+
+#[tauri::command]
+pub async fn library_browser_total(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    query: LibraryBrowserQueryDto,
+    expected_revision: u64,
+) -> Result<LibraryBrowserTotalDto, LibraryQueryErrorDto> {
+    let service = state.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let s = storage().map_err(|message| LibraryQueryErrorDto {
+            kind: "storage_error",
+            message,
+        })?;
+        let query = browser_query_from_dto(query).map_err(LibraryQueryErrorDto::from)?;
+        let total = service
+            .exact_total(&s.cd, &query, expected_revision)
+            .map_err(|error| LibraryQueryErrorDto {
+                kind: error.kind,
+                message: error.message,
+            })?;
+        Ok(LibraryBrowserTotalDto {
+            revision: total.revision,
+            total: total.total,
+        })
+    })
+    .await
+    .map_err(|error| LibraryQueryErrorDto {
+        kind: "join_error",
+        message: error.to_string(),
+    })?
 }
 
 #[tauri::command]
@@ -183,6 +249,17 @@ pub async fn library_browser_random(
     tauri::async_runtime::spawn_blocking(move || {
         let s = storage()?;
         library_browser_random_for_storage(s, query)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn library_wallpaper_exists(wallpaper_id: i64) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let storage = storage()?;
+        wc_storage::sqlite::library_wallpaper_exists(&storage.cd, wallpaper_id)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
@@ -238,29 +315,49 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
 }
 
 #[tauri::command]
-pub async fn favorite_add(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match s.favorites_add(&path) {
-            Ok(_) => ok("Added favorite."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn favorite_add(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => match s.favorites_add(&path) {
+                Ok(changed) => {
+                    if changed {
+                        service.invalidate_local_write();
+                    }
+                    ok("Added favorite.")
+                }
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn favorite_remove(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match s.favorites_remove(&path) {
-            Ok(_) => ok("Removed favorite."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn favorite_remove(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => match s.favorites_remove(&path) {
+                Ok(()) => {
+                    service.invalidate_local_write();
+                    ok("Removed favorite.")
+                }
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 fn build_library_source_status(
@@ -357,7 +454,7 @@ mod tests {
             favorites_only: true,
             search: "aurora ada curated".into(),
             sort: "recentlyAdded".into(),
-            offset: 0,
+            cursor: None,
             limit: 20,
         }
     }
@@ -401,12 +498,14 @@ mod tests {
         unknown_type.type_filter = "we_scene".into();
         assert!(super::browser_query_from_dto(unknown_type)
             .unwrap_err()
+            .to_string()
             .contains("unknown library browser type"));
 
         let mut unknown_sort = browser_query(None);
         unknown_sort.sort = "recently_added".into();
         assert!(super::browser_query_from_dto(unknown_sort)
             .unwrap_err()
+            .to_string()
             .contains("unknown library browser sort"));
     }
 
@@ -418,7 +517,7 @@ mod tests {
             "favoritesOnly": true,
             "search": "aurora",
             "sort": "nameAsc",
-            "offset": 40,
+            "cursor": "opaque-cursor",
             "limit": 20
         }))
         .unwrap();
@@ -428,7 +527,7 @@ mod tests {
         assert!(dto.favorites_only);
         assert_eq!(dto.search, "aurora");
         assert_eq!(dto.sort, "nameAsc");
-        assert_eq!(dto.offset, 40);
+        assert_eq!(dto.cursor.as_deref(), Some("opaque-cursor"));
         assert_eq!(dto.limit, 20);
     }
 
@@ -439,7 +538,14 @@ mod tests {
         let page =
             super::library_browser_page_for_storage(&storage, browser_query(Some(source_id)))
                 .unwrap();
-        assert_eq!(page.total, 1);
+        assert_eq!(page.total, None);
+        assert_eq!(
+            page.revision,
+            wc_storage::sqlite::read_library_revision(
+                &rusqlite::Connection::open(storage.cd.db_path()).unwrap(),
+            )
+            .unwrap(),
+        );
         assert_eq!(page.items.len(), 1);
 
         let json = serde_json::to_value(&page.items[0]).unwrap();
@@ -505,7 +611,7 @@ mod tests {
 
         let item = super::library_browser_random_for_storage(&storage, {
             let mut query = browser_query(Some(source_id));
-            query.offset = usize::MAX;
+            query.cursor = Some("ignored-by-random".into());
             query.limit = 0;
             query
         })

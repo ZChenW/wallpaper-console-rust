@@ -3,28 +3,36 @@
 mod backup;
 mod connection;
 mod display_state;
+mod library_fts;
 mod library_page;
+mod library_revision;
 mod metadata_cache;
 mod row_map;
+mod scan_snapshot;
 mod schema;
 mod source_config_state;
 mod source_reconcile;
+mod source_refresh_state;
 mod sources;
 
 pub use backup::*;
-pub use connection::invalidate_cached_connections;
+pub use connection::{invalidate_cached_connections, RUNTIME_BUSY_TIMEOUT_MS};
 #[cfg(test)]
 pub(crate) use connection::{
     reset_runtime_connection_open_count, runtime_connection_open_count,
     take_exclusive_maintenance_lock,
 };
 pub use display_state::*;
+pub use library_fts::*;
 pub use library_page::*;
+pub use library_revision::*;
 pub use metadata_cache::*;
 pub use row_map::wallpaper_entry_from_row;
+pub use scan_snapshot::*;
 pub use schema::*;
 pub use source_config_state::*;
 pub use source_reconcile::*;
+pub use source_refresh_state::*;
 pub use sources::*;
 
 use crate::sqlite_err;

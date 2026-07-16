@@ -1,11 +1,73 @@
 mod commands;
+mod instance_coordinator;
+mod library_scheduler;
+mod library_service;
+
+use std::sync::Arc;
+
+use tauri::{Emitter, Manager};
 
 pub use commands::path_guard::{ensure_path_in_config_dir, ensure_path_in_sources};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Cross-process test entry point: when the test harness spawns this
+    // binary with WC_INSTANCE_TEST set, run the coordinator test logic
+    // and exit immediately — never start Tauri.
+    if std::env::var("WC_INSTANCE_TEST").is_ok() {
+        instance_coordinator::run_instance_test_entry_point();
+    }
+
+    // Phase 1: single-instance coordinator using a ConfigDir lock file and
+    // Unix-domain socket. CLI paths are completely unaffected — this only
+    // runs in the Tauri GUI entry point.
+    let cd = wc_core::config::ConfigDir::from_path(
+        wc_config::resolve_config_dir().expect("cannot resolve config directory"),
+    );
+
+    // Claim the instance lock BEFORE expensive init_config_dir / default
+    // writes. Only resolves the path and creates the private dir (0700).
+    let claim = instance_coordinator::claim_instance(&cd).expect("cannot claim instance lock");
+
+    let (primary_socket, _lease) = match claim {
+        instance_coordinator::ClaimResult::Primary(lease) => {
+            // This is the first GUI instance. Bind the socket so
+            // secondaries can connect while we initialise Tauri.
+            let socket = instance_coordinator::PrimarySocket::bind(&cd)
+                .expect("cannot bind instance socket");
+            (Some(socket), Some(lease))
+        }
+        instance_coordinator::ClaimResult::Secondary => {
+            // Another GUI is already running. Request focus and exit.
+            let outcome = instance_coordinator::try_focus_primary(&cd);
+            match outcome {
+                instance_coordinator::SecondaryOutcome::Ack => {
+                    eprintln!("Focus request acknowledged by primary instance.");
+                    std::process::exit(0);
+                }
+                instance_coordinator::SecondaryOutcome::Timeout => {
+                    let msg = "Focus request to primary instance timed out after 2 seconds. \
+                               The primary GUI may be unresponsive.";
+                    instance_coordinator::show_error("Wallpaper Console", msg);
+                    std::process::exit(1);
+                }
+                instance_coordinator::SecondaryOutcome::Failed(reason) => {
+                    let msg = format!(
+                        "Could not request focus from primary instance: {reason}. \
+                         Is another wallpaper-console already running?"
+                    );
+                    instance_coordinator::show_error("Wallpaper Console", &msg);
+                    std::process::exit(1);
+                }
+            }
+        }
+    };
+
+    // Now safe to do expensive initialisation.
+    let _ = wc_config::init_config_dir(&cd.path);
+
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -13,7 +75,44 @@ pub fn run() {
                         .build(),
                 )?;
             }
-            commands::schedule_startup_source_refresh();
+
+            // Phase 1: manage the library service for readiness gating and
+            // future Phase 2 caching / observation.
+            let library_service = library_service::LibraryService::new();
+            let app_handle = app.handle().clone();
+            library_service.set_change_notifier(move |revision| {
+                let _ = app_handle.emit("library-revision-changed", revision);
+            });
+            app.manage(library_service);
+
+            // Start the instance socket accept loop now that the main window
+            // exists and can be focused.
+            if let Some(primary) = primary_socket {
+                let window = app
+                    .get_webview_window("main")
+                    .expect("main window must exist after setup");
+                let on_focus: instance_coordinator::FocusCallback = Arc::new(move || {
+                    window.show().map_err(|e| e.to_string())?;
+                    window.unminimize().map_err(|e| e.to_string())?;
+                    window.set_focus().map_err(|e| e.to_string())?;
+                    Ok(())
+                });
+                // Store the handle so it lives for the app lifetime.
+                // The lease is also held in app state for cleanup.
+                let _handle = instance_coordinator::start_accept_loop(primary, on_focus);
+                // Leak both for the process lifetime (the app never
+                // returns from run()). The OS cleans up the lock file
+                // on process exit; the socket file is cleaned by the
+                // CoordinatorHandle on drop (when the process exits).
+                std::mem::forget(_handle);
+                if let Some(lease) = _lease {
+                    std::mem::forget(lease);
+                }
+            }
+
+            // Phase 1: startup no longer schedules an automatic source scan.
+            // Background work starts only after the frontend signals its
+            // first Library paint via the `library_ready` command.
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -51,8 +150,11 @@ pub fn run() {
             commands::library_count,
             commands::library_page_gui,
             commands::library_browser_page,
+            commands::library_browser_total,
             commands::library_browser_random,
+            commands::library_wallpaper_exists,
             commands::rescan,
+            commands::library_ready,
             commands::migrate_to_sqlite,
             commands::import_legacy_flat_files,
             commands::sqlite_verify,

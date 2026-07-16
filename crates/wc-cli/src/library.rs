@@ -558,6 +558,28 @@ mod tests {
     }
 
     #[test]
+    fn cli_rescan_reports_scan_busy_after_bounded_wait() {
+        let (_tmp, storage) = storage();
+        let _guard = wc_app::library_rescan::acquire_rescan_lock(&storage).unwrap();
+        let started = std::time::Instant::now();
+
+        let error = rescan(&storage).unwrap_err();
+
+        assert!(
+            error.to_string().contains("scan_busy"),
+            "CLI must preserve the stable contention category: {error}"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "CLI manual rescan must wait for the bounded manual lock timeout"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "CLI manual rescan must not wait indefinitely"
+        );
+    }
+
+    #[test]
     fn rescan_summary_labels_candidate_and_visited_counts_precisely() {
         let report = wc_app::library_refresh::LibraryRefreshReport {
             complete_sources: 1,

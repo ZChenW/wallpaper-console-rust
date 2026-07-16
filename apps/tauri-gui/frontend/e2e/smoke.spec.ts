@@ -395,7 +395,7 @@ test('compact settings contains exactly the three user-facing groups', async ({ 
   await sourceManagement.click();
   await expect(sourcesDialog).toBeVisible();
   await sourcesDialog.getByRole('button', { name: 'Close wallpaper sources' }).click();
-  expect(await sourcePanel.count()).toBe(0);
+  await expect(sourcePanel).toBeHidden({ timeout: 1_000 });
   await expect(settingsOverlay).toBeHidden();
   await expect(page.getByRole('button', { name: 'Open settings' })).toBeFocused();
 
@@ -420,6 +420,7 @@ test('Liquid Glass keeps blur off wallpaper cards and uses white-glass source ca
   expect(styles.cardBackdrop).toBe('none');
 
   await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden({ timeout: 1_000 });
   await openSources(page);
   const sourceBackgrounds = await page.locator('[data-source-id]').evaluateAll((rows) =>
     rows.slice(0, 2).map((row) => getComputedStyle(row).backgroundColor),
@@ -841,4 +842,98 @@ test('first run requires explicit folder or Wallpaper Engine confirmation', asyn
   await page.getByRole('button', { name: 'Add Downloads as a wallpaper source' }).click();
   await openSources(page);
   await expect(sourceRow(page, 4)).toContainText('/mock/Downloads');
+});
+
+test('current wallpaper keeps its semantics without a special green card border', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  const current = page.locator('.wallpaper-card[aria-current="true"]');
+  const neutral = page.locator('.wallpaper-card:not([aria-current="true"])').first();
+  await expect(current).toHaveCount(1);
+  await expect(current).toHaveAttribute('aria-current', 'true');
+  await expect(neutral).toBeVisible();
+
+  const [currentBorder, neutralBorder] = await Promise.all([
+    current.evaluate((element) => getComputedStyle(element).borderColor),
+    neutral.evaluate((element) => getComputedStyle(element).borderColor),
+  ]);
+  expect(currentBorder).toBe(neutralBorder);
+});
+
+test('success countdown moves continuously between animation frames', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  await page.locator('[data-wallpaper-path="/mock/path/wallpaper-002.jpg"]').click();
+  const progress = page.locator('[data-feedback-progress="apply"]');
+  const fill = progress.locator('span');
+  await expect(progress).toBeVisible();
+
+  const accentJoin = await progress.evaluate((element) => {
+    const card = element.closest<HTMLElement>('[data-feedback-card="apply"]');
+    if (!card) throw new Error('apply feedback card is unavailable');
+    const cardStyle = getComputedStyle(card);
+    const accentStyle = getComputedStyle(card, '::before');
+    const connectorStyle = getComputedStyle(card, '::after');
+    const fill = element.querySelector<HTMLElement>('.feedback-overlay__progress-fill');
+    if (!fill) throw new Error('apply feedback progress fill is unavailable');
+    const fillStyle = getComputedStyle(fill);
+    const progressStyle = getComputedStyle(element);
+    return {
+      accentBottom: accentStyle.bottom,
+      accentColour: accentStyle.backgroundColor,
+      accentLeft: accentStyle.left,
+      accentWidth: accentStyle.width,
+      cardBorderLeftWidth: cardStyle.borderLeftWidth,
+      cardBorderRightWidth: cardStyle.borderRightWidth,
+      connectorContent: connectorStyle.content,
+      progressColour: fillStyle.backgroundColor,
+      progressHeight: progressStyle.height,
+      progressMarginLeft: progressStyle.marginLeft,
+      progressRadius: fillStyle.borderTopLeftRadius,
+    };
+  });
+  expect(accentJoin).toEqual({
+    accentBottom: '0px',
+    accentColour: accentJoin.progressColour,
+    accentLeft: '0px',
+    accentWidth: '4px',
+    cardBorderLeftWidth: accentJoin.cardBorderRightWidth,
+    cardBorderRightWidth: accentJoin.cardBorderRightWidth,
+    connectorContent: 'none',
+    progressColour: accentJoin.progressColour,
+    progressHeight: accentJoin.progressHeight,
+    progressMarginLeft: '4px',
+    progressRadius: '3.2px',
+  });
+
+  const movement = await fill.evaluate((element) => new Promise<{
+    frames: number;
+    movingFrames: number;
+    ratio: number;
+  }>((resolve) => {
+    const widths: number[] = [];
+    const startedAt = performance.now();
+    const sample = (now: number) => {
+      widths.push(element.getBoundingClientRect().width);
+      if (now - startedAt < 700) {
+        requestAnimationFrame(sample);
+        return;
+      }
+      const movingFrames = widths.slice(1).filter((width, index) => (
+        Math.abs(width - widths[index]) > 0.01
+      )).length;
+      const frames = Math.max(0, widths.length - 1);
+      resolve({
+        frames,
+        movingFrames,
+        ratio: frames === 0 ? 0 : movingFrames / frames,
+      });
+    };
+    requestAnimationFrame(sample);
+  }));
+
+  expect(movement.frames).toBeGreaterThan(20);
+  expect(movement.ratio).toBeGreaterThanOrEqual(0.95);
 });

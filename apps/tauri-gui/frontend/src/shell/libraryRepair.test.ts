@@ -8,6 +8,7 @@ import {
   shouldVerifyLibraryIntegrity,
   verifyLibraryIntegrity,
 } from './libraryRepair.ts';
+import { effectiveSourceFilter } from './singlePageShellModel.ts';
 
 const ok: CommandResult = {
   success: true,
@@ -114,4 +115,54 @@ test('integrity verification runs for storage errors and only an unfiltered conf
   for (const typeFilter of ['image', 'gif', 'video', 'weScene', 'unsupported'] as const) {
     assert.equal(shouldVerifyLibraryIntegrity({ ...defaults, typeFilter }), false);
   }
+});
+
+test('source error forces effective filter to all so verification still runs with specific source preference', () => {
+  // When the source catalog has an error, effectiveSourceFilter forces 'all'
+  // regardless of the persisted preference. shouldVerifyLibraryIntegrity must
+  // receive the effective filter so it triggers verification even when the
+  // user has a source-specific filter persisted.
+  const sourceError = 'source database unavailable';
+  const persistedFilter = { kind: 'source' as const, sourceId: 7 };
+  const effective = effectiveSourceFilter(persistedFilter, sourceError);
+  assert.deepEqual(effective, { kind: 'all' as const });
+
+  // With the persisted source-specific filter, verification would be skipped.
+  assert.equal(shouldVerifyLibraryIntegrity({
+    browserLoadError: false,
+    sourceLoadError: true,  // because source catalog errored
+    sourceCount: 3,
+    emptyConfirmed: true,
+    sourceFilter: persistedFilter,   // what the old code passed
+    typeFilter: 'usable',
+    favoritesOnly: false,
+    search: '',
+  }), true); // still true because sourceLoadError short-circuits
+
+  // But when there's NO sourceLoadError and NO browserLoadError,
+  // verification depends on the sourceFilter. The old code would
+  // skip verification with a source-specific filter:
+  assert.equal(shouldVerifyLibraryIntegrity({
+    browserLoadError: false,
+    sourceLoadError: false,
+    sourceCount: 3,
+    emptyConfirmed: true,
+    sourceFilter: persistedFilter,  // old code: skipped verification
+    typeFilter: 'usable',
+    favoritesOnly: false,
+    search: '',
+  }), false); // WRONG: should verify after source recovery
+
+  // With the effective filter (forced to 'all' due to source error),
+  // verification fires correctly:
+  assert.equal(shouldVerifyLibraryIntegrity({
+    browserLoadError: false,
+    sourceLoadError: false,
+    sourceCount: 3,
+    emptyConfirmed: true,
+    sourceFilter: effective,  // forced to 'all' by effectiveSourceFilter
+    typeFilter: 'usable',
+    favoritesOnly: false,
+    search: '',
+  }), true); // CORRECT: effective filter enables verification
 });

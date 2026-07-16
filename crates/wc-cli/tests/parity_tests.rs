@@ -521,7 +521,7 @@ fn sqlite_verify_fails_on_missing_state_table() {
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
 
-    // Drop the state table — auto-repair recreates it, so verify succeeds
+    // Same-version warm opens must not silently mutate a damaged database.
     let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch("DROP TABLE state;").unwrap();
@@ -529,9 +529,10 @@ fn sqlite_verify_fails_on_missing_state_table() {
 
     let out = rust(&["sqlite-verify"], &cd);
     assert!(
-        out.status.success(),
-        "verify should auto-repair and succeed"
+        !out.status.success(),
+        "verify must report the missing table"
     );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("state"));
 }
 
 #[test]
@@ -541,7 +542,7 @@ fn sqlite_export_flat_fails_on_missing_state_table() {
     std::fs::create_dir_all(&src).unwrap();
     rust(&["add", &src], &cd);
 
-    // Drop the state table — auto-repair recreates it, so export succeeds
+    // Export must not hide or repair same-version structural corruption.
     let db_path = format!("{}/wallpaper-console/wallpapers.db", cd);
     let conn = rusqlite::Connection::open(&db_path).unwrap();
     conn.execute_batch("DROP TABLE state;").unwrap();
@@ -549,10 +550,10 @@ fn sqlite_export_flat_fails_on_missing_state_table() {
 
     let out = rust(&["sqlite-export-flat"], &cd);
     assert!(
-        out.status.success(),
-        "export should auto-repair and succeed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        !out.status.success(),
+        "export must report the missing table"
     );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("state"));
 }
 
 // ── search-type uses live scan ─────────────────────────────────────────────

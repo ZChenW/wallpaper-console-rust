@@ -203,63 +203,138 @@ pub async fn first_run_source_suggestions() -> Result<Vec<FirstRunSourceSuggesti
 }
 
 #[tauri::command]
-pub async fn source_add(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => source_add_with_storage(s, &path),
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn source_add(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => {
+                let result = source_add_with_storage(s, &path);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_rename(id: i64, display_name: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_rename_with_storage(storage, id, &display_name),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_rename(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+    display_name: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_rename_with_storage(storage, id, &display_name);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_set_recursive(id: i64, recursive: bool) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_set_recursive_with_storage(storage, id, recursive),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_set_recursive(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+    recursive: bool,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_set_recursive_with_storage(storage, id, recursive);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_refresh(id: i64) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_refresh_with_storage(storage, id),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_refresh(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    service.manual_refresh_requested(id);
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_refresh_with_storage(storage, id);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_remove_by_id(id: i64) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_remove_by_id_with_storage(storage, id),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_remove_by_id(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_remove_by_id_with_storage(storage, id);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_remove(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_remove_with_storage(storage, &path),
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn source_remove(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_remove_with_storage(storage, &path);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
@@ -282,24 +357,38 @@ pub async fn validate_sources() -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn remove_missing_sources() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_app::sources_maintenance::remove_missing_sources(s) {
-            Ok(report) => ok(format!(
-                "Removed {} missing source(s).",
-                report.removed.len()
-            )),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn remove_missing_sources(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => match wc_app::sources_maintenance::remove_missing_sources(s) {
+                Ok(report) => {
+                    if !report.removed.is_empty() {
+                        service.invalidate_local_write();
+                    }
+                    ok(format!(
+                        "Removed {} missing source(s).",
+                        report.removed.len()
+                    ))
+                }
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn scan_steam_workshop() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn scan_steam_workshop(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    service.manual_refresh_all_requested();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         if let Err(err) = mark_scan_started("discovering Wallpaper Engine") {
             return fail(err);
         }
@@ -313,6 +402,7 @@ pub async fn scan_steam_workshop() -> CommandResult {
 
         match result {
             Ok(msg) => {
+                service.invalidate_local_write();
                 finish_scan_success();
                 ok(msg)
             }
@@ -323,7 +413,7 @@ pub async fn scan_steam_workshop() -> CommandResult {
         }
     })
     .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+    .unwrap_or_else(|e| fail(e.to_string())))
 }
 
 #[cfg(test)]
