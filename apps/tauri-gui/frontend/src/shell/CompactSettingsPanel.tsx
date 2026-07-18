@@ -6,8 +6,8 @@ import SelectField from '../components/SelectField.tsx';
 import type {
   ApplyGesture,
   ShellPreferences,
-  ShellTheme,
 } from './shellPreferences.ts';
+import { isShellTheme, SHELL_THEME_OPTIONS } from './shellThemes.ts';
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
 import {
   AWWW_TRANSITION_TYPES,
@@ -21,6 +21,7 @@ import {
   WallpaperFillMode,
 } from './useWallpaperBehaviorSettings.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
+import { trapDialogFocus } from './dialogFocus.ts';
 
 export interface CompactSettingsPanelProps {
   readonly open: boolean;
@@ -65,6 +66,7 @@ export function CompactSettingsPanelView({
   onClose,
 }: CompactSettingsPanelProps & { readonly presentationPhase?: 'open' | 'exiting' }) {
   if (!open) return null;
+  const unavailableToInteraction = obscured || presentationPhase === 'exiting';
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
@@ -72,8 +74,8 @@ export function CompactSettingsPanelView({
   const mpvpaperUnavailable = rendererStatuses?.mpvpaper.available === false;
   const lweUnavailable = rendererStatuses?.linuxWallpaperEngine.available === false;
   const updateTheme = (value: string) => {
-    const theme = value as ShellTheme;
-    updatePreferences((current) => ({ ...current, theme }));
+    if (!isShellTheme(value)) return;
+    updatePreferences((current) => ({ ...current, theme: value }));
   };
   const updateGesture = (value: string) => {
     const applyGesture = value as ApplyGesture;
@@ -166,11 +168,12 @@ export function CompactSettingsPanelView({
     >
       <aside
         aria-label="Settings"
-        aria-hidden={obscured ? true : undefined}
+        aria-hidden={unavailableToInteraction ? true : undefined}
         aria-modal="true"
-        inert={obscured}
+        inert={unavailableToInteraction}
         role="dialog"
         className="settings-panel"
+        onKeyDown={(event) => trapDialogFocus(event, event.currentTarget)}
       >
         <header className="settings-panel__header">
           <h2>Settings</h2>
@@ -205,12 +208,7 @@ export function CompactSettingsPanelView({
                 <SelectField
                   aria-label="Theme"
                   onValueChange={updateTheme}
-                  options={[
-                    { value: 'system', label: 'System' },
-                    { value: 'light', label: 'Light' },
-                    { value: 'dark', label: 'Dark' },
-                    { value: 'glass', label: 'Glass' },
-                  ]}
+                  options={SHELL_THEME_OPTIONS}
                   value={preferences.theme}
                   variant="settings"
                 />

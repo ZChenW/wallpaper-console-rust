@@ -120,6 +120,12 @@ async function removeSource(page: Page, sourceId: number): Promise<void> {
   await expect(row).toHaveCount(0);
 }
 
+async function documentHasNoHorizontalOverflow(page: Page): Promise<boolean> {
+  return page.evaluate(() =>
+    document.documentElement.scrollWidth <= document.documentElement.clientWidth + 1,
+  );
+}
+
 test('renders one unified wallpaper picker without legacy navigation', async ({ page }) => {
   await openApp(page);
   await waitForGrid(page);
@@ -192,7 +198,7 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
   await chooseSelect(page, 'Wallpaper type filter', 'Images');
   await chooseSelect(page, 'Library sort', 'Name Z–A');
 
-  await expect(page.locator('.wallpaper-card').first()).toHaveAttribute(
+  await expect(page.locator('.wallpaper-card__primary').first()).toHaveAttribute(
     'title',
     'wallpaper-148.jpg · Pictures',
   );
@@ -442,6 +448,293 @@ test('Liquid Glass keeps blur off wallpaper cards and uses white-glass source ca
     .toHaveAttribute('data-value', 'glass');
 });
 
+test('Editorial theme is high-contrast, square, persistent, and independently scoped', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  const initialViewport = page.viewportSize();
+  if (!initialViewport) throw new Error('Editorial test requires a viewport');
+  await openSettings(page);
+
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+  await chooseSelect(page, 'Theme', 'Editorial');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'editorial');
+
+  const editorialVisuals = await page.evaluate(() => {
+    const shell = document.querySelector<HTMLElement>('.single-page-shell');
+    const topbar = document.querySelector<HTMLElement>('.single-page-topbar');
+    const card = document.querySelector<HTMLElement>('.wallpaper-card');
+    const cardPrimary = document.querySelector<HTMLElement>('.wallpaper-card__primary');
+    const settings = document.querySelector<HTMLElement>('.settings-panel');
+    const themeControl = document.querySelector<HTMLElement>('[aria-label="Theme"]');
+    if (!shell || !topbar || !card || !cardPrimary || !settings || !themeControl) {
+      throw new Error('Editorial visual contract elements are unavailable');
+    }
+
+    const colorChannels = (value: string): [number, number, number] => {
+      const rgb = value.match(/^rgba?\(([^)]+)\)$/i)?.[1]
+        .split(/[\s,\/]+/)
+        .filter(Boolean)
+        .slice(0, 3)
+        .map(Number);
+      if (rgb?.length === 3 && rgb.every(Number.isFinite)) {
+        return rgb as [number, number, number];
+      }
+
+      const srgb = value.match(/^color\(srgb\s+([^)/]+)/i)?.[1]
+        .trim()
+        .split(/\s+/)
+        .slice(0, 3)
+        .map((channel) => Number(channel) * 255);
+      if (srgb?.length === 3 && srgb.every(Number.isFinite)) {
+        return srgb as [number, number, number];
+      }
+      throw new Error(`Unsupported computed color: ${value}`);
+    };
+    const luminance = (value: string) => {
+      const linear = colorChannels(value).map((channel) => {
+        const normalized = channel / 255;
+        return normalized <= 0.04045
+          ? normalized / 12.92
+          : ((normalized + 0.055) / 1.055) ** 2.4;
+      });
+      return linear[0] * 0.2126 + linear[1] * 0.7152 + linear[2] * 0.0722;
+    };
+    const contrast = (element: HTMLElement) => {
+      const style = getComputedStyle(element);
+      const foreground = luminance(style.color);
+      const background = luminance(style.backgroundColor);
+      return (Math.max(foreground, background) + 0.05)
+        / (Math.min(foreground, background) + 0.05);
+    };
+    const backdrop = (element: HTMLElement) => {
+      const style = getComputedStyle(element);
+      return [style.backdropFilter, style.getPropertyValue('-webkit-backdrop-filter')]
+        .filter(Boolean);
+    };
+
+    return {
+      shellContrast: contrast(shell),
+      settingsContrast: contrast(settings),
+      radii: [card, settings, themeControl].map((element) =>
+        Number.parseFloat(getComputedStyle(element).borderTopLeftRadius),
+      ),
+      backdrops: [topbar, card, settings].flatMap(backdrop),
+      primaryReset: {
+        background: getComputedStyle(cardPrimary).backgroundColor,
+        borderWidth: getComputedStyle(cardPrimary).borderTopWidth,
+        fontFamilyMatches: getComputedStyle(cardPrimary).fontFamily === getComputedStyle(card).fontFamily,
+        heightRatio: cardPrimary.getBoundingClientRect().height / card.getBoundingClientRect().height,
+      },
+    };
+  });
+
+  expect(editorialVisuals.shellContrast).toBeGreaterThanOrEqual(7);
+  expect(editorialVisuals.settingsContrast).toBeGreaterThanOrEqual(7);
+  expect(editorialVisuals.radii).toEqual([0, 0, 0]);
+  expect(editorialVisuals.backdrops.length).toBeGreaterThanOrEqual(3);
+  expect(editorialVisuals.backdrops.every((value) => value === 'none')).toBe(true);
+  expect(editorialVisuals.primaryReset).toMatchObject({
+    background: 'rgba(0, 0, 0, 0)',
+    borderWidth: '0px',
+    fontFamilyMatches: true,
+  });
+  expect(editorialVisuals.primaryReset.heightRatio).toBeGreaterThan(0.95);
+  expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
+
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden({ timeout: 1_000 });
+
+  const firstCard = page.locator('.wallpaper-card').first();
+  await expect(firstCard).toHaveAttribute('data-wallpaper-index', '01');
+  const firstOrdinal = firstCard.locator('.wallpaper-index');
+  await expect(firstOrdinal).toHaveText('01');
+  await expect(firstOrdinal).toHaveAttribute('aria-hidden', 'true');
+  const ordinal = await firstOrdinal.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return {
+      display: style.display,
+      opacity: Number(style.opacity),
+      visibility: style.visibility,
+    };
+  });
+  expect(ordinal).toMatchObject({
+    visibility: 'visible',
+  });
+  expect(ordinal.display).not.toBe('none');
+  expect(ordinal.opacity).toBeGreaterThan(0);
+
+  await firstCard.hover();
+  await expect.poll(() => firstCard.evaluate((element) => {
+    const style = getComputedStyle(element, '::after');
+    return {
+      content: style.content.replace(/^['"]|['"]$/g, ''),
+      display: style.display,
+      opacity: Number(style.opacity),
+      visibility: style.visibility,
+    };
+  })).toMatchObject({
+    content: 'Select / apply',
+    visibility: 'visible',
+  });
+  await expect.poll(() => firstCard.evaluate((element) =>
+    Number(getComputedStyle(element, '::after').opacity),
+  )).toBeGreaterThan(0.5);
+  const action = await firstCard.evaluate((element) => {
+    const style = getComputedStyle(element, '::after');
+    return { display: style.display, opacity: Number(style.opacity) };
+  });
+  expect(action.display).not.toBe('none');
+  expect(action.opacity).toBeGreaterThan(0.5);
+  expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
+
+  for (const viewport of [
+    { width: 320, height: 568 },
+    { width: 760, height: 700 },
+    { width: 1024, height: 768 },
+    { width: 1440, height: 900 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect.poll(() => documentHasNoHorizontalOverflow(page)).toBe(true);
+    const brandBounds = await page.locator('.single-page-brand').boundingBox();
+    expect(brandBounds).not.toBeNull();
+    expect(brandBounds!.x).toBeGreaterThanOrEqual(0);
+    expect(brandBounds!.x + brandBounds!.width).toBeLessThanOrEqual(viewport.width + 1);
+  }
+  await page.setViewportSize(initialViewport);
+
+  const applyTarget = page.locator('.wallpaper-card').nth(1);
+  const applyPath = await applyTarget.getAttribute('data-wallpaper-path');
+  if (!applyPath) throw new Error('Editorial apply target has no wallpaper path');
+  await applyTarget.locator('.wallpaper-card__primary').click();
+  await expect.poll(async () => (await lastApplyRequest(page))?.path).toBe(applyPath);
+
+  await expect.poll(() => page.evaluate(() => {
+    const rawStore = sessionStorage.getItem('wallpaper-console.mock.config');
+    if (!rawStore) return null;
+    const store = JSON.parse(rawStore) as Record<string, string>;
+    const rawPreferences = store.gui_shell_preferences;
+    if (!rawPreferences) return null;
+    return (JSON.parse(rawPreferences) as { theme?: string }).theme ?? null;
+  })).toBe('editorial');
+  await page.reload();
+  await waitForGrid(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'editorial');
+
+  await openSettings(page);
+  await expect(dialog.getByLabel('Theme')).toHaveAttribute('data-value', 'editorial');
+
+  await dialog.getByRole('button', { name: 'Manage wallpaper sources' }).click();
+  const sourceDialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
+  await expect(sourceDialog).toBeVisible();
+  const sourcePanelBounds = await sourceDialog.boundingBox();
+  expect(sourcePanelBounds).not.toBeNull();
+  expect(sourcePanelBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(sourcePanelBounds!.x + sourcePanelBounds!.width).toBeLessThanOrEqual(initialViewport.width + 1);
+  expect(Number.parseFloat(await sourceDialog.evaluate((element) =>
+    getComputedStyle(element).borderTopLeftRadius,
+  ))).toBe(0);
+  await sourceDialog.getByRole('button', { name: 'Back to settings' }).click();
+  await expect(dialog).toBeVisible();
+
+  await page.emulateMedia({ reducedMotion: 'reduce' });
+  await page.setViewportSize({ width: 1024, height: 768 });
+  const reducedMotionPanel = await dialog.evaluate((element) => {
+    const rect = element.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, viewportWidth: window.innerWidth };
+  });
+  expect(reducedMotionPanel.left).toBeGreaterThanOrEqual(0);
+  expect(reducedMotionPanel.right).toBeLessThanOrEqual(reducedMotionPanel.viewportWidth);
+  const reducedMotionCard = await firstCard.evaluate((element) => {
+    const image = element.querySelector('img');
+    const cardStyle = getComputedStyle(element);
+    const imageStyle = image ? getComputedStyle(image) : null;
+    return {
+      animationName: cardStyle.animationName,
+      transitionDuration: cardStyle.transitionDuration,
+      imageFilter: imageStyle?.filter ?? 'none',
+      imageTransitionDuration: imageStyle?.transitionDuration ?? '0s',
+    };
+  });
+  expect(reducedMotionCard.animationName).toBe('none');
+  expect(reducedMotionCard.transitionDuration).toBe('0s');
+  expect(reducedMotionCard.imageFilter).toBe('none');
+  expect(reducedMotionCard.imageTransitionDuration).toBe('0s');
+  expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
+  await page.emulateMedia({ reducedMotion: 'no-preference' });
+
+  await chooseSelect(page, 'Theme', 'Dark');
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+  await dialog.getByRole('button', { name: 'Close settings' }).click();
+  await expect(dialog).toBeHidden({ timeout: 1_000 });
+
+  const darkCardVisuals = await firstCard.evaluate((element) => ({
+    actionContent: getComputedStyle(element, '::after').content,
+    radius: Number.parseFloat(getComputedStyle(element).borderTopLeftRadius),
+  }));
+  expect(darkCardVisuals.radius).toBeGreaterThan(0);
+  expect(darkCardVisuals.actionContent).toBe('none');
+  expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
+});
+
+test('settings and wallpaper actions keep keyboard focus contained and restore it on close', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await openSettings(page);
+
+  const dialog = page.getByRole('dialog', { name: 'Settings' });
+  const firstSettingsControl = dialog.getByRole('button', { name: 'Close settings' });
+  const lastSettingsControl = dialog.getByRole('button', { name: 'Manage wallpaper sources' });
+  await expect(firstSettingsControl).toBeFocused();
+
+  await firstSettingsControl.press('Shift+Tab');
+  await expect(lastSettingsControl).toBeFocused();
+  await lastSettingsControl.press('Tab');
+  await expect(firstSettingsControl).toBeFocused();
+
+  await firstSettingsControl.click();
+  await expect(dialog).toBeHidden({ timeout: 1_000 });
+
+  const card = page.locator('.wallpaper-card').first();
+  const cardPrimary = card.locator('.wallpaper-card__primary');
+  await cardPrimary.focus();
+  await cardPrimary.press('Shift+F10');
+
+  const menu = page.getByRole('menu', { name: 'Wallpaper actions' });
+  const menuItems = menu.getByRole('menuitem');
+  await expect(menu).toBeVisible();
+  await expect(menuItems.first()).toBeFocused();
+
+  await page.keyboard.press('ArrowDown');
+  await expect(menuItems.nth(1)).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(menuItems.first()).toBeFocused();
+  await page.keyboard.press('End');
+  await expect(menuItems.last()).toBeFocused();
+  await page.keyboard.press('Escape');
+
+  await expect(menu).toHaveCount(0);
+  await expect(cardPrimary).toBeFocused();
+
+  await cardPrimary.press('Shift+F10');
+  await expect(menuItems.first()).toBeFocused();
+  await menuItems.first().press('Tab');
+  await expect(menu).toHaveCount(0);
+  await expect(cardPrimary).not.toBeFocused();
+  expect(await page.evaluate(() => document.activeElement !== document.body)).toBe(true);
+
+  await cardPrimary.focus();
+  await cardPrimary.press('Shift+F10');
+  const information = menu.getByRole('menuitem', { name: 'Information' });
+  await information.focus();
+  await information.press('Enter');
+  const details = page.locator('.wallpaper-details');
+  const closeDetails = details.getByRole('button', { name: 'Close wallpaper details' });
+  await expect(closeDetails).toBeFocused();
+  await closeDetails.press('Escape');
+  await expect(details).toHaveCount(0);
+  await expect(cardPrimary).toBeFocused();
+});
+
 test('source drawer adds, renames, configures, refreshes, and safely removes sources', async ({ page }) => {
   await openApp(page);
   await openSources(page);
@@ -562,14 +855,14 @@ test('unsupported wallpaper context offers only browsing and limitation actions'
   const webWallpaper = page.locator('.wallpaper-card').filter({ hasText: 'Web title' });
   await webWallpaper.click({ button: 'right' });
   const menu = page.locator('.context-menu');
-  await expect(menu.getByRole('button', { name: 'Add to Favorites' })).toBeVisible();
-  await expect(menu.getByRole('button', { name: 'Open Location' })).toBeVisible();
-  await expect(menu.getByRole('button', { name: 'Information' })).toBeVisible();
-  await expect(menu.getByRole('button', { name: 'Limitation Details' })).toBeVisible();
-  await expect(menu.getByRole('button', { name: 'Apply', exact: true })).toHaveCount(0);
+  await expect(menu.getByRole('menuitem', { name: 'Add to Favorites' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Open Location' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Information' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Limitation Details' })).toBeVisible();
+  await expect(menu.getByRole('menuitem', { name: 'Apply', exact: true })).toHaveCount(0);
   await expect(menu.getByText(/Retry|preview|linux-wallpaperengine/i)).toHaveCount(0);
 
-  await menu.getByRole('button', { name: 'Limitation Details' }).click();
+  await menu.getByRole('menuitem', { name: 'Limitation Details' }).click();
   await expect(page.locator('[data-feedback-card="system"]')).toContainText(
     'This wallpaper has a renderer limitation.',
   );
@@ -583,7 +876,7 @@ test('feedback countdown pauses on hover and resumes to automatic dismissal', as
   const card = page.locator('.wallpaper-card').first();
   await expect(card).toBeVisible();
   await card.click({ button: 'right' });
-  await page.locator('.context-menu').getByRole('button', { name: 'Add to Favorites' }).click();
+  await page.locator('.context-menu').getByRole('menuitem', { name: 'Add to Favorites' }).click();
 
   const feedback = page.locator('[data-feedback-card="system"]');
   const progress = feedback.getByRole('progressbar');
@@ -596,10 +889,76 @@ test('feedback countdown pauses on hover and resumes to automatic dismissal', as
   await page.waitForTimeout(650);
   expect(Number(await progress.getAttribute('aria-valuenow'))).toBe(pausedAt);
 
+  const dismiss = feedback.getByRole('button', { name: 'Dismiss system notification' });
+  await dismiss.focus();
   await page.mouse.move(0, 0);
+  await page.waitForTimeout(650);
+  expect(Number(await progress.getAttribute('aria-valuenow'))).toBe(pausedAt);
+
+  await page.locator('.single-page-search input').focus();
   await page.waitForTimeout(450);
   expect(Number(await progress.getAttribute('aria-valuenow'))).toBeLessThan(pausedAt);
   await expect(feedback).toHaveCount(0, { timeout: 3_500 });
+});
+
+test('compact Editorial keeps concurrent scan controls clear of notifications', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openApp(page);
+  await waitForGrid(page);
+  await openSettings(page);
+  await chooseSelect(page, 'Theme', 'Editorial');
+  await page.getByRole('dialog', { name: 'Settings' })
+    .getByRole('button', { name: 'Close settings' })
+    .click();
+
+  await openSources(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setScanProgress({
+      running: true,
+      stage: 'walking files',
+      scanned: 5,
+      totalHint: 100,
+    });
+  });
+  await page.getByRole('button', { name: 'Refresh all' }).click();
+  await page.getByRole('button', { name: 'Close wallpaper sources' }).click();
+
+  const activity = page.locator('.scan-activity');
+  await expect(activity).toBeVisible({ timeout: 1_000 });
+  await page.locator('.wallpaper-card__primary').nth(1).click();
+  const feedback = page.locator('[data-feedback-card="apply"]');
+  await expect(feedback).toBeVisible();
+
+  for (const viewport of [
+    { width: 320, height: 568 },
+    { width: 390, height: 844 },
+  ]) {
+    await page.setViewportSize(viewport);
+    await expect(activity).toBeVisible();
+    await expect(feedback).toBeVisible();
+    const overlap = await Promise.all([activity.boundingBox(), feedback.boundingBox()]).then(
+      ([scanBounds, feedbackBounds]) => {
+        if (!scanBounds || !feedbackBounds) throw new Error('Concurrent feedback bounds unavailable');
+        const width = Math.max(0, Math.min(
+          scanBounds.x + scanBounds.width,
+          feedbackBounds.x + feedbackBounds.width,
+        ) - Math.max(scanBounds.x, feedbackBounds.x));
+        const height = Math.max(0, Math.min(
+          scanBounds.y + scanBounds.height,
+          feedbackBounds.y + feedbackBounds.height,
+        ) - Math.max(scanBounds.y, feedbackBounds.y));
+        return width * height;
+      },
+    );
+    expect(overlap).toBe(0);
+    expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
+  }
+  const cancel = activity.getByRole('button', { name: 'Cancel' });
+  await expect(cancel).toBeVisible();
+  await expect(cancel).toBeEnabled();
+  await cancel.click();
 });
 
 test('scan activity is delayed, non-modal, and cancellable', async ({ page }) => {
@@ -848,10 +1207,11 @@ test('current wallpaper keeps its semantics without a special green card border'
   await openApp(page);
   await waitForGrid(page);
 
-  const current = page.locator('.wallpaper-card[aria-current="true"]');
-  const neutral = page.locator('.wallpaper-card:not([aria-current="true"])').first();
+  const currentControl = page.locator('.wallpaper-card__primary[aria-current="true"]');
+  const current = page.locator('.wallpaper-card:has(.wallpaper-card__primary[aria-current="true"])');
+  const neutral = page.locator('.wallpaper-card:not(:has(.wallpaper-card__primary[aria-current="true"]))').first();
   await expect(current).toHaveCount(1);
-  await expect(current).toHaveAttribute('aria-current', 'true');
+  await expect(currentControl).toHaveAttribute('aria-current', 'true');
   await expect(neutral).toBeVisible();
 
   const [currentBorder, neutralBorder] = await Promise.all([

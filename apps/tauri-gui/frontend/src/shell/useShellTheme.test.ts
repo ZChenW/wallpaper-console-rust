@@ -41,6 +41,21 @@ test('glass uses the glass document palette with dark native window chrome', asy
   ]);
 });
 
+test('editorial uses its document palette with light native window chrome', async () => {
+  assert.equal(resolveShellTheme('editorial', true), 'editorial');
+
+  const events: unknown[][] = [];
+  await applyShellThemeToSurface('editorial', true, {
+    setDocumentTheme: (theme) => events.push(['document', theme]),
+    setWindowTheme: async (theme) => { events.push(['window', theme]); },
+  });
+
+  assert.deepEqual(events, [
+    ['document', 'editorial'],
+    ['window', 'light'],
+  ]);
+});
+
 test('missing Tauri window chrome does not prevent document theming', async () => {
   const documentThemes: string[] = [];
   await applyShellThemeToSurface('dark', false, {

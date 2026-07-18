@@ -11,6 +11,8 @@ import {
   shouldRequestNextPage,
   restoreStableViewportAnchor,
   visibleThumbnailPaths,
+  wallpaperOrdinal,
+  wallpaperApplyFlags,
 } from './wallpaperGridHelpers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
 
@@ -56,6 +58,7 @@ test('animated preview is exposed only for a hovered GIF while scrolling is idle
   assert.equal(animatedPreviewPath(gif, true, false), '/project/preview.GIF');
   assert.equal(animatedPreviewPath(gif, false, false), null);
   assert.equal(animatedPreviewPath(gif, true, true), null);
+  assert.equal(animatedPreviewPath(gif, true, false, true), null);
   assert.equal(animatedPreviewPath(entry('/project', '/project/preview.jpg'), true, false), null);
 });
 
@@ -68,6 +71,29 @@ test('thumbnail reveal pauses while the grid is inactive or scrolling', () => {
 test('hover starts an animated preview only while scrolling is idle', () => {
   assert.equal(shouldStartAnimatedHover(false), true);
   assert.equal(shouldStartAnimatedHover(true), false);
+  assert.equal(shouldStartAnimatedHover(false, true), false);
+});
+
+test('wallpaperOrdinal is one-based and keeps compact editorial leading zeroes', () => {
+  assert.equal(wallpaperOrdinal(0), '01');
+  assert.equal(wallpaperOrdinal(8), '09');
+  assert.equal(wallpaperOrdinal(98), '99');
+  assert.equal(wallpaperOrdinal(99), '100');
+});
+
+test('apply activity marks only the active card while keeping a queued card pending', () => {
+  assert.deepEqual(
+    wallpaperApplyFlags('/active.jpg', true, '/active.jpg', '/queued.jpg'),
+    { applying: true, pending: false },
+  );
+  assert.deepEqual(
+    wallpaperApplyFlags('/queued.jpg', true, '/active.jpg', '/queued.jpg'),
+    { applying: false, pending: true },
+  );
+  assert.deepEqual(
+    wallpaperApplyFlags('/other.jpg', true, '/active.jpg', '/queued.jpg'),
+    { applying: false, pending: false },
+  );
 });
 
 test('anchoredScrollTopForLayoutChange preserves the first visible item when columns change', () => {

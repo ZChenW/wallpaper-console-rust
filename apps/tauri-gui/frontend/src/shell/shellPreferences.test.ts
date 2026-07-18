@@ -92,6 +92,16 @@ test('glass theme survives persistence', () => {
   );
 });
 
+test('editorial theme survives persistence', () => {
+  assert.equal(
+    parseShellPreferences(serializeShellPreferences({
+      ...DEFAULT_SHELL_PREFERENCES,
+      theme: 'editorial',
+    })).theme,
+    'editorial',
+  );
+});
+
 test('serialization excludes transient shell state even when extra properties reach runtime', () => {
   const runtimeState = {
     ...DEFAULT_SHELL_PREFERENCES,

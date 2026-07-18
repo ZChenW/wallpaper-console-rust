@@ -153,6 +153,7 @@ export default function SinglePageShell() {
   const [watchdogRetryCount, setWatchdogRetryCount] = useState(0);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
   const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+  const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
@@ -166,6 +167,13 @@ export default function SinglePageShell() {
     const trigger = overlayReturnFocusRef.current;
     overlayReturnFocusRef.current = null;
     if (!trigger) return;
+    window.requestAnimationFrame(() => trigger.focus());
+  }, []);
+  const closeDetails = useCallback(() => {
+    setDetailsEntry(null);
+    const trigger = detailsReturnFocusRef.current;
+    detailsReturnFocusRef.current = null;
+    if (!trigger?.isConnected) return;
     window.requestAnimationFrame(() => trigger.focus());
   }, []);
   const openSources = useCallback((returnToSettings = false) => {
@@ -699,7 +707,8 @@ export default function SinglePageShell() {
       },
       {
         label: 'Information',
-        action: () => {
+        action: (_path, returnFocus) => {
+          detailsReturnFocusRef.current = returnFocus;
           setSelectedEntry(entry);
           setDetailsEntry(entry);
         },
@@ -862,7 +871,8 @@ export default function SinglePageShell() {
             cardSize={preferences.cardSize}
             applyGesture={preferences.applyGesture}
             selectedPath={selectedEntry?.path ?? null}
-            pendingPath={applyQueue.pendingPath ?? applyQueue.activePath ?? null}
+            activePath={applyQueue.activePath ?? null}
+            pendingPath={applyQueue.pendingPath ?? null}
             currentPath={currentPath}
             isEntryApplicable={isLibraryEntryApplicable}
             hasMore={browser.hasMore && !browser.automaticAppendPaused}
@@ -1158,7 +1168,7 @@ export default function SinglePageShell() {
                 : null
           )
           : null}
-        onClose={() => setDetailsEntry(null)}
+        onClose={closeDetails}
       />
       <FeedbackOverlay
         state={feedbackState}

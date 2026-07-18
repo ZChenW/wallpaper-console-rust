@@ -286,7 +286,33 @@ const defaultConfig: Record<string, string> = {
 let scanProgressState: ScanProgressDTO = { ...defaultScanProgress };
 let scanAutoAdvance = false;
 let scanStep = 5;
-let configStore: Record<string, string> = {};
+const MOCK_CONFIG_SESSION_KEY = 'wallpaper-console.mock.config';
+
+function loadMockConfigStore(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.sessionStorage.getItem(MOCK_CONFIG_SESSION_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string',
+    ));
+  } catch {
+    return {};
+  }
+}
+
+function persistMockConfigStore(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(MOCK_CONFIG_SESSION_KEY, JSON.stringify(configStore));
+  } catch {
+    // Persistence is a mock-browser convenience; in-memory behavior remains usable.
+  }
+}
+
+let configStore: Record<string, string> = loadMockConfigStore();
 const commandFailures = new Set<string>();
 const thumbnailFailures = new Set<string>();
 let libraryFirstPageEmpty = false;
@@ -319,6 +345,12 @@ function resetScanProgressState(): void {
 
 function resetConfigStore(): void {
   configStore = {};
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(MOCK_CONFIG_SESSION_KEY);
+  } catch {
+    // Ignore unavailable storage in constrained browser contexts.
+  }
 }
 
 function resetLibraryScenario(): void {
@@ -825,6 +857,7 @@ const mockBridgeAdapter = {
 
   configSet: async (key: string, value: string): Promise<CommandResult> => {
     configStore[key] = value;
+    persistMockConfigStore();
     return ok;
   },
 
@@ -895,6 +928,7 @@ const mockControl = {
   },
   setConfig: (key: string, value: string): void => {
     configStore[key] = value;
+    persistMockConfigStore();
   },
   resetConfig: (): void => {
     resetConfigStore();

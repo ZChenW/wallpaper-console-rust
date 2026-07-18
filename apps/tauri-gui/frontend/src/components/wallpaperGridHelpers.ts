@@ -60,8 +60,27 @@ export function shouldPauseThumbnailReveal(active: boolean, scrolling: boolean):
   return !active || scrolling;
 }
 
-export function shouldStartAnimatedHover(scrolling: boolean): boolean {
-  return !scrolling;
+export function shouldStartAnimatedHover(
+  scrolling: boolean,
+  reducedMotion = false,
+): boolean {
+  return !scrolling && !reducedMotion;
+}
+
+export function wallpaperOrdinal(index: number): string {
+  return String(Math.max(0, Math.trunc(index)) + 1).padStart(2, '0');
+}
+
+export function wallpaperApplyFlags(
+  path: string,
+  applying: boolean,
+  activePath: string | null | undefined,
+  pendingPath: string | null | undefined,
+): { applying: boolean; pending: boolean } {
+  return {
+    applying: applying && activePath === path,
+    pending: pendingPath === path,
+  };
 }
 
 export function previewAssetPath(entry: WallpaperDTO): string {
@@ -72,8 +91,9 @@ export function animatedPreviewPath(
   entry: WallpaperDTO,
   hovered: boolean,
   scrolling: boolean,
+  reducedMotion = false,
 ): string | null {
-  if (!hovered || scrolling || !entry.previewPath) return null;
+  if (!hovered || scrolling || reducedMotion || !entry.previewPath) return null;
   const pathWithoutQuery = entry.previewPath.split(/[?#]/, 1)[0].toLowerCase();
   return pathWithoutQuery.endsWith('.gif') ? entry.previewPath : null;
 }

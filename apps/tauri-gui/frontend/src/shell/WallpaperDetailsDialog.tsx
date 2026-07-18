@@ -2,6 +2,7 @@ import type { CSSProperties, KeyboardEvent } from 'react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
+import { trapDialogFocus } from './dialogFocus.ts';
 
 export interface WallpaperDetailsDialogProps {
   readonly open: boolean;
@@ -132,6 +133,10 @@ export function WallpaperDetailsDialogView({
     .filter(Boolean)
     .join(', ');
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Tab') {
+      trapDialogFocus(event, event.currentTarget);
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault?.();
     event.stopPropagation?.();

@@ -1,6 +1,17 @@
 /* ── Reset & Base ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
+.wallpaper-card__state {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
 body {
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   font-size: 13px;
@@ -43,6 +54,7 @@ select:focus, input:focus { border-color: #555; }
   padding-bottom: 100px;
 }
 .wallpaper-card {
+  position: relative;
   background: #1e1e1e;
   border: 1px solid #2a2a2a;
   border-radius: 6px;
@@ -54,12 +66,34 @@ select:focus, input:focus { border-color: #555; }
   contain: layout paint style;
 }
 .wallpaper-card:hover { border-color: #444; }
-.wallpaper-card:focus-visible {
+.wallpaper-card:has(.wallpaper-card__primary:focus-visible) {
   border-color: var(--primary);
   outline: 2px solid var(--primary);
   outline-offset: 2px;
 }
-.wallpaper-card.selected { border-color: #8ab4f8; box-shadow: 0 0 0 2px #8ab4f8; }
+.wallpaper-card__primary {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: inherit;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  appearance: none;
+}
+.wallpaper-card__primary:focus-visible { outline: none; }
+.wallpaper-card.selected {
+  border-color: var(--selection-accent, var(--primary));
+  box-shadow: 0 0 0 2px var(--selection-accent, var(--primary));
+}
 .wallpaper-card.disabled { opacity: 0.6; pointer-events: none; }
 .wallpaper-thumb {
   width: 100%; height: var(--wallpaper-thumbnail-height, 120px);
@@ -85,7 +119,7 @@ select:focus, input:focus { border-color: #555; }
   border: 0;
   border-radius: 999px;
   background: transparent;
-  color: #ff8da1;
+  color: var(--favorite-accent, var(--danger));
   font-size: 0.95rem;
   line-height: 1;
   cursor: pointer;
@@ -120,8 +154,8 @@ select:focus, input:focus { border-color: #555; }
   bottom: 6px;
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(100, 20, 20, 0.9);
-  color: #fca5a5;
+  background: var(--danger-surface, rgb(100 20 20 / 90%));
+  color: var(--danger-foreground, #fca5a5);
   font-size: 10px;
   line-height: 14px;
   text-align: center;
@@ -137,8 +171,8 @@ select:focus, input:focus { border-color: #555; }
   max-width: calc(100% - 12px);
   padding: 2px 6px;
   border-radius: 4px;
-  background: rgba(20, 24, 28, 0.86);
-  color: #f4f4f5;
+  background: var(--badge-surface, rgb(20 24 28 / 86%));
+  color: var(--badge-foreground, #f4f4f5);
   font-size: 10px;
   line-height: 14px;
   font-weight: 600;
@@ -147,14 +181,15 @@ select:focus, input:focus { border-color: #555; }
   white-space: nowrap;
 }
 .wallpaper-badge-danger {
-  background: rgba(100, 20, 20, 0.9);
-  color: #f87171;
+  background: var(--danger-surface, rgb(100 20 20 / 90%));
+  color: var(--danger-foreground, #f87171);
 }
 .wallpaper-info {
   padding: 6px 8px;
   display: flex; flex-direction: column; gap: 2px;
   min-width: 0;
 }
+.wallpaper-index { display: none; }
 .wallpaper-name {
   font-size: 12px; font-weight: 500; color: #ccc;
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
@@ -220,6 +255,12 @@ select:focus, input:focus { border-color: #555; }
   --success: #15803d;
   --warning-bg: #fff7dc;
   --warning: #a16207;
+  --selection-accent: #8ab4f8;
+  --favorite-accent: #d92d5c;
+  --danger-surface: rgb(127 29 29 / 94%);
+  --danger-foreground: #fff1f2;
+  --badge-surface: rgb(20 24 28 / 88%);
+  --badge-foreground: #f8fafc;
   --shadow: rgba(15, 23, 42, 0.14);
   --wallpaper-details-border: color-mix(in srgb, currentColor 16%, transparent);
   --wallpaper-details-background: Canvas;
@@ -260,6 +301,12 @@ select:focus, input:focus { border-color: #555; }
   --success: #7fd39a;
   --warning-bg: #342b17;
   --warning: #e5bd62;
+  --selection-accent: #8ab4f8;
+  --favorite-accent: #ff8da1;
+  --danger-surface: rgb(100 20 20 / 92%);
+  --danger-foreground: #fca5a5;
+  --badge-surface: rgb(20 24 28 / 88%);
+  --badge-foreground: #f4f4f5;
   --shadow: rgba(0, 0, 0, 0.5);
   --wallpaper-details-border: color-mix(in srgb, currentColor 16%, transparent);
   --wallpaper-details-background: Canvas;
@@ -326,12 +373,33 @@ body {
 }
 
 .feedback-overlay__card {
+  border-radius: 0.75rem;
   border: 1px solid var(--feedback-card-border);
   background: var(--feedback-card-background);
   color: var(--feedback-card-color);
   box-shadow: var(--feedback-card-shadow);
   -webkit-backdrop-filter: var(--feedback-card-backdrop-filter);
   backdrop-filter: var(--feedback-card-backdrop-filter);
+}
+
+.feedback-overlay__card[data-feedback-severity="success"] {
+  --feedback-accent: var(--success);
+}
+
+.feedback-overlay__card[data-feedback-severity="info"] {
+  --feedback-accent: var(--primary);
+}
+
+.feedback-overlay__card[data-feedback-severity="warning"] {
+  --feedback-accent: var(--warning);
+}
+
+.feedback-overlay__card[data-feedback-severity="error"] {
+  --feedback-accent: var(--danger);
+}
+
+.feedback-overlay__severity {
+  color: var(--feedback-accent);
 }
 
 .feedback-overlay__card::before {
@@ -348,6 +416,7 @@ body {
 .feedback-overlay__progress-fill {
   display: block;
   border-start-start-radius: 0.2rem;
+  background: var(--feedback-accent);
   transform-origin: left center;
   animation: feedback-countdown-shrink var(--feedback-duration) linear forwards;
   will-change: transform;
@@ -1542,12 +1611,21 @@ input:focus {
   box-shadow: inset 0 0 0 1px var(--warning);
 }
 
+.wallpaper-card.applying {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
 .scan-activity,
 .feedback-overlay {
   bottom: 3.45rem !important;
 }
 
 @media (max-width: 760px) {
+  .single-page-shell:has(> .scan-activity) > .feedback-overlay {
+    bottom: 8.75rem !important;
+  }
+
   .single-page-topbar {
     grid-template-columns: minmax(0, 1fr) auto auto;
   }

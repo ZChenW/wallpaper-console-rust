@@ -9,6 +9,7 @@ import { wallpaperCardMetrics, type WallpaperCardSize } from '../utils/layout';
 import {
   displayName,
   cardHoverLabel,
+  editorialActionLabel,
   formatSize,
   metaLine,
   typeIcon,
@@ -41,6 +42,7 @@ export function safeFileSrc(path: string): string {
 
 interface CardProps {
   entry: LibraryBrowserItemDTO;
+  ordinal?: string;
   applying: boolean;
   onApply: (path: string) => void;
   onSelect?: (entry: WallpaperDTO) => void;
@@ -61,6 +63,7 @@ const neverScrolling = () => false;
 
 function WallpaperCardImpl({
   entry,
+  ordinal,
   applying,
   onApply,
   onSelect,
@@ -99,9 +102,16 @@ function WallpaperCardImpl({
     subscribeThumbnail,
     getThumbnailFailure,
   );
-  const animatedPreview = animatedPreviewPath(entry, hovered, isScrolling());
+  const reducedMotion = typeof window !== 'undefined'
+    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const animatedPreview = animatedPreviewPath(
+    entry,
+    hovered,
+    isScrolling(),
+    reducedMotion,
+  );
 
-  const handleClick = (event: React.MouseEvent<HTMLDivElement>) => {
+  const handleClick = (event: React.MouseEvent<HTMLButtonElement>) => {
     const target = event.target;
     const control = target instanceof Element
       ? target.closest('button, a, input, select, textarea, [role="menuitem"], [data-card-control]')
@@ -135,6 +145,13 @@ function WallpaperCardImpl({
   };
 
   const canApply = applyAvailable ?? isApplyAvailable(entry);
+  const stateDescription = [
+    selected ? 'Selected' : null,
+    current ? 'Currently applied' : null,
+    applying ? 'Applying wallpaper' : null,
+    pending ? 'Pending apply' : null,
+  ].filter((label): label is string => label !== null).join('. ');
+  const stateDescriptionId = `wallpaper-card-state-${entry.wallpaperId}`;
   const reportUnsupportedApply = () => {
     emitFeedback({
       state: 'warning',
@@ -143,7 +160,7 @@ function WallpaperCardImpl({
     });
   };
 
-  const handleKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+  const handleKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
     const interaction = resolveCardKeyboardInteraction({
       key: event.key,
       shiftKey: event.shiftKey,
@@ -171,52 +188,66 @@ function WallpaperCardImpl({
       className={`${cardInteractionClassName({ selected, pending, current })}${applying ? ' applying' : ''}`}
       style={cardStyle}
       onContextMenu={(ev) => onContextMenu(ev, entry.path)}
-      onClick={handleClick}
-      onKeyDown={handleKeyDown}
-      onMouseEnter={() => setHovered(shouldStartAnimatedHover(isScrolling()))}
+      onMouseEnter={() => setHovered(shouldStartAnimatedHover(isScrolling(), reducedMotion))}
       onMouseLeave={() => setHovered(false)}
-      aria-current={current ? 'true' : undefined}
-      aria-selected={selected}
       data-pending={pending || undefined}
+      data-editorial-action={editorialActionLabel(canApply, applyGesture)}
+      data-wallpaper-index={ordinal}
       data-wallpaper-path={entry.path}
-      role="option"
-      tabIndex={0}
-      title={cardHoverLabel(entry)}
+      role="listitem"
     >
-      <div className="wallpaper-thumb">
-        {animatedPreview || thumbnail ? (
-          <img
-            src={safeFileSrc(animatedPreview ?? thumbnail ?? '')}
-            alt=""
-            loading="lazy"
-            decoding="async"
-          />
-        ) : (
-          <div className="wallpaper-thumb-placeholder" title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}>
-            <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
-            {thumbnailFailure ? <span className="wallpaper-thumb-error">Preview failed</span> : null}
-          </div>
-        )}
-        {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
-        <button
-          aria-label={entry.favorite ? 'Remove favorite' : 'Add favorite'}
-          className={`wallpaper-favorite-button${entry.favorite ? ' is-favorite' : ''}`}
-          data-card-control
-          disabled={favoritePending}
-          type="button"
-          onClick={(event) => {
-            event.stopPropagation();
-            onToggleFavorite(entry);
-          }}
-          onKeyDown={(event) => event.stopPropagation()}
-        >
-          {entry.favorite ? '♥' : '♡'}
-        </button>
-      </div>
-      <div className="wallpaper-info">
-        <span className="wallpaper-name">{displayName(entry)}</span>
-        <span className="wallpaper-meta">{metaLine(entry)}</span>
-      </div>
+      <button
+        aria-busy={applying || undefined}
+        aria-current={current ? 'true' : undefined}
+        aria-describedby={stateDescription ? stateDescriptionId : undefined}
+        className="wallpaper-card__primary"
+        onClick={handleClick}
+        onKeyDown={handleKeyDown}
+        title={cardHoverLabel(entry)}
+        type="button"
+      >
+        <div className="wallpaper-thumb">
+          {animatedPreview || thumbnail ? (
+            <img
+              src={safeFileSrc(animatedPreview ?? thumbnail ?? '')}
+              alt=""
+              loading="lazy"
+              decoding="async"
+            />
+          ) : (
+            <div className="wallpaper-thumb-placeholder" title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}>
+              <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
+              {thumbnailFailure ? <span className="wallpaper-thumb-error">Preview failed</span> : null}
+            </div>
+          )}
+          {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
+        </div>
+        <div className="wallpaper-info">
+          <span className="wallpaper-name">{displayName(entry)}</span>
+          <span className="wallpaper-meta">{metaLine(entry)}</span>
+          {ordinal ? (
+            <span aria-hidden="true" className="wallpaper-index">{ordinal}</span>
+          ) : null}
+        </div>
+      </button>
+      <button
+        aria-label={entry.favorite ? 'Remove favorite' : 'Add favorite'}
+        className={`wallpaper-favorite-button${entry.favorite ? ' is-favorite' : ''}`}
+        data-card-control
+        disabled={favoritePending}
+        type="button"
+        onClick={(event) => {
+          event.stopPropagation();
+          onToggleFavorite(entry);
+        }}
+      >
+        {entry.favorite ? '♥' : '♡'}
+      </button>
+      {stateDescription ? (
+        <span className="wallpaper-card__state" id={stateDescriptionId}>
+          {stateDescription}
+        </span>
+      ) : null}
     </div>
   );
 }

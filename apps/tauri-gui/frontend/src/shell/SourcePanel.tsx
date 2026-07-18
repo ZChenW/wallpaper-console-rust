@@ -16,6 +16,7 @@ import {
   type AddSourceOutcome,
   type UseWallpaperSourcesOptions,
 } from './useWallpaperSources';
+import { trapDialogFocus } from './dialogFocus.ts';
 
 export type SourcePanelNotice = {
   readonly channel: 'settings' | 'scan';
@@ -183,13 +184,13 @@ const buttonStyle: CSSProperties = {
 
 const primaryButtonStyle: CSSProperties = {
   ...buttonStyle,
-  background: 'color-mix(in srgb, AccentColor 16%, transparent)',
+  background: 'color-mix(in srgb, var(--primary) 16%, transparent)',
 };
 
 const dangerButtonStyle: CSSProperties = {
   ...buttonStyle,
-  borderColor: 'color-mix(in srgb, #ff6b6b 55%, transparent)',
-  color: '#d94b4b',
+  borderColor: 'color-mix(in srgb, var(--danger) 55%, transparent)',
+  color: 'var(--danger)',
 };
 
 const contentStyle: CSSProperties = {
@@ -312,9 +313,9 @@ const confirmationStyle: CSSProperties = {
   display: 'grid',
   gap: '0.55rem',
   padding: '0.7rem',
-  border: '1px solid color-mix(in srgb, #ff6b6b 45%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--danger) 45%, transparent)',
   borderRadius: '0.55rem',
-  background: 'color-mix(in srgb, #ff6b6b 8%, Canvas)',
+  background: 'color-mix(in srgb, var(--danger) 8%, Canvas)',
   fontSize: '0.78rem',
 };
 
@@ -479,12 +480,12 @@ function availabilityLabel(source: SourceDTO): string {
 
 function availabilityStyle(availability: SourceDTO['availability']): CSSProperties {
   if (availability === 'available') {
-    return { color: '#2e9b59', background: 'rgb(46 155 89 / 16%)' };
+    return { color: 'var(--success)', background: 'var(--success-bg)' };
   }
   if (availability === 'offline') {
-    return { color: '#d94b4b', background: 'rgb(217 75 75 / 16%)' };
+    return { color: 'var(--danger)', background: 'var(--danger-bg)' };
   }
-  return { color: '#b78700', background: 'rgb(183 135 0 / 16%)' };
+  return { color: 'var(--warning)', background: 'var(--warning-bg)' };
 }
 
 function SourceRow({
@@ -629,7 +630,7 @@ function SourceRow({
             data-source-mutating={true}
             disabled={busy}
             onClick={() => onRequestRemove(source.id)}
-            style={{ ...iconButtonStyle, color: '#d94b4b' }}
+            style={{ ...iconButtonStyle, color: 'var(--danger)' }}
             title={`Remove ${source.displayName}`}
             type="button"
           >
@@ -705,6 +706,10 @@ export function SourcePanelView({
 
   const busy = pendingOperation !== null;
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Tab') {
+      trapDialogFocus(event, event.currentTarget);
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault();
     if (removeCandidateId !== null) onCancelRemove();

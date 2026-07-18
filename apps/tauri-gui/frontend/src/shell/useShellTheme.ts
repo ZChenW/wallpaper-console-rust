@@ -2,9 +2,13 @@ import { useEffect } from 'react';
 import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 
 import type { ShellTheme } from './shellPreferences.ts';
+import {
+  nativeWindowTheme,
+  type NativeShellTheme,
+  type ResolvedShellTheme,
+} from './shellThemes.ts';
 
-export type ResolvedShellTheme = 'light' | 'dark' | 'glass';
-type NativeShellTheme = Exclude<ResolvedShellTheme, 'glass'>;
+export type { ResolvedShellTheme } from './shellThemes.ts';
 
 export interface ShellThemeSurface {
   setDocumentTheme(theme: ResolvedShellTheme): void;
@@ -25,9 +29,7 @@ export async function applyShellThemeToSurface(
 ): Promise<void> {
   surface.setDocumentTheme(resolveShellTheme(theme, prefersDark));
   try {
-    await surface.setWindowTheme(
-      theme === 'system' ? null : theme === 'glass' ? 'dark' : theme,
-    );
+    await surface.setWindowTheme(nativeWindowTheme(theme));
   } catch {
     // Browser, mock, and smoke environments may not expose a Tauri window.
   }

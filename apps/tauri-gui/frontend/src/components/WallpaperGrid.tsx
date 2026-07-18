@@ -11,6 +11,8 @@ import {
   shouldRequestNextPage,
   shouldResetScroll,
   visibleThumbnailPaths,
+  wallpaperApplyFlags,
+  wallpaperOrdinal,
 } from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
@@ -39,6 +41,7 @@ interface Props {
   cardSize?: WallpaperCardSize;
   applyGesture?: ApplyGesture;
   selectedPath?: string | null;
+  activePath?: string | null;
   pendingPath?: string | null;
   favoritePendingPaths?: ReadonlySet<string>;
   currentPath?: string | null;
@@ -50,7 +53,7 @@ interface Props {
 
 export interface ContextAction {
   label: string;
-  action: (path: string) => void;
+  action: (path: string, returnFocus: HTMLElement | null) => void | Promise<void>;
   danger?: boolean;
   visible?: (entry: WallpaperDTO) => boolean;
 }
@@ -87,6 +90,7 @@ function WallpaperGridImpl({
   cardSize = 'medium',
   applyGesture = 'single',
   selectedPath = null,
+  activePath = null,
   pendingPath = null,
   favoritePendingPaths = new Set(),
   currentPath = null,
@@ -379,7 +383,7 @@ function WallpaperGridImpl({
       ref={containerRef}
       onScroll={handleScroll}
       aria-label="Wallpaper library"
-      role="listbox"
+      role="list"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -400,26 +404,35 @@ function WallpaperGridImpl({
                 gap: `${GRID_GAP}px`,
               }}
             >
-              {rowEntries.map((e) => (
-                <WallpaperCard
-                  key={e.path}
-                  entry={e}
-                  applying={applying}
-                  onApply={onApply}
-                  onSelect={onSelect}
-                  onToggleFavorite={onToggleFavorite}
-                  onContextMenu={handleContextMenu}
-                  onKeyboardContextMenu={handleKeyboardContextMenu}
-                  cardSize={cardSize}
-                  applyGesture={applyGesture}
-                  selected={selectedPath === e.path}
-                  pending={pendingPath === e.path}
-                  favoritePending={favoritePendingPaths.has(e.path)}
-                  current={currentPath === e.path}
-                  applyAvailable={isEntryApplicable?.(e)}
-                  isScrolling={isScrolling}
-                />
-              ))}
+              {rowEntries.map((e, offset) => {
+                const activity = wallpaperApplyFlags(
+                  e.path,
+                  applying,
+                  activePath,
+                  pendingPath,
+                );
+                return (
+                  <WallpaperCard
+                    key={e.path}
+                    entry={e}
+                    ordinal={wallpaperOrdinal(start + offset)}
+                    applying={activity.applying}
+                    onApply={onApply}
+                    onSelect={onSelect}
+                    onToggleFavorite={onToggleFavorite}
+                    onContextMenu={handleContextMenu}
+                    onKeyboardContextMenu={handleKeyboardContextMenu}
+                    cardSize={cardSize}
+                    applyGesture={applyGesture}
+                    selected={selectedPath === e.path}
+                    pending={activity.pending}
+                    favoritePending={favoritePendingPaths.has(e.path)}
+                    current={currentPath === e.path}
+                    applyAvailable={isEntryApplicable?.(e)}
+                    isScrolling={isScrolling}
+                  />
+                );
+              })}
             </div>
           );
         })}

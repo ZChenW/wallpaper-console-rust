@@ -163,6 +163,15 @@ test('settings stays mounted but becomes obscured under a child drawer', async (
   assert.equal(obscuredDialog.props['aria-hidden'], true);
 });
 
+test('settings becomes hidden and inert during its exit animation', async () => {
+  const { CompactSettingsPanelView } = await importTsxModule();
+  const tree = CompactSettingsPanelView({ ...viewProps(), presentationPhase: 'exiting' });
+  const [dialog] = findElements(tree, (element) => element.props.role === 'dialog');
+
+  assert.equal(dialog.props['aria-hidden'], true);
+  assert.equal(dialog.props.inert, true);
+});
+
 test('renders exactly the three compact groups and excludes legacy diagnostics', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView(viewProps());
@@ -208,11 +217,11 @@ test('appearance controls update only remembered shell preferences', async () =>
     ['Theme', 'Apply gesture', 'Card size'],
   );
 
-  (theme.props.onValueChange as (value: string) => void)('dark');
+  (theme.props.onValueChange as (value: string) => void)('editorial');
   (gesture.props.onValueChange as (value: string) => void)('double');
   (cardSize.props.onValueChange as (value: string) => void)('large');
 
-  assert.equal(current.theme, 'dark');
+  assert.equal(current.theme, 'editorial');
   assert.equal(current.applyGesture, 'double');
   assert.equal(current.cardSize, 'large');
   assert.deepEqual(
@@ -222,6 +231,7 @@ test('appearance controls update only remembered shell preferences', async () =>
       { value: 'light', label: 'Light' },
       { value: 'dark', label: 'Dark' },
       { value: 'glass', label: 'Glass' },
+      { value: 'editorial', label: 'Editorial' },
     ],
   );
 });
