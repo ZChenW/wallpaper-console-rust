@@ -16,6 +16,7 @@ export type LibraryTypeFilter =
   | 'unsupported';
 
 export type LibrarySort = 'recentlyAdded' | 'nameAsc' | 'nameDesc';
+export type LibraryViewMode = 'grid' | 'flow';
 
 export type DisplayTarget =
   | { readonly kind: 'allDisplays' }
@@ -35,6 +36,7 @@ export interface ShellPreferences {
   displayTarget: DisplayTarget;
   applyGesture: ApplyGesture;
   theme: ShellTheme;
+  libraryViewMode: LibraryViewMode;
 }
 
 export const DEFAULT_SHELL_PREFERENCES: Readonly<ShellPreferences> = Object.freeze({
@@ -46,6 +48,7 @@ export const DEFAULT_SHELL_PREFERENCES: Readonly<ShellPreferences> = Object.free
   displayTarget: Object.freeze({ kind: 'allDisplays' as const }),
   applyGesture: 'single',
   theme: 'system',
+  libraryViewMode: 'grid',
 });
 
 const TYPE_FILTERS = new Set<LibraryTypeFilter>([
@@ -59,6 +62,7 @@ const TYPE_FILTERS = new Set<LibraryTypeFilter>([
 const SORTS = new Set<LibrarySort>(['recentlyAdded', 'nameAsc', 'nameDesc']);
 const CARD_SIZES = new Set<WallpaperCardSize>(['small', 'medium', 'large']);
 const APPLY_GESTURES = new Set<ApplyGesture>(['single', 'double']);
+const LIBRARY_VIEW_MODES = new Set<LibraryViewMode>(['grid', 'flow']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -108,6 +112,7 @@ export function normalizeShellPreferences(value: unknown): ShellPreferences {
     displayTarget: normalizeDisplayTarget(record.displayTarget),
     applyGesture: memberOf(record.applyGesture, APPLY_GESTURES, 'single'),
     theme: isShellTheme(record.theme) ? record.theme : 'system',
+    libraryViewMode: memberOf(record.libraryViewMode, LIBRARY_VIEW_MODES, 'grid'),
   };
 }
 
@@ -136,5 +141,6 @@ export function serializeShellPreferences(preferences: ShellPreferences): string
     displayTarget: normalized.displayTarget,
     applyGesture: normalized.applyGesture,
     theme: normalized.theme,
+    libraryViewMode: normalized.libraryViewMode,
   });
 }

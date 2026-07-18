@@ -110,11 +110,11 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
         role="status"
         style={activityStyle}
       >
-        <div style={textStyle}>
-          <span style={titleStyle}>Scan cancelled</span>
-          <span style={metaStyle}>Completed source updates were kept.</span>
+        <div className="scan-activity__content" style={textStyle}>
+          <span className="scan-activity__title" style={titleStyle}>Scan cancelled</span>
+          <span className="scan-activity__meta" style={metaStyle}>Completed source updates were kept.</span>
         </div>
-        <button onClick={onDismiss} style={actionStyle} type="button">
+        <button className="scan-activity__action" onClick={onDismiss} style={actionStyle} type="button">
           Dismiss
         </button>
       </section>
@@ -134,17 +134,22 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
       role="status"
       style={activityStyle}
     >
-      <div style={textStyle}>
-        <span style={titleStyle}>{isCancelling ? 'Cancelling scan…' : 'Scanning wallpapers…'}</span>
+      <div className="scan-activity__content" style={textStyle}>
+        <span className="scan-activity__title" style={titleStyle}>
+          {isCancelling ? 'Cancelling scan…' : 'Scanning wallpapers…'}
+        </span>
         <progress
           aria-label="Wallpaper scan progress"
           className="scan-activity__progress"
           style={progressStyle}
           {...(determinate ?? {})}
         />
-        <span style={metaStyle}>Elapsed {formatScanElapsed(presentation.elapsedMs)}</span>
+        <span className="scan-activity__meta" style={metaStyle}>
+          Elapsed {formatScanElapsed(presentation.elapsedMs)}
+        </span>
       </div>
       <button
+        className="scan-activity__action"
         disabled={!canCancel}
         onClick={canCancel ? onCancel : undefined}
         style={{ ...actionStyle, cursor: canCancel ? 'pointer' : 'wait', opacity: canCancel ? 1 : 0.62 }}

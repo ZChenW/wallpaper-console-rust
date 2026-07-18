@@ -115,6 +115,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   const consecutiveZeroCountRef = useRef(0);
   const confirmEmptyTimerRef = useRef<number | null>(null);
   const appendInFlightRef = useRef(false);
+  const replacementRequestRef = useRef<number | null>(null);
 
   const clearConfirmEmptyTimer = useCallback(() => {
     if (confirmEmptyTimerRef.current !== null) {
@@ -124,7 +125,10 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   }, []);
 
   const load = useCallback(async (append = false, cursor: string | null = null) => {
-    if (append && appendInFlightRef.current) return;
+    if (append && (
+      appendInFlightRef.current
+      || replacementRequestRef.current !== null
+    )) return;
     if (append) {
       appendInFlightRef.current = true;
       setAppending(true);
@@ -132,6 +136,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     clearConfirmEmptyTimer();
     const requestId = requestSeq.current + 1;
     requestSeq.current = requestId;
+    if (!append) replacementRequestRef.current = requestId;
     const isCurrent = () => requestSeq.current === requestId;
     const kind = resolveRequestKind(append, hasLoadedOnceRef.current);
     if (kind === 'initial' && typeof performance !== 'undefined') {
@@ -212,6 +217,9 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
         appendInFlightRef.current = false;
         setAppending(false);
       }
+      if (!append && replacementRequestRef.current === requestId) {
+        replacementRequestRef.current = null;
+      }
       if (isCurrent()) {
         if (succeeded) {
           hasLoadedOnceRef.current = true;
@@ -236,8 +244,10 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     return load(false, null);
   }, [load]);
   const loadMore = useCallback(() => {
+    if (nextCursor === null || replacementRequestRef.current !== null) {
+      return Promise.resolve();
+    }
     setAutomaticAppendPaused(false);
-    if (nextCursor === null) return Promise.resolve();
     return load(true, nextCursor);
   }, [load, nextCursor]);
 
@@ -247,6 +257,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
 
   useEffect(() => () => {
     requestSeq.current += 1;
+    replacementRequestRef.current = null;
     clearConfirmEmptyTimer();
   }, [clearConfirmEmptyTimer]);
 

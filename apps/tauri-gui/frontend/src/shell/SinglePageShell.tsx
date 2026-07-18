@@ -14,10 +14,15 @@ import type {
   CommandResult,
   FirstRunSourceSuggestionDTO,
   LibraryBrowserItemDTO,
-  WallpaperDTO,
 } from '../api/types.ts';
 import { commandErrorFeedback } from '../api/feedback.ts';
-import WallpaperGrid, { type ContextAction } from '../components/WallpaperGrid.tsx';
+import LibraryViewport from '../components/LibraryViewport.tsx';
+import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
+import {
+  resolveLibraryModeSwitchAnchor,
+  type ContextAction,
+  type LibraryViewModel,
+} from '../components/libraryViewModel.ts';
 import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
@@ -29,7 +34,7 @@ import { FeedbackOverlay } from './FeedbackOverlay.tsx';
 import FirstRunSuggestions from './FirstRunSuggestions.tsx';
 import LibraryRepairPrompt from './LibraryRepairPrompt.tsx';
 import WallpaperDetailsDialog from './WallpaperDetailsDialog.tsx';
-import { safeFileSrc } from '../components/WallpaperCard.tsx';
+import { safeFileSrc } from '../components/WallpaperPreviewMedia.tsx';
 import { ScanActivity } from './ScanActivity.tsx';
 import { SourcePanel, type SourcePanelNotice } from './SourcePanel.tsx';
 import CompactSettingsPanel from './CompactSettingsPanel.tsx';
@@ -154,6 +159,9 @@ export default function SinglePageShell() {
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
   const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const libraryViewportAnchorRef = useRef<number | null>(null);
+  const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
+  const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
@@ -175,6 +183,13 @@ export default function SinglePageShell() {
     detailsReturnFocusRef.current = null;
     if (!trigger?.isConnected) return;
     window.requestAnimationFrame(() => trigger.focus());
+  }, []);
+  const openLibraryDetails = useCallback((
+    entry: LibraryBrowserItemDTO,
+    returnFocus: HTMLElement | null = null,
+  ) => {
+    detailsReturnFocusRef.current = returnFocus;
+    setDetailsEntry(entry);
   }, []);
   const openSources = useCallback((returnToSettings = false) => {
     setRestoreSourceCardFocus(false);
@@ -439,6 +454,7 @@ export default function SinglePageShell() {
     [],
     createRuntimeWallpaperSession,
   );
+  const [runtimeObservationReady, setRuntimeObservationReady] = useState(false);
   const connectedOutputsKey = catalog.connectedOutputs.join('\0');
   useEffect(() => {
     dispatchRuntimeSession({
@@ -450,12 +466,21 @@ export default function SinglePageShell() {
   const runtimeObservationController = useRef<RuntimeObservationController | null>(null);
   useEffect(() => {
     const outputs = [...catalog.connectedOutputs];
-    if (!catalog.ready || outputs.length === 0) return undefined;
+    if (!catalog.ready) {
+      setRuntimeObservationReady(false);
+      return undefined;
+    }
+    if (outputs.length === 0) {
+      setRuntimeObservationReady(true);
+      return undefined;
+    }
+    setRuntimeObservationReady(false);
     const controller = new RuntimeObservationController({
       api,
       connectedOutputs: outputs,
       onObservations: (observations) => {
         dispatchRuntimeSession({ type: 'runtimeReconciled', observations });
+        setRuntimeObservationReady(true);
       },
     });
     runtimeObservationController.current = controller;
@@ -481,6 +506,10 @@ export default function SinglePageShell() {
     invalidateLibrary,
     onApplied,
   });
+  const {
+    handleApplyActionToDisplay,
+    handleApplyToDisplay,
+  } = applyQueue;
 
   const currentWallpaper = useMemo(() => resolveCurrentWallpaperState({
     activeTarget: preferences.displayTarget,
@@ -501,7 +530,7 @@ export default function SinglePageShell() {
     preferences.displayTarget,
   );
 
-  const applyEntry = useCallback((entry: WallpaperDTO) => {
+  const applyEntry = useCallback((entry: LibraryBrowserItemDTO) => {
     if (!displayModel.canApply) {
       showNotice({
         channel: 'apply',
@@ -522,21 +551,23 @@ export default function SinglePageShell() {
     }
     const target = targetArgument(preferences.displayTarget);
     if (kind === 'retry_backend_apply') {
-      applyQueue.handleApplyActionToDisplay({ kind, path: entry.path }, target);
+      handleApplyActionToDisplay({ kind, path: entry.path }, target);
       return;
     }
-    applyQueue.handleApplyToDisplay(entry.path, target);
-  }, [applyQueue, displayModel.canApply, preferences.displayTarget, showNotice]);
+    handleApplyToDisplay(entry.path, target);
+  }, [
+    displayModel.canApply,
+    handleApplyActionToDisplay,
+    handleApplyToDisplay,
+    preferences.displayTarget,
+    showNotice,
+  ]);
 
-  const applyPath = useCallback((path: string) => {
-    const entry = browser.entryByPath.get(path);
-    if (entry) applyEntry(entry);
-  }, [applyEntry, browser.entryByPath]);
-  const selectLibraryEntry = useCallback((entry: WallpaperDTO) => {
-    setSelectedEntry(entry as LibraryBrowserItemDTO);
+  const selectLibraryEntry = useCallback((entry: LibraryBrowserItemDTO) => {
+    setSelectedEntry(entry);
   }, []);
   const isLibraryEntryApplicable = useCallback(
-    (entry: WallpaperDTO) => primaryApplyKind(entry) !== null,
+    (entry: LibraryBrowserItemDTO) => primaryApplyKind(entry) !== null,
     [],
   );
 
@@ -685,7 +716,7 @@ export default function SinglePageShell() {
     }
   }, [setCommandFeedback, showNotice]);
 
-  const openLocation = useCallback(async (entry: WallpaperDTO) => {
+  const openLocation = useCallback(async (entry: LibraryBrowserItemDTO) => {
     try {
       const result = await api.openProjectLocation(entry.path, 'file_manager');
       if (!result.success) setCommandFeedback(commandErrorFeedback('Open location', result), 'system');
@@ -694,8 +725,7 @@ export default function SinglePageShell() {
     }
   }, [setCommandFeedback]);
 
-  const buildContextActions = useCallback((wallpaper: WallpaperDTO): ContextAction[] => {
-    const entry = wallpaper as LibraryBrowserItemDTO;
+  const buildContextActions = useCallback((entry: LibraryBrowserItemDTO): ContextAction[] => {
     const actions: ContextAction[] = [
       {
         label: entry.favorite ? 'Remove from Favorites' : 'Add to Favorites',
@@ -708,9 +738,8 @@ export default function SinglePageShell() {
       {
         label: 'Information',
         action: (_path, returnFocus) => {
-          detailsReturnFocusRef.current = returnFocus;
-          setSelectedEntry(entry);
-          setDetailsEntry(entry);
+          if (preferences.libraryViewMode === 'grid') setSelectedEntry(entry);
+          openLibraryDetails(entry, returnFocus);
         },
       },
     ];
@@ -727,7 +756,7 @@ export default function SinglePageShell() {
       });
     }
     return actions;
-  }, [openLocation, showNotice, toggleFavorite]);
+  }, [openLibraryDetails, openLocation, preferences.libraryViewMode, showNotice, toggleFavorite]);
 
   const chooseRandom = useCallback(async () => {
     const outcome = await browser.chooseRandom();
@@ -788,6 +817,82 @@ export default function SinglePageShell() {
     preferences.sort,
     browser.debouncedSearch,
   ].join('|');
+
+  const rememberLibraryAnchor = useCallback((wallpaperId: number) => {
+    libraryViewportAnchorRef.current = wallpaperId;
+  }, []);
+  const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
+    if (mode === preferences.libraryViewMode) return;
+    const anchor = resolveLibraryModeSwitchAnchor(
+      browser.entries,
+      selectedEntry?.wallpaperId,
+      libraryViewportAnchorRef.current,
+    );
+    setLibraryModeAnchorId(anchor?.wallpaperId ?? null);
+    setLibraryViewFocusToken((token) => token + 1);
+    updatePreferences((current) => ({ ...current, libraryViewMode: mode }));
+  }, [browser.entries, preferences.libraryViewMode, selectedEntry, updatePreferences]);
+
+  const libraryViewModel = useMemo<LibraryViewModel>(() => ({
+    entries: browser.entries,
+    selectedPath: selectedEntry?.path ?? null,
+    currentPath,
+    currentObservationReady: runtimeObservationReady,
+    applying: applyQueue.applying,
+    activePath: applyQueue.activePath ?? null,
+    pendingPath: applyQueue.pendingPath ?? null,
+    favoritePendingPaths,
+    active: !settingsOpen && !sourcesOpen && detailsEntry === null,
+    refreshing: browser.refreshing || scanRunning,
+    resetKey,
+    replaceCount: browser.replaceCount,
+    queryReplacementPending: browser.criteriaReplacementPending,
+    totalKnown: browser.totalKnown,
+    total: browser.total,
+    hasMore: browser.hasMore,
+    loadingMore: browser.appending,
+    automaticAppendPaused: browser.automaticAppendPaused,
+    loadErrorDetail: browser.loadErrorDetail,
+    canApplyToDisplay: displayModel.canApply,
+    isEntryApplicable: isLibraryEntryApplicable,
+    onSelect: selectLibraryEntry,
+    onApply: applyEntry,
+    onToggleFavorite: toggleFavorite,
+    onDetails: openLibraryDetails,
+    buildContextActions,
+    onLoadMore: browser.loadMore,
+  }), [
+    applyEntry,
+    applyQueue.activePath,
+    applyQueue.applying,
+    applyQueue.pendingPath,
+    browser.appending,
+    browser.automaticAppendPaused,
+    browser.entries,
+    browser.hasMore,
+    browser.loadErrorDetail,
+    browser.loadMore,
+    browser.criteriaReplacementPending,
+    browser.refreshing,
+    browser.replaceCount,
+    browser.total,
+    browser.totalKnown,
+    buildContextActions,
+    currentPath,
+    runtimeObservationReady,
+    detailsEntry,
+    displayModel.canApply,
+    favoritePendingPaths,
+    isLibraryEntryApplicable,
+    openLibraryDetails,
+    resetKey,
+    scanRunning,
+    selectLibraryEntry,
+    selectedEntry?.path,
+    settingsOpen,
+    sourcesOpen,
+    toggleFavorite,
+  ]);
 
   const renderLibrary = () => {
     // Library loads independently of preferences, catalog, and display probes.
@@ -857,29 +962,18 @@ export default function SinglePageShell() {
               </button>
             </div>
           ) : null}
-          <WallpaperGrid
-            entries={browser.entries}
-            onApply={applyPath}
-            onSelect={selectLibraryEntry}
-            onToggleFavorite={toggleFavorite}
-            applying={applyQueue.applying}
-            favoritePendingPaths={favoritePendingPaths}
-            buildContextActions={buildContextActions}
-            active={!settingsOpen && !sourcesOpen}
-            refreshing={browser.refreshing || scanRunning}
-            resetKey={resetKey}
-            cardSize={preferences.cardSize}
+          <LibraryViewport
             applyGesture={preferences.applyGesture}
-            selectedPath={selectedEntry?.path ?? null}
-            activePath={applyQueue.activePath ?? null}
-            pendingPath={applyQueue.pendingPath ?? null}
-            currentPath={currentPath}
-            isEntryApplicable={isLibraryEntryApplicable}
-            hasMore={browser.hasMore && !browser.automaticAppendPaused}
-            loadingMore={browser.appending}
-            onLoadMore={browser.loadMore}
+            cardSize={preferences.cardSize}
+            focusToken={libraryViewFocusToken}
+            initialAnchorWallpaperId={libraryModeAnchorId}
+            mode={preferences.libraryViewMode}
+            model={libraryViewModel}
+            onAnchorChange={rememberLibraryAnchor}
           />
-          {!browser.refreshing && browser.hasMore ? (
+          {!browser.refreshing
+            && browser.hasMore
+            && (preferences.libraryViewMode === 'grid' || browser.automaticAppendPaused) ? (
             <div className="single-page-load-more">
               <button
                 className="btn"
@@ -1064,20 +1158,27 @@ export default function SinglePageShell() {
           }}
           variant="compact"
         />
-        <SelectField
-          aria-label="Card size"
-          value={preferences.cardSize}
-          options={[
-            { value: 'small', label: 'Small' },
-            { value: 'medium', label: 'Medium' },
-            { value: 'large', label: 'Large' },
-          ]}
-          onValueChange={(value) => {
-            const cardSize = value as typeof preferences.cardSize;
-            updatePreferences((current) => ({ ...current, cardSize }));
-          }}
-          variant="compact"
+        <LibraryViewSwitch
+          disabled={!preferencesReady}
+          onChange={changeLibraryViewMode}
+          value={preferences.libraryViewMode}
         />
+        {preferences.libraryViewMode === 'grid' ? (
+          <SelectField
+            aria-label="Card size"
+            value={preferences.cardSize}
+            options={[
+              { value: 'small', label: 'Small' },
+              { value: 'medium', label: 'Medium' },
+              { value: 'large', label: 'Large' },
+            ]}
+            onValueChange={(value) => {
+              const cardSize = value as typeof preferences.cardSize;
+              updatePreferences((current) => ({ ...current, cardSize }));
+            }}
+            variant="compact"
+          />
+        ) : null}
         <span className="single-page-count" aria-live="polite">
           {browser.totalKnown
             ? `${browser.entries.length} / ${browser.total}`

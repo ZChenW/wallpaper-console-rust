@@ -210,3 +210,164 @@ test('dialog and feedback skin lives in CSS while inline layout remains', async 
   assert.match(dialogInline, /display:\s*'grid'/);
   assert.match(cardInline, /position:\s*'relative'/);
 });
+
+test('Flow keeps scrolling in the central stream and reserves independent side rails', async () => {
+  const { css } = await sources();
+  const viewport = ruleBody(css, '.library-viewport');
+  const flow = ruleBody(css, '.wallpaper-flow');
+  const stream = ruleBody(css, '.flow-preview-stream');
+  const item = ruleBody(css, '.flow-preview-item');
+  const media = ruleBody(css, '.flow-preview-item__media');
+
+  assert.match(viewport, /container-name:\s*library-viewport/);
+  assert.match(viewport, /container-type:\s*inline-size/);
+  assert.match(viewport, /min-height:\s*0/);
+  assert.match(flow, /display:\s*grid/);
+  assert.match(flow, /grid-template-columns:\s*minmax\(/);
+  assert.match(flow, /overflow:\s*hidden/);
+  assert.match(stream, /overflow-y:\s*auto/);
+  assert.match(stream, /overscroll-behavior(?:-y)?:\s*contain/);
+  assert.match(stream, /scrollbar-gutter:\s*stable/);
+  assert.match(item, /place-items:\s*center/);
+  assert.match(item, /contain:\s*layout paint/);
+  assert.match(media, /aspect-ratio:\s*var\(--flow-media-aspect\)/);
+  assert.match(media, /max-height:/);
+  assert.match(ruleBody(css, '.flow-metadata-rail'), /overflow:\s*hidden/);
+});
+
+test('Flow exposes additive visual states without making hover equivalent to selection', async () => {
+  const { css } = await sources();
+  const centered = ruleBody(css, '.flow-preview-item[data-centered]');
+  const centeredMedia = ruleBody(css, '.flow-preview-item[data-centered] .flow-preview-item__media');
+  const hovered = ruleBody(css, '.flow-preview-item[data-hovered]');
+  const selected = ruleBody(css, '.flow-preview-item[data-selected] .flow-preview-item__media');
+  const current = ruleBody(css, '.flow-preview-item[data-current] .flow-preview-item__media::before');
+  const applying = ruleBody(css, '.flow-preview-item[data-applying] .flow-preview-item__media::after');
+  const surroundingImage = ruleBody(
+    css,
+    '.flow-preview-item:not([data-centered]) .flow-preview-item__media > img',
+  );
+  const centeredImage = ruleBody(
+    css,
+    '.flow-preview-item[data-centered] .flow-preview-item__media > img',
+  );
+  const metadata = ruleBody(css, '.flow-metadata-rail');
+  const hoveredMetadata = ruleBody(css, '.flow-metadata-rail[data-hovered]');
+
+  assert.match(centered, /opacity:\s*1/);
+  assert.match(centeredMedia, /transform:\s*scale\(/);
+  assert.match(hovered, /opacity:/);
+  assert.doesNotMatch(hovered, /outline|box-shadow/);
+  assert.match(selected, /outline:/);
+  assert.match(current, /content:\s*['"]['"]/);
+  assert.match(applying, /animation:/);
+  assert.match(surroundingImage, /filter:\s*grayscale\(/);
+  assert.match(centeredImage, /filter:\s*none/);
+  assert.match(metadata, /animation:\s*flow-metadata-enter 180ms/);
+  assert.match(hoveredMetadata, /box-shadow:\s*inset/);
+  assert.match(ruleBody(css, '.flow-index-rail__states'), /display:\s*flex/);
+});
+
+test('Flow suppresses decorative transitions while native scrolling is unsettled', async () => {
+  const { css } = await sources();
+  const item = ruleBody(css, '.flow-preview-item:not([data-settled])');
+  const media = ruleBody(
+    css,
+    '.flow-preview-item:not([data-settled]) .flow-preview-item__media',
+  );
+
+  assert.match(item, /transition:\s*none/);
+  assert.match(media, /transition:\s*none/);
+});
+
+test('Flow progressively collapses at container breakpoints and preserves in-layout actions', async () => {
+  const { css } = await sources();
+  const medium = atRuleBody(css, '@container library-viewport (max-width: 1023px)');
+  const narrow = atRuleBody(css, '@container library-viewport (max-width: 759px)');
+  const compact = atRuleBody(css, '@container library-viewport (max-width: 420px)');
+  const compactViewport = atRuleBody(css, '@media (max-width: 760px)');
+  const shortCompact = atRuleBody(
+    css,
+    '@media (max-width: 420px) and (max-height: 640px)',
+  );
+
+  assert.match(medium, /\.wallpaper-flow/);
+  assert.match(medium, /grid-template-columns:/);
+  assert.match(medium, /data-flow-metadata-priority="secondary"/);
+  assert.match(medium, /display:\s*none/);
+  assert.match(narrow, /grid-template-rows:\s*auto minmax\(0, 1fr\) auto/);
+  assert.match(narrow, /\.flow-index-rail__list/);
+  assert.match(narrow, /display:\s*none/);
+  assert.match(narrow, /\.flow-metadata-rail/);
+  assert.match(narrow, /position:\s*relative/);
+  assert.match(narrow, /overflow-x:\s*visible/);
+  assert.doesNotMatch(narrow, /overflow-y:\s*auto/);
+  assert.match(compact, /\.flow-metadata-rail__actions/);
+  assert.match(compact, /grid-template-columns:\s*repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(compact, /\.flow-metadata-rail__action--primary/);
+  assert.match(compact, /grid-column:\s*1 \/ -1/);
+  assert.match(compactViewport, /\.single-page-shell:has\(\.wallpaper-flow\).*\.feedback-overlay/);
+  assert.match(compactViewport, /position:\s*relative\s*!important/);
+  assert.match(compactViewport, /\.single-page-statusbar/);
+  assert.match(compactViewport, /display:\s*none/);
+  assert.match(shortCompact, /data-flow-metadata-field="compatibility"/);
+  assert.match(shortCompact, /\.flow-metadata-rail__actions/);
+  assert.match(shortCompact, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(shortCompact, /\.flow-metadata-rail__return/);
+  assert.match(shortCompact, /position:\s*absolute/);
+});
+
+test('Flow accessibility fallbacks cover reduced motion, forced colors, and coarse pointers', async () => {
+  const { css } = await sources();
+  const reduced = atRuleBody(css, '@media (prefers-reduced-motion: reduce)');
+  const reducedMedia = ruleBody(reduced, '.library-viewport :is(.flow-preview-item__media)');
+  const forced = atRuleBody(css, '@media (forced-colors: active)');
+  const coarse = atRuleBody(css, '@media (pointer: coarse)');
+
+  assert.match(reduced, /\.flow-preview-stream/);
+  assert.match(reduced, /scroll-behavior:\s*auto\s*!important/);
+  assert.match(reduced, /\.flow-preview-item/);
+  assert.match(reduced, /transition:\s*none\s*!important/);
+  assert.match(reducedMedia, /transform:\s*none\s*!important/);
+  assert.match(forced, /\.flow-preview-item\[data-selected\]/);
+  assert.match(forced, /Highlight/);
+  assert.match(forced, /\.flow-preview-stream:focus-visible/);
+  assert.match(forced, /outline:\s*2px solid Highlight/);
+  assert.match(coarse, /\.flow-metadata-rail__action/);
+  assert.match(coarse, /min-height:\s*44px/);
+});
+
+test('short compact Flow reserves the stream and bounds concurrent transient status', async () => {
+  const { css } = await sources();
+  const shortCompact = atRuleBody(
+    css,
+    '@media (max-width: 420px) and (max-height: 640px)',
+  );
+  const shortStatus = atRuleBody(
+    css,
+    '@media (max-width: 760px) and (max-height: 480px)',
+  );
+  const concurrentShell = ':is(.single-page-shell:has(.wallpaper-flow):has(> .scan-activity):has(> .feedback-overlay))';
+  const flow = ruleBody(shortCompact, `${concurrentShell} .wallpaper-flow`);
+  const metadata = ruleBody(shortCompact, `${concurrentShell} .flow-metadata-rail`);
+  const secondary = ruleBody(
+    shortCompact,
+    `${concurrentShell} :is(.flow-metadata-rail__status-list, .flow-metadata-rail__metadata, .flow-metadata-rail__queue, .flow-metadata-rail__completion)`,
+  );
+  const actions = ruleBody(shortCompact, `${concurrentShell} .flow-metadata-rail__actions`);
+  const action = ruleBody(shortCompact, `${concurrentShell} .flow-metadata-rail__action`);
+  const returnToTop = ruleBody(shortCompact, `${concurrentShell} .flow-metadata-rail__return`);
+
+  assert.match(flow, /grid-template-rows:\s*auto minmax\(6rem, 1fr\) auto/);
+  assert.match(metadata, /grid-template-areas:\s*["']header actions return["']/);
+  assert.match(secondary, /display:\s*none/);
+  assert.match(actions, /grid-template-columns:\s*repeat\(3, minmax\(0, 1fr\)\)/);
+  assert.match(action, /white-space:\s*nowrap/);
+  assert.match(action, /text-overflow:\s*ellipsis/);
+  assert.match(returnToTop, /position:\s*static/);
+  assert.match(shortStatus, /grid-template-rows:\s*auto auto minmax\(0, 1fr\) 4\.75rem/);
+  assert.match(shortStatus, /grid-template-columns:\s*minmax\(8rem, 2fr\) minmax\(0, 3fr\)/);
+  assert.match(shortStatus, /> \.feedback-overlay\s*\{[^}]*max-height:\s*calc\(4\.75rem - 0\.5rem\)/s);
+  assert.match(shortStatus, /grid-auto-rows:\s*max-content/);
+  assert.match(shortStatus, /overflow-y:\s*auto/);
+});

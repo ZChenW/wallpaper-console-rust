@@ -6,6 +6,7 @@ import {
   createRandomLibraryBrowserQuery,
   formatRandomWallpaperError,
   isCurrentQueryEmpty,
+  isLibraryCriteriaPending,
   isRandomRequestCurrent,
   randomWallpaperErrorOutcome,
 } from './useLibraryBrowser.ts';
@@ -73,6 +74,18 @@ test('confirmed emptiness is used only for the query that produced it', () => {
   assert.equal(isCurrentQueryEmpty(true, 'all|usable|false|', 'all|usable|false|'), true);
   assert.equal(isCurrentQueryEmpty(true, 'source:7|usable|false|', 'all|usable|false|'), false);
   assert.equal(isCurrentQueryEmpty(false, 'all|usable|false|', 'all|usable|false|'), false);
+});
+
+test('criteria stay pending until a page resolves for the current query key', () => {
+  assert.equal(isLibraryCriteriaPending(null, 'all|usable|false|'), true);
+  assert.equal(
+    isLibraryCriteriaPending('source:7|usable|false|', 'all|usable|false|'),
+    true,
+  );
+  assert.equal(
+    isLibraryCriteriaPending('all|usable|false|', 'all|usable|false|'),
+    false,
+  );
 });
 
 test('a random result becomes stale as soon as raw search text changes', () => {

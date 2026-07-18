@@ -54,6 +54,22 @@ test('runtime observation mock exposes replaceable positive evidence and reset r
   assert.deepEqual(await api.runtimeWallpaperObservations(), defaults);
 });
 
+test('runtime observations can be held and released to exercise late startup evidence', async () => {
+  ctrl.holdRuntimeWallpaperObservations();
+  let settled = false;
+  const read = api.runtimeWallpaperObservations().then((observations) => {
+    settled = true;
+    return observations;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  ctrl.releaseRuntimeWallpaperObservations();
+  assert.equal((await read).length, 2);
+  assert.equal(settled, true);
+});
+
 test('renderer status mock is replaceable and reset restores installation defaults', async () => {
   const defaults = await api.rendererStatuses();
   assert.equal(defaults.awww.available, true);
@@ -540,6 +556,23 @@ test('library browser page caps oversized requests at 500 items', async () => {
 
   assert.ok(total.total > 500, 'fixture must prove the cap rather than exhaust the result set');
   assert.equal(page.items.length, 500);
+});
+
+test('mock revision control invalidates an already issued browser cursor', async () => {
+  const first = await api.libraryBrowserPage(browserQuery({ limit: 12 }));
+  assert.ok(first.nextCursor);
+
+  ctrl.advanceBrowserRevision();
+
+  await assert.rejects(
+    api.libraryBrowserPage(browserQuery({ cursor: first.nextCursor, limit: 12 })),
+    (error: unknown) => (
+      typeof error === 'object'
+      && error !== null
+      && 'kind' in error
+      && error.kind === 'revision_changed'
+    ),
+  );
 });
 
 test('library browser random returns only a matching candidate and null for no match', async () => {

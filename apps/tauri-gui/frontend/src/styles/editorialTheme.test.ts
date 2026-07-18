@@ -133,10 +133,25 @@ test('Editorial CSS has restrained progressive motion and complete accessibility
   );
   const progressive = atRuleBody(css, '@supports (animation-timeline: view())');
   const reduced = atRuleBody(css, '@media (prefers-reduced-motion: reduce)');
+  const reducedFlowMedia = ruleBody(
+    reduced,
+    ':root[data-theme="editorial"] .flow-preview-item__media',
+  );
   const forced = atRuleBody(css, '@media (forced-colors: active)');
   const medium = atRuleBody(css, '@media (max-width: 760px)');
   const compact = atRuleBody(css, '@media (max-width: 420px)');
+  const short = atRuleBody(css, '@media (max-width: 760px) and (max-height: 480px)');
   const wide = atRuleBody(css, '@media (min-width: 1100px)');
+  const shortTopbar = ruleBody(short, ':root[data-theme="editorial"] .single-page-topbar');
+  const shortBrand = ruleBody(short, ':root[data-theme="editorial"] .single-page-brand');
+  const shortScanTitle = ruleBody(
+    short,
+    ':root[data-theme="editorial"] .single-page-shell:has(.wallpaper-flow) > .scan-activity .scan-activity__title',
+  );
+  const shortScanMeta = ruleBody(
+    short,
+    ':root[data-theme="editorial"] .single-page-shell:has(.wallpaper-flow) > .scan-activity .scan-activity__meta',
+  );
 
   assert.match(focus, /outline:\s*2px solid var\(--text\)/);
   assert.match(focus, /outline-offset:\s*3px/);
@@ -151,6 +166,7 @@ test('Editorial CSS has restrained progressive motion and complete accessibility
   assert.match(reduced, /filter:\s*none/);
   assert.match(reduced, /\.settings-overlay\[data-presentation-phase="open"\]\s+\.settings-panel/);
   assert.match(reduced, /transform:\s*none\s*!important/);
+  assert.match(reducedFlowMedia, /transform:\s*none\s*!important/);
   assert.match(forced, /\bCanvas\b/);
   assert.match(forced, /\bCanvasText\b/);
   assert.match(forced, /\bButtonText\b/);
@@ -159,5 +175,69 @@ test('Editorial CSS has restrained progressive motion and complete accessibility
   assert.match(css, /data-source-action\^=["']confirm-remove["'][\s\S]*?var\(--danger\)/);
   assert.match(medium, /\.single-page-brand/);
   assert.match(compact, /\.single-page-topbar/);
+  assert.match(shortTopbar, /grid-template-rows:\s*auto/);
+  assert.match(shortBrand, /display:\s*none/);
+  assert.match(shortScanTitle, /text-overflow:\s*ellipsis/);
+  assert.match(shortScanTitle, /white-space:\s*nowrap/);
+  assert.match(shortScanMeta, /display:\s*none\s*!important/);
   assert.match(wide, /\.single-page-brand/);
+});
+
+test('Editorial Flow is a strict monochrome portfolio composition', async () => {
+  const css = await readCss();
+  const flow = ruleBody(css, ':root[data-theme="editorial"] .wallpaper-flow');
+  const rail = ruleBody(
+    css,
+    ':root[data-theme="editorial"] :is(.flow-index-rail, .flow-metadata-rail)',
+  );
+  const media = ruleBody(css, ':root[data-theme="editorial"] .flow-preview-item__media');
+  const restingMedia = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .flow-preview-item:not([data-centered]) .flow-preview-item__media img',
+  );
+  const centeredMedia = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .flow-preview-item[data-centered] .flow-preview-item__media img',
+  );
+  const metadata = ruleBody(css, ':root[data-theme="editorial"] .flow-metadata-rail');
+
+  assert.match(flow, /background:\s*var\(--bg\)/);
+  assert.match(flow, /border-top:\s*1px solid var\(--text\)/);
+  assert.match(rail, /font-family:\s*var\(--editorial-mono\)/);
+  assert.match(rail, /text-transform:\s*uppercase/);
+  assert.match(media, /border-radius:\s*0/);
+  assert.match(media, /box-shadow:\s*none/);
+  assert.match(restingMedia, /filter:\s*grayscale\(1\)/);
+  assert.match(centeredMedia, /filter:\s*grayscale\(0\)/);
+  assert.match(metadata, /animation:\s*editorial-flow-metadata-enter 180ms/);
+});
+
+test('Editorial Flow keeps native scrolling free of decorative transition work', async () => {
+  const css = await readCss();
+  const unsettled = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .flow-preview-item:not([data-settled])',
+  );
+
+  assert.match(unsettled, /transition:\s*none/);
+});
+
+test('Editorial Flow keeps state, controls, and dialogs in the same visual language', async () => {
+  const css = await readCss();
+  const switchGroup = ruleBody(css, ':root[data-theme="editorial"] .library-view-switch');
+  const pressed = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .library-view-switch__button[aria-pressed="true"]',
+  );
+  const actions = ruleBody(css, ':root[data-theme="editorial"] .flow-metadata-rail__action');
+  const dialog = ruleBody(css, ':root[data-theme="editorial"] .flow-index-dialog');
+
+  assert.match(switchGroup, /border:\s*1px solid var\(--text\)/);
+  assert.match(switchGroup, /border-radius:\s*0/);
+  assert.match(pressed, /background:\s*var\(--text\)/);
+  assert.match(pressed, /color:\s*var\(--bg\)/);
+  assert.match(actions, /border-radius:\s*0/);
+  assert.match(actions, /text-transform:\s*uppercase/);
+  assert.match(dialog, /border-radius:\s*0/);
+  assert.match(dialog, /box-shadow:\s*none/);
 });

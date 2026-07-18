@@ -1,10 +1,7 @@
-import { memo, useCallback, useState, useSyncExternalStore, type CSSProperties } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
-import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
+import { memo, useState, type CSSProperties } from 'react';
+import type { LibraryBrowserItemDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
 import { emitFeedback } from '../events/appEvents';
-import { BoundedFileSrcCache } from './fileSrcCache';
-import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { wallpaperCardMetrics, type WallpaperCardSize } from '../utils/layout';
 import {
   displayName,
@@ -12,7 +9,6 @@ import {
   editorialActionLabel,
   formatSize,
   metaLine,
-  typeIcon,
   weBadge,
   weBadgeClass,
 } from './wallpaperCardHelpers';
@@ -24,28 +20,16 @@ import {
 import type { ApplyGesture } from '../shell/shellPreferences';
 import {
   animatedPreviewPath,
-  previewAssetPath,
   shouldStartAnimatedHover,
 } from './wallpaperGridHelpers';
-
-const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
-  }
-});
-
-export function safeFileSrc(path: string): string {
-  return fileSrcCache.get(path);
-}
+import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 
 interface CardProps {
   entry: LibraryBrowserItemDTO;
   ordinal?: string;
   applying: boolean;
-  onApply: (path: string) => void;
-  onSelect?: (entry: WallpaperDTO) => void;
+  onApply: (entry: LibraryBrowserItemDTO) => void;
+  onSelect?: (entry: LibraryBrowserItemDTO) => void;
   onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   onContextMenu: (e: React.MouseEvent, path: string) => void;
   onKeyboardContextMenu?: (path: string, x: number, y: number) => void;
@@ -79,29 +63,7 @@ function WallpaperCardImpl({
   applyAvailable,
   isScrolling = neverScrolling,
 }: CardProps) {
-  const store = useThumbnailStore();
   const [hovered, setHovered] = useState(false);
-  const thumbnailPath = previewAssetPath(entry);
-  const subscribeThumbnail = useCallback(
-    (callback: () => void) => store.subscribe(thumbnailPath, callback),
-    [store, thumbnailPath],
-  );
-  const getThumbnail = useCallback(
-    () => store.get(thumbnailPath),
-    [store, thumbnailPath],
-  );
-  const getThumbnailFailure = useCallback(
-    () => store.getFailure(thumbnailPath),
-    [store, thumbnailPath],
-  );
-  const thumbnail = useSyncExternalStore(
-    subscribeThumbnail,
-    getThumbnail,
-  );
-  const thumbnailFailure = useSyncExternalStore(
-    subscribeThumbnail,
-    getThumbnailFailure,
-  );
   const reducedMotion = typeof window !== 'undefined'
     && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
   const animatedPreview = animatedPreviewPath(
@@ -127,7 +89,7 @@ function WallpaperCardImpl({
       fromControl,
     });
     if (interaction.select) onSelect?.(entry);
-    if (interaction.apply) onApply(entry.path);
+    if (interaction.apply) onApply(entry);
 
     const attemptedUnsupportedApply = !canApply
       && interaction.select
@@ -174,7 +136,7 @@ function WallpaperCardImpl({
       return;
     }
     if (interaction.select) onSelect?.(entry);
-    if (interaction.apply) onApply(entry.path);
+    if (interaction.apply) onApply(entry);
     else if (interaction.select && !canApply) reportUnsupportedApply();
   };
 
@@ -193,6 +155,7 @@ function WallpaperCardImpl({
       data-pending={pending || undefined}
       data-editorial-action={editorialActionLabel(canApply, applyGesture)}
       data-wallpaper-index={ordinal}
+      data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
       role="listitem"
     >
@@ -207,19 +170,10 @@ function WallpaperCardImpl({
         type="button"
       >
         <div className="wallpaper-thumb">
-          {animatedPreview || thumbnail ? (
-            <img
-              src={safeFileSrc(animatedPreview ?? thumbnail ?? '')}
-              alt=""
-              loading="lazy"
-              decoding="async"
-            />
-          ) : (
-            <div className="wallpaper-thumb-placeholder" title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}>
-              <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
-              {thumbnailFailure ? <span className="wallpaper-thumb-error">Preview failed</span> : null}
-            </div>
-          )}
+          <WallpaperPreviewMedia
+            entry={entry}
+            transientImagePath={animatedPreview}
+          />
           {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
         </div>
         <div className="wallpaper-info">

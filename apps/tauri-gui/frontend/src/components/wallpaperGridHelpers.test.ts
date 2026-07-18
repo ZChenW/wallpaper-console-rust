@@ -11,6 +11,7 @@ import {
   shouldRequestNextPage,
   restoreStableViewportAnchor,
   visibleThumbnailPaths,
+  wallpaperIdNearestGridViewportCenter,
   wallpaperOrdinal,
   wallpaperApplyFlags,
 } from './wallpaperGridHelpers.ts';
@@ -176,4 +177,30 @@ test('stable wallpaper ID restores the viewport across revision replacement', ()
   const after = [9, 5, 6, 7].map((wallpaperId) => ({ wallpaperId }));
   assert.equal(restoreStableViewportAnchor(after, anchor, 2, 100), 25);
   assert.equal(restoreStableViewportAnchor([{ wallpaperId: 9 }], anchor, 2, 100), null);
+});
+
+test('mode-switch anchor uses the wallpaper nearest the Grid viewport center', () => {
+  const entries = Array.from({ length: 12 }, (_, index) => ({ wallpaperId: index + 1 }));
+
+  assert.equal(wallpaperIdNearestGridViewportCenter({
+    entries,
+    columns: 4,
+    rowHeight: 100,
+    scrollTop: 150,
+    viewportHeight: 200,
+  }), 10);
+  assert.equal(wallpaperIdNearestGridViewportCenter({
+    entries: entries.slice(0, 10),
+    columns: 4,
+    rowHeight: 100,
+    scrollTop: 250,
+    viewportHeight: 200,
+  }), 10);
+  assert.equal(wallpaperIdNearestGridViewportCenter({
+    entries: [],
+    columns: 4,
+    rowHeight: 100,
+    scrollTop: 0,
+    viewportHeight: 200,
+  }), null);
 });

@@ -1,6 +1,6 @@
 import { useEffect, useRef, type KeyboardEvent } from 'react';
-import type { ContextAction } from './WallpaperGrid';
 import { emitFeedback } from '../events/appEvents';
+import type { ContextAction } from './libraryViewModel.ts';
 
 interface Props {
   x: number;

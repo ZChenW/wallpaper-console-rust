@@ -25,6 +25,39 @@ export interface StableViewportAnchor {
   readonly rowOffset: number;
 }
 
+export function wallpaperIdNearestGridViewportCenter<
+  T extends { readonly wallpaperId: number },
+>({
+  entries,
+  columns,
+  rowHeight,
+  scrollTop,
+  viewportHeight,
+}: {
+  readonly entries: readonly T[];
+  readonly columns: number;
+  readonly rowHeight: number;
+  readonly scrollTop: number;
+  readonly viewportHeight: number;
+}): number | null {
+  if (entries.length === 0) return null;
+  const safeColumns = Math.max(1, Math.trunc(columns));
+  const safeRowHeight = Number.isFinite(rowHeight) ? Math.max(1, rowHeight) : 1;
+  const safeScrollTop = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  const safeViewportHeight = Number.isFinite(viewportHeight)
+    ? Math.max(0, viewportHeight)
+    : 0;
+  const centerRow = Math.floor(
+    (safeScrollTop + safeViewportHeight / 2) / safeRowHeight,
+  );
+  const centerColumn = Math.floor((safeColumns - 1) / 2);
+  const index = Math.min(
+    entries.length - 1,
+    centerRow * safeColumns + centerColumn,
+  );
+  return entries[Math.max(0, index)]?.wallpaperId ?? null;
+}
+
 export function captureStableViewportAnchor<T extends { readonly wallpaperId: number }>(
   entries: readonly T[],
   columns: number,
@@ -122,7 +155,7 @@ export function anchoredScrollTopForLayoutChange({
 }
 
 export function visibleThumbnailPaths(
-  entries: WallpaperDTO[],
+  entries: readonly WallpaperDTO[],
   colCount: number,
   range: GridRange | null | undefined,
   fallbackRows: number,

@@ -119,6 +119,7 @@ test('save writes only allow-listed preferences to the fixed key', async () => {
     'cardSize',
     'displayTarget',
     'favoritesOnly',
+    'libraryViewMode',
     'sort',
     'sourceFilter',
     'theme',

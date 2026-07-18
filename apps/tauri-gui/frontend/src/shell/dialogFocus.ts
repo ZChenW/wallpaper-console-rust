@@ -24,7 +24,8 @@ export function wrappedDialogFocusIndex(
 }
 
 function isActuallyFocusable(element: HTMLElement): boolean {
-  return !element.hidden
+  return element.tabIndex >= 0
+    && !element.hidden
     && element.getAttribute('aria-hidden') !== 'true'
     && !element.closest('[inert]')
     && element.getClientRects().length > 0;

@@ -98,6 +98,13 @@ export function isCurrentQueryEmpty(
   return emptyConfirmed && resolvedCriteriaKey === currentCriteriaKey;
 }
 
+export function isLibraryCriteriaPending(
+  resolvedCriteriaKey: string | null,
+  currentCriteriaKey: string,
+): boolean {
+  return resolvedCriteriaKey !== currentCriteriaKey;
+}
+
 export function isRandomRequestCurrent(
   requestId: number,
   currentRequestId: number,
@@ -258,6 +265,10 @@ export function useLibraryBrowser({
     ),
     emptyConfirmed: isCurrentQueryEmpty(
       pages.emptyConfirmed,
+      resolvedCriteriaKey,
+      criteriaKey,
+    ),
+    criteriaReplacementPending: isLibraryCriteriaPending(
       resolvedCriteriaKey,
       criteriaKey,
     ),

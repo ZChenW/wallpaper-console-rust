@@ -1,4 +1,16 @@
+import { Buffer } from 'node:buffer';
+
 import { expect, test, type Page } from '@playwright/test';
+
+// Generated one-frame media fixtures keep decoder lifecycle coverage self-contained.
+const TINY_WEBM = Buffer.from(
+  'GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAHpEU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggElTbuMU6uEHFO7a1OsggHT7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZmNjIuMTIuMTAyV0GNTGF2ZjYyLjEyLjEwMkSJiEBEAAAAAAAAFlSua8iuAQAAAAAAAD/XgQFzxYiPzLk7nm2B6ZyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhAJiWgDgkLCBELqBEJqBAlWwhFW5gQESVMNn/HNzoGPAgGfImkWjh0VOQ09ERVJEh41MYXZmNjIuMTIuMTAyc3PWY8CLY8WIj8y5O55tgelnyKFFo4dFTkNPREVSRIeUTGF2YzYyLjI4LjEwMiBsaWJ2cHhnyKFFo4hEVVJBVElPTkSHkzAwOjAwOjAwLjA0MDAwMDAwMAAfQ7Z1qOeBAKOjgQAAgBACAJ0BKhAAEAAARwiFhYiFhIgCAgAMDWAA/v+rUIAcU7trkbuPs4EAt4r3gQHxggGm8IED',
+  'base64',
+);
+const TINY_GIF = Buffer.from(
+  'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
+  'base64',
+);
 
 type TargetedApplyRequest = {
   requestId: string;
@@ -10,9 +22,13 @@ type MockControl = {
   injectCommandFailure(command: string): void;
   clearCommandFailure(command: string): void;
   setBrowserFixtureCopies(copies: number): void;
+  advanceBrowserRevision(): void;
+  delayNextBrowserPage(delayMs: number): void;
+  setBrowserPageDelay(delayMs: number): void;
   rejectNextBrowserAppend(message?: string): void;
   emptyNextBrowserAppend(): void;
   browserAppendRequestCount(): number;
+  browserPageRequestCount(): number;
   setScanProgress(progress: Record<string, unknown>): void;
   setSourceAvailability(id: number, availability: 'unknown' | 'available' | 'offline'): void;
   holdSourceRefresh(): void;
@@ -28,6 +44,8 @@ type MockControl = {
     status: 'confirmed' | 'unknown';
     reason?: string;
   }>): void;
+  holdRuntimeWallpaperObservations(): void;
+  releaseRuntimeWallpaperObservations(): void;
   setThumbnailFailure(path: string): void;
   lastTargetedApplyRequest(): TargetedApplyRequest | null;
 };
@@ -60,6 +78,14 @@ async function waitForGrid(page: Page): Promise<void> {
   await expect(page.locator('.wallpaper-card').first()).toBeVisible();
 }
 
+async function waitForFlow(page: Page): Promise<void> {
+  await expect(page.locator('.wallpaper-flow')).toBeVisible();
+  await expect(page.getByRole('listbox', { name: 'Wallpaper Flow' })).toBeVisible();
+  await expect(page.locator('.flow-preview-item').first()).toBeVisible();
+  await expect(page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]'))
+    .toBeVisible();
+}
+
 async function lastApplyRequest(page: Page): Promise<TargetedApplyRequest | null> {
   return page.evaluate(() => {
     const control = window.__mockControl;
@@ -76,6 +102,14 @@ async function browserAppendRequestCount(page: Page): Promise<number> {
   });
 }
 
+async function browserPageRequestCount(page: Page): Promise<number> {
+  return page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    return control.browserPageRequestCount();
+  });
+}
+
 async function sourceRefreshCallCount(page: Page): Promise<number> {
   return page.evaluate(() => {
     const control = window.__mockControl;
@@ -89,6 +123,25 @@ async function scrollLibraryGrid(page: Page, edge: 'start' | 'end'): Promise<voi
     element.scrollTop = requestedEdge === 'end' ? element.scrollHeight : 0;
     element.dispatchEvent(new Event('scroll'));
   }, edge);
+}
+
+async function gridVisualCenterWallpaperId(page: Page): Promise<string | null> {
+  return page.locator('.wallpaper-grid').evaluate((element) => {
+    const gridBounds = element.getBoundingClientRect();
+    const viewportCenter = gridBounds.top + gridBounds.height / 2;
+    const cards = [...element.querySelectorAll<HTMLElement>('.wallpaper-card')]
+      .map((card) => ({ card, bounds: card.getBoundingClientRect() }));
+    const closest = cards.reduce((winner, candidate) => (
+      Math.abs(candidate.bounds.top + candidate.bounds.height / 2 - viewportCenter)
+        < Math.abs(winner.bounds.top + winner.bounds.height / 2 - viewportCenter)
+        ? candidate
+        : winner
+    ));
+    const row = cards
+      .filter(({ bounds }) => Math.abs(bounds.top - closest.bounds.top) < 1)
+      .sort((left, right) => left.bounds.left - right.bounds.left);
+    return row[Math.floor((row.length - 1) / 2)]?.card.dataset.wallpaperId ?? null;
+  });
 }
 
 async function openSettings(page: Page): Promise<void> {
@@ -171,6 +224,946 @@ test('renders one unified wallpaper picker without legacy navigation', async ({ 
   await expect(page.getByRole('button', { name: 'History', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Favorites', exact: true })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Sources', exact: true })).toHaveCount(0);
+});
+
+test('Grid is the first-use default and Flow persists while only one adapter stays mounted', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  const viewGroup = page.getByRole('group', { name: 'Library view' });
+  const grid = viewGroup.getByRole('button', { name: 'Grid' });
+  const flow = viewGroup.getByRole('button', { name: 'Flow' });
+  await expect(grid).toHaveAttribute('aria-pressed', 'true');
+  await expect(flow).toHaveAttribute('aria-pressed', 'false');
+
+  await flow.click();
+  await waitForFlow(page);
+  await expect(page.locator('.wallpaper-grid')).toHaveCount(0);
+  await expect(flow).toHaveAttribute('aria-pressed', 'true');
+
+  await page.reload();
+  await expect(page.locator('.single-page-shell')).toBeVisible();
+  await waitForFlow(page);
+  await expect(page.locator('.wallpaper-grid')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: 'Flow' })).toHaveAttribute('aria-pressed', 'true');
+});
+
+test('Flow completes its direct-start anchor when runtime Current arrives after Library', async ({ page }) => {
+  await page.addInitScript(() => {
+    window.sessionStorage.setItem('wallpaper-console.mock.hold-runtime-observations', 'true');
+  });
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  await expect.poll(() => page.evaluate(() => (
+    window.sessionStorage.getItem('wallpaper-console.mock.config') ?? ''
+  ))).toContain('libraryViewMode');
+  await page.reload();
+  await expect(page.locator('.single-page-shell')).toBeVisible();
+  await waitForFlow(page);
+
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-index', '0');
+  await page.evaluate(() => window.__mockControl?.releaseRuntimeWallpaperObservations());
+
+  await expect(page.locator('.single-page-statusbar__current'))
+    .toHaveText('Current: wallpaper-001.jpg');
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-wallpaper-path', '/mock/path/wallpaper-001.jpg');
+});
+
+test('Flow keeps the centered local-index name on the preview anchor near a boundary', async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const centerDifference = await page.evaluate(() => {
+    const railItem = document.querySelector<HTMLElement>('.flow-index-rail__item[data-centered]');
+    const stream = document.querySelector<HTMLElement>('.flow-preview-stream');
+    if (!railItem || !stream) throw new Error('Flow alignment targets are unavailable');
+    const itemBounds = railItem.getBoundingClientRect();
+    const streamBounds = stream.getBoundingClientRect();
+    return Math.abs(
+      itemBounds.top + itemBounds.height / 2
+      - (streamBounds.top + streamBounds.height / 2),
+    );
+  });
+  expect(centerDifference).toBeLessThanOrEqual(2);
+});
+
+test('Flow waits for a delayed query replacement before resetting to the first result', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const centered = page.locator('.flow-preview-item[data-centered="true"]');
+  const oldAnchorPath = await centered.getAttribute('data-wallpaper-path');
+  expect(oldAnchorPath).not.toBeNull();
+  await page.evaluate(() => window.__mockControl?.delayNextBrowserPage(600));
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
+  await page.waitForTimeout(150);
+  await expect(centered).toHaveAttribute('data-wallpaper-path', oldAnchorPath!);
+
+  await expect(centered).toHaveAttribute('data-index', '0');
+  const newFirstPath = await centered.getAttribute('data-wallpaper-path');
+  expect(newFirstPath).not.toBe(oldAnchorPath);
+});
+
+test('Flow mounted during a delayed Grid query still resets to the new first result', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  const oldAnchorId = await gridVisualCenterWallpaperId(page);
+  expect(oldAnchorId).not.toBeNull();
+  const oldAnchorPath = await page.locator(
+    `.wallpaper-card[data-wallpaper-id="${oldAnchorId!}"]`,
+  )
+    .getAttribute('data-wallpaper-path');
+  expect(oldAnchorPath).not.toBeNull();
+  await page.evaluate(() => window.__mockControl?.delayNextBrowserPage(3_000));
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
+  await page.waitForTimeout(150);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  const centered = page.locator('.flow-preview-item[data-centered="true"]');
+  await expect(centered).toHaveAttribute('data-wallpaper-path', oldAnchorPath!);
+
+  await expect(centered).toHaveAttribute('data-index', '0');
+  const newFirstPath = await centered.getAttribute('data-wallpaper-path');
+  expect(newFirstPath).not.toBe(oldAnchorPath);
+});
+
+test('Flow scrolling only browses while explicit click and Apply own selection and runtime action', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  const hoverTarget = page.locator('.flow-preview-item[data-centered="true"]');
+  const hoverTargetId = await hoverTarget.getAttribute('data-wallpaper-id');
+  expect(hoverTargetId).not.toBeNull();
+  await hoverTarget.hover();
+  await expect(hoverTarget).toHaveAttribute('data-hovered', 'true');
+  await expect(page.locator(
+    `.flow-index-rail__item[data-hovered] [data-wallpaper-id="${hoverTargetId!}"]`,
+  )).toBeAttached();
+  await expect(page.locator('.flow-metadata-rail')).toHaveAttribute('data-hovered', 'true');
+  await page.mouse.move(0, 0);
+
+  const initialActive = await stream.getAttribute('aria-activedescendant');
+  await stream.evaluate((element) => {
+    element.dispatchEvent(new WheelEvent('wheel', { bubbles: true, deltaY: 640 }));
+    element.scrollTop = Math.min(element.scrollHeight, element.clientHeight * 1.4);
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(() => stream.getAttribute('aria-activedescendant')).not.toBe(initialActive);
+  await expect(page.locator('.single-page-statusbar__selection')).toHaveText(
+    'Select a wallpaper to see its details.',
+  );
+  expect(await lastApplyRequest(page)).toBeNull();
+
+  const centered = page.locator('.flow-preview-item[data-centered="true"]');
+  await centered.click();
+  await expect(centered).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.single-page-statusbar__selection')).toContainText('Selected:');
+  expect(await lastApplyRequest(page)).toBeNull();
+
+  const appliedPath = await centered.getAttribute('data-wallpaper-path');
+  await page.getByRole('button', { name: 'Apply centered wallpaper' }).click();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: appliedPath });
+});
+
+test('Flow owns one enhanced preview and releases video decoders when browsing resumes', async ({ page }) => {
+  await page.addInitScript(() => {
+    const audit = { loadCalls: 0, pauseCalls: 0 };
+    (window as unknown as { __mediaLifecycleAudit?: typeof audit }).__mediaLifecycleAudit = audit;
+    const originalLoad = HTMLMediaElement.prototype.load;
+    const originalPause = HTMLMediaElement.prototype.pause;
+    HTMLMediaElement.prototype.load = function load() {
+      audit.loadCalls += 1;
+      return originalLoad.call(this);
+    };
+    HTMLMediaElement.prototype.pause = function pause() {
+      audit.pauseCalls += 1;
+      return originalPause.call(this);
+    };
+  });
+  await page.route('**/mock/path/wallpaper-000.mp4', (route) => route.fulfill({
+    body: TINY_WEBM,
+    contentType: 'video/webm',
+  }));
+  await page.route('**/mock/path/wallpaper-003.gif', (route) => route.fulfill({
+    body: TINY_GIF,
+    contentType: 'image/gif',
+  }));
+
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  await stream.press('Home');
+  await expect(page.locator('.flow-preview-item[data-index="0"]'))
+    .toHaveAttribute('data-settled', 'true');
+  const enhanced = page.locator('[data-enhanced-preview]');
+  const initialScene = page.locator('.flow-preview-item[data-centered="true"]');
+  await initialScene.click();
+  await expect(initialScene).toHaveAttribute('aria-selected', 'true');
+  await expect(enhanced).toHaveCount(0);
+
+  await chooseSelect(page, 'Wallpaper type filter', 'Videos');
+  const videoItem = page.locator('.flow-preview-item[data-centered="true"]');
+  await expect(videoItem).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-000.mp4',
+  );
+  await expect(videoItem).toBeAttached();
+  await videoItem.click();
+  await expect(videoItem).toHaveAttribute('data-centered', 'true');
+  await expect(videoItem).toHaveAttribute('data-settled', 'true');
+  await expect(videoItem).toHaveAttribute('aria-selected', 'true');
+  await expect(videoItem.locator('video[data-enhanced-preview="video"]')).toHaveCount(1);
+  await expect(enhanced).toHaveCount(1);
+
+  const decoderReleasesBeforeBlur = await page.evaluate(() => {
+    const audit = (window as unknown as {
+      __mediaLifecycleAudit?: { loadCalls: number; pauseCalls: number };
+    }).__mediaLifecycleAudit;
+    return Math.min(audit?.loadCalls ?? 0, audit?.pauseCalls ?? 0);
+  });
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')));
+  expect(await page.evaluate(() => document.visibilityState)).toBe('visible');
+  await expect(videoItem.locator('video[data-enhanced-preview="video"]')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const audit = (window as unknown as {
+      __mediaLifecycleAudit?: { loadCalls: number; pauseCalls: number };
+    }).__mediaLifecycleAudit;
+    return Math.min(audit?.loadCalls ?? 0, audit?.pauseCalls ?? 0);
+  })).toBeGreaterThan(decoderReleasesBeforeBlur);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await expect(videoItem.locator('video[data-enhanced-preview="video"]')).toHaveCount(1);
+
+  await stream.focus();
+  await stream.press('ArrowDown');
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-settled', 'true');
+  await expect(page.locator('video[data-enhanced-preview="video"]')).toHaveCount(0);
+  await expect.poll(() => page.evaluate(() => {
+    const audit = (window as unknown as {
+      __mediaLifecycleAudit?: { loadCalls: number; pauseCalls: number };
+    }).__mediaLifecycleAudit;
+    return Math.min(audit?.loadCalls ?? 0, audit?.pauseCalls ?? 0);
+  })).toBeGreaterThanOrEqual(1);
+
+  await chooseSelect(page, 'Wallpaper type filter', 'GIFs');
+  const gifItem = page.locator('.flow-preview-item[data-centered="true"]');
+  await expect(gifItem).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-003.gif',
+  );
+  await expect(gifItem).toBeAttached();
+  await gifItem.click();
+  await expect(gifItem).toHaveAttribute('data-centered', 'true');
+  await expect(gifItem).toHaveAttribute('data-settled', 'true');
+  await expect(gifItem.locator('img[data-enhanced-preview="image"]')).toHaveCount(1);
+  await expect(enhanced).toHaveCount(1);
+
+  await stream.focus();
+  await stream.press('ArrowDown');
+  await expect(enhanced).toHaveCount(0);
+});
+
+test('Flow composite keyboard navigation, index activation, and context menu stay scoped', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  const first = await stream.getAttribute('aria-activedescendant');
+  await stream.press('ArrowDown');
+  await expect.poll(() => stream.getAttribute('aria-activedescendant')).not.toBe(first);
+  await stream.press('Enter');
+  const activeId = await stream.getAttribute('aria-activedescendant');
+  await expect(page.locator(`#${activeId}`)).toHaveAttribute('aria-selected', 'true');
+
+  const selectedPath = await page.locator(`#${activeId}`).getAttribute('data-wallpaper-path');
+  await stream.press('Control+Enter');
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: selectedPath });
+
+  await stream.press('Shift+F10');
+  await expect(page.getByRole('menu', { name: 'Wallpaper actions' })).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(stream).toBeFocused();
+
+  await page.getByRole('navigation', { name: 'Loaded wallpaper index' })
+    .getByRole('button', { name: /^Index/ })
+    .click();
+  const indexDialog = page.getByRole('dialog', { name: 'Loaded wallpapers' });
+  await expect(indexDialog).toBeVisible();
+  await indexDialog.locator('[data-flow-index="2"]').click();
+  await expect(indexDialog).toHaveCount(0);
+  await expect(page.locator('.flow-preview-item[data-index="2"]'))
+    .toHaveAttribute('aria-selected', 'true');
+  expect((await lastApplyRequest(page))?.path).toBe(selectedPath);
+});
+
+test('Flow far navigation keeps its active descendant mounted and settles promptly', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  await page.evaluate(() => {
+    const flow = document.querySelector<HTMLElement>('.flow-preview-stream');
+    if (!flow) throw new Error('Flow stream is unavailable');
+    const violations: string[] = [];
+    const inspect = () => {
+      const activeId = flow.getAttribute('aria-activedescendant');
+      if (activeId && document.getElementById(activeId) === null) {
+        violations.push(activeId);
+      }
+    };
+    const observer = new MutationObserver(inspect);
+    observer.observe(flow, {
+      attributeFilter: ['aria-activedescendant'],
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    inspect();
+    const audit = { violations, observer };
+    (window as unknown as { __flowActiveAudit?: typeof audit }).__flowActiveAudit = audit;
+  });
+
+  const startedAt = Date.now();
+  await stream.press('End');
+  await expect(page.locator('.flow-preview-item[data-index="119"]'))
+    .toHaveAttribute('data-centered', 'true', { timeout: 1_000 });
+  await expect(page.locator('.flow-preview-item[data-index="119"]'))
+    .toHaveAttribute('data-settled', 'true', { timeout: 1_000 });
+  expect(Date.now() - startedAt).toBeLessThan(800);
+  const violations = await page.evaluate(() => {
+    const owner = window as unknown as {
+      __flowActiveAudit?: { violations: string[]; observer: MutationObserver };
+    };
+    const audit = owner.__flowActiveAudit;
+    if (!audit) return ['audit missing'];
+    audit.observer.disconnect();
+    delete owner.__flowActiveAudit;
+    return audit.violations;
+  });
+  expect(violations).toEqual([]);
+});
+
+test('Flow keeps metadata action focus while native scrolling changes the centered item', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  const favorite = page.locator('.flow-metadata-rail__actions')
+    .getByRole('button', { name: /^Favorite/ });
+  const initialPath = await page.locator('.flow-preview-item[data-centered="true"]')
+    .getAttribute('data-wallpaper-path');
+  expect(initialPath).toBeTruthy();
+
+  await favorite.focus();
+  await expect(favorite).toBeFocused();
+  await stream.evaluate((element) => {
+    element.scrollTop = Math.min(
+      element.scrollHeight - element.clientHeight,
+      element.scrollTop + element.clientHeight * 1.5,
+    );
+    element.dispatchEvent(new Event('scroll'));
+  });
+
+  await expect.poll(async () => (
+    page.locator('.flow-preview-item[data-centered="true"]')
+      .getAttribute('data-wallpaper-path')
+  )).not.toBe(initialPath);
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-settled', 'true');
+  await expect(favorite).toBeFocused();
+});
+
+test('Flow keeps keyboard focus on Favorite while its update is pending', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const favorite = page.locator('.flow-metadata-rail__actions')
+    .getByRole('button', { name: /^Favorite/ });
+  const initialPressed = await favorite.getAttribute('aria-pressed');
+  await favorite.focus();
+  await favorite.press('Enter');
+
+  await expect(favorite).toBeFocused();
+  await expect.poll(() => favorite.getAttribute('aria-pressed')).not.toBe(initialPressed);
+  await expect(favorite).toBeFocused();
+});
+
+test('Flow preserves loaded results across append failure and exposes its finite end and return', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.rejectNextBrowserAppend('mock Flow append failure');
+  });
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  await stream.press('End');
+
+  const retry = page.getByRole('button', { name: 'Retry loading more' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('mock Flow append failure');
+  await expect(page.locator('.single-page-count')).toHaveText('120 / 152');
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(1);
+
+  await stream.press('End');
+  await page.waitForTimeout(350);
+  expect(await browserAppendRequestCount(page)).toBe(1);
+
+  await retry.click();
+  await expect(page.locator('.single-page-count')).toHaveText('152 / 152');
+  await expect(page.getByText('All 152 wallpapers viewed')).toBeVisible();
+  await expect.poll(() => browserAppendRequestCount(page)).toBe(2);
+
+  await stream.focus();
+  await stream.press('End');
+  const last = page.locator('.flow-preview-item[data-index="151"]');
+  await expect(last).toHaveAttribute('data-centered', 'true');
+  await expect(last).toHaveAttribute('data-settled', 'true');
+
+  const returnToTop = page.getByRole('button', { name: 'Return to first wallpaper' });
+  await expect(returnToTop).toBeVisible();
+  await returnToTop.click();
+  await expect(page.locator('.flow-preview-item[data-index="0"]'))
+    .toHaveAttribute('data-centered', 'true');
+  await expect(stream).toBeFocused();
+});
+
+test('Flow recovers an invalidated paging revision through an atomic page-one replacement', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const initialPageRequests = await browserPageRequestCount(page);
+  await page.evaluate(() => {
+    window.__mockControl?.setBrowserPageDelay(120);
+    window.__mockControl?.advanceBrowserRevision();
+  });
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  await stream.press('End');
+
+  await expect.poll(() => browserPageRequestCount(page)).toBeGreaterThanOrEqual(
+    initialPageRequests + 2,
+  );
+  await expect(page.getByRole('button', { name: 'Retry loading more' })).toHaveCount(0);
+  await expect(page.locator('.flow-preview-item[data-index="119"]'))
+    .toHaveAttribute('data-centered', 'true');
+  await expect(page.locator('.flow-preview-item[data-index="119"]'))
+    .toHaveAttribute('data-settled', 'true');
+  await expect(page.locator('.single-page-count')).toContainText('/ 152');
+  await expect(page.locator('.single-page-stale-results')).toHaveCount(0);
+
+  await expect.poll(() => browserPageRequestCount(page), { timeout: 2_000 }).toBeLessThanOrEqual(
+    initialPageRequests + 4,
+  );
+  const settledPageRequests = await browserPageRequestCount(page);
+  await page.waitForTimeout(500);
+  expect(await browserPageRequestCount(page)).toBe(settledPageRequests);
+});
+
+test('Grid and Flow round trips preserve filters, the selected anchor, and incoming focus', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+
+  await chooseSelect(page, 'Source filter', 'Pictures');
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await chooseSelect(page, 'Library sort', 'Name Z–A');
+  await page.getByLabel('Search wallpapers').fill('wallpaper-00');
+
+  const sourceFilter = page.getByLabel('Source filter');
+  const typeFilter = page.getByLabel('Wallpaper type filter');
+  const sort = page.getByLabel('Library sort');
+  const search = page.getByLabel('Search wallpapers');
+  await expect.poll(async () => page.locator('.wallpaper-card').evaluateAll((cards) => (
+    cards.length > 1 && cards.every((card) => {
+      const path = card.getAttribute('data-wallpaper-path') ?? '';
+      const title = card.querySelector('.wallpaper-card__primary')?.getAttribute('title') ?? '';
+      return /wallpaper-00\d\.jpg$/.test(path) && title.endsWith('· Pictures');
+    })
+  ))).toBe(true);
+
+  const selectedCard = page.locator('.wallpaper-card').nth(1);
+  const selectedPath = await selectedCard.getAttribute('data-wallpaper-path');
+  expect(selectedPath).toBeTruthy();
+  await selectedCard.locator('.wallpaper-card__primary').click();
+  await expect(selectedCard).toHaveClass(/selected/);
+
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  const flowAnchor = page.locator(
+    `.flow-preview-item[data-wallpaper-path="${selectedPath!}"]`,
+  );
+  await expect(stream).toBeFocused();
+  await expect(flowAnchor).toHaveAttribute('data-centered', 'true');
+  await expect(flowAnchor).toHaveAttribute('aria-selected', 'true');
+  await expect(sourceFilter).toHaveAttribute('data-value', 'source:1');
+  await expect(typeFilter).toHaveAttribute('data-value', 'image');
+  await expect(sort).toHaveAttribute('data-value', 'nameDesc');
+  await expect(search).toHaveValue('wallpaper-00');
+
+  await page.getByRole('button', { name: 'Grid' }).click();
+  await waitForGrid(page);
+  const restoredCard = page.locator(
+    `.wallpaper-card[data-wallpaper-path="${selectedPath!}"]`,
+  );
+  await expect(restoredCard).toHaveClass(/selected/);
+  await expect(restoredCard.locator('.wallpaper-card__primary')).toBeFocused();
+  await expect(sourceFilter).toHaveAttribute('data-value', 'source:1');
+  await expect(typeFilter).toHaveAttribute('data-value', 'image');
+  await expect(sort).toHaveAttribute('data-value', 'nameDesc');
+  await expect(search).toHaveValue('wallpaper-00');
+});
+
+test('Grid hands its visual center to Flow when no wallpaper is selected', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await expect(page.locator('.wallpaper-card.selected')).toHaveCount(0);
+
+  const grid = page.locator('.wallpaper-grid');
+  await grid.evaluate((element) => {
+    element.scrollTop = Math.min(
+      element.scrollHeight - element.clientHeight,
+      element.clientHeight * 1.4,
+    );
+    element.dispatchEvent(new Event('scroll'));
+  });
+  await expect.poll(() => grid.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
+
+  const centeredGridWallpaperId = await gridVisualCenterWallpaperId(page);
+  expect(centeredGridWallpaperId).not.toBeNull();
+
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-wallpaper-id', centeredGridWallpaperId!);
+});
+
+test('Grid publishes its initial visual center before the first switch to Flow', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await expect(page.locator('.wallpaper-card.selected')).toHaveCount(0);
+
+  const centeredGridWallpaperId = await gridVisualCenterWallpaperId(page);
+  expect(centeredGridWallpaperId).not.toBeNull();
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-wallpaper-id', centeredGridWallpaperId!);
+});
+
+test('Flow settles after a mouse drag is released outside the stream', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  const bounds = await stream.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move(bounds!.x + bounds!.width / 2, bounds!.y + bounds!.height / 2);
+  await page.mouse.down();
+  await expect(page.locator('.wallpaper-flow')).toHaveAttribute('data-scrolling', 'true');
+  await page.mouse.move(8, 8);
+  await page.mouse.up();
+
+  await expect(page.locator('.wallpaper-flow')).not.toHaveAttribute('data-scrolling', 'true');
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-settled', 'true');
+});
+
+test.describe('Flow short-window touch layout', () => {
+  test.use({ hasTouch: true, viewport: { width: 800, height: 400 } });
+
+test('Flow keeps every metadata action fully reachable in short windows', async ({ page }) => {
+  const viewports = [
+    { width: 1440, height: 400 },
+    { width: 1024, height: 400 },
+    { width: 800, height: 400 },
+    { width: 780, height: 400 },
+    { width: 760, height: 400 },
+    { width: 600, height: 400 },
+    { width: 480, height: 400 },
+    { width: 390, height: 400 },
+    { width: 390, height: 320 },
+  ];
+  await page.setViewportSize(viewports[0]);
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  for (const viewport of viewports) {
+    await page.setViewportSize(viewport);
+    const rail = page.locator('.flow-metadata-rail');
+    const railBounds = await rail.boundingBox();
+    expect(railBounds).not.toBeNull();
+    for (const action of [
+      rail.getByRole('button', { name: 'Apply centered wallpaper' }),
+      rail.getByRole('button', { name: /^Favorite/ }),
+      rail.getByRole('button', { name: 'Details', exact: true }),
+    ]) {
+      await expect(action).toBeVisible();
+      const bounds = await action.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.height).toBeGreaterThanOrEqual(44);
+      expect(bounds!.y).toBeGreaterThanOrEqual(railBounds!.y - 1);
+      expect(bounds!.y + bounds!.height)
+        .toBeLessThanOrEqual(railBounds!.y + railBounds!.height + 1);
+      expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height + 1);
+    }
+    await expect.poll(async () => (
+      (await page.getByRole('listbox', { name: 'Wallpaper Flow' }).boundingBox())?.height ?? 0
+    )).toBeGreaterThanOrEqual(96);
+  }
+});
+});
+
+test('Flow double click applies while Details and pointer context preserve selection and focus', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await expect(page.locator('.single-page-statusbar__selection')).toHaveText(
+    'Select a wallpaper to see its details.',
+  );
+  await stream.focus();
+  await stream.press('Shift+F10');
+  const informationMenu = page.getByRole('menu', { name: 'Wallpaper actions' });
+  await expect(informationMenu).toBeVisible();
+  await informationMenu.getByRole('menuitem', { name: 'Information' }).click();
+  const informationDetails = page.locator('.wallpaper-details');
+  await expect(informationDetails).toBeVisible();
+  await expect(page.locator('.single-page-statusbar__selection')).toHaveText(
+    'Select a wallpaper to see its details.',
+  );
+  await informationDetails.getByRole('button', { name: 'Close wallpaper details' }).click();
+  await expect(informationDetails).toHaveCount(0);
+  await expect(stream).toBeFocused();
+
+  const centered = page.locator('.flow-preview-item[data-centered="true"]');
+  const appliedPath = await centered.getAttribute('data-wallpaper-path');
+  expect(appliedPath).toBeTruthy();
+  await centered.dblclick();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: appliedPath! });
+  await expect(page.locator(
+    `.flow-preview-item[data-wallpaper-path="${appliedPath!}"]`,
+  )).toHaveAttribute('aria-selected', 'true');
+
+  await stream.focus();
+  await stream.press('ArrowDown');
+  await expect.poll(async () => (
+    await page.locator('.flow-preview-item[data-centered="true"]')
+      .getAttribute('data-wallpaper-path')
+  )).not.toBe(appliedPath);
+  const browsed = page.locator('.flow-preview-item[data-centered="true"]');
+  const browsedPath = await browsed.getAttribute('data-wallpaper-path');
+  expect(browsedPath).toBeTruthy();
+  await expect(browsed).toHaveAttribute('aria-selected', 'false');
+
+  const detailsButton = page.getByRole('button', { name: 'Details', exact: true });
+  await detailsButton.click();
+  const details = page.locator('.wallpaper-details');
+  await expect(details).toBeVisible();
+  await expect(page.locator(
+    `.flow-preview-item[data-wallpaper-path="${browsedPath!}"]`,
+  )).toHaveAttribute('aria-selected', 'false');
+  await expect(page.locator(
+    `.flow-preview-item[data-wallpaper-path="${appliedPath!}"]`,
+  )).toHaveAttribute('aria-selected', 'true');
+  await details.getByRole('button', { name: 'Close wallpaper details' }).click();
+  await expect(details).toHaveCount(0);
+  await expect(detailsButton).toBeFocused();
+
+  await browsed.click({ button: 'right' });
+  const contextMenu = page.getByRole('menu', { name: 'Wallpaper actions' });
+  await expect(contextMenu).toBeVisible();
+  await page.keyboard.press('Escape');
+  await expect(contextMenu).toHaveCount(0);
+  await expect(stream).toBeFocused();
+  await expect(browsed).toHaveAttribute('aria-selected', 'false');
+});
+
+test('Flow keeps its structure and readable primary actions across every explicit theme', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const themes = [
+    ['Light', 'light'],
+    ['Dark', 'dark'],
+    ['Glass', 'glass'],
+    ['Editorial', 'editorial'],
+  ] as const;
+
+  for (const [label, value] of themes) {
+    await openSettings(page);
+    const settings = page.getByRole('dialog', { name: 'Settings' });
+    await chooseSelect(page, 'Theme', label);
+    await expect(page.locator('html')).toHaveAttribute('data-theme', value);
+    await settings.getByRole('button', { name: 'Close settings' }).click();
+    await expect(settings).toHaveCount(0);
+
+    await waitForFlow(page);
+    await expect(page.locator('.wallpaper-flow')).toHaveCount(1);
+    await expect(page.locator('.wallpaper-grid')).toHaveCount(0);
+    await expect(page.getByRole('navigation', { name: 'Loaded wallpaper index' })
+      .getByRole('button', { name: /^Index/ })).toBeVisible();
+
+    const actions = page.locator('.flow-metadata-rail__actions');
+    const apply = actions.getByRole('button', { name: 'Apply centered wallpaper' });
+    const favorite = actions.getByRole('button', { name: /^Favorite/ });
+    const details = actions.getByRole('button', { name: 'Details', exact: true });
+    await expect(apply).toBeVisible();
+    await expect(apply).toBeEnabled();
+    await expect(apply).toHaveText('Apply');
+    await expect(favorite).toBeVisible();
+    await expect(favorite).toBeEnabled();
+    await expect(favorite).toContainText('Favorite');
+    await expect(details).toBeVisible();
+    await expect(details).toBeEnabled();
+    await expect(details).toHaveText('Details');
+  }
+});
+
+test('Flow honors reduced motion and preserves focus and selection boundaries in forced colors', async ({ page }) => {
+  await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  await stream.focus();
+  await stream.press('ArrowDown');
+  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
+    .toHaveAttribute('data-settled', 'true');
+  await expect(stream).toBeFocused();
+  await expect(stream).toHaveCSS('outline-style', 'solid');
+  await expect(stream).toHaveCSS('outline-width', '2px');
+  await expect(stream).toHaveCSS('scroll-behavior', 'auto');
+
+  const centered = page.locator('.flow-preview-item[data-centered="true"]');
+  const offCenter = page.locator('.flow-preview-item:not([data-centered])').first();
+  await expect(offCenter).toBeAttached();
+  expect(await centered.locator('.flow-preview-item__media').evaluate(
+    (element) => getComputedStyle(element).transform,
+  )).toBe('none');
+  expect(await offCenter.locator('.flow-preview-item__media').evaluate(
+    (element) => getComputedStyle(element).transform,
+  )).toBe('none');
+
+  await centered.click();
+  const selectedMedia = centered.locator('.flow-preview-item__media');
+  await expect(selectedMedia).toHaveCSS('outline-style', 'solid');
+  await expect(selectedMedia).toHaveCSS('outline-width', '2px');
+
+  await chooseSelect(page, 'Wallpaper type filter', 'Videos');
+  const videoItem = page.locator('.flow-preview-item[data-centered="true"]');
+  await expect(videoItem).toHaveAttribute(
+    'data-wallpaper-path',
+    '/mock/path/wallpaper-000.mp4',
+  );
+  await videoItem.click();
+  await expect(videoItem).toHaveAttribute('data-centered', 'true');
+  await expect(videoItem).toHaveAttribute('data-settled', 'true');
+  await expect(videoItem).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('[data-enhanced-preview]')).toHaveCount(0);
+});
+
+test.describe('Flow compact touch layout', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
+  test('Index, actions, and return remain touch reachable without page overflow', async ({ page }) => {
+    await openApp(page);
+    await waitForGrid(page);
+    await page.getByRole('button', { name: 'Flow' }).click();
+    await waitForFlow(page);
+
+    const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+    const indexNavigation = page.getByRole('navigation', { name: 'Loaded wallpaper index' });
+    const indexButton = indexNavigation.getByRole('button', { name: /^Index/ });
+    await expect(indexNavigation.locator('.flow-index-rail__list')).toBeHidden();
+    await indexButton.tap();
+    const indexDialog = page.getByRole('dialog', { name: 'Loaded wallpapers' });
+    await expect(indexDialog).toBeVisible();
+    await indexDialog.getByRole('button', { name: 'Close wallpaper index' }).tap();
+    await expect(indexDialog).toHaveCount(0);
+    await expect(stream).toBeFocused();
+
+    const actions = page.locator('.flow-metadata-rail__actions');
+    const apply = actions.getByRole('button', { name: 'Apply centered wallpaper' });
+    const favorite = actions.getByRole('button', { name: /^Favorite/ });
+    const details = actions.getByRole('button', { name: 'Details', exact: true });
+    for (const control of [indexButton, apply, favorite, details]) {
+      await expect(control).toBeVisible();
+      await expect(control).toBeEnabled();
+      await expect.poll(async () => (await control.boundingBox())?.height ?? 0)
+        .toBeGreaterThanOrEqual(44);
+    }
+
+    const appliedPath = await page.locator('.flow-preview-item[data-centered="true"]')
+      .getAttribute('data-wallpaper-path');
+    await apply.tap();
+    await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: appliedPath });
+    const applyFeedback = page.locator('[data-feedback-card="apply"]');
+    await expect(applyFeedback).toBeVisible();
+    const [actionsBounds, feedbackBounds] = await Promise.all([
+      actions.boundingBox(),
+      applyFeedback.boundingBox(),
+    ]);
+    expect(actionsBounds).not.toBeNull();
+    expect(feedbackBounds).not.toBeNull();
+    const overlapsActions = actionsBounds !== null && feedbackBounds !== null
+      && actionsBounds.x < feedbackBounds.x + feedbackBounds.width
+      && actionsBounds.x + actionsBounds.width > feedbackBounds.x
+      && actionsBounds.y < feedbackBounds.y + feedbackBounds.height
+      && actionsBounds.y + actionsBounds.height > feedbackBounds.y;
+    expect(overlapsActions, 'Apply feedback must not cover Flow actions').toBe(false);
+    const favoriteBefore = await favorite.getAttribute('aria-pressed');
+    await favorite.tap();
+    await expect.poll(() => favorite.getAttribute('aria-pressed')).not.toBe(favoriteBefore);
+    await details.tap();
+    const detailsDialog = page.locator('.wallpaper-details');
+    await expect(detailsDialog).toBeVisible();
+    await detailsDialog.getByRole('button', { name: 'Close wallpaper details' }).tap();
+    await expect(details).toBeFocused();
+
+    await stream.evaluate((element) => {
+      element.scrollTop = Math.min(
+        element.scrollHeight - element.clientHeight,
+        element.clientHeight * 1.5,
+      );
+      element.dispatchEvent(new Event('scroll'));
+    });
+    const returnToTop = page.getByRole('button', { name: 'Return to first wallpaper' });
+    await expect(returnToTop).toBeVisible();
+    await expect.poll(async () => (await returnToTop.boundingBox())?.height ?? 0)
+      .toBeGreaterThanOrEqual(44);
+    await returnToTop.tap();
+    await expect(returnToTop).toHaveCount(0);
+    await expect(stream).toBeFocused();
+    await expect(page.locator('.flow-preview-item[data-index="0"]'))
+      .toHaveAttribute('data-centered', 'true');
+
+    await expect.poll(() => documentHasNoHorizontalOverflow(page)).toBe(true);
+    expect(await page.locator('.library-viewport').evaluate((element) => (
+      element.scrollWidth <= element.clientWidth + 1
+    ))).toBe(true);
+  });
+
+  test('required Flow breakpoints keep a usable center stream and reachable actions', async ({ page }) => {
+    await openApp(page);
+    await waitForGrid(page);
+    await page.getByRole('button', { name: 'Flow' }).click();
+    await waitForFlow(page);
+
+    for (const viewport of [
+      { width: 320, height: 568 },
+      { width: 390, height: 844 },
+      { width: 760, height: 700 },
+      { width: 1024, height: 768 },
+      { width: 1440, height: 900 },
+    ]) {
+      await page.setViewportSize(viewport);
+      const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+      await expect.poll(async () => (await stream.boundingBox())?.height ?? 0)
+        .toBeGreaterThanOrEqual(96);
+      for (const action of [
+        page.getByRole('button', { name: 'Apply centered wallpaper' }),
+        page.getByRole('button', { name: /^Favorite/ }),
+        page.getByRole('button', { name: 'Details', exact: true }),
+      ]) {
+        const bounds = await action.boundingBox();
+        expect(bounds).not.toBeNull();
+        expect(bounds!.height).toBeGreaterThanOrEqual(44);
+        expect(bounds!.x).toBeGreaterThanOrEqual(0);
+        expect(bounds!.x + bounds!.width).toBeLessThanOrEqual(viewport.width + 1);
+        expect(bounds!.y + bounds!.height).toBeLessThanOrEqual(viewport.height + 1);
+      }
+      await expect.poll(() => documentHasNoHorizontalOverflow(page)).toBe(true);
+      expect(await page.locator('.library-viewport').evaluate((element) => (
+        element.scrollWidth <= element.clientWidth + 1
+      ))).toBe(true);
+      expect(await page.evaluate(() => ({
+        stream: getComputedStyle(document.querySelector('.flow-preview-stream')!).overflowY,
+        index: getComputedStyle(document.querySelector('.flow-index-rail')!).overflowY,
+        metadata: getComputedStyle(document.querySelector('.flow-metadata-rail')!).overflowY,
+      }))).toEqual({ stream: 'auto', index: 'hidden', metadata: 'hidden' });
+    }
+  });
+
+  test('a long touch before scrolling does not snap back to the previous wallpaper', async ({ page }) => {
+    await openApp(page);
+    await waitForGrid(page);
+    await page.getByRole('button', { name: 'Flow' }).click();
+    await waitForFlow(page);
+
+    const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+    await stream.dispatchEvent('pointerdown', {
+      buttons: 1,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: 'touch',
+    });
+    await page.waitForTimeout(320);
+    await stream.evaluate((element) => {
+      element.scrollTop = Math.min(
+        element.scrollHeight - element.clientHeight,
+        Math.max(1_000, element.clientHeight * 1.5),
+      );
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await stream.dispatchEvent('pointerup', {
+      buttons: 0,
+      isPrimary: true,
+      pointerId: 1,
+      pointerType: 'touch',
+    });
+
+    await expect.poll(async () => Number(
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-index'),
+    ), { timeout: 2_500 }).toBeGreaterThan(0);
+    await expect.poll(() => stream.evaluate((element) => element.scrollTop))
+      .toBeGreaterThan(300);
+  });
 });
 
 test('runtime reconciliation confirms current state and clears it after renderer exit', async ({ page }) => {
@@ -729,6 +1722,8 @@ test('settings and wallpaper actions keep keyboard focus contained and restore i
   await information.press('Enter');
   const details = page.locator('.wallpaper-details');
   const closeDetails = details.getByRole('button', { name: 'Close wallpaper details' });
+  await expect(card).toHaveClass(/selected/);
+  await expect(page.locator('.single-page-statusbar__selection')).toContainText('Selected:');
   await expect(closeDetails).toBeFocused();
   await closeDetails.press('Escape');
   await expect(details).toHaveCount(0);
@@ -901,6 +1896,9 @@ test('feedback countdown pauses on hover and resumes to automatic dismissal', as
   await expect(feedback).toHaveCount(0, { timeout: 3_500 });
 });
 
+test.describe('Flow compact touch status pressure', () => {
+  test.use({ hasTouch: true, viewport: { width: 390, height: 844 } });
+
 test('compact Editorial keeps concurrent scan controls clear of notifications', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await openApp(page);
@@ -927,38 +1925,150 @@ test('compact Editorial keeps concurrent scan controls clear of notifications', 
 
   const activity = page.locator('.scan-activity');
   await expect(activity).toBeVisible({ timeout: 1_000 });
-  await page.locator('.wallpaper-card__primary').nth(1).click();
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+  await page.setViewportSize({ width: 320, height: 568 });
+  const actions = page.locator('.flow-metadata-rail__actions');
+  await actions.getByRole('button', { name: 'Apply centered wallpaper' }).click();
   const feedback = page.locator('[data-feedback-card="apply"]');
   await expect(feedback).toBeVisible();
+  await actions.getByRole('button', { name: /^Favorite/ }).click();
+  await expect(page.locator('[data-feedback-card="scan"]')).toBeVisible();
+  await expect(page.locator('[data-feedback-card="system"]')).toBeVisible();
+  const feedbackOverlay = page.locator('.feedback-overlay');
+  await expect.poll(() => feedbackOverlay.evaluate((element) => (
+    element.scrollHeight > element.clientHeight
+  ))).toBe(true);
+  await expect.poll(() => feedbackOverlay.locator('[data-feedback-card]').evaluateAll((cards) => (
+    cards.length === 3
+      && cards.every((card) => card.getBoundingClientRect().height >= 40)
+  ))).toBe(true);
+  const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
 
   for (const viewport of [
+    { width: 760, height: 400 },
+    { width: 600, height: 400 },
+    { width: 480, height: 400 },
+    { width: 390, height: 400 },
+    { width: 320, height: 400 },
     { width: 320, height: 568 },
-    { width: 390, height: 844 },
   ]) {
     await page.setViewportSize(viewport);
     await expect(activity).toBeVisible();
     await expect(feedback).toBeVisible();
-    const overlap = await Promise.all([activity.boundingBox(), feedback.boundingBox()]).then(
-      ([scanBounds, feedbackBounds]) => {
-        if (!scanBounds || !feedbackBounds) throw new Error('Concurrent feedback bounds unavailable');
+    await expect.poll(() => feedbackOverlay.evaluate((element) => (
+      element.scrollHeight > element.clientHeight
+    ))).toBe(true);
+    await expect.poll(() => feedbackOverlay.locator('[data-feedback-card]').evaluateAll((cards) => (
+      cards.length === 3
+        && cards.every((card) => card.getBoundingClientRect().height >= 40)
+    ))).toBe(true);
+    const overlaps = await Promise.all([
+      activity.boundingBox(),
+      feedbackOverlay.boundingBox(),
+      actions.boundingBox(),
+      page.locator('.flow-metadata-rail').boundingBox(),
+      activity.getByText('Scanning wallpapers…', { exact: true }).boundingBox(),
+      activity.getByRole('progressbar').boundingBox(),
+      activity.getByRole('button', { name: 'Cancel' }).boundingBox(),
+    ]).then(([
+      scanBounds,
+      feedbackBounds,
+      actionBounds,
+      metadataBounds,
+      scanTitleBounds,
+      scanProgressBounds,
+      scanCancelBounds,
+    ]) => {
+      if (
+        !scanBounds
+        || !feedbackBounds
+        || !actionBounds
+        || !metadataBounds
+        || !scanTitleBounds
+        || !scanProgressBounds
+        || !scanCancelBounds
+      ) {
+        throw new Error('Concurrent Flow status bounds unavailable');
+      }
+      const overlapArea = (
+        first: typeof scanBounds,
+        second: typeof scanBounds,
+      ) => {
         const width = Math.max(0, Math.min(
-          scanBounds.x + scanBounds.width,
-          feedbackBounds.x + feedbackBounds.width,
-        ) - Math.max(scanBounds.x, feedbackBounds.x));
+          first.x + first.width,
+          second.x + second.width,
+        ) - Math.max(first.x, second.x));
         const height = Math.max(0, Math.min(
-          scanBounds.y + scanBounds.height,
-          feedbackBounds.y + feedbackBounds.height,
-        ) - Math.max(scanBounds.y, feedbackBounds.y));
+          first.y + first.height,
+          second.y + second.height,
+        ) - Math.max(first.y, second.y));
         return width * height;
-      },
-    );
-    expect(overlap).toBe(0);
+      };
+      return {
+        scanFeedback: overlapArea(scanBounds, feedbackBounds),
+        scanActions: overlapArea(scanBounds, actionBounds),
+        feedbackActions: overlapArea(feedbackBounds, actionBounds),
+        scanTitleCancel: overlapArea(scanTitleBounds, scanCancelBounds),
+        scanProgressCancel: overlapArea(scanProgressBounds, scanCancelBounds),
+        scanContentsWithinActivity: [scanTitleBounds, scanProgressBounds, scanCancelBounds]
+          .every((bounds) => (
+            bounds.x >= scanBounds.x - 1
+            && bounds.y >= scanBounds.y - 1
+            && bounds.x + bounds.width <= scanBounds.x + scanBounds.width + 1
+            && bounds.y + bounds.height <= scanBounds.y + scanBounds.height + 1
+          )),
+        actionsWithinMetadata: actionBounds.y >= metadataBounds.y - 1
+          && actionBounds.y + actionBounds.height
+            <= metadataBounds.y + metadataBounds.height + 1,
+        bounds: {
+          scan: scanBounds,
+          feedback: feedbackBounds,
+          actions: actionBounds,
+          metadata: metadataBounds,
+          scanTitle: scanTitleBounds,
+          scanProgress: scanProgressBounds,
+          scanCancel: scanCancelBounds,
+        },
+      };
+    });
+    const layoutMessage = JSON.stringify(overlaps.bounds);
+    expect(overlaps.scanFeedback, `Scan status must not cover Apply feedback: ${layoutMessage}`).toBe(0);
+    expect(overlaps.scanActions, `Scan status must not cover Flow actions: ${layoutMessage}`).toBe(0);
+    expect(overlaps.feedbackActions, `Apply feedback must not cover Flow actions: ${layoutMessage}`).toBe(0);
+    expect(overlaps.scanTitleCancel, `Scan title must not cover Cancel: ${layoutMessage}`).toBe(0);
+    expect(overlaps.scanProgressCancel, `Scan progress must not cover Cancel: ${layoutMessage}`).toBe(0);
+    expect(overlaps.scanContentsWithinActivity, `Scan contents must stay inside status: ${layoutMessage}`).toBe(true);
+    expect(overlaps.actionsWithinMetadata, `Flow actions must not be clipped by metadata: ${layoutMessage}`).toBe(true);
+    for (const action of [
+      actions.getByRole('button', { name: 'Apply centered wallpaper' }),
+      actions.getByRole('button', { name: /^Favorite/ }),
+      actions.getByRole('button', { name: 'Details', exact: true }),
+    ]) {
+      const bounds = await action.boundingBox();
+      expect(bounds).not.toBeNull();
+      expect(bounds!.height).toBeGreaterThanOrEqual(44);
+    }
+    await expect.poll(async () => (await stream.boundingBox())?.height ?? 0)
+      .toBeGreaterThanOrEqual(96);
     expect(await documentHasNoHorizontalOverflow(page)).toBe(true);
   }
+  const systemFeedback = page.locator('[data-feedback-card="system"]');
+  await systemFeedback.scrollIntoViewIfNeeded();
+  const [overlayBounds, systemBounds] = await Promise.all([
+    feedbackOverlay.boundingBox(),
+    systemFeedback.boundingBox(),
+  ]);
+  expect(overlayBounds).not.toBeNull();
+  expect(systemBounds).not.toBeNull();
+  expect(systemBounds!.y).toBeGreaterThanOrEqual(overlayBounds!.y - 1);
+  expect(systemBounds!.y + systemBounds!.height)
+    .toBeLessThanOrEqual(overlayBounds!.y + overlayBounds!.height + 1);
   const cancel = activity.getByRole('button', { name: 'Cancel' });
   await expect(cancel).toBeVisible();
   await expect(cancel).toBeEnabled();
   await cancel.click();
+});
 });
 
 test('scan activity is delayed, non-modal, and cancellable', async ({ page }) => {

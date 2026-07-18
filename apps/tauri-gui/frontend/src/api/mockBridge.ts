@@ -287,6 +287,26 @@ let scanProgressState: ScanProgressDTO = { ...defaultScanProgress };
 let scanAutoAdvance = false;
 let scanStep = 5;
 const MOCK_CONFIG_SESSION_KEY = 'wallpaper-console.mock.config';
+const MOCK_RUNTIME_HOLD_SESSION_KEY = 'wallpaper-console.mock.hold-runtime-observations';
+
+function mockSessionFlag(key: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.sessionStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setMockSessionFlag(key: string, enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (enabled) window.sessionStorage.setItem(key, 'true');
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // In-memory mock behavior remains usable when session storage is unavailable.
+  }
+}
 
 function loadMockConfigStore(): Record<string, string> {
   if (typeof window === 'undefined') return {};
@@ -323,7 +343,10 @@ type NextBrowserAppendScenario =
   | { readonly kind: 'empty' };
 let nextBrowserAppendScenario: NextBrowserAppendScenario | null = null;
 let browserAppendRequests = 0;
+let browserPageRequests = 0;
 let browserRevision = 0;
+let nextBrowserPageDelayMs = 0;
+let browserPageDelayMs = 0;
 let sourceRefreshHeld = false;
 let sourceRefreshCalls = 0;
 let sourceRefreshWaiters: Array<() => void> = [];
@@ -332,6 +355,8 @@ let nextSourceId = 4;
 let favoriteStore = new Set(MOCK_FAVORITES);
 let runtimeObservationStore: RuntimeWallpaperObservationDTO[] =
   DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+let runtimeObservationsHeld = mockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY);
+let runtimeObservationWaiters: Array<() => void> = [];
 let firstRunSuggestionStore: FirstRunSourceSuggestionDTO[] = [];
 let rendererStatusesStore: RendererStatusesDTO = cloneRendererStatuses(
   DEFAULT_RENDERER_STATUSES,
@@ -359,7 +384,10 @@ function resetLibraryScenario(): void {
   browserFixtureCopies = 1;
   nextBrowserAppendScenario = null;
   browserAppendRequests = 0;
+  browserPageRequests = 0;
   browserRevision = 0;
+  nextBrowserPageDelayMs = 0;
+  browserPageDelayMs = 0;
 }
 
 function releaseHeldSourceRefreshes(): void {
@@ -384,7 +412,21 @@ function resetFavoriteStore(): void {
 }
 
 function resetRuntimeObservationStore(): void {
+  releaseHeldRuntimeObservations();
   runtimeObservationStore = DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+}
+
+function releaseHeldRuntimeObservations(): void {
+  runtimeObservationsHeld = false;
+  setMockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY, false);
+  const waiters = runtimeObservationWaiters;
+  runtimeObservationWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+async function waitForRuntimeObservationRelease(): Promise<void> {
+  if (!runtimeObservationsHeld) return;
+  await new Promise<void>((resolve) => runtimeObservationWaiters.push(resolve));
 }
 
 function resetFirstRunSuggestionStore(): void {
@@ -605,8 +647,10 @@ const mockBridgeAdapter = {
   }),
   displayStateList: async (): Promise<DisplayStateDTO[]> =>
     DEFAULT_DISPLAY_STATE.map((row) => ({ ...row })),
-  runtimeWallpaperObservations: async (): Promise<RuntimeWallpaperObservationDTO[]> =>
-    runtimeObservationStore.map((entry) => ({ ...entry })),
+  runtimeWallpaperObservations: async (): Promise<RuntimeWallpaperObservationDTO[]> => {
+    await waitForRuntimeObservationRelease();
+    return runtimeObservationStore.map((entry) => ({ ...entry }));
+  },
   applyToDisplay: async (request: TargetedApplyRequestDTO): Promise<CommandResult> => {
     lastTargetedApplyRequest = { ...request };
     const kind = request.kind ?? 'apply';
@@ -664,6 +708,12 @@ const mockBridgeAdapter = {
   libraryBrowserPage: async (
     query: LibraryBrowserQueryDTO,
   ): Promise<LibraryBrowserPageDTO> => {
+    browserPageRequests += 1;
+    const delayMs = nextBrowserPageDelayMs || browserPageDelayMs;
+    nextBrowserPageDelayMs = 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+    }
     const items = filterBrowserItems(query);
     const offset = decodeMockBrowserCursor(query);
     const limit = Math.min(500, Math.max(0, Math.trunc(query.limit)));
@@ -946,6 +996,15 @@ const mockControl = {
   setBrowserFixtureCopies: (copies: number): void => {
     browserFixtureCopies = Math.max(0, Math.trunc(copies));
   },
+  advanceBrowserRevision: (): void => {
+    browserRevision += 1;
+  },
+  delayNextBrowserPage: (delayMs: number): void => {
+    nextBrowserPageDelayMs = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 0;
+  },
+  setBrowserPageDelay: (delayMs: number): void => {
+    browserPageDelayMs = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 0;
+  },
   rejectNextBrowserAppend: (message = 'mock append request failed'): void => {
     nextBrowserAppendScenario = { kind: 'reject', message };
   },
@@ -953,6 +1012,7 @@ const mockControl = {
     nextBrowserAppendScenario = { kind: 'empty' };
   },
   browserAppendRequestCount: (): number => browserAppendRequests,
+  browserPageRequestCount: (): number => browserPageRequests,
   holdSourceRefresh: (): void => {
     sourceRefreshHeld = true;
   },
@@ -971,6 +1031,13 @@ const mockControl = {
     observations: RuntimeWallpaperObservationDTO[],
   ): void => {
     runtimeObservationStore = observations.map((entry) => ({ ...entry }));
+  },
+  holdRuntimeWallpaperObservations: (): void => {
+    runtimeObservationsHeld = true;
+    setMockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY, true);
+  },
+  releaseRuntimeWallpaperObservations: (): void => {
+    releaseHeldRuntimeObservations();
   },
   setFirstRunSourceSuggestions: (suggestions: FirstRunSourceSuggestionDTO[]): void => {
     firstRunSuggestionStore = suggestions.map((suggestion) => (
