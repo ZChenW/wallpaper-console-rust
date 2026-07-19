@@ -104,6 +104,27 @@ pub fn mark_source_refresh_dirty(cd: &ConfigDir, source_id: i64) -> Result<(), W
     Ok(())
 }
 
+/// Make a recovered source immediately eligible for a background refresh
+/// without erasing its failure history. A real refresh success remains the
+/// only transition that clears the failure category and count.
+pub fn mark_source_refresh_recovery_due(cd: &ConfigDir, source_id: i64) -> Result<(), WcError> {
+    let mut connection = open_runtime_connection(cd)?;
+    let transaction = connection.transaction().map_err(sqlite_err)?;
+    read_state(&transaction, source_id)?;
+    transaction
+        .execute(
+            "INSERT INTO source_refresh_state (source_id, dirty, next_retry_at)
+             VALUES (?1, 1, NULL)
+             ON CONFLICT(source_id) DO UPDATE SET
+                 dirty = 1,
+                 next_retry_at = NULL",
+            [source_id],
+        )
+        .map_err(sqlite_err)?;
+    transaction.commit().map_err(sqlite_err)?;
+    Ok(())
+}
+
 /// Clear the dirty bit immediately before enumeration begins. Any watcher
 /// event arriving during the scan sets it again, and success deliberately
 /// preserves that newer bit so a follow-up cannot be lost.
@@ -294,6 +315,37 @@ mod tests {
             source_refresh_eligibility(&cd, source_id, 1_001, RefreshIntent::Background).unwrap(),
             SourceRefreshEligibility::Due
         );
+    }
+
+    #[test]
+    fn recovery_due_bypasses_backoff_without_clearing_failure_history() {
+        let (_tmp, cd, source_id) = source();
+        record_source_refresh_success(&cd, source_id, 9_000).unwrap();
+        let failed = record_source_refresh_failure(&cd, source_id, "offline", 10_000).unwrap();
+        assert_eq!(failed.next_retry_at, Some(10_060));
+        assert_eq!(
+            source_refresh_eligibility(&cd, source_id, 10_001, RefreshIntent::Background).unwrap(),
+            SourceRefreshEligibility::SkipBackoff { retry_at: 10_060 }
+        );
+
+        mark_source_refresh_recovery_due(&cd, source_id).unwrap();
+
+        let recovered = read_source_refresh_state(&cd, source_id).unwrap();
+        assert!(recovered.dirty);
+        assert_eq!(recovered.next_retry_at, None);
+        assert_eq!(recovered.failure_category.as_deref(), Some("offline"));
+        assert_eq!(recovered.consecutive_failures, 1);
+        assert_eq!(
+            source_refresh_eligibility(&cd, source_id, 10_001, RefreshIntent::Background).unwrap(),
+            SourceRefreshEligibility::Due
+        );
+    }
+
+    #[test]
+    fn recovery_due_rejects_unknown_source() {
+        let (_tmp, cd, source_id) = source();
+
+        assert!(mark_source_refresh_recovery_due(&cd, source_id + 1).is_err());
     }
 
     #[test]

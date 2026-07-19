@@ -203,6 +203,7 @@ enum WatchAction {
     None,
     Dirty(i64),
     FailureStarted(i64),
+    Recovered(i64),
     Overflow,
 }
 
@@ -267,8 +268,12 @@ impl WatchRegistry {
         Some(WatchRegistration { generation, stop })
     }
 
-    fn source_ids(&self) -> impl Iterator<Item = i64> + '_ {
-        self.watchers.keys().copied()
+    fn live_source_ids(&self) -> BTreeSet<i64> {
+        self.watchers
+            .keys()
+            .chain(self.retry_states.keys())
+            .copied()
+            .collect()
     }
 
     fn retain_sources(&mut self, live_ids: &BTreeSet<i64>) {
@@ -285,10 +290,13 @@ impl WatchRegistry {
     fn apply_message(&mut self, message: WatchMessage, now_millis: u64) -> WatchAction {
         match message {
             WatchMessage::Ready(source_id, generation) => {
-                if self.is_current(source_id, generation) {
-                    self.retry_states.remove(&source_id);
+                if self.is_current(source_id, generation)
+                    && self.retry_states.remove(&source_id).is_some()
+                {
+                    WatchAction::Recovered(source_id)
+                } else {
+                    WatchAction::None
                 }
-                WatchAction::None
             }
             WatchMessage::Changed(source_id, generation) => {
                 if self.is_current(source_id, generation) {
@@ -346,6 +354,7 @@ fn process_watch_message<C: SchedulerClock>(
     message: WatchMessage,
     now_millis: u64,
     mut mark_dirty: impl FnMut(i64),
+    mut mark_recovery_due: impl FnMut(i64),
 ) {
     match registry.apply_message(message, now_millis) {
         WatchAction::None => {}
@@ -356,6 +365,11 @@ fn process_watch_message<C: SchedulerClock>(
         WatchAction::FailureStarted(source_id) => {
             log::warn!("Library watcher failed for source id {source_id}; scheduling recreation");
             mark_dirty(source_id);
+            scheduler.source_changed(source_id);
+        }
+        WatchAction::Recovered(source_id) => {
+            mark_recovery_due(source_id);
+            log::info!("Library watcher recovered for source id {source_id}; scheduling rescan");
             scheduler.source_changed(source_id);
         }
         WatchAction::Overflow => {
@@ -384,7 +398,7 @@ pub fn start_library_scheduler(
                 match control {
                     SchedulerControl::Manual(id) => scheduler.manual_requested(id),
                     SchedulerControl::ManualAll => {
-                        for id in watch_registry.source_ids().collect::<Vec<_>>() {
+                        for id in watch_registry.live_source_ids() {
                             scheduler.manual_requested(id);
                         }
                     }
@@ -457,6 +471,15 @@ pub fn start_library_scheduler(
                     clock.now_millis(),
                     |source_id| {
                         let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, source_id);
+                    },
+                    |source_id| {
+                        if wc_storage::sqlite::mark_source_refresh_recovery_due(&cd, source_id)
+                            .is_err()
+                        {
+                            log::warn!(
+                                "Failed to mark recovered Library source id {source_id} due"
+                            );
+                        }
                     },
                 );
             }
@@ -822,6 +845,7 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
 
         assert!(!current.stop.load(Ordering::Acquire));
@@ -845,6 +869,7 @@ mod tests {
                 );
                 dirtied_sources.push(source_id);
             },
+            |_| {},
         );
 
         assert!(current.stop.load(Ordering::Acquire));
@@ -883,6 +908,7 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         assert_eq!(dirtied_sources, vec![7]);
         assert!(registry.reconcile(7, signature.clone(), 1_999).is_none());
@@ -896,6 +922,7 @@ mod tests {
             WatchMessage::Ready(7, first.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         process_watch_message(
             &mut registry,
@@ -903,6 +930,7 @@ mod tests {
             WatchMessage::Changed(7, first.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         assert!(registry.retry_states.contains_key(&7));
         assert_eq!(dirtied_sources, vec![7]);
@@ -913,6 +941,7 @@ mod tests {
             WatchMessage::Failed(7, second.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         assert_eq!(dirtied_sources, vec![7]);
         assert!(registry.reconcile(7, signature.clone(), 6_999).is_none());
@@ -926,6 +955,7 @@ mod tests {
             WatchMessage::Ready(7, third.generation),
             7_000,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         assert!(!registry.retry_states.contains_key(&7));
 
@@ -935,10 +965,113 @@ mod tests {
             WatchMessage::Failed(7, third.generation),
             7_001,
             |source_id| dirtied_sources.push(source_id),
+            |_| {},
         );
         assert_eq!(dirtied_sources, vec![7, 7]);
         assert!(registry.reconcile(7, signature.clone(), 9_000).is_none());
         assert!(registry.reconcile(7, signature, 9_001).is_some());
+    }
+
+    #[test]
+    fn ready_recovery_rescans_exactly_once_and_stale_ready_is_ignored() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let signature = ("recovering".to_owned(), true);
+        let first = registry
+            .reconcile(7, signature.clone(), 0)
+            .expect("initial watcher");
+        let mut dirtied_sources = Vec::new();
+        let mut recovered_sources = Vec::new();
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, first.generation),
+            0,
+            |source_id| dirtied_sources.push(source_id),
+            |source_id| recovered_sources.push(source_id),
+        );
+        assert!(dirtied_sources.is_empty());
+        assert!(recovered_sources.is_empty());
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, first.generation),
+            0,
+            |source_id| dirtied_sources.push(source_id),
+            |source_id| recovered_sources.push(source_id),
+        );
+        assert_eq!(dirtied_sources, vec![7]);
+        scheduler.manual_requested(7);
+
+        let retry = registry
+            .reconcile(7, signature, 2_000)
+            .expect("retry watcher");
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, first.generation),
+            2_000,
+            |source_id| dirtied_sources.push(source_id),
+            |source_id| recovered_sources.push(source_id),
+        );
+        assert!(recovered_sources.is_empty());
+        assert!(registry.retry_states.contains_key(&7));
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |source_id| dirtied_sources.push(source_id),
+            |source_id| recovered_sources.push(source_id),
+        );
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |source_id| dirtied_sources.push(source_id),
+            |source_id| recovered_sources.push(source_id),
+        );
+
+        assert_eq!(recovered_sources, vec![7]);
+        clock.advance(1_499);
+        assert!(scheduler.take_due_scans().is_empty());
+        clock.advance(1);
+        assert_eq!(scheduler.take_due_scans(), vec![7]);
+    }
+
+    #[test]
+    fn manual_all_includes_retry_only_sources_and_clears_pending_background_scan() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let watcher = registry
+            .reconcile(7, ("failed".to_owned(), true), 0)
+            .expect("initial watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, watcher.generation),
+            0,
+            |_| {},
+            |_| {},
+        );
+        assert!(registry.watchers.is_empty());
+        assert!(registry.retry_states.contains_key(&7));
+
+        let live_source_ids = registry.live_source_ids();
+        assert_eq!(live_source_ids, BTreeSet::from([7]));
+        for source_id in live_source_ids {
+            scheduler.manual_requested(source_id);
+        }
+
+        clock.advance(1_500);
+        assert!(scheduler.take_due_scans().is_empty());
     }
 
     #[test]
@@ -955,6 +1088,7 @@ mod tests {
             &mut scheduler,
             WatchMessage::Failed(7, first.generation),
             0,
+            |_| {},
             |_| {},
         );
 
@@ -980,6 +1114,7 @@ mod tests {
             &mut scheduler,
             WatchMessage::Failed(7, first.generation),
             0,
+            |_| {},
             |_| {},
         );
 
