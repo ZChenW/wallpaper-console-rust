@@ -334,16 +334,26 @@ test('Flow scrolling only browses while explicit click and Apply own selection a
   await waitForFlow(page);
 
   const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+  const flow = page.locator('.wallpaper-flow');
   const hoverTarget = page.locator('.flow-preview-item[data-centered="true"]');
   const hoverTargetId = await hoverTarget.getAttribute('data-wallpaper-id');
   expect(hoverTargetId).not.toBeNull();
+  const matchingEntry = page.locator(
+    `.flow-index-rail__entry[data-wallpaper-id="${hoverTargetId!}"]`,
+  );
+  const matchingMarker = page.locator(
+    `.flow-index-rail__item[data-wallpaper-id="${hoverTargetId!}"]`,
+  );
   await hoverTarget.hover();
   await expect(hoverTarget).toHaveAttribute('data-hovered', 'true');
-  await expect(page.locator(
-    `.flow-index-rail__entry[data-hovered][data-wallpaper-id="${hoverTargetId!}"]`,
-  )).toBeAttached();
-  await expect(page.locator('.wallpaper-flow')).toHaveAttribute('data-hovering', '');
+  await expect(matchingEntry).toHaveAttribute('data-hovered', 'true');
+  await expect(matchingMarker).toHaveAttribute('data-hovered', 'true');
+  await expect(flow).toHaveAttribute('data-hovering', '');
   await page.mouse.move(0, 0);
+  await expect.poll(() => flow.getAttribute('data-hovering')).toBeNull();
+  await expect.poll(() => hoverTarget.getAttribute('data-hovered')).toBeNull();
+  await expect.poll(() => matchingEntry.getAttribute('data-hovered')).toBeNull();
+  await expect.poll(() => matchingMarker.getAttribute('data-hovered')).toBeNull();
 
   const initialActive = await stream.getAttribute('aria-activedescendant');
   await stream.evaluate((element) => {
@@ -366,6 +376,125 @@ test('Flow scrolling only browses while explicit click and Apply own selection a
   const appliedPath = await centered.getAttribute('data-wallpaper-path');
   await page.getByRole('button', { name: 'Apply centered wallpaper' }).click();
   await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: appliedPath });
+});
+
+test('Flow desktop index hover transfers one rule and binds its background', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Flow index hover geometry is desktop-only.');
+
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const flow = page.locator('.wallpaper-flow');
+  const centeredPreview = page.locator('.flow-preview-item[data-centered="true"]');
+  const centeredId = await centeredPreview.getAttribute('data-wallpaper-id');
+  expect(centeredId).not.toBeNull();
+  const centeredMarker = page.locator(
+    `.flow-index-rail__item[data-wallpaper-id="${centeredId!}"]`,
+  );
+  const activeRuleColor = await centeredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  );
+  const hoverEntry = page.locator(
+    `.flow-index-rail__entry:not([data-wallpaper-id="${centeredId!}"])`,
+  ).first();
+  const idleBackgroundColor = await hoverEntry.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  );
+  const hoverId = await hoverEntry.getAttribute('data-wallpaper-id');
+  expect(hoverId).not.toBeNull();
+  const hoveredMarker = page.locator(
+    `.flow-index-rail__item[data-wallpaper-id="${hoverId!}"]`,
+  );
+
+  await hoverEntry.hover();
+  await expect(flow).toHaveAttribute('data-hovering', '');
+  await expect(hoverEntry).toHaveAttribute('data-hovered', 'true');
+  await expect(hoveredMarker).toHaveAttribute('data-hovered', 'true');
+  await expect(page.locator('.flow-index-rail__item[data-hovered]')).toHaveCount(1);
+  await expect.poll(() => hoverEntry.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  )).not.toBe(idleBackgroundColor);
+  const hoveredRuleColor = await hoveredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  );
+  expect(hoveredRuleColor).toBe(activeRuleColor);
+  const displacedCenteredRuleColor = await centeredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  );
+  expect(displacedCenteredRuleColor).not.toBe(hoveredRuleColor);
+
+  await page.mouse.move(0, 0);
+  await expect.poll(() => flow.getAttribute('data-hovering')).toBeNull();
+  await expect(page.locator('.flow-index-rail__item[data-hovered]')).toHaveCount(0);
+  await expect.poll(() => centeredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  )).toBe(hoveredRuleColor);
+  await expect.poll(() => hoverEntry.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  )).toBe(idleBackgroundColor);
+});
+
+test('Flow forced colors keeps exactly one outlined index marker', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'Flow forced-colors index geometry is desktop-only.');
+  await page.emulateMedia({ forcedColors: 'active' });
+
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const flow = page.locator('.wallpaper-flow');
+  const indexItems = page.locator('.flow-index-rail__item');
+  const outlinedMarkerIds = () => indexItems.evaluateAll((elements) => elements
+    .filter((element) => {
+      const style = getComputedStyle(element);
+      return style.outlineStyle !== 'none' && Number.parseFloat(style.outlineWidth) > 0;
+    })
+    .map((element) => element.getAttribute('data-wallpaper-id')));
+  const centeredPreview = page.locator('.flow-preview-item[data-centered="true"]');
+  const centeredId = await centeredPreview.getAttribute('data-wallpaper-id');
+  expect(centeredId).not.toBeNull();
+  const centeredMarker = page.locator(
+    `.flow-index-rail__item[data-wallpaper-id="${centeredId!}"]`,
+  );
+  const hoverEntry = page.locator(
+    `.flow-index-rail__entry:not([data-wallpaper-id="${centeredId!}"])`,
+  ).first();
+  await expect(hoverEntry).toBeVisible();
+  const hoverId = await hoverEntry.getAttribute('data-wallpaper-id');
+  expect(hoverId).not.toBeNull();
+  const hoveredMarker = page.locator(
+    `.flow-index-rail__item[data-wallpaper-id="${hoverId!}"]`,
+  );
+
+  await expect.poll(outlinedMarkerIds).toEqual([centeredId]);
+  await hoverEntry.hover();
+  await expect(flow).toHaveAttribute('data-hovering', '');
+  await expect(hoveredMarker).toHaveAttribute('data-hovered', 'true');
+  await expect.poll(outlinedMarkerIds).toEqual([hoverId]);
+  const centeredOutline = await centeredMarker.evaluate((element) => {
+    const style = getComputedStyle(element);
+    return { style: style.outlineStyle, width: style.outlineWidth };
+  });
+  expect(centeredOutline.style).toBe('none');
+  expect(Number.parseFloat(centeredOutline.width)).toBe(0);
+  const hoveredBorderColor = await hoveredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  );
+  const centeredBorderColor = await centeredMarker.evaluate(
+    (element) => getComputedStyle(element).borderInlineStartColor,
+  );
+  expect(hoveredBorderColor).not.toBe(centeredBorderColor);
+
+  await page.mouse.move(0, 0);
+  await expect.poll(() => flow.getAttribute('data-hovering')).toBeNull();
+  await expect.poll(outlinedMarkerIds).toEqual([centeredId]);
 });
 
 test('Flow owns one enhanced preview and releases video decoders when browsing resumes', async ({ page }) => {

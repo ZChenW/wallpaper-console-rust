@@ -23,6 +23,14 @@ function ruleBody(css: string, selector: string): string {
   return css.slice(bodyStart, end);
 }
 
+function lastRuleBody(css: string, selector: string): string {
+  const start = css.lastIndexOf(`${selector} {`);
+  assert.notEqual(start, -1, `missing CSS rule: ${selector}`);
+  const bodyStart = css.indexOf('{', start) + 1;
+  const end = css.indexOf('}', bodyStart);
+  return css.slice(bodyStart, end);
+}
+
 function atRuleBody(css: string, atRule: string): string {
   const start = css.indexOf(atRule);
   assert.notEqual(start, -1, `missing CSS at-rule: ${atRule}`);
@@ -261,6 +269,16 @@ test('Flow exposes additive visual states without making hover equivalent to sel
   );
   const metadata = ruleBody(css, '.flow-metadata-rail');
   const hoveredMetadata = ruleBody(css, '.wallpaper-flow[data-hovering] .flow-metadata-rail');
+  const indexItem = ruleBody(css, '.flow-index-rail__item');
+  const hoverTransferItem = ruleBody(
+    css,
+    '.wallpaper-flow[data-hovering] .flow-index-rail__item',
+  );
+  const hoveredIndexRule = lastRuleBody(css, '.flow-index-rail__item[data-hovered]');
+  const displacedCenteredRule = lastRuleBody(
+    css,
+    '.wallpaper-flow[data-hovering] .flow-index-rail__item[data-centered]:not([data-hovered])',
+  );
 
   assert.match(centered, /opacity:\s*1/);
   assert.match(centeredMedia, /transform:\s*scale\(/);
@@ -273,6 +291,11 @@ test('Flow exposes additive visual states without making hover equivalent to sel
   assert.match(centeredImage, /filter:\s*none/);
   assert.match(metadata, /animation:\s*flow-metadata-enter 180ms/);
   assert.match(hoveredMetadata, /box-shadow:\s*inset/);
+  assert.match(indexItem, /transition:\s*border-color 60ms ease,\s*opacity 60ms ease/);
+  assert.match(hoverTransferItem, /transition:\s*opacity 60ms ease/);
+  assert.doesNotMatch(hoverTransferItem, /border-color/);
+  assert.match(hoveredIndexRule, /border-inline-start-color:\s*var\(--text\)/);
+  assert.match(displacedCenteredRule, /border-inline-start-color:\s*transparent/);
   assert.match(ruleBody(css, '.flow-index-rail__states'), /display:\s*flex/);
 });
 
@@ -330,6 +353,14 @@ test('Flow accessibility fallbacks cover reduced motion, forced colors, and coar
   const reduced = atRuleBody(css, '@media (prefers-reduced-motion: reduce)');
   const reducedMedia = ruleBody(reduced, '.library-viewport :is(.flow-preview-item__media)');
   const forced = atRuleBody(css, '@media (forced-colors: active)');
+  const forcedHoveredIndex = ruleBody(
+    forced,
+    '.wallpaper-flow .flow-index-rail__item[data-hovered]',
+  );
+  const forcedDisplacedCentered = ruleBody(
+    forced,
+    ':root .wallpaper-flow[data-hovering] .flow-index-rail__item[data-centered]:not([data-hovered])',
+  );
   const coarse = atRuleBody(css, '@media (pointer: coarse)');
 
   assert.match(reduced, /\.flow-preview-stream/);
@@ -341,6 +372,11 @@ test('Flow accessibility fallbacks cover reduced motion, forced colors, and coar
   assert.match(forced, /Highlight/);
   assert.match(forced, /\.flow-preview-stream:focus-visible/);
   assert.match(forced, /outline:\s*2px solid Highlight/);
+  assert.match(forcedHoveredIndex, /border-inline-start-color:\s*Highlight/);
+  assert.match(forcedHoveredIndex, /outline:\s*2px solid Highlight/);
+  assert.match(forcedHoveredIndex, /outline-offset:\s*-2px/);
+  assert.match(forcedDisplacedCentered, /border-inline-start-color:\s*Canvas/);
+  assert.match(forcedDisplacedCentered, /outline:\s*(?:0|none)/);
   assert.match(coarse, /\.flow-metadata-rail__action/);
   assert.match(coarse, /min-height:\s*44px/);
 });

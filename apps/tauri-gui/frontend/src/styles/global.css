@@ -742,6 +742,17 @@ input:focus {
     outline-offset: -2px;
   }
 
+  .wallpaper-flow .flow-index-rail__item[data-hovered] {
+    border-inline-start-color: Highlight;
+    outline: 2px solid Highlight;
+    outline-offset: -2px;
+  }
+
+  :root .wallpaper-flow[data-hovering] .flow-index-rail__item[data-centered]:not([data-hovered]) {
+    border-inline-start-color: Canvas;
+    outline: 0;
+  }
+
   .flow-preview-stream:focus-visible {
     outline: 2px solid Highlight;
     outline-offset: -2px;
@@ -1787,8 +1798,20 @@ input:focus {
   color: var(--text);
 }
 
+.wallpaper-flow[data-hovering] .flow-index-rail__item {
+  transition: opacity 60ms ease;
+}
+
 .flow-index-rail__item[data-centered] {
   border-inline-start-color: var(--text);
+}
+
+.flow-index-rail__item[data-hovered] {
+  border-inline-start-color: var(--text);
+}
+
+.wallpaper-flow[data-hovering] .flow-index-rail__item[data-centered]:not([data-hovered]) {
+  border-inline-start-color: transparent;
 }
 
 .flow-index-rail__item[data-centered] .flow-index-rail__entry {
