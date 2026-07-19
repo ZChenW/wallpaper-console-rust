@@ -78,10 +78,12 @@ import {
   verifyLibraryIntegrity,
 } from './libraryRepair.ts';
 import {
-  createLibraryReadyGate,
+  createLibraryReadyDelivery,
   createLibraryWatchdog,
+  shouldClearLibraryTimeout,
   shouldSignalLibraryPaint,
 } from './startupWatchdog.ts';
+import { createRecurringErrorGate } from './recurringErrorGate.ts';
 
 const LIBRARY_REVISION_EVENT = 'library-revision-changed';
 const LIBRARY_REFRESH_EVENT = 'wallpaper-console:library-revision-changed';
@@ -164,7 +166,7 @@ export default function SinglePageShell() {
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
-  const libraryReadyGate = useRef(createLibraryReadyGate()).current;
+  const libraryReadyDelivery = useRef(createLibraryReadyDelivery(api.libraryReady)).current;
   const WATCHDOG_MS = 500;
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
@@ -302,36 +304,28 @@ export default function SinglePageShell() {
   });
 
   // ── library_ready signal ────────────────────────────────────────────
-  // Sent exactly once after the first Library paint (cards, empty, error, or
-  // timeout retry state). Uses a pure gate so the "exactly once" guarantee is
-  // testable without mounting the full shell.
-  const libraryPaintActive = shouldSignalLibraryPaint({
+  // Delivered after the first Library paint (cards, empty, error, or timeout
+  // retry state) until the backend acknowledges it.
+  const libraryPaintState = {
     initialLoading: browser.initialLoading,
     hasEntries: browser.entries.length > 0,
     emptyConfirmed: browser.emptyConfirmed,
     loadError: browser.loadError,
     timedOut: initialRequestTimedOut,
-  });
+  };
+  const libraryPaintActive = shouldSignalLibraryPaint(libraryPaintState);
   useEffect(() => {
-    if (!libraryReadyGate.shouldSignal({
-      initialLoading: browser.initialLoading,
-      hasEntries: browser.entries.length > 0,
-      emptyConfirmed: browser.emptyConfirmed,
-      loadError: browser.loadError,
-      timedOut: initialRequestTimedOut,
-    })) return;
-    libraryReadyGate.markCalled();
-    void api.libraryReady().catch(() => {
-      // library_ready is fire-and-forget; the backend handles idempotency.
-    });
-  }, [
-    browser.emptyConfirmed,
-    browser.entries.length,
-    browser.initialLoading,
-    browser.loadError,
-    initialRequestTimedOut,
-    libraryReadyGate,
-  ]);
+    if (!libraryPaintActive) return undefined;
+    libraryReadyDelivery.activate();
+    return () => libraryReadyDelivery.deactivate();
+  }, [libraryPaintActive, libraryReadyDelivery]);
+
+  const libraryTimeoutResolved = shouldClearLibraryTimeout(libraryPaintState);
+  useEffect(() => {
+    if (initialRequestTimedOut && libraryTimeoutResolved) {
+      setInitialRequestTimedOut(false);
+    }
+  }, [initialRequestTimedOut, libraryTimeoutResolved]);
 
   // ── initial request watchdog (500 ms) ──────────────────────────────────
   // If the first browser request never resolves (perpetual loading),
@@ -631,18 +625,21 @@ export default function SinglePageShell() {
     previousScanRunning.current = running;
   }, [catalog.reloadSources, scan.progress?.running]);
 
-  const lastScanError = useRef<string | null>(null);
+  const scanErrorGate = useRef(createRecurringErrorGate()).current;
   useEffect(() => {
     const error = scan.scanError ?? scan.transportError;
-    if (!error || error === lastScanError.current) return;
-    lastScanError.current = error;
+    if (error === null) {
+      scanErrorGate.shouldNotify(null);
+      return;
+    }
+    if (!error || !scanErrorGate.shouldNotify(error)) return;
     showNotice({
       channel: 'scan',
       severity: scan.scanError ? 'error' : 'warning',
       message: scan.scanError ? 'Wallpaper scan failed.' : 'Scan status is temporarily unavailable.',
       technicalDetails: error,
     });
-  }, [scan.scanError, scan.transportError, showNotice]);
+  }, [scan.scanError, scan.transportError, scanErrorGate, showNotice]);
 
   useEffect(() => {
     const error = preferencesSaveError ?? preferencesLoadError;

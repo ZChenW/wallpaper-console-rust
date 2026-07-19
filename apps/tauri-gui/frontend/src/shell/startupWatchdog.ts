@@ -1,5 +1,5 @@
 /**
- * Pure controller for the Library startup watchdog and library_ready gate.
+ * Pure controllers for the Library startup watchdog and library_ready delivery.
  *
  * These helpers are separated from React so they can be tested without
  * mounting components or manipulating real timers.
@@ -27,38 +27,103 @@ export interface LibraryPaintInput {
 export function shouldSignalLibraryPaint(state: LibraryPaintInput): boolean {
   // A timeout counts as paint regardless of initialLoading.
   if (state.timedOut) return true;
-  // Otherwise we need the loading to have finished and some content signal.
+  return shouldClearLibraryTimeout(state);
+}
+
+/** Returns true only when a timed-out request has since reached a real result. */
+export function shouldClearLibraryTimeout(state: LibraryPaintInput): boolean {
   if (state.initialLoading) return false;
   return state.hasEntries || state.emptyConfirmed || state.loadError;
 }
 
-// ── library_ready gate ──────────────────────────────────────────────────
+// ── library_ready delivery ──────────────────────────────────────────────
 
-export interface LibraryReadyGate {
-  /** Whether library_ready has already been signalled. */
-  readonly called: boolean;
-  /**
-   * Returns true if `library_ready` should be sent given the current paint
-   * state. Returns false if the gate has already been opened.
-   */
-  shouldSignal(state: LibraryPaintInput): boolean;
-  /** Record that `library_ready` has been sent. */
-  markCalled(): void;
+export interface LibraryReadyTimers {
+  setTimer(callback: () => void, delayMs: number): unknown;
+  clearTimer(handle: unknown): void;
 }
 
-export function createLibraryReadyGate(): LibraryReadyGate {
-  let _called = false;
+export interface LibraryReadyDelivery {
+  /** Whether the backend has acknowledged library_ready. */
+  readonly acknowledged: boolean;
+  /** Begin or resume delivery. Safe to call while a send is already active. */
+  activate(): void;
+  /** Cancel pending retries while preserving in-flight and acknowledgement state. */
+  deactivate(): void;
+}
+
+const LIBRARY_READY_RETRY_DELAYS_MS = [250, 1_000, 2_000, 5_000] as const;
+
+const DEFAULT_LIBRARY_READY_TIMERS: LibraryReadyTimers = {
+  setTimer: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+  clearTimer: (handle) => globalThis.clearTimeout(handle as number),
+};
+
+export function createLibraryReadyDelivery(
+  send: () => Promise<void>,
+  timers: LibraryReadyTimers = DEFAULT_LIBRARY_READY_TIMERS,
+): LibraryReadyDelivery {
+  let active = false;
+  let acknowledged = false;
+  let inFlight = false;
+  let retryIndex = 0;
+  let pendingRetry: { handle: unknown } | null = null;
+
+  const scheduleRetry = (): void => {
+    const delayIndex = Math.min(retryIndex, LIBRARY_READY_RETRY_DELAYS_MS.length - 1);
+    const delayMs = LIBRARY_READY_RETRY_DELAYS_MS[delayIndex];
+    retryIndex += 1;
+    if (!active) return;
+
+    const retry = {
+      handle: timers.setTimer(() => {
+        if (pendingRetry !== retry) return;
+        pendingRetry = null;
+        attemptSend();
+      }, delayMs),
+    };
+    pendingRetry = retry;
+  };
+
+  const finishRejectedSend = (): void => {
+    inFlight = false;
+    scheduleRetry();
+  };
+
+  const attemptSend = (): void => {
+    if (!active || acknowledged || inFlight || pendingRetry !== null) return;
+    inFlight = true;
+
+    let request: Promise<void>;
+    try {
+      request = send();
+    } catch {
+      finishRejectedSend();
+      return;
+    }
+
+    void request.then(
+      () => {
+        inFlight = false;
+        acknowledged = true;
+      },
+      () => finishRejectedSend(),
+    );
+  };
 
   return {
-    get called() {
-      return _called;
+    get acknowledged() {
+      return acknowledged;
     },
-    shouldSignal(state) {
-      if (_called) return false;
-      return shouldSignalLibraryPaint(state);
+    activate() {
+      active = true;
+      attemptSend();
     },
-    markCalled() {
-      _called = true;
+    deactivate() {
+      active = false;
+      if (pendingRetry === null) return;
+      timers.clearTimer(pendingRetry.handle);
+      pendingRetry = null;
     },
   };
 }
