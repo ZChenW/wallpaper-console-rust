@@ -4,12 +4,19 @@ import test from 'node:test';
 import {
   cardHoverLabel,
   displayName,
+  editorialActionLabel,
   formatSize,
   metaLine,
   typeIcon,
   weBadge,
   weBadgeClass,
 } from './wallpaperCardHelpers.ts';
+
+test('Editorial action copy reflects the configured apply gesture', () => {
+  assert.equal(editorialActionLabel(true, 'single'), 'Select / apply');
+  assert.equal(editorialActionLabel(true, 'double'), 'Select / double-click apply');
+  assert.equal(editorialActionLabel(false, 'single'), 'View details');
+});
 
 const baseEntry = (overrides: Record<string, unknown> = {}) => ({
   path: '/walls/a.jpg',

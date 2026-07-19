@@ -24,6 +24,4 @@ doc/
 scripts/*
 !scripts/check_runtime_config_drift.sh
 !scripts/test_install_contract.sh
-tests/
-crates/**/tests/
-crates/**/src/**/tests/
+/tests/

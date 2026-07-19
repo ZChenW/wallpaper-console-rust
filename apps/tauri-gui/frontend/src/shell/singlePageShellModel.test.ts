@@ -6,7 +6,9 @@ import type { CurrentWallpaperState } from './currentWallpaperState.ts';
 import {
   canChooseRandomWallpaper,
   currentWallpaperLabel,
+  effectiveSourceFilter,
   reconcileSelectedEntry,
+  reconcileSelectedEntryByStableId,
   reconcileSourceFilter,
   shouldOfferFirstRun,
   targetArgument,
@@ -98,4 +100,71 @@ test('selection follows a replacement entry and clears when the replacement omit
   );
   assert.equal(reconcileSelectedEntry(selected, new Map()), null);
   assert.equal(reconcileSelectedEntry(null, new Map()), null);
+});
+
+test('revision replacement refreshes selection by stable ID and retains deep-page selection', () => {
+  const selected = { wallpaperId: 7, path: '/old.jpg', title: 'Old' };
+  const refreshed = { wallpaperId: 7, path: '/new.jpg', title: 'New' };
+  assert.equal(
+    reconcileSelectedEntryByStableId(selected, [refreshed]),
+    refreshed,
+  );
+  assert.equal(reconcileSelectedEntryByStableId(selected, []), selected);
+  assert.equal(reconcileSelectedEntryByStableId(null, [refreshed]), null);
+});
+
+test('source failure disables filtering but Library still loads with all-sources view', () => {
+  // When sources fail to load, the source list is empty but the Library should
+  // still render results using a default all-sources filter.
+  // The sourceFilter reconciliation already handles this: an empty source list
+  // forces sourceFilter back to 'all'.
+  assert.deepEqual(reconcileSourceFilter({ kind: 'source', sourceId: 7 }, []), { kind: 'all' });
+  assert.deepEqual(reconcileSourceFilter({ kind: 'all' }, []), { kind: 'all' });
+});
+
+test('source error is distinct from empty source list for first-run detection', () => {
+  // An error is an error state, not evidence of fresh install
+  assert.equal(shouldOfferFirstRun([], 'source database unavailable'), false);
+  // But an empty list without error IS a first-run
+  assert.equal(shouldOfferFirstRun([], undefined), true);
+  // A populated list is never a first-run
+  assert.equal(shouldOfferFirstRun([source(1)], undefined), false);
+});
+
+// ── effectiveSourceFilter ──────────────────────────────────────────────
+
+test('effectiveSourceFilter returns the persisted filter when sources load successfully', () => {
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'source', sourceId: 7 }, undefined),
+    { kind: 'source', sourceId: 7 },
+  );
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'all' }, undefined),
+    { kind: 'all' },
+  );
+});
+
+test('effectiveSourceFilter forces all when source catalog errors', () => {
+  // A source catalog error means we cannot know which sources exist.
+  // The Library must still render with all sources; the persisted preference
+  // is NOT overwritten — only the effective value passed to the browser changes.
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'source', sourceId: 7 }, 'database unavailable'),
+    { kind: 'all' },
+  );
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'all' }, 'source error'),
+    { kind: 'all' },
+  );
+});
+
+test('effectiveSourceFilter with null/empty error string behaves as no error', () => {
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'source', sourceId: 7 }, undefined),
+    { kind: 'source', sourceId: 7 },
+  );
+  assert.deepEqual(
+    effectiveSourceFilter({ kind: 'source', sourceId: 3 }, ''),
+    { kind: 'source', sourceId: 3 },
+  );
 });

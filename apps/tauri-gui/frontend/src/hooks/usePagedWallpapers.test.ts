@@ -62,6 +62,13 @@ test('formatLoadPageError preserves string errors', () => {
   assert.equal(formatLoadPageError('database is locked'), 'database is locked');
 });
 
+test('formatLoadPageError preserves typed backend error details', () => {
+  assert.equal(
+    formatLoadPageError({ kind: 'query_timeout', message: 'Library query exceeded 2 seconds.' }),
+    'Library query exceeded 2 seconds.',
+  );
+});
+
 test('formatLoadPageError falls back for unknown error shapes', () => {
   assert.equal(formatLoadPageError({ code: 1 }), 'Failed to load library page');
 });
@@ -73,20 +80,17 @@ test('append failures pause automatic retries until an explicit retry', () => {
 test('append pages with no progress pause automatic retries while the server reports more', () => {
   assert.equal(shouldPauseAutomaticAppend({
     kind: 'success',
-    offset: 120,
     itemCount: 0,
-    total: 240,
+    nextCursor: 'next',
   }), true);
   assert.equal(shouldPauseAutomaticAppend({
     kind: 'success',
-    offset: 120,
     itemCount: 120,
-    total: 240,
+    nextCursor: 'next',
   }), false);
   assert.equal(shouldPauseAutomaticAppend({
     kind: 'success',
-    offset: 120,
     itemCount: 0,
-    total: 120,
-  }), false);
+    nextCursor: null,
+  }), true);
 });

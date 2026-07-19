@@ -9,6 +9,7 @@ import type {
   LibraryBrowserItemDTO,
   LibraryBrowserPageDTO,
   LibraryBrowserQueryDTO,
+  LibraryBrowserTotalDTO,
   LibraryPageDTO,
   LibrarySourceStatusDTO,
   LinuxWallpaperEngineStatusDTO,
@@ -46,10 +47,19 @@ export function createLibraryBrowserApi(invokeFn: InvokeFn = invoke) {
   return {
     libraryBrowserPage: (query: LibraryBrowserQueryDTO): Promise<LibraryBrowserPageDTO> =>
       invokeFn<LibraryBrowserPageDTO>('library_browser_page', { query }),
+    libraryBrowserTotal: (
+      query: LibraryBrowserQueryDTO,
+      expectedRevision: number,
+    ): Promise<LibraryBrowserTotalDTO> => invokeFn<LibraryBrowserTotalDTO>(
+      'library_browser_total',
+      { query, expectedRevision },
+    ),
     libraryBrowserRandom: (
       query: LibraryBrowserQueryDTO,
     ): Promise<LibraryBrowserItemDTO | null> =>
       invokeFn<LibraryBrowserItemDTO | null>('library_browser_random', { query }),
+    libraryWallpaperExists: (wallpaperId: number): Promise<boolean> =>
+      invokeFn<boolean>('library_wallpaper_exists', { wallpaperId }),
   };
 }
 
@@ -146,6 +156,8 @@ export const api = {
 
   thumbnailFor: (path: string): Promise<ThumbnailDTO> =>
     invoke<ThumbnailDTO>('thumbnail_for', { path }).catch(() => ({ path, cacheHit: false })),
+  previewAssetAuthorize: (path: string, wallpaperPath: string): Promise<string> =>
+    invoke<string>('preview_asset_authorize', { path, wallpaperPath }),
 
   thumbnailCacheStatus: (): Promise<ThumbnailCacheDTO> => invoke<ThumbnailCacheDTO>('thumbnail_cache_status'),
   thumbnailCacheClear: (): Promise<CommandResult> => invoke<CommandResult>('thumbnail_cache_clear'),
@@ -157,5 +169,6 @@ export const api = {
   revealInFileManager: (path: string): Promise<CommandResult> => invoke<CommandResult>('reveal_in_file_manager', { path }),
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),
 
+  libraryReady: (): Promise<void> => invoke<void>('library_ready'),
   exportDiagnostics: (): Promise<CommandResult> => invoke<CommandResult>('export_diagnostics'),
 } satisfies WallpaperConsoleApi;

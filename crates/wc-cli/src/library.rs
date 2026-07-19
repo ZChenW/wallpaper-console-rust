@@ -1,6 +1,7 @@
-use std::fs::OpenOptions;
-use std::io::{BufWriter, ErrorKind, Write};
+use std::io::{BufWriter, Write};
 
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::types::{Backend, WallpaperEntry};
 use wc_storage::StorageApi;
 
@@ -93,33 +94,32 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 }
 
 fn rescan(s: &StorageApi) -> anyhow::Result<()> {
-    let _rescan_guard = acquire_rescan_lock(s)?;
     let t0 = std::time::Instant::now();
-    let source_count = with_dirty_library_marker(s, || Ok(s.source_records()?.len()))?;
-    if source_count == 0 {
-        let sqlite_count = write_legacy_tsv_snapshot(s)?;
-        println!("(no sources configured; SQLite snapshot: {sqlite_count})");
+    let report =
+        wc_app::library_rescan::run_library_rescan(s, |_, _| wc_scan::ScanControl::Continue)
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    if report.source_count == 0 {
+        println!(
+            "(no sources configured; SQLite snapshot: {})",
+            report.snapshot_count
+        );
         return Ok(());
     }
 
-    let refresh_start = std::time::Instant::now();
-    let report =
-        wc_app::library_refresh::refresh_library_sources(s, |_, _| wc_scan::ScanControl::Continue)
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    let refresh_time = refresh_start.elapsed();
-
-    let snapshot_start = std::time::Instant::now();
-    let sqlite_count = write_legacy_tsv_snapshot(s)?;
-    let snapshot_time = snapshot_start.elapsed();
+    let refresh = report
+        .refresh
+        .as_ref()
+        .expect("rescan with sources always includes a refresh report");
     let total_time = t0.elapsed();
     println!(
         "{}",
         format_rescan_summary(
-            source_count,
-            &report,
-            sqlite_count,
-            refresh_time,
-            snapshot_time,
+            report.source_count,
+            refresh,
+            report.snapshot_count,
+            report.refresh_time,
+            report.snapshot_time,
             total_time,
         )
     );
@@ -162,7 +162,8 @@ fn format_rescan_summary(
 }
 
 fn sqlite_library_snapshot(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEntry>> {
-    ensure_dirty_sqlite_is_readable(s)?;
+    wc_app::library_rescan::ensure_dirty_sqlite_is_readable(s)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let total = wc_storage::sqlite::source_backed_library_count(&s.cd)?;
     if total == 0 {
         return Ok(Vec::new());
@@ -188,73 +189,7 @@ fn sqlite_library_snapshot(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEntry>
 }
 
 fn dirty_marker_path(s: &StorageApi) -> std::path::PathBuf {
-    s.cd.path.join("library.dirty")
-}
-
-fn acquire_rescan_lock(s: &StorageApi) -> anyhow::Result<std::fs::File> {
-    std::fs::create_dir_all(&s.cd.path)?;
-    let lock = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .create(true)
-        .truncate(false)
-        .open(s.cd.path.join(".library.rescan.lock"))?;
-    lock.lock()?;
-    Ok(lock)
-}
-
-fn establish_library_dirty_marker(s: &StorageApi) -> anyhow::Result<()> {
-    let dirty = dirty_marker_path(s);
-    let marker = match OpenOptions::new().write(true).create_new(true).open(&dirty) {
-        Ok(marker) => marker,
-        Err(error) if error.kind() == ErrorKind::AlreadyExists => return Ok(()),
-        Err(error) => return Err(error.into()),
-    };
-    marker.sync_all()?;
-    Ok(())
-}
-
-fn with_dirty_library_marker<T, F>(s: &StorageApi, operation: F) -> anyhow::Result<T>
-where
-    F: FnOnce() -> anyhow::Result<T>,
-{
-    establish_library_dirty_marker(s)?;
-    operation()
-}
-
-fn write_legacy_tsv_snapshot(s: &StorageApi) -> anyhow::Result<usize> {
-    let entries = sqlite_library_snapshot(s)?;
-    let tsv_path = s.cd.library_tsv_path();
-    let tsv_tmp = tsv_path.with_extension("tsv.tmp");
-    let write_result = (|| -> anyhow::Result<()> {
-        let tsv_file = std::fs::File::create(&tsv_tmp)?;
-        let mut writer = BufWriter::new(tsv_file);
-        for entry in &entries {
-            write_library_tsv_entry(&mut writer, entry)?;
-        }
-        writer.flush()?;
-        drop(writer);
-        std::fs::rename(&tsv_tmp, &tsv_path)?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&tsv_tmp);
-    }
-    write_result?;
-    let dirty = dirty_marker_path(s);
-    if dirty.exists() {
-        std::fs::remove_file(dirty)?;
-    }
-    Ok(entries.len())
-}
-
-fn ensure_dirty_sqlite_is_readable(s: &StorageApi) -> anyhow::Result<()> {
-    if dirty_marker_path(s).exists() && !s.cd.db_path().exists() {
-        anyhow::bail!(
-            "library snapshot is stale: library.dirty exists but SQLite is unavailable; run rescan"
-        );
-    }
-    Ok(())
+    wc_app::library_rescan::library_dirty_marker_path(s)
 }
 
 pub(crate) fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEntry>> {
@@ -299,7 +234,8 @@ pub(crate) fn library_entries(s: &StorageApi) -> anyhow::Result<Vec<WallpaperEnt
 }
 
 fn json_source_backed_library(s: &StorageApi) -> anyhow::Result<()> {
-    ensure_dirty_sqlite_is_readable(s)?;
+    wc_app::library_rescan::ensure_dirty_sqlite_is_readable(s)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     if !s.cd.db_path().exists() {
         return json_library_from_sqlite(s);
     }
@@ -317,7 +253,8 @@ fn json_source_backed_library_page(
     offset: usize,
     limit: usize,
 ) -> anyhow::Result<()> {
-    ensure_dirty_sqlite_is_readable(s)?;
+    wc_app::library_rescan::ensure_dirty_sqlite_is_readable(s)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
     let query = wc_storage::sqlite::LibraryPageQuery {
         filter: wc_storage::sqlite::LibraryFilter::parse(filter)?,
         sort: wc_storage::sqlite::LibrarySort::parse(sort)?,
@@ -529,12 +466,12 @@ mod tests {
         let (_tmp, storage) = storage();
         let dirty = storage.cd.path.join("library.dirty");
 
-        let value = with_dirty_library_marker(&storage, || {
+        let value = wc_app::library_rescan::with_dirty_library_marker(&storage, || {
             assert!(
                 dirty.exists(),
                 "the marker must predate every SQLite mutation in refresh"
             );
-            Ok::<_, anyhow::Error>(42)
+            Ok::<_, std::io::Error>(42)
         })
         .unwrap();
 
@@ -591,7 +528,7 @@ mod tests {
     #[test]
     fn rescan_lock_serializes_snapshot_refreshes() {
         let (_tmp, storage) = storage();
-        let first_guard = acquire_rescan_lock(&storage).unwrap();
+        let first_guard = wc_app::library_rescan::acquire_rescan_lock(&storage).unwrap();
         let config_path = storage.cd.path.clone();
         let (attempting_tx, attempting_rx) = std::sync::mpsc::channel();
         let (acquired_tx, acquired_rx) = std::sync::mpsc::channel();
@@ -599,7 +536,7 @@ mod tests {
         let second = std::thread::spawn(move || {
             let storage = StorageApi::new(wc_core::ConfigDir { path: config_path });
             attempting_tx.send(()).unwrap();
-            let _guard = acquire_rescan_lock(&storage).unwrap();
+            let _guard = wc_app::library_rescan::acquire_rescan_lock(&storage).unwrap();
             acquired_tx.send(()).unwrap();
         });
 
@@ -618,6 +555,28 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(1))
             .unwrap();
         second.join().unwrap();
+    }
+
+    #[test]
+    fn cli_rescan_reports_scan_busy_after_bounded_wait() {
+        let (_tmp, storage) = storage();
+        let _guard = wc_app::library_rescan::acquire_rescan_lock(&storage).unwrap();
+        let started = std::time::Instant::now();
+
+        let error = rescan(&storage).unwrap_err();
+
+        assert!(
+            error.to_string().contains("scan_busy"),
+            "CLI must preserve the stable contention category: {error}"
+        );
+        assert!(
+            started.elapsed() >= std::time::Duration::from_secs(2),
+            "CLI manual rescan must wait for the bounded manual lock timeout"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(3),
+            "CLI manual rescan must not wait indefinitely"
+        );
     }
 
     #[test]

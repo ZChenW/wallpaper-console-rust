@@ -1,10 +1,5 @@
 use std::collections::HashMap;
-use std::ffi::{OsStr, OsString};
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-
-use crate::error::WcError;
+use std::path::PathBuf;
 
 const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gif_backend", "awww"),
@@ -39,18 +34,12 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_terminal_file_manager_custom", ""),
 ];
 
-/// Resolve the wallpaper-console config directory.
-pub fn resolve_config_dir() -> Result<PathBuf, WcError> {
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return Ok(PathBuf::from(xdg).join("wallpaper-console"));
-        }
-    }
-    let home = std::env::var("HOME").map_err(|_| WcError::HomeNotSet)?;
-    Ok(Path::new(&home).join(".config").join("wallpaper-console"))
+/// Default config key-value pairs (populated on first run).
+pub fn default_config_pairs() -> &'static [(&'static str, &'static str)] {
+    DEFAULT_CONFIG_PAIRS
 }
 
-/// Default config key-value pairs (populated on first run).
+/// Default config key-value pairs as an owned map (test/helper convenience).
 pub fn default_config() -> HashMap<String, String> {
     DEFAULT_CONFIG_PAIRS
         .iter()
@@ -63,330 +52,18 @@ pub fn default_config_keys() -> Vec<&'static str> {
     DEFAULT_CONFIG_PAIRS.iter().map(|(key, _)| *key).collect()
 }
 
-/// Runtime files that must exist.
-const RUNTIME_FILES: &[&str] = &[
-    "sources",
-    "config",
-    "current",
-    "last_backend",
-    "favorites",
-    "history",
-];
-
-/// Initialize the config directory: create it and populate missing runtime files
-/// and config defaults. Never overwrites existing values.
-pub fn init_config_dir(config_dir: &Path) -> Result<(), WcError> {
-    fs::create_dir_all(config_dir).map_err(WcError::Io)?;
-
-    // Ensure runtime files exist
-    for f in RUNTIME_FILES {
-        let path = config_dir.join(f);
-        if !path.exists() {
-            fs::write(&path, "").map_err(WcError::Io)?;
-        }
-    }
-
-    // Ensure library.tsv exists
-    let lib_path = config_dir.join("library.tsv");
-    if !lib_path.exists() {
-        fs::write(&lib_path, "").map_err(WcError::Io)?;
-    }
-
-    // Populate defaults for missing config keys
-    let config_path = config_dir.join("config");
-    let existing = parse_config_file(&config_path)?;
-    let mut to_add = Vec::new();
-    for (key, val) in DEFAULT_CONFIG_PAIRS {
-        if !existing.contains_key(*key) {
-            to_add.push(format!("{}={}", key, val));
-        }
-    }
-    if !to_add.is_empty() {
-        let mut content = fs::read_to_string(&config_path).unwrap_or_default();
-        for line in &to_add {
-            content.push_str(line);
-            content.push('\n');
-        }
-        fs::write(&config_path, content).map_err(WcError::Io)?;
-    }
-
-    Ok(())
-}
-
-/// Parse a flat `key=value` config file into a HashMap.
-/// Lines starting with `#` are treated as comments.
-/// Empty lines are ignored.
-pub fn parse_config_file(path: &Path) -> Result<HashMap<String, String>, WcError> {
-    let mut map = HashMap::new();
-    if !path.exists() {
-        return Ok(map);
-    }
-    let content = fs::read_to_string(path).map_err(WcError::Io)?;
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some(eq_pos) = line.find('=') {
-            let key = line[..eq_pos].to_string();
-            let value = line[eq_pos + 1..].to_string();
-            map.insert(key, value);
-        }
-    }
-    Ok(map)
-}
-
-static ATOMIC_CONFIG_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-
-fn atomic_config_temp_path(config_path: &Path) -> PathBuf {
-    let sequence = ATOMIC_CONFIG_TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let mut temp_file_name = OsString::from(".");
-    temp_file_name.push(
-        config_path
-            .file_name()
-            .unwrap_or_else(|| OsStr::new("config")),
-    );
-    temp_file_name.push(format!(".tmp.{}.{}", std::process::id(), sequence));
-    config_path.with_file_name(temp_file_name)
-}
-
-/// Set a config value in the flat config file (atomic write).
-pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
-    let config_path = config_dir.join("config");
-    let mut map = if config_path.exists() {
-        parse_config_file(&config_path)?
-    } else {
-        HashMap::new()
-    };
-    let value = if key == "storage_backend" {
-        "sqlite"
-    } else {
-        value
-    };
-    map.insert(key.to_string(), value.to_string());
-
-    let content = serialize_config_map(&map);
-    // Atomic: write to temp, then rename
-    let tmp = atomic_config_temp_path(&config_path);
-    if let Err(error) = fs::write(&tmp, content) {
-        let _ = fs::remove_file(&tmp);
-        return Err(WcError::Io(error));
-    }
-    if let Err(error) = fs::rename(&tmp, &config_path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(WcError::Io(error));
-    }
-    Ok(())
-}
-
-fn serialize_config_map(map: &HashMap<String, String>) -> String {
-    let mut content = String::new();
-    let mut emitted = std::collections::HashSet::new();
-
-    for key in default_config_keys() {
-        if let Some(value) = map.get(key) {
-            content.push_str(key);
-            content.push('=');
-            content.push_str(value);
-            content.push('\n');
-            emitted.insert(key.to_string());
-        }
-    }
-
-    let mut unknown: Vec<&String> = map.keys().filter(|key| !emitted.contains(*key)).collect();
-    unknown.sort();
-    for key in unknown {
-        if let Some(value) = map.get(key) {
-            content.push_str(key);
-            content.push('=');
-            content.push_str(value);
-            content.push('\n');
-        }
-    }
-
-    content
-}
-
-/// Read a single config value. Returns `default` if key not found.
-pub fn read_config_value(config_dir: &Path, key: &str, default: &str) -> String {
-    let path = config_dir.join("config");
-    let value = parse_config_file(&path)
-        .ok()
-        .and_then(|m| m.get(key).cloned())
-        .unwrap_or_else(|| default.to_string());
-
-    if key == "storage_backend" {
-        "sqlite".to_string()
-    } else {
-        value
-    }
-}
-
-/// Pure normalization: map any image_backend value to a valid backend name.
-/// "mpvpaper" => "mpvpaper", "awww" | "swww" => "awww", anything else => "awww".
-pub fn normalize_image_backend(raw: &str) -> &'static str {
-    match raw {
-        "mpvpaper" => "mpvpaper",
-        _ => "awww",
-    }
-}
-
 /// A handle for the wallpaper-console config directory.
+///
+/// Pure path derivation only. Resolving from the environment and creating
+/// on-disk files live in `wc-config`.
 pub struct ConfigDir {
     pub path: PathBuf,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn normalize_image_backend_known() {
-        assert_eq!(normalize_image_backend("awww"), "awww");
-        assert_eq!(normalize_image_backend("mpvpaper"), "mpvpaper");
-    }
-
-    #[test]
-    fn normalize_image_backend_legacy_swww() {
-        assert_eq!(normalize_image_backend("swww"), "awww");
-    }
-
-    #[test]
-    fn normalize_image_backend_unknown_fallback() {
-        assert_eq!(normalize_image_backend("bad"), "awww");
-        assert_eq!(normalize_image_backend(""), "awww");
-        assert_eq!(normalize_image_backend("unknown"), "awww");
-    }
-
-    #[test]
-    fn default_mpvpaper_options_includes_panscan() {
-        let defaults = default_config();
-        assert_eq!(
-            defaults.get("mpvpaper_options").unwrap(),
-            "--loop-file=inf --panscan=1.0"
-        );
-    }
-
-    #[test]
-    fn login_restore_is_opt_in_by_default() {
-        let defaults = default_config();
-        assert_eq!(
-            defaults.get("restore_on_login").map(String::as_str),
-            Some("off")
-        );
-    }
-
-    #[test]
-    fn default_config_keys_are_unique() {
-        let keys = default_config_keys();
-        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
-        assert_eq!(keys.len(), unique.len());
-        assert_eq!(keys.first().copied(), Some("gif_backend"));
-        assert_eq!(
-            keys.last().copied(),
-            Some("gui_terminal_file_manager_custom")
-        );
-    }
-
-    #[test]
-    fn write_config_value_is_deterministic() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cfg = tmp.path().join("config");
-        fs::write(
-            &cfg,
-            "z_custom=last\nimage_backend=awww\ngif_backend=awww\n",
-        )
-        .unwrap();
-
-        write_config_value(tmp.path(), "mpvpaper_output", "DP-1").unwrap();
-        let first = fs::read_to_string(&cfg).unwrap();
-        write_config_value(tmp.path(), "mpvpaper_output", "DP-1").unwrap();
-        let second = fs::read_to_string(&cfg).unwrap();
-
-        assert_eq!(first, second);
-        assert!(first.contains("gif_backend=awww\nimage_backend=awww\n"));
-        assert!(first.ends_with("z_custom=last\n"));
-    }
-
-    #[test]
-    fn atomic_config_temp_paths_are_unique() {
-        let config_path = Path::new("/tmp/config");
-
-        let first = atomic_config_temp_path(config_path);
-        let second = atomic_config_temp_path(config_path);
-
-        assert_ne!(first, second);
-        assert_eq!(first.parent(), config_path.parent());
-        assert_eq!(second.parent(), config_path.parent());
-
-        let expected_prefix = format!(".config.tmp.{}.", std::process::id());
-        assert!(first
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with(&expected_prefix));
-        assert!(second
-            .file_name()
-            .unwrap()
-            .to_string_lossy()
-            .starts_with(&expected_prefix));
-    }
-
-    #[test]
-    fn default_config_includes_gui_theme() {
-        let defaults = default_config();
-        assert_eq!(defaults.get("gui_theme").map(|s| s.as_str()), Some("light"));
-    }
-
-    #[test]
-    fn init_config_dir_appends_missing_defaults_in_registry_order() {
-        let tmp = tempfile::tempdir().unwrap();
-        init_config_dir(tmp.path()).unwrap();
-        let content = fs::read_to_string(tmp.path().join("config")).unwrap();
-        let first_three: Vec<&str> = content.lines().take(3).collect();
-        assert_eq!(
-            first_three,
-            vec![
-                "gif_backend=awww",
-                "image_backend=awww",
-                "video_backend=mpvpaper"
-            ]
-        );
-    }
-
-    #[test]
-    fn storage_backend_reads_are_sqlite_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        init_config_dir(tmp.path()).unwrap();
-        std::fs::write(tmp.path().join("config"), "storage_backend=hybrid\n").unwrap();
-
-        assert_eq!(
-            read_config_value(tmp.path(), "storage_backend", "file"),
-            "sqlite"
-        );
-    }
-
-    #[test]
-    fn storage_backend_writes_are_normalized_to_sqlite() {
-        let tmp = tempfile::tempdir().unwrap();
-        init_config_dir(tmp.path()).unwrap();
-
-        write_config_value(tmp.path(), "storage_backend", "file").unwrap();
-
-        let content = std::fs::read_to_string(tmp.path().join("config")).unwrap();
-        assert!(content.contains("storage_backend=sqlite\n"));
-        assert!(!content.contains("storage_backend=file\n"));
-    }
-}
-
 impl ConfigDir {
-    pub fn new() -> Result<Self, WcError> {
-        let path = resolve_config_dir()?;
-        Ok(ConfigDir { path })
-    }
-
-    pub fn init(&self) -> Result<(), WcError> {
-        init_config_dir(&self.path)
+    /// Construct from an already-resolved path (tests and explicit paths).
+    pub fn from_path(path: PathBuf) -> Self {
+        ConfigDir { path }
     }
 
     pub fn config_path(&self) -> PathBuf {
@@ -431,5 +108,57 @@ impl ConfigDir {
 
     pub fn gui_thumbnail_cache_dir(&self) -> PathBuf {
         self.path.join("cache").join("gui-thumbnails")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_mpvpaper_options_includes_panscan() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("mpvpaper_options").unwrap(),
+            "--loop-file=inf --panscan=1.0"
+        );
+    }
+
+    #[test]
+    fn login_restore_is_opt_in_by_default() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("restore_on_login").map(String::as_str),
+            Some("off")
+        );
+    }
+
+    #[test]
+    fn default_config_keys_are_unique() {
+        let keys = default_config_keys();
+        let unique = keys.iter().collect::<std::collections::HashSet<_>>();
+        assert_eq!(keys.len(), unique.len());
+        assert_eq!(keys.first().copied(), Some("gif_backend"));
+        assert_eq!(
+            keys.last().copied(),
+            Some("gui_terminal_file_manager_custom")
+        );
+    }
+
+    #[test]
+    fn default_config_includes_gui_theme() {
+        let defaults = default_config();
+        assert_eq!(defaults.get("gui_theme").map(|s| s.as_str()), Some("light"));
+    }
+
+    #[test]
+    fn path_helpers_join_expected_names() {
+        let cd = ConfigDir::from_path(PathBuf::from("/tmp/wc-test"));
+        assert_eq!(cd.config_path(), PathBuf::from("/tmp/wc-test/config"));
+        assert_eq!(cd.db_path(), PathBuf::from("/tmp/wc-test/wallpapers.db"));
+        assert_eq!(
+            cd.gui_thumbnail_cache_dir(),
+            PathBuf::from("/tmp/wc-test/cache/gui-thumbnails")
+        );
     }
 }

@@ -69,9 +69,18 @@ pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
 
 pub(crate) fn stop_mpvpaper() {
     let user = crate::whoami();
-    let _ = Command::new("pkill")
+    match Command::new("pkill")
         .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
-        .status();
+        .status()
+    {
+        Ok(status) if status.success() || status.code() == Some(1) => {}
+        Ok(status) => {
+            log::warn!("pkill -u {user} -f mpvpaper exited with unexpected status: {status}");
+        }
+        Err(err) => {
+            log::warn!("failed to execute pkill for mpvpaper: {err}");
+        }
+    }
 }
 
 pub(crate) fn normalize_mpvpaper_options(raw: &str) -> &str {

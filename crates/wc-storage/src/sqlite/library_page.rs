@@ -1,6 +1,10 @@
+use crate::sqlite_err;
 use rusqlite::types::Value;
 use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 use wc_core::types::WallpaperEntry;
@@ -70,7 +74,7 @@ pub struct LibraryPage {
 }
 
 /// User-facing wallpaper categories for the unified library browser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LibraryBrowserType {
     Usable,
     Image,
@@ -81,21 +85,21 @@ pub enum LibraryBrowserType {
 }
 
 /// Stable sort orders supported by the unified library browser.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum LibraryBrowserSort {
     RecentlyAdded,
     NameAsc,
     NameDesc,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LibraryBrowserQuery {
     pub source_id: Option<i64>,
     pub type_filter: LibraryBrowserType,
     pub favorites_only: bool,
     pub search: String,
     pub sort: LibraryBrowserSort,
-    pub offset: usize,
+    pub cursor: Option<String>,
     pub limit: usize,
 }
 
@@ -107,7 +111,7 @@ impl Default for LibraryBrowserQuery {
             favorites_only: false,
             search: String::new(),
             sort: LibraryBrowserSort::RecentlyAdded,
-            offset: 0,
+            cursor: None,
             limit: 100,
         }
     }
@@ -131,8 +135,35 @@ pub struct LibraryBrowserItem {
 
 #[derive(Debug, Clone)]
 pub struct LibraryBrowserPage {
-    pub total: usize,
+    pub revision: u64,
+    pub next_cursor: Option<String>,
+    pub total: Option<usize>,
     pub items: Vec<LibraryBrowserItem>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LibraryBrowserTotal {
+    pub revision: u64,
+    pub total: usize,
+}
+
+const BROWSER_CURSOR_VERSION: u8 = 1;
+const MAX_CURSOR_BYTES: usize = 4096;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BrowserCursorV1 {
+    version: u8,
+    revision: u64,
+    fingerprint: String,
+    boundary: BrowserCursorBoundary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "sort", rename_all = "snake_case")]
+enum BrowserCursorBoundary {
+    RecentlyAdded { added_at: String, id: i64 },
+    NameAsc { name: String, path: String, id: i64 },
+    NameDesc { name: String, path: String, id: i64 },
 }
 
 pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
@@ -143,7 +174,7 @@ pub fn library_count(cd: &ConfigDir) -> Result<usize, WcError> {
     let conn = open_runtime_connection(cd)?;
     let count: i64 = conn
         .query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(count as usize)
 }
 
@@ -168,8 +199,57 @@ pub fn source_backed_library_count(cd: &ConfigDir) -> Result<usize, WcError> {
             [],
             |row| row.get(0),
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(count.max(0) as usize)
+}
+
+/// Read the entire source-backed legacy snapshot and its revision from one
+/// SQLite read transaction. Callers must recheck the revision before publish.
+pub fn source_backed_library_snapshot(
+    cd: &ConfigDir,
+) -> Result<(u64, Vec<WallpaperEntry>), WcError> {
+    if !cd.db_path().exists() {
+        return Ok((0, Vec::new()));
+    }
+    let mut conn = open_runtime_connection(cd)?;
+    let transaction = conn.transaction().map_err(sqlite_err)?;
+    let revision = super::read_library_revision(&transaction)?;
+    let mut statement = transaction
+        .prepare(
+            "SELECT path, type, ext, backend, size, mtime, resolution,
+                    project_type, preview_path, workshop_id, title, we_file, unsupported_reason
+             FROM wallpapers wallpaper
+             WHERE EXISTS (
+                 SELECT 1 FROM wallpaper_sources membership
+                 WHERE membership.wallpaper_id = wallpaper.id
+             )
+             ORDER BY COALESCE(title, path) COLLATE NOCASE ASC, path ASC, id ASC",
+        )
+        .map_err(sqlite_err)?;
+    let entries = statement
+        .query_map([], wallpaper_entry_from_row)
+        .map_err(sqlite_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_err)?;
+    drop(statement);
+    transaction.commit().map_err(sqlite_err)?;
+    Ok((revision, entries))
+}
+
+pub fn library_wallpaper_exists(cd: &ConfigDir, wallpaper_id: i64) -> Result<bool, WcError> {
+    if !cd.db_path().exists() {
+        return Ok(false);
+    }
+    let connection = open_runtime_connection(cd)?;
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM wallpaper_sources WHERE wallpaper_id = ?1
+             )",
+            [wallpaper_id],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(sqlite_err)
 }
 
 fn empty_library_page() -> LibraryPage {
@@ -254,7 +334,7 @@ fn library_page_sqlite_with_scope(
                 [],
                 |row| row.get(0),
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         let sql = format!(
             "SELECT path, type, ext, backend, size, mtime, resolution,
@@ -264,9 +344,7 @@ fn library_page_sqlite_with_scope(
              ORDER BY {order_by}
              LIMIT ?1 OFFSET ?2"
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(sqlite_err)?;
         let items = stmt
             .query_map(
                 params![
@@ -275,9 +353,9 @@ fn library_page_sqlite_with_scope(
                 ],
                 wallpaper_entry_from_row,
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         Ok(LibraryPage {
             total: total.max(0) as usize,
@@ -313,7 +391,7 @@ fn library_page_sqlite_with_scope(
                 params![&fts],
                 |row| row.get(0),
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         let sql = format!(
             "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
@@ -324,9 +402,7 @@ fn library_page_sqlite_with_scope(
              ORDER BY {order_by}
              LIMIT ?2 OFFSET ?3"
         );
-        let mut stmt = conn
-            .prepare(&sql)
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let mut stmt = conn.prepare(&sql).map_err(sqlite_err)?;
         let items = stmt
             .query_map(
                 params![
@@ -336,9 +412,9 @@ fn library_page_sqlite_with_scope(
                 ],
                 wallpaper_entry_from_row,
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
 
         Ok(LibraryPage {
             total: total.max(0) as usize,
@@ -382,12 +458,120 @@ fn browser_type_condition(filter: LibraryBrowserType) -> &'static str {
     }
 }
 
+fn normalized_browser_search(search: &str) -> String {
+    search.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn browser_type_key(filter: LibraryBrowserType) -> &'static str {
+    match filter {
+        LibraryBrowserType::Usable => "usable",
+        LibraryBrowserType::Image => "image",
+        LibraryBrowserType::Gif => "gif",
+        LibraryBrowserType::Video => "video",
+        LibraryBrowserType::WeScene => "we_scene",
+        LibraryBrowserType::Unsupported => "unsupported",
+    }
+}
+
+fn browser_sort_key(sort: LibraryBrowserSort) -> &'static str {
+    match sort {
+        LibraryBrowserSort::RecentlyAdded => "recently_added",
+        LibraryBrowserSort::NameAsc => "name_asc",
+        LibraryBrowserSort::NameDesc => "name_desc",
+    }
+}
+
+/// Stable, non-cryptographic fingerprint. It binds a cursor to normalized
+/// criteria without embedding raw search text in the token.
+fn browser_query_fingerprint(query: &LibraryBrowserQuery) -> String {
+    let normalized = format!(
+        "source={:?}\ntype={}\nfavorite={}\nsearch={}\nsort={}",
+        query.source_id,
+        browser_type_key(query.type_filter),
+        query.favorites_only,
+        normalized_browser_search(&query.search),
+        browser_sort_key(query.sort),
+    );
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in normalized.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[(byte >> 4) as usize]));
+        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
+    }
+    encoded
+}
+
+fn hex_decode(token: &str) -> Result<Vec<u8>, WcError> {
+    if token.len() > MAX_CURSOR_BYTES * 2 {
+        return Err(WcError::InvalidCursor {
+            reason: "token too long",
+        });
+    }
+    if !token.len().is_multiple_of(2) {
+        return Err(WcError::InvalidCursor {
+            reason: "malformed token",
+        });
+    }
+    fn digit(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
+    }
+    token
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let high = digit(pair[0]).ok_or(WcError::InvalidCursor {
+                reason: "malformed token",
+            })?;
+            let low = digit(pair[1]).ok_or(WcError::InvalidCursor {
+                reason: "malformed token",
+            })?;
+            Ok((high << 4) | low)
+        })
+        .collect()
+}
+
+fn encode_browser_cursor(cursor: &BrowserCursorV1) -> Result<String, WcError> {
+    serde_json::to_vec(cursor)
+        .map(|bytes| hex_encode(&bytes))
+        .map_err(|_| WcError::InvalidCursor {
+            reason: "encode failed",
+        })
+}
+
+fn decode_browser_cursor(token: &str) -> Result<BrowserCursorV1, WcError> {
+    let bytes = hex_decode(token)?;
+    let cursor: BrowserCursorV1 =
+        serde_json::from_slice(&bytes).map_err(|_| WcError::InvalidCursor {
+            reason: "malformed token",
+        })?;
+    if cursor.version != BROWSER_CURSOR_VERSION {
+        return Err(WcError::InvalidCursor {
+            reason: "unsupported version",
+        });
+    }
+    Ok(cursor)
+}
+
 /// Build the sole predicate used by browser count, page, and random queries.
 ///
 /// Keeping source membership as `EXISTS` prevents overlapping source rows from
 /// multiplying wallpapers. Search deliberately references only user-facing
 /// basename/title/author/source-name fields.
-fn browser_predicate(query: &LibraryBrowserQuery) -> BrowserPredicate {
+fn browser_predicate(query: &LibraryBrowserQuery, use_fts: bool) -> BrowserPredicate {
     let mut params = Vec::new();
     let mut conditions = vec![
         "EXISTS (
@@ -422,6 +606,17 @@ fn browser_predicate(query: &LibraryBrowserQuery) -> BrowserPredicate {
     }
 
     for term in query.search.split_whitespace() {
+        if use_fts {
+            if let Some(fts_term) = super::library_fts::library_fts_match_term(term) {
+                let fts_placeholder = push_browser_param(&mut params, Value::Text(fts_term));
+                conditions.push(format!(
+                    "w.id IN (
+                         SELECT rowid FROM library_browser_fts
+                         WHERE library_browser_fts MATCH {fts_placeholder}
+                     )"
+                ));
+            }
+        }
         let placeholder = push_browser_param(&mut params, Value::Text(escape_like_term(term)));
         conditions.push(format!(
             "(
@@ -455,6 +650,91 @@ fn browser_order_by(sort: LibraryBrowserSort) -> &'static str {
         }
         LibraryBrowserSort::NameDesc => {
             "COALESCE(NULLIF(w.title, ''), w.filename) COLLATE NOCASE DESC, w.path ASC, w.id ASC"
+        }
+    }
+}
+
+fn append_cursor_boundary(
+    predicate: &mut BrowserPredicate,
+    sort: LibraryBrowserSort,
+    boundary: &BrowserCursorBoundary,
+) -> Result<(), WcError> {
+    let condition = match (sort, boundary) {
+        (
+            LibraryBrowserSort::RecentlyAdded,
+            BrowserCursorBoundary::RecentlyAdded { added_at, id },
+        ) => {
+            let added_at = push_browser_param(&mut predicate.params, Value::Text(added_at.clone()));
+            let id = push_browser_param(&mut predicate.params, Value::Integer(*id));
+            format!("(w.added_at < {added_at} OR (w.added_at = {added_at} AND w.id < {id}))")
+        }
+        (LibraryBrowserSort::NameAsc, BrowserCursorBoundary::NameAsc { name, path, id }) => {
+            name_cursor_condition(&mut predicate.params, name, path, *id, ">")
+        }
+        (LibraryBrowserSort::NameDesc, BrowserCursorBoundary::NameDesc { name, path, id }) => {
+            name_cursor_condition(&mut predicate.params, name, path, *id, "<")
+        }
+        _ => {
+            return Err(WcError::InvalidCursor {
+                reason: "sort boundary mismatch",
+            })
+        }
+    };
+    predicate.where_sql.push_str(" AND ");
+    predicate.where_sql.push_str(&condition);
+    Ok(())
+}
+
+fn name_cursor_condition(
+    params: &mut Vec<Value>,
+    name: &str,
+    path: &str,
+    id: i64,
+    name_operator: &str,
+) -> String {
+    let name = push_browser_param(params, Value::Text(name.to_string()));
+    let path = push_browser_param(params, Value::Text(path.to_string()));
+    let id = push_browser_param(params, Value::Integer(id));
+    let expression = "COALESCE(NULLIF(w.title, ''), w.filename)";
+    format!(
+        "({expression} COLLATE NOCASE {name_operator} {name} COLLATE NOCASE
+          OR ({expression} COLLATE NOCASE = {name} COLLATE NOCASE
+              AND (w.path > {path} OR (w.path = {path} AND w.id > {id}))))"
+    )
+}
+
+fn cursor_boundary_for_item(
+    sort: LibraryBrowserSort,
+    item: &LibraryBrowserItem,
+) -> BrowserCursorBoundary {
+    match sort {
+        LibraryBrowserSort::RecentlyAdded => BrowserCursorBoundary::RecentlyAdded {
+            added_at: item.added_at.clone(),
+            id: item.wallpaper_id,
+        },
+        LibraryBrowserSort::NameAsc | LibraryBrowserSort::NameDesc => {
+            let name = item
+                .entry
+                .project
+                .as_ref()
+                .and_then(|project| project.title.as_deref())
+                .filter(|title| !title.is_empty())
+                .unwrap_or_else(|| item.entry.filename())
+                .to_string();
+            let path = item.entry.path.to_string();
+            if sort == LibraryBrowserSort::NameAsc {
+                BrowserCursorBoundary::NameAsc {
+                    name,
+                    path,
+                    id: item.wallpaper_id,
+                }
+            } else {
+                BrowserCursorBoundary::NameDesc {
+                    name,
+                    path,
+                    id: item.wallpaper_id,
+                }
+            }
         }
     }
 }
@@ -506,9 +786,7 @@ fn hydrate_browser_sources(
          WHERE membership.wallpaper_id IN ({placeholders})
          ORDER BY membership.wallpaper_id ASC, source.id ASC"
     );
-    let mut statement = conn
-        .prepare(&sql)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let mut statement = conn.prepare(&sql).map_err(sqlite_err)?;
     let rows = statement
         .query_map(params_from_iter(ids.iter()), |row| {
             Ok((
@@ -519,10 +797,10 @@ fn hydrate_browser_sources(
                 },
             ))
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut sources_by_wallpaper = HashMap::<i64, Vec<LibraryBrowserSource>>::new();
     for row in rows {
-        let (wallpaper_id, source) = row.map_err(|error| WcError::Sqlite(error.to_string()))?;
+        let (wallpaper_id, source) = row.map_err(sqlite_err)?;
         sources_by_wallpaper
             .entry(wallpaper_id)
             .or_default()
@@ -537,74 +815,149 @@ fn hydrate_browser_sources(
 }
 
 fn browser_library_page_inner<F>(
-    cd: &ConfigDir,
+    conn: &Connection,
     query: &LibraryBrowserQuery,
     after_count: F,
 ) -> Result<LibraryBrowserPage, WcError>
 where
     F: FnOnce(),
 {
-    if !cd.db_path().exists() {
+    // The revision read is the first read and pins the snapshot used by row
+    // selection and source hydration.
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let revision = super::library_revision::read_library_revision(&transaction)?;
+    let fingerprint = browser_query_fingerprint(query);
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(decode_browser_cursor)
+        .transpose()?;
+    if let Some(cursor) = cursor.as_ref() {
+        if cursor.revision != revision || cursor.fingerprint != fingerprint {
+            return Err(WcError::RevisionChanged {
+                expected: cursor.revision,
+                observed: revision,
+            });
+        }
+    }
+
+    after_count();
+
+    const MAX_BROWSER_PAGE_SIZE: usize = 500;
+    let page_limit = query.limit.min(MAX_BROWSER_PAGE_SIZE);
+    if page_limit == 0 {
+        transaction.commit().map_err(sqlite_err)?;
         return Ok(LibraryBrowserPage {
-            total: 0,
+            revision,
+            next_cursor: None,
+            total: None,
             items: Vec::new(),
         });
     }
+    let use_fts = super::library_fts::library_fts_ready(&transaction, revision);
+    let mut predicate = browser_predicate(query, use_fts);
+    if let Some(cursor) = cursor.as_ref() {
+        append_cursor_boundary(&mut predicate, query.sort, &cursor.boundary)?;
+    }
+    let mut page_params = predicate.params.clone();
+    let limit = push_browser_param(
+        &mut page_params,
+        Value::Integer(i64::try_from(page_limit + 1).unwrap_or(501)),
+    );
+    let sql = format!(
+        "{BROWSER_ITEM_SELECT}
+         {}
+         ORDER BY {}
+         LIMIT {limit}",
+        predicate.where_sql,
+        browser_order_by(query.sort)
+    );
+    let mut items = {
+        let mut statement = transaction.prepare(&sql).map_err(sqlite_err)?;
+        let items = statement
+            .query_map(params_from_iter(page_params.iter()), browser_item_from_row)
+            .map_err(sqlite_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(sqlite_err)?;
+        items
+    };
+    let has_more = items.len() > page_limit;
+    if has_more {
+        items.truncate(page_limit);
+    }
+    hydrate_browser_sources(&transaction, &mut items)?;
+    let next_cursor = if has_more {
+        items
+            .last()
+            .map(|item| {
+                encode_browser_cursor(&BrowserCursorV1 {
+                    version: BROWSER_CURSOR_VERSION,
+                    revision,
+                    fingerprint: fingerprint.clone(),
+                    boundary: cursor_boundary_for_item(query.sort, item),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    transaction.commit().map_err(sqlite_err)?;
+
+    Ok(LibraryBrowserPage {
+        revision,
+        next_cursor,
+        total: None,
+        items,
+    })
+}
+
+pub fn browser_library_exact_total(
+    cd: &ConfigDir,
+    query: &LibraryBrowserQuery,
+    expected_revision: u64,
+) -> Result<LibraryBrowserTotal, WcError> {
+    if !cd.db_path().exists() {
+        if expected_revision != 0 {
+            return Err(WcError::RevisionChanged {
+                expected: expected_revision,
+                observed: 0,
+            });
+        }
+        return Ok(LibraryBrowserTotal {
+            revision: 0,
+            total: 0,
+        });
+    }
     let conn = open_runtime_connection(cd)?;
-    // rusqlite's default unchecked transaction is DEFERRED. The count is the
-    // first read and pins the snapshot used by row selection and source hydration.
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    let predicate = browser_predicate(query);
+    browser_library_exact_total_on_connection(&conn, query, expected_revision)
+}
+
+pub fn browser_library_exact_total_on_connection(
+    conn: &Connection,
+    query: &LibraryBrowserQuery,
+    expected_revision: u64,
+) -> Result<LibraryBrowserTotal, WcError> {
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let revision = super::library_revision::read_library_revision(&transaction)?;
+    if revision != expected_revision {
+        return Err(WcError::RevisionChanged {
+            expected: expected_revision,
+            observed: revision,
+        });
+    }
+    let use_fts = super::library_fts::library_fts_ready(&transaction, revision);
+    let predicate = browser_predicate(query, use_fts);
     let total = transaction
         .query_row(
             &format!("SELECT COUNT(*) FROM wallpapers w {}", predicate.where_sql),
             params_from_iter(predicate.params.iter()),
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-
-    after_count();
-
-    const MAX_BROWSER_PAGE_SIZE: usize = 500;
-    let page_limit = query.limit.min(MAX_BROWSER_PAGE_SIZE);
-    let mut page_params = predicate.params.clone();
-    let limit = push_browser_param(
-        &mut page_params,
-        Value::Integer(i64::try_from(page_limit).unwrap_or(500)),
-    );
-    let offset = push_browser_param(
-        &mut page_params,
-        Value::Integer(i64::try_from(query.offset).unwrap_or(i64::MAX)),
-    );
-    let sql = format!(
-        "{BROWSER_ITEM_SELECT}
-         {}
-         ORDER BY {}
-         LIMIT {limit} OFFSET {offset}",
-        predicate.where_sql,
-        browser_order_by(query.sort)
-    );
-    let mut items = {
-        let mut statement = transaction
-            .prepare(&sql)
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
-        let items = statement
-            .query_map(params_from_iter(page_params.iter()), browser_item_from_row)
-            .map_err(|error| WcError::Sqlite(error.to_string()))?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
-        items
-    };
-    hydrate_browser_sources(&transaction, &mut items)?;
-    transaction
-        .commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-
-    Ok(LibraryBrowserPage {
+        .map_err(sqlite_err)?;
+    transaction.commit().map_err(sqlite_err)?;
+    Ok(LibraryBrowserTotal {
+        revision,
         total: total.max(0) as usize,
-        items,
     })
 }
 
@@ -613,7 +966,25 @@ pub fn browser_library_page(
     cd: &ConfigDir,
     query: &LibraryBrowserQuery,
 ) -> Result<LibraryBrowserPage, WcError> {
-    browser_library_page_inner(cd, query, || {})
+    if !cd.db_path().exists() {
+        return Ok(LibraryBrowserPage {
+            revision: 0,
+            next_cursor: None,
+            total: None,
+            items: Vec::new(),
+        });
+    }
+    let conn = open_runtime_connection(cd)?;
+    browser_library_page_inner(&conn, query, || {})
+}
+
+/// Execute a browser page on a caller-owned connection. This lets the GUI
+/// service install and reliably clear a SQLite progress deadline.
+pub fn browser_library_page_on_connection(
+    conn: &Connection,
+    query: &LibraryBrowserQuery,
+) -> Result<LibraryBrowserPage, WcError> {
+    browser_library_page_inner(conn, query, || {})
 }
 
 #[cfg(test)]
@@ -625,7 +996,8 @@ fn browser_library_page_with_after_count<F>(
 where
     F: FnOnce(),
 {
-    browser_library_page_inner(cd, query, after_count)
+    let conn = open_runtime_connection(cd)?;
+    browser_library_page_inner(&conn, query, after_count)
 }
 
 /// Pick one random wallpaper using exactly the same membership and filter
@@ -638,31 +1010,45 @@ pub fn browser_library_random(
         return Ok(None);
     }
     let conn = open_runtime_connection(cd)?;
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    let predicate = browser_predicate(query);
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let revision = super::library_revision::read_library_revision(&transaction)?;
+    let use_fts = super::library_fts::library_fts_ready(&transaction, revision);
+    let predicate = browser_predicate(query, use_fts);
+    let count_sql = format!("SELECT COUNT(*) FROM wallpapers w {}", predicate.where_sql);
+    let count: i64 = transaction
+        .query_row(
+            &count_sql,
+            params_from_iter(predicate.params.iter()),
+            |row| row.get(0),
+        )
+        .map_err(sqlite_err)?;
+    if count <= 0 {
+        transaction.commit().map_err(sqlite_err)?;
+        return Ok(None);
+    }
+    // Uniform offset over the filtered set. Filtered rowids are not contiguous,
+    // so COUNT+OFFSET is safer than probing random rowids.
+    let offset: i64 = transaction
+        .query_row("SELECT abs(random()) % ?1", [count], |row| row.get(0))
+        .map_err(sqlite_err)?;
     let sql = format!(
         "{BROWSER_ITEM_SELECT}
          {}
-         ORDER BY RANDOM()
-         LIMIT 1",
-        predicate.where_sql
+         ORDER BY w.id
+         LIMIT 1 OFFSET ?{}",
+        predicate.where_sql,
+        predicate.params.len() + 1
     );
+    let mut params = predicate.params;
+    params.push(Value::Integer(offset));
     let mut item = transaction
-        .query_row(
-            &sql,
-            params_from_iter(predicate.params.iter()),
-            browser_item_from_row,
-        )
+        .query_row(&sql, params_from_iter(params.iter()), browser_item_from_row)
         .optional()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     if let Some(item) = item.as_mut() {
         hydrate_browser_sources(&transaction, std::slice::from_mut(item))?;
     }
-    transaction
-        .commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    transaction.commit().map_err(sqlite_err)?;
     Ok(item)
 }
 
@@ -696,14 +1082,14 @@ fn library_counts_sqlite_with_scope(
         .prepare(&format!(
             "SELECT type, COUNT(*) FROM wallpapers {where_sql} GROUP BY type"
         ))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let rows = stmt
         .query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
         })
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     for row in rows {
-        let (kind, count) = row.map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let (kind, count) = row.map_err(sqlite_err)?;
         let count = count.max(0) as usize;
         counts.total += count;
         match kind.as_str() {
@@ -733,7 +1119,7 @@ pub fn favorites_page_sqlite(
             [],
             |row| row.get(0),
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut stmt = conn
         .prepare(
             "SELECT w.path, w.type, w.ext, w.backend, w.size, w.mtime, w.resolution,
@@ -743,7 +1129,7 @@ pub fn favorites_page_sqlite(
              ORDER BY w.mtime DESC, w.path ASC
              LIMIT ?1 OFFSET ?2",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let items = stmt
         .query_map(
             params![
@@ -752,9 +1138,9 @@ pub fn favorites_page_sqlite(
             ],
             wallpaper_entry_from_row,
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(LibraryPage {
         total: total.max(0) as usize,
         items,
@@ -1182,7 +1568,7 @@ mod browser_tests {
         favorites_only: bool,
         search: &str,
         sort: LibraryBrowserSort,
-        offset: usize,
+        _offset: usize,
         limit: usize,
     ) -> LibraryBrowserQuery {
         LibraryBrowserQuery {
@@ -1191,7 +1577,7 @@ mod browser_tests {
             favorites_only,
             search: search.into(),
             sort,
-            offset,
+            cursor: None,
             limit,
         }
     }
@@ -1267,7 +1653,7 @@ mod browser_tests {
         )
         .unwrap();
 
-        assert_eq!(page.total, 1);
+        assert_eq!(page.total, None);
         assert_eq!(page.items.len(), 1);
         let item = &page.items[0];
         assert_eq!(item.wallpaper_id, 10);
@@ -1341,7 +1727,7 @@ mod browser_tests {
             ),
         )
         .unwrap();
-        assert_eq!(usable.total, 4);
+        assert_eq!(usable.total, None);
         assert_eq!(
             usable
                 .items
@@ -1363,7 +1749,7 @@ mod browser_tests {
             ),
         )
         .unwrap();
-        assert_eq!(unsupported.total, 2);
+        assert_eq!(unsupported.total, None);
         assert_eq!(
             unsupported
                 .items
@@ -1391,7 +1777,7 @@ mod browser_tests {
                 ),
             )
             .unwrap();
-            assert_eq!(page.total, 1);
+            assert_eq!(page.total, None);
             assert_eq!(page.items[0].wallpaper_id, expected_id);
             assert_eq!(page.items[0].author, None);
             assert!(!page.items[0].favorite);
@@ -1410,7 +1796,10 @@ mod browser_tests {
                 ),
             )
             .unwrap();
-            assert_eq!(page.total, 0, "private search term leaked: {private_term}");
+            assert!(
+                page.items.is_empty(),
+                "private search term leaked: {private_term}"
+            );
         }
     }
 
@@ -1451,7 +1840,7 @@ mod browser_tests {
             ),
         )
         .unwrap();
-        assert_eq!(page.total, 1);
+        assert_eq!(page.total, None);
         assert_eq!(page.items[0].wallpaper_id, 1);
 
         let apostrophe = browser_library_page(
@@ -1467,7 +1856,7 @@ mod browser_tests {
             ),
         )
         .unwrap();
-        assert_eq!(apostrophe.total, 1);
+        assert_eq!(apostrophe.total, None);
         assert_eq!(apostrophe.items[0].wallpaper_id, 4);
     }
 
@@ -1517,7 +1906,7 @@ mod browser_tests {
             vec![12, 11, 10, 13]
         );
 
-        let name_page = browser_library_page(
+        let first_name_page = browser_library_page(
             &cd,
             &query(
                 None,
@@ -1525,12 +1914,23 @@ mod browser_tests {
                 false,
                 "",
                 LibraryBrowserSort::NameAsc,
+                0,
                 1,
-                2,
             ),
         )
         .unwrap();
-        assert_eq!(name_page.total, 4);
+        let mut next_name_query = query(
+            None,
+            LibraryBrowserType::Image,
+            false,
+            "",
+            LibraryBrowserSort::NameAsc,
+            0,
+            2,
+        );
+        next_name_query.cursor = first_name_page.next_cursor;
+        let name_page = browser_library_page(&cd, &next_name_query).unwrap();
+        assert_eq!(name_page.total, None);
         assert_eq!(
             name_page
                 .items
@@ -1575,7 +1975,7 @@ mod browser_tests {
             ),
         )
         .unwrap();
-        assert_eq!(count_only.total, 4);
+        assert_eq!(count_only.total, None);
         assert!(count_only.items.is_empty());
     }
 
@@ -1644,6 +2044,61 @@ mod browser_tests {
     }
 
     #[test]
+    fn browser_random_count_offset_covers_all_filtered_rows() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for id in 1..=5_i64 {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/walls/img-{id}.jpg"),
+                "image",
+                "Title",
+                "",
+                "2025-01-01",
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+        insert_browser_wallpaper(
+            &conn,
+            99,
+            "/walls/video.mp4",
+            "video",
+            "Skip",
+            "",
+            "2025-01-01",
+            "",
+            "",
+        );
+        attach(&conn, 99, 1);
+
+        let matching = query(
+            None,
+            LibraryBrowserType::Image,
+            false,
+            "",
+            LibraryBrowserSort::RecentlyAdded,
+            0,
+            20,
+        );
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..80 {
+            let item = browser_library_random(&cd, &matching)
+                .unwrap()
+                .expect("filtered library must yield a row");
+            assert_ne!(item.wallpaper_id, 99, "type filter must exclude video");
+            seen.insert(item.wallpaper_id);
+        }
+        assert_eq!(
+            seen,
+            [1, 2, 3, 4, 5].into_iter().collect(),
+            "count+offset random must be able to hit every filtered row"
+        );
+    }
+
+    #[test]
     fn browser_page_caps_source_hydration_to_a_bound_parameter_safe_size() {
         let (_tmp, cd) = fixture();
         let conn = Connection::open(cd.db_path()).unwrap();
@@ -1678,7 +2133,7 @@ mod browser_tests {
         )
         .unwrap();
 
-        assert_eq!(page.total, 510);
+        assert_eq!(page.total, None);
         assert_eq!(page.items.len(), 500);
         assert!(page.items.iter().all(|item| item.sources.len() == 1));
     }
@@ -1723,7 +2178,7 @@ mod browser_tests {
         )
         .unwrap();
 
-        assert_eq!(page.total, 1);
+        assert_eq!(page.total, None);
         assert_eq!(page.items.len(), 1);
         assert_eq!(page.items[0].sources.len(), 1);
         assert_eq!(crate::sqlite::runtime_connection_open_count(), 1);
@@ -1741,8 +2196,191 @@ mod browser_tests {
                 ),
             )
             .unwrap()
-            .total,
+            .items
+            .len(),
             0
+        );
+    }
+
+    #[test]
+    fn browser_keyset_pages_do_not_duplicate_or_skip_for_every_sort() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        for (id, filename, title, added_at) in [
+            (1, "b.jpg", "Alpha", "2025-01-03"),
+            (2, "a.jpg", "alpha", "2025-01-03"),
+            (3, "d.jpg", "Delta", "2025-01-02"),
+            (4, "c.jpg", "Charlie", "2025-01-01"),
+            (5, "e.jpg", "Echo", "2025-01-01"),
+        ] {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/walls/{filename}"),
+                "image",
+                title,
+                "",
+                added_at,
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+
+        for sort in [
+            LibraryBrowserSort::RecentlyAdded,
+            LibraryBrowserSort::NameAsc,
+            LibraryBrowserSort::NameDesc,
+        ] {
+            let mut request = query(None, LibraryBrowserType::Image, false, "", sort, 0, 2);
+            let mut ids = Vec::new();
+            loop {
+                let page = browser_library_page(&cd, &request).unwrap();
+                assert_eq!(page.revision, 0);
+                ids.extend(page.items.iter().map(|item| item.wallpaper_id));
+                let Some(cursor) = page.next_cursor else {
+                    break;
+                };
+                request.cursor = Some(cursor);
+            }
+            assert_eq!(ids.len(), 5, "sort {sort:?}");
+            let unique = ids
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>();
+            assert_eq!(unique.len(), 5, "sort {sort:?}: {ids:?}");
+        }
+    }
+
+    #[test]
+    fn browser_cursor_is_opaque_and_rejects_query_or_revision_changes() {
+        let (_tmp, cd) = fixture();
+        let mut conn = Connection::open(cd.db_path()).unwrap();
+        for id in 1..=3 {
+            insert_browser_wallpaper(
+                &conn,
+                id,
+                &format!("/private/secret-{id}.jpg"),
+                "image",
+                "secret title",
+                "",
+                "2025-01-01",
+                "",
+                "",
+            );
+            attach(&conn, id, 1);
+        }
+        let first_query = query(
+            None,
+            LibraryBrowserType::Image,
+            false,
+            "secret title",
+            LibraryBrowserSort::RecentlyAdded,
+            0,
+            1,
+        );
+        let first = browser_library_page(&cd, &first_query).unwrap();
+        let cursor = first.next_cursor.unwrap();
+        assert!(!cursor.contains("secret"));
+        assert!(!cursor.contains("/private"));
+
+        let mut changed_query = first_query.clone();
+        changed_query.search = "different".into();
+        changed_query.cursor = Some(cursor.clone());
+        assert!(matches!(
+            browser_library_page(&cd, &changed_query),
+            Err(WcError::RevisionChanged { .. })
+        ));
+
+        let tx = conn.transaction().unwrap();
+        super::super::library_revision::bump_library_revision(&tx).unwrap();
+        tx.commit().unwrap();
+        let mut old_cursor_query = first_query;
+        old_cursor_query.cursor = Some(cursor);
+        assert!(matches!(
+            browser_library_page(&cd, &old_cursor_query),
+            Err(WcError::RevisionChanged {
+                expected: 0,
+                observed: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn browser_rejects_malformed_cursor_and_exact_total_is_revision_bound() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        insert_browser_wallpaper(
+            &conn,
+            1,
+            "/walls/one.jpg",
+            "image",
+            "One",
+            "",
+            "2025-01-01",
+            "",
+            "",
+        );
+        attach(&conn, 1, 1);
+        let mut request = query(
+            None,
+            LibraryBrowserType::Image,
+            false,
+            "",
+            LibraryBrowserSort::RecentlyAdded,
+            0,
+            20,
+        );
+        request.cursor = Some("not-hex".into());
+        assert!(matches!(
+            browser_library_page(&cd, &request),
+            Err(WcError::InvalidCursor { .. })
+        ));
+        request.cursor = None;
+        assert_eq!(
+            browser_library_exact_total(&cd, &request, 0).unwrap(),
+            LibraryBrowserTotal {
+                revision: 0,
+                total: 1
+            }
+        );
+        assert!(matches!(
+            browser_library_exact_total(&cd, &request, 9),
+            Err(WcError::RevisionChanged {
+                expected: 9,
+                observed: 0
+            })
+        ));
+    }
+
+    #[test]
+    fn stable_wallpaper_existence_tracks_database_identity() {
+        let (_tmp, cd) = fixture();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        insert_browser_wallpaper(
+            &conn,
+            41,
+            "/walls/selected.jpg",
+            "image",
+            "Selected",
+            "",
+            "2025-01-01",
+            "",
+            "",
+        );
+        attach(&conn, 41, 1);
+
+        assert!(library_wallpaper_exists(&cd, 41).unwrap());
+        assert!(!library_wallpaper_exists(&cd, 99).unwrap());
+        conn.execute("DELETE FROM wallpaper_sources WHERE wallpaper_id = 41", [])
+            .unwrap();
+        assert!(!library_wallpaper_exists(&cd, 41).unwrap());
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM wallpapers WHERE id = 41", [], |row| {
+                row.get::<_, i64>(0)
+            },)
+                .unwrap(),
+            1
         );
     }
 }

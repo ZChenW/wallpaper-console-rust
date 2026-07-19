@@ -14,7 +14,7 @@ function browserQuery(
     favoritesOnly: false,
     search: '',
     sort: 'recentlyAdded',
-    offset: 0,
+    cursor: null,
     limit: 200,
     ...overrides,
   };
@@ -52,6 +52,22 @@ test('runtime observation mock exposes replaceable positive evidence and reset r
 
   ctrl.resetAll();
   assert.deepEqual(await api.runtimeWallpaperObservations(), defaults);
+});
+
+test('runtime observations can be held and released to exercise late startup evidence', async () => {
+  ctrl.holdRuntimeWallpaperObservations();
+  let settled = false;
+  const read = api.runtimeWallpaperObservations().then((observations) => {
+    settled = true;
+    return observations;
+  });
+
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+
+  ctrl.releaseRuntimeWallpaperObservations();
+  assert.equal((await read).length, 2);
+  assert.equal(settled, true);
 });
 
 test('renderer status mock is replaceable and reset restores installation defaults', async () => {
@@ -459,7 +475,7 @@ test('library browser unsupported category contains only WE Web and unsupported 
     new Set(page.items.map((item) => item.type)),
     new Set(['we_web', 'unsupported']),
   );
-  assert.equal(page.total, 2);
+  assert.equal(page.items.length, 2);
 });
 
 test('library browser composes source, type, favorite, and AND search filters', async () => {
@@ -472,7 +488,7 @@ test('library browser composes source, type, favorite, and AND search filters', 
     }),
   );
 
-  assert.equal(page.total, 1);
+  assert.equal(page.items.length, 1);
   assert.equal(page.items[0]?.path, '/mock/path/wallpaper-050.mp4');
   assert.equal(page.items[0]?.favorite, true);
   assert.deepEqual(page.items[0]?.sources.map((source) => source.id), [1]);
@@ -494,25 +510,28 @@ test('library browser search uses filename, title, author, and source display na
     const excluded = await api.libraryBrowserPage(
       browserQuery({ typeFilter: 'weScene', search: excludedField }),
     );
-    assert.equal(excluded.total, 0, `${excludedField} must not be searchable`);
+    assert.equal(excluded.items.length, 0, `${excludedField} must not be searchable`);
   }
 });
 
 test('library browser name sorts are stable and pagination uses filtered total', async () => {
+  const firstAsc = await api.libraryBrowserPage(
+    browserQuery({ typeFilter: 'image', sort: 'nameAsc', limit: 1 }),
+  );
   const asc = await api.libraryBrowserPage(
-    browserQuery({ typeFilter: 'image', sort: 'nameAsc', limit: 2 }),
+    browserQuery({
+      typeFilter: 'image',
+      sort: 'nameAsc',
+      cursor: firstAsc.nextCursor,
+      limit: 1,
+    }),
   );
   const desc = await api.libraryBrowserPage(
     browserQuery({ typeFilter: 'image', sort: 'nameDesc', limit: 2 }),
   );
-  const second = await api.libraryBrowserPage(
-    browserQuery({ typeFilter: 'image', sort: 'nameAsc', offset: 1, limit: 1 }),
-  );
-
-  assert.equal(asc.items[0]?.path, '/mock/path/wallpaper-001.jpg');
+  assert.equal(firstAsc.items[0]?.path, '/mock/path/wallpaper-001.jpg');
   assert.equal(desc.items[0]?.path, '/mock/path/wallpaper-149.jpg');
-  assert.equal(second.total, asc.total);
-  assert.equal(second.items[0]?.path, asc.items[1]?.path);
+  assert.equal(asc.items[0]?.path, '/mock/path/wallpaper-002.jpg');
 });
 
 test('library browser recentlyAdded sort uses newest metadata first', async () => {
@@ -533,9 +552,27 @@ test('library browser page caps oversized requests at 500 items', async () => {
   ctrl.setBrowserFixtureCopies(4);
 
   const page = await api.libraryBrowserPage(browserQuery({ limit: 10_000 }));
+  const total = await api.libraryBrowserTotal(browserQuery({ limit: 10_000 }), page.revision);
 
-  assert.ok(page.total > 500, 'fixture must prove the cap rather than exhaust the result set');
+  assert.ok(total.total > 500, 'fixture must prove the cap rather than exhaust the result set');
   assert.equal(page.items.length, 500);
+});
+
+test('mock revision control invalidates an already issued browser cursor', async () => {
+  const first = await api.libraryBrowserPage(browserQuery({ limit: 12 }));
+  assert.ok(first.nextCursor);
+
+  ctrl.advanceBrowserRevision();
+
+  await assert.rejects(
+    api.libraryBrowserPage(browserQuery({ cursor: first.nextCursor, limit: 12 })),
+    (error: unknown) => (
+      typeof error === 'object'
+      && error !== null
+      && 'kind' in error
+      && error.kind === 'revision_changed'
+    ),
+  );
 });
 
 test('library browser random returns only a matching candidate and null for no match', async () => {
@@ -545,7 +582,6 @@ test('library browser random returns only a matching candidate and null for no m
       typeFilter: 'weScene',
       favoritesOnly: true,
       search: 'scene ada',
-      offset: Number.MAX_SAFE_INTEGER,
       limit: 0,
     }),
   );
@@ -568,18 +604,18 @@ test('favorite mutations immediately update unified page and random results', as
     search: 'wallpaper-002',
   });
 
-  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal((await api.libraryBrowserPage(query)).items.length, 0);
   assert.equal(await api.libraryBrowserRandom(query), null);
 
   assert.equal((await api.favoriteAdd(path)).success, true);
   const addedPage = await api.libraryBrowserPage(query);
-  assert.equal(addedPage.total, 1);
+  assert.equal(addedPage.items.length, 1);
   assert.equal(addedPage.items[0]?.path, path);
   assert.equal(addedPage.items[0]?.favorite, true);
   assert.equal((await api.libraryBrowserRandom(query))?.path, path);
 
   assert.equal((await api.favoriteRemove(path)).success, true);
-  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal((await api.libraryBrowserPage(query)).items.length, 0);
   assert.equal(await api.libraryBrowserRandom(query), null);
 });
 
@@ -593,7 +629,7 @@ test('failed favorite additions leave unified browser state unchanged', async ()
   });
 
   assert.equal((await api.favoriteAdd(path)).success, false);
-  assert.equal((await api.libraryBrowserPage(query)).total, 0);
+  assert.equal((await api.libraryBrowserPage(query)).items.length, 0);
   assert.equal(await api.libraryBrowserRandom(query), null);
 });
 
@@ -621,18 +657,21 @@ test('large browser fixture has at least 1000 unique paths across stable pages',
   ctrl.setBrowserFixtureCopies(7);
   const query = browserQuery({ limit: 500 });
   const first = await api.libraryBrowserPage(query);
+  const total = await api.libraryBrowserTotal(query, first.revision);
   const allItems = [...first.items];
 
-  for (let offset = first.items.length; offset < first.total; offset += 500) {
-    const page = await api.libraryBrowserPage({ ...query, offset });
-    assert.equal(page.total, first.total);
+  let cursor = first.nextCursor;
+  while (cursor !== null) {
+    const page = await api.libraryBrowserPage({ ...query, cursor });
+    assert.equal(page.revision, first.revision);
     allItems.push(...page.items);
+    cursor = page.nextCursor;
   }
 
-  assert.ok(first.total >= 1_000);
-  assert.equal(allItems.length, first.total);
-  assert.equal(new Set(allItems.map((item) => item.path)).size, first.total);
-  assert.equal(new Set(allItems.map((item) => item.wallpaperId)).size, first.total);
+  assert.ok(total.total >= 1_000);
+  assert.equal(allItems.length, total.total);
+  assert.equal(new Set(allItems.map((item) => item.path)).size, total.total);
+  assert.equal(new Set(allItems.map((item) => item.wallpaperId)).size, total.total);
 });
 
 test('large fixture filtering, favorites, and random share the same unique entries', async () => {
@@ -645,7 +684,7 @@ test('large fixture filtering, favorites, and random share the same unique entri
   });
   const matching = await api.libraryBrowserPage(matchingQuery);
 
-  assert.equal(matching.total, 7);
+  assert.equal(matching.items.length, 7);
   assert.equal(new Set(matching.items.map((item) => item.path)).size, 7);
 
   const initialPath = '/mock/path/wallpaper-050.mp4';

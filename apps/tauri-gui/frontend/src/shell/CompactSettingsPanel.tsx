@@ -1,4 +1,4 @@
-import { useEffect, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { ChevronRight, FolderCog, X } from 'lucide-react';
 
 import type { RendererStatusesDTO } from '../api/types.ts';
@@ -6,8 +6,8 @@ import SelectField from '../components/SelectField.tsx';
 import type {
   ApplyGesture,
   ShellPreferences,
-  ShellTheme,
 } from './shellPreferences.ts';
+import { isShellTheme, SHELL_THEME_OPTIONS } from './shellThemes.ts';
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
 import {
   AWWW_TRANSITION_TYPES,
@@ -21,6 +21,7 @@ import {
   WallpaperFillMode,
 } from './useWallpaperBehaviorSettings.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
+import { trapDialogFocus } from './dialogFocus.ts';
 
 export interface CompactSettingsPanelProps {
   readonly open: boolean;
@@ -52,6 +53,7 @@ export function lockBodyScroll(body: { style: { overflow: string } }): () => voi
 export function CompactSettingsPanelView({
   open,
   obscured = false,
+  presentationPhase = 'open',
   preferences,
   updatePreferences,
   behaviorSettings,
@@ -62,8 +64,9 @@ export function CompactSettingsPanelView({
   rendererStatuses,
   onOpenSources,
   onClose,
-}: CompactSettingsPanelProps) {
+}: CompactSettingsPanelProps & { readonly presentationPhase?: 'open' | 'exiting' }) {
   if (!open) return null;
+  const unavailableToInteraction = obscured || presentationPhase === 'exiting';
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
@@ -71,8 +74,8 @@ export function CompactSettingsPanelView({
   const mpvpaperUnavailable = rendererStatuses?.mpvpaper.available === false;
   const lweUnavailable = rendererStatuses?.linuxWallpaperEngine.available === false;
   const updateTheme = (value: string) => {
-    const theme = value as ShellTheme;
-    updatePreferences((current) => ({ ...current, theme }));
+    if (!isShellTheme(value)) return;
+    updatePreferences((current) => ({ ...current, theme: value }));
   };
   const updateGesture = (value: string) => {
     const applyGesture = value as ApplyGesture;
@@ -157,6 +160,7 @@ export function CompactSettingsPanelView({
     <div
       className="settings-overlay"
       data-obscured={obscured}
+      data-presentation-phase={presentationPhase}
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
@@ -164,11 +168,12 @@ export function CompactSettingsPanelView({
     >
       <aside
         aria-label="Settings"
-        aria-hidden={obscured ? true : undefined}
+        aria-hidden={unavailableToInteraction ? true : undefined}
         aria-modal="true"
-        inert={obscured}
+        inert={unavailableToInteraction}
         role="dialog"
         className="settings-panel"
+        onKeyDown={(event) => trapDialogFocus(event, event.currentTarget)}
       >
         <header className="settings-panel__header">
           <h2>Settings</h2>
@@ -203,12 +208,7 @@ export function CompactSettingsPanelView({
                 <SelectField
                   aria-label="Theme"
                   onValueChange={updateTheme}
-                  options={[
-                    { value: 'system', label: 'System' },
-                    { value: 'light', label: 'Light' },
-                    { value: 'dark', label: 'Dark' },
-                    { value: 'glass', label: 'Glass' },
-                  ]}
+                  options={SHELL_THEME_OPTIONS}
                   value={preferences.theme}
                   variant="settings"
                 />
@@ -517,6 +517,42 @@ export function CompactSettingsPanelView({
 }
 
 export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
+  const [prevOpen, setPrevOpen] = useState(props.open);
+  const [shouldRender, setShouldRender] = useState(props.open);
+  const [presentationPhase, setPresentationPhase] = useState<'open' | 'exiting'>('open');
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Synchronously adjust state when props.open changes during render
+  if (props.open !== prevOpen) {
+    setPrevOpen(props.open);
+    if (props.open) {
+      if (exitTimerRef.current !== null) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = null;
+      }
+      setShouldRender(true);
+      setPresentationPhase('open');
+    } else {
+      setPresentationPhase('exiting');
+      const reducedMotion = typeof window !== 'undefined'
+        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+      if (reducedMotion) {
+        setShouldRender(false);
+      } else {
+        exitTimerRef.current = setTimeout(() => {
+          exitTimerRef.current = null;
+          setShouldRender(false);
+        }, 180);
+      }
+    }
+  }
+
+  // Clean up exit timer on unmount.
+  useEffect(() => () => {
+    if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+  }, []);
+
   useEffect(() => {
     if (!props.open) return undefined;
 
@@ -525,7 +561,7 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       if (props.obscured) return;
       if (event.key !== 'Escape' || event.defaultPrevented) return;
       event.preventDefault();
-      props.onClose();
+      props.onClose(); // Set settingsOpen to false immediately
     };
     document.addEventListener('keydown', closeOnEscape);
     return () => {
@@ -534,5 +570,12 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
     };
   }, [props.obscured, props.open, props.onClose]);
 
-  return CompactSettingsPanelView(props);
+  if (!shouldRender) return null;
+
+  return CompactSettingsPanelView({
+    ...props,
+    open: shouldRender,
+    onClose: props.onClose, // Trigger immediate close on click
+    presentationPhase,
+  });
 }

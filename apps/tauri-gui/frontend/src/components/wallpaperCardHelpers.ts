@@ -27,6 +27,16 @@ export function cardHoverLabel(e: WallpaperDTO): string {
   return sourceNames ? `${displayName(e)} · ${sourceNames}` : displayName(e);
 }
 
+export function editorialActionLabel(
+  canApply: boolean,
+  applyGesture: 'single' | 'double',
+): string {
+  if (!canApply) return 'View details';
+  return applyGesture === 'double'
+    ? 'Select / double-click apply'
+    : 'Select / apply';
+}
+
 export function weBadge(e: WallpaperDTO): string | null {
   if (e.type === 'we_scene') {
     if (e.backendStatus === 'renderer_limitation') return 'Renderer limitation';

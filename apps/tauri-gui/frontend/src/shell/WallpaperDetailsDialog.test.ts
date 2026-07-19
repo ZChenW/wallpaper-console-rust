@@ -8,6 +8,7 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
+import { nextDetailsPreviewSource } from './wallpaperDetailsPreview.ts';
 
 async function importTsxModule(): Promise<typeof import('./WallpaperDetailsDialog.tsx')> {
   const sourceUrl = new URL('./WallpaperDetailsDialog.tsx', import.meta.url);
@@ -117,6 +118,24 @@ test('omits unavailable optional metadata and explains a missing preview', async
   assert.match(markup, /Source information unavailable/);
   assert.match(markup, /Preview unavailable/);
   assert.doesNotMatch(markup, /<img/);
+});
+
+test('details preview falls back once, then reports exhaustion', () => {
+  assert.equal(
+    nextDetailsPreviewSource(
+      'asset://localhost/original.jpg',
+      'asset://localhost/thumbnail.jpg',
+    ),
+    'asset://localhost/thumbnail.jpg',
+  );
+  assert.equal(
+    nextDetailsPreviewSource(
+      'asset://localhost/thumbnail.jpg',
+      'asset://localhost/thumbnail.jpg',
+    ),
+    null,
+  );
+  assert.equal(nextDetailsPreviewSource('asset://localhost/original.jpg', null), null);
 });
 
 test('Escape and the explicit close button call onClose', async () => {

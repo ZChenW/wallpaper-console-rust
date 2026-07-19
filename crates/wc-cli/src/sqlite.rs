@@ -1,9 +1,31 @@
 use std::path::PathBuf;
 
+use fs2::FileExt;
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_storage::StorageApi;
 
 use crate::Commands;
+
+fn claim_database_maintenance(cd: &ConfigDir) -> anyhow::Result<std::fs::File> {
+    let path = cd.path.join(".instance.lock");
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)?;
+    file.try_lock_exclusive().map_err(|error| {
+        if error.kind() == std::io::ErrorKind::WouldBlock {
+            anyhow::anyhow!(
+                "database_busy: close the wallpaper-console GUI before repair or restore"
+            )
+        } else {
+            anyhow::Error::from(error)
+        }
+    })?;
+    Ok(file)
+}
 
 pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     match cmd {
@@ -37,6 +59,7 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             }
         },
         Commands::SqliteResync => {
+            let _gui_guard = claim_database_maintenance(&s.cd)?;
             wc_storage::sqlite::repair(&s.cd)?;
             println!("Repair complete.");
         }
@@ -49,6 +72,7 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             println!("{}", bak);
         }
         Commands::SqliteRestore { backup } => {
+            let _gui_guard = claim_database_maintenance(&s.cd)?;
             wc_storage::sqlite::restore(&s.cd, &PathBuf::from(&backup))?;
             println!("Restored.");
         }
@@ -195,5 +219,25 @@ mod tests {
         );
         assert_eq!(version, future_version);
         assert_eq!(sentinel, "cli-value");
+    }
+
+    #[test]
+    fn destructive_maintenance_is_rejected_while_gui_instance_lock_is_held() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let gui_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(cd.path.join(".instance.lock"))
+            .unwrap();
+        gui_lock.try_lock_exclusive().unwrap();
+
+        let error = claim_database_maintenance(&cd).unwrap_err();
+        assert!(error.to_string().contains("database_busy"));
     }
 }

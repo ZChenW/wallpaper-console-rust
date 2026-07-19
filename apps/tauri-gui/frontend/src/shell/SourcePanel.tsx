@@ -16,6 +16,7 @@ import {
   type AddSourceOutcome,
   type UseWallpaperSourcesOptions,
 } from './useWallpaperSources';
+import { trapDialogFocus } from './dialogFocus.ts';
 
 export type SourcePanelNotice = {
   readonly channel: 'settings' | 'scan';
@@ -43,7 +44,7 @@ export function beginSourcePanelExit(
   return {
     accepted: true,
     next: 'exiting',
-    delayMs: reducedMotion ? 0 : 160,
+    delayMs: reducedMotion ? 0 : 180,
   };
 }
 
@@ -183,13 +184,13 @@ const buttonStyle: CSSProperties = {
 
 const primaryButtonStyle: CSSProperties = {
   ...buttonStyle,
-  background: 'color-mix(in srgb, AccentColor 16%, transparent)',
+  background: 'color-mix(in srgb, var(--primary) 16%, transparent)',
 };
 
 const dangerButtonStyle: CSSProperties = {
   ...buttonStyle,
-  borderColor: 'color-mix(in srgb, #ff6b6b 55%, transparent)',
-  color: '#d94b4b',
+  borderColor: 'color-mix(in srgb, var(--danger) 55%, transparent)',
+  color: 'var(--danger)',
 };
 
 const contentStyle: CSSProperties = {
@@ -312,9 +313,9 @@ const confirmationStyle: CSSProperties = {
   display: 'grid',
   gap: '0.55rem',
   padding: '0.7rem',
-  border: '1px solid color-mix(in srgb, #ff6b6b 45%, transparent)',
+  border: '1px solid color-mix(in srgb, var(--danger) 45%, transparent)',
   borderRadius: '0.55rem',
-  background: 'color-mix(in srgb, #ff6b6b 8%, Canvas)',
+  background: 'color-mix(in srgb, var(--danger) 8%, Canvas)',
   fontSize: '0.78rem',
 };
 
@@ -479,12 +480,12 @@ function availabilityLabel(source: SourceDTO): string {
 
 function availabilityStyle(availability: SourceDTO['availability']): CSSProperties {
   if (availability === 'available') {
-    return { color: '#2e9b59', background: 'rgb(46 155 89 / 16%)' };
+    return { color: 'var(--success)', background: 'var(--success-bg)' };
   }
   if (availability === 'offline') {
-    return { color: '#d94b4b', background: 'rgb(217 75 75 / 16%)' };
+    return { color: 'var(--danger)', background: 'var(--danger-bg)' };
   }
-  return { color: '#b78700', background: 'rgb(183 135 0 / 16%)' };
+  return { color: 'var(--warning)', background: 'var(--warning-bg)' };
 }
 
 function SourceRow({
@@ -629,7 +630,7 @@ function SourceRow({
             data-source-mutating={true}
             disabled={busy}
             onClick={() => onRequestRemove(source.id)}
-            style={{ ...iconButtonStyle, color: '#d94b4b' }}
+            style={{ ...iconButtonStyle, color: 'var(--danger)' }}
             title={`Remove ${source.displayName}`}
             type="button"
           >
@@ -705,6 +706,10 @@ export function SourcePanelView({
 
   const busy = pendingOperation !== null;
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key === 'Tab') {
+      trapDialogFocus(event, event.currentTarget);
+      return;
+    }
     if (event.key !== 'Escape') return;
     event.preventDefault();
     if (removeCandidateId !== null) onCancelRemove();
@@ -751,6 +756,7 @@ export function SourcePanelView({
           <button
             autoFocus
             aria-label="Close wallpaper sources"
+            className="source-panel__close"
             disabled={presentationPhase === 'exiting' ? true : undefined}
             onClick={onClose}
             style={closeStyle}
@@ -878,42 +884,50 @@ export function SourcePanel({
   });
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
   const [renameEditor, setRenameEditor] = useState<RenameEditor | null>(null);
+
+  const [prevOpen, setPrevOpen] = useState(open);
+  const [shouldRender, setShouldRender] = useState(open);
   const [presentationPhase, setPresentationPhase] = useState<SourcePanelPresentationPhase>('open');
-  const presentationPhaseRef = useRef<SourcePanelPresentationPhase>('open');
   const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const visibility = useRef<SourcePanelVisibility>({ open: false, hasOpened: false });
 
-  useEffect(() => {
-    const wasOpen = visibility.current.open;
-    const transition = transitionSourcePanelVisibility(visibility.current, open);
-    visibility.current = transition.next;
-    if (open && !wasOpen) {
-      presentationPhaseRef.current = 'open';
+  // Synchronously adjust state when open changes during render
+  if (open !== prevOpen) {
+    setPrevOpen(open);
+    if (open) {
+      if (exitTimerRef.current !== null) {
+        clearTimeout(exitTimerRef.current);
+        exitTimerRef.current = null;
+      }
+      setShouldRender(true);
       setPresentationPhase('open');
+
+      const wasOpen = visibility.current.open;
+      const transition = transitionSourcePanelVisibility(visibility.current, true);
+      visibility.current = transition.next;
+      if (transition.reload) void reload();
+    } else {
+      const wasOpen = visibility.current.open;
+      const transition = transitionSourcePanelVisibility(visibility.current, false);
+      visibility.current = transition.next;
+
+      const reducedMotion = typeof window !== 'undefined'
+        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+
+      setPresentationPhase('exiting');
+      if (reducedMotion) {
+        setShouldRender(false);
+      } else {
+        exitTimerRef.current = setTimeout(() => {
+          exitTimerRef.current = null;
+          setShouldRender(false);
+        }, 180);
+      }
     }
-    if (transition.reload) void reload();
-  }, [open, reload]);
+  }
 
   useEffect(() => () => {
     if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
-  }, []);
-
-  const requestExit = useCallback((destination: () => void) => {
-    const reducedMotion = typeof window !== 'undefined'
-      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
-    const transition = beginSourcePanelExit(presentationPhaseRef.current, reducedMotion);
-    if (!transition.accepted) return;
-
-    presentationPhaseRef.current = transition.next;
-    setPresentationPhase(transition.next);
-    if (transition.delayMs === 0) {
-      destination();
-      return;
-    }
-    exitTimerRef.current = setTimeout(() => {
-      exitTimerRef.current = null;
-      destination();
-    }, transition.delayMs);
   }, []);
 
   useEffect(() => {
@@ -993,12 +1007,14 @@ export function SourcePanel({
     );
   }, [onNotice, onScanFinished, onScanStarted, scanWallpaperEngine]);
 
+  if (!shouldRender) return null;
+
   return (
     <SourcePanelView
       loadError={loadError}
       loading={loading}
       editingSourceId={renameEditor?.sourceId ?? null}
-      onBack={onBack ? () => requestExit(onBack) : undefined}
+      onBack={onBack}
       onAdd={handleAdd}
       onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
@@ -1013,7 +1029,7 @@ export function SourcePanel({
       onScanWallpaperEngine={handleScanWallpaperEngine}
       onSetRecursive={handleSetRecursive}
       onStartRename={(source) => setRenameEditor({ sourceId: source.id, draft: source.displayName })}
-      open={open}
+      open={shouldRender}
       pendingOperation={pendingOperation}
       presentationPhase={presentationPhase}
       renameDraft={renameEditor?.draft ?? ''}

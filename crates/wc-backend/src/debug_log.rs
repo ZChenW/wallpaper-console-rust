@@ -1,3 +1,5 @@
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
@@ -70,7 +72,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         (tmp, s)
     }

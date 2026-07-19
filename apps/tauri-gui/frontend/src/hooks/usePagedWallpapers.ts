@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { WallpaperDTO } from '../api/bridge';
+import { isRevisionChangedError } from '../api/types.ts';
 
 export interface WallpaperPageDTO<T extends WallpaperDTO = WallpaperDTO> {
-  total: number;
+  revision: number;
+  nextCursor: string | null;
+  total: number | null;
   items?: T[] | null;
 }
 
 export type WallpaperPageLoader<T extends WallpaperDTO = WallpaperDTO> = (
-  offset: number,
+  cursor: string | null,
   limit: number,
 ) => Promise<WallpaperPageDTO<T>>;
 
@@ -22,9 +25,8 @@ export type AutomaticAppendOutcome =
   | { kind: 'error' }
   | {
     kind: 'success';
-    offset: number;
     itemCount: number;
-    total: number;
+    nextCursor: string | null;
   };
 
 interface UsePagedWallpapersOptions<T extends WallpaperDTO = WallpaperDTO> {
@@ -75,12 +77,16 @@ export function formatLoadPageError(error: unknown): string {
   if (typeof error === 'string' && error) {
     return error;
   }
+  if (typeof error === 'object' && error !== null && 'message' in error) {
+    const message = (error as { message?: unknown }).message;
+    if (typeof message === 'string' && message) return message;
+  }
   return 'Failed to load library page';
 }
 
 export function shouldPauseAutomaticAppend(outcome: AutomaticAppendOutcome): boolean {
   if (outcome.kind === 'error') return true;
-  return outcome.itemCount === 0 && outcome.total > outcome.offset;
+  return outcome.itemCount === 0;
 }
 
 export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
@@ -90,7 +96,10 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   onPage,
 }: UsePagedWallpapersOptions<T>) {
   const [entries, setEntries] = useState<T[]>([]);
-  const [total, setTotal] = useState(0);
+  const [total, setTotal] = useState<number | null>(null);
+  const [revision, setRevision] = useState<number | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const revisionRef = useRef<number | null>(null);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -106,6 +115,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   const consecutiveZeroCountRef = useRef(0);
   const confirmEmptyTimerRef = useRef<number | null>(null);
   const appendInFlightRef = useRef(false);
+  const replacementRequestRef = useRef<number | null>(null);
 
   const clearConfirmEmptyTimer = useCallback(() => {
     if (confirmEmptyTimerRef.current !== null) {
@@ -114,8 +124,11 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     }
   }, []);
 
-  const load = useCallback(async (append = false, offset = 0) => {
-    if (append && appendInFlightRef.current) return;
+  const load = useCallback(async (append = false, cursor: string | null = null) => {
+    if (append && (
+      appendInFlightRef.current
+      || replacementRequestRef.current !== null
+    )) return;
     if (append) {
       appendInFlightRef.current = true;
       setAppending(true);
@@ -123,8 +136,15 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     clearConfirmEmptyTimer();
     const requestId = requestSeq.current + 1;
     requestSeq.current = requestId;
+    if (!append) replacementRequestRef.current = requestId;
     const isCurrent = () => requestSeq.current === requestId;
     const kind = resolveRequestKind(append, hasLoadedOnceRef.current);
+    if (kind === 'initial' && typeof performance !== 'undefined') {
+      performance.clearMarks('wc-library-request-start');
+      performance.clearMarks('wc-library-request-settled');
+      performance.clearMeasures('wc-library-first-request');
+      performance.mark('wc-library-request-start');
+    }
     setLastRequestKind(kind);
     const next = loadingStateForKind(kind);
     setInitialLoading(next.initialLoading);
@@ -132,32 +152,42 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
 
     let succeeded = false;
     try {
-      const page = await loadPage(offset, pageSize);
+      const page = await loadPage(cursor, pageSize);
       if (!isCurrent()) return;
+      if (append && revisionRef.current !== null && page.revision !== revisionRef.current) {
+        throw { kind: 'revision_changed', message: 'Library snapshot changed.' };
+      }
       succeeded = true;
       setLoadError(false);
       setLoadErrorDetail(null);
       onPage?.(page);
+      setRevision(page.revision);
+      revisionRef.current = page.revision;
+      const appendOutcome = append ? {
+        kind: 'success' as const,
+        itemCount: page.items?.length ?? 0,
+        nextCursor: page.nextCursor,
+      } : null;
+      const appendPaused = appendOutcome !== null && shouldPauseAutomaticAppend(appendOutcome);
+      // An empty append is not evidence that the prior cursor was exhausted:
+      // preserve it for an explicit retry even if a transient backend response
+      // omitted nextCursor.
+      setNextCursor(appendPaused ? cursor : page.nextCursor);
       setTotal(page.total);
       setEntries((prev) => mergePagedWallpaperItems(prev, page.items, append));
       if (append) {
-        setAutomaticAppendPaused(shouldPauseAutomaticAppend({
-          kind: 'success',
-          offset,
-          itemCount: page.items?.length ?? 0,
-          total: page.total,
-        }));
+        setAutomaticAppendPaused(appendPaused);
       }
       if (!append) {
         setReplaceCount((c) => c + 1);
-        if (page.total === 0) {
+        if ((page.items?.length ?? 0) === 0 && page.nextCursor === null) {
           consecutiveZeroCountRef.current += 1;
           if (shouldConfirmEmpty(consecutiveZeroCountRef.current, true)) {
             setEmptyConfirmed(true);
           } else if (confirmEmptyTimerRef.current === null) {
             confirmEmptyTimerRef.current = window.setTimeout(() => {
               confirmEmptyTimerRef.current = null;
-              void load(false, 0);
+              void load(false, null);
             }, CONFIRM_EMPTY_DELAY_MS);
           }
         } else {
@@ -169,17 +199,26 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       if (!isCurrent()) return;
       setLoadError(true);
       setLoadErrorDetail(formatLoadPageError(error));
+      if (append && isRevisionChangedError(error)) {
+        // Keep the old list visible while atomically replacing it with page 1
+        // from the new revision.
+        void load(false, null);
+        return;
+      }
       if (append) {
         setAutomaticAppendPaused(shouldPauseAutomaticAppend({ kind: 'error' }));
       }
       if (!append && !hasLoadedOnceRef.current) {
         setEntries([]);
-        setTotal(0);
+        setTotal(null);
       }
     } finally {
       if (append) {
         appendInFlightRef.current = false;
         setAppending(false);
+      }
+      if (!append && replacementRequestRef.current === requestId) {
+        replacementRequestRef.current = null;
       }
       if (isCurrent()) {
         if (succeeded) {
@@ -188,18 +227,29 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
         }
         setInitialLoading(false);
         setRefreshing(false);
+        if (kind === 'initial' && typeof performance !== 'undefined') {
+          performance.mark('wc-library-request-settled');
+          performance.measure(
+            'wc-library-first-request',
+            'wc-library-request-start',
+            'wc-library-request-settled',
+          );
+        }
       }
     }
   }, [loadPage, onPage, pageSize, clearConfirmEmptyTimer]);
 
   const reload = useCallback(() => {
     setAutomaticAppendPaused(false);
-    return load(false, 0);
+    return load(false, null);
   }, [load]);
   const loadMore = useCallback(() => {
+    if (nextCursor === null || replacementRequestRef.current !== null) {
+      return Promise.resolve();
+    }
     setAutomaticAppendPaused(false);
-    return load(true, entries.length);
-  }, [entries.length, load]);
+    return load(true, nextCursor);
+  }, [load, nextCursor]);
 
   useEffect(() => {
     void reload();
@@ -207,6 +257,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
 
   useEffect(() => () => {
     requestSeq.current += 1;
+    replacementRequestRef.current = null;
     clearConfirmEmptyTimer();
   }, [clearConfirmEmptyTimer]);
 
@@ -221,6 +272,10 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
 
   useEffect(() => {
     consecutiveZeroCountRef.current = 0;
+    revisionRef.current = null;
+    setRevision(null);
+    setNextCursor(null);
+    setTotal(null);
     setEmptyConfirmed(false);
     setLoadError(false);
     setLoadErrorDetail(null);
@@ -238,6 +293,9 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     entries,
     setEntries,
     total,
+    revision,
+    nextCursor,
+    hasMore: nextCursor !== null,
     loading,
     initialLoading,
     refreshing,

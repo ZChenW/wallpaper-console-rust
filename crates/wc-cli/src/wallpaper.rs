@@ -1,6 +1,7 @@
-use std::collections::HashSet;
 use std::io::Write;
 use std::process::{Command, Stdio};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 
 use wc_storage::StorageApi;
 
@@ -8,17 +9,7 @@ use crate::library::library_paths;
 use crate::Commands;
 
 fn parse_display_target(raw: &str) -> anyhow::Result<wc_app::DisplayTarget> {
-    let value = raw.trim();
-    if value.is_empty() {
-        anyhow::bail!("display target must not be blank");
-    }
-    if value.eq_ignore_ascii_case("all")
-        || value.eq_ignore_ascii_case("all displays")
-        || value == wc_storage::sqlite::ALL_DISPLAYS_TARGET_KEY
-    {
-        return Ok(wc_app::DisplayTarget::AllDisplays);
-    }
-    Ok(wc_app::DisplayTarget::Output(value.to_string()))
+    wc_app::display_target::parse_display_target(Some(raw)).map_err(anyhow::Error::msg)
 }
 
 fn discover_connected_outputs() -> anyhow::Result<Vec<String>> {
@@ -73,34 +64,15 @@ fn resolve_known_outputs_with<F>(
 where
     F: FnOnce() -> anyhow::Result<Vec<String>>,
 {
-    let discovered_outputs = discover()?;
-    validate_known_outputs(&discovered_outputs)?;
-
-    if !explicit_outputs.is_empty() {
-        validate_known_outputs(explicit_outputs)?;
-        let explicit: HashSet<_> = explicit_outputs.iter().map(String::as_str).collect();
-        let discovered: HashSet<_> = discovered_outputs.iter().map(String::as_str).collect();
-        if explicit != discovered {
-            anyhow::bail!(
-                "explicit display outputs must exactly match discovered connected outputs"
-            );
-        }
-    }
-
-    Ok(discovered_outputs)
-}
-
-fn validate_known_outputs(outputs: &[String]) -> anyhow::Result<()> {
-    let mut seen = HashSet::new();
-    for output in outputs {
-        if output.trim().is_empty() {
-            anyhow::bail!("display output must not be blank");
-        }
-        if !seen.insert(output.as_str()) {
-            anyhow::bail!("duplicate display output: {output}");
-        }
-    }
-    Ok(())
+    let explicit = if explicit_outputs.is_empty() {
+        None
+    } else {
+        Some(explicit_outputs)
+    };
+    wc_app::display_target::resolve_known_outputs_with(explicit, || {
+        discover().map_err(|error| error.to_string())
+    })
+    .map_err(anyhow::Error::msg)
 }
 
 pub(crate) fn apply(
@@ -314,33 +286,33 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         Commands::SteamWorkshop => {
             let home = std::env::var("HOME").unwrap_or_default();
-            for root in wc_scan::discover_steam_workshop_roots(std::path::Path::new(&home)) {
-                let canonical = root.to_string_lossy().to_string();
-                if s.sources_add(&canonical)? {
-                    println!("Added: {}", canonical);
-                }
+            let report = wc_app::sources_maintenance::scan_steam_workshop(
+                s,
+                std::path::Path::new(&home),
+                false,
+                |_, _| wc_scan::ScanControl::Continue,
+            )
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            for path in &report.added_paths {
+                println!("Added: {}", path);
             }
             println!("Steam Workshop scan complete.");
         }
 
         Commands::ValidateSources => {
-            for src in s.sources_list()? {
-                let exists = std::path::Path::new(&src).is_dir();
+            let report = wc_app::sources_maintenance::validate_sources(s)?;
+            for src in &report.sources {
+                let exists = !report.missing.iter().any(|missing| missing == src);
                 println!("{}  {}", if exists { "✓" } else { "✕" }, src);
             }
         }
 
         Commands::RemoveMissing => {
-            let sources = s.sources_list()?;
-            let mut removed = 0;
-            for src in &sources {
-                if !std::path::Path::new(src).is_dir() {
-                    s.sources_remove(src)?;
-                    println!("Removed missing source: {}", src);
-                    removed += 1;
-                }
+            let report = wc_app::sources_maintenance::remove_missing_sources(s)?;
+            for src in &report.removed {
+                println!("Removed missing source: {}", src);
             }
-            println!("Removed {} missing source(s).", removed);
+            println!("Removed {} missing source(s).", report.removed.len());
         }
 
         Commands::DedupeSources => {
@@ -712,7 +684,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", mode).unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", mode).unwrap();
         let storage = StorageApi::new(cd);
         (tmp, storage)
     }

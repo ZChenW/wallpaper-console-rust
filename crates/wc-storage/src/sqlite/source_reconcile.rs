@@ -1,9 +1,16 @@
-use std::path::Path;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
+use wc_core::types::WallpaperEntry;
 use wc_scan::{CompleteSourceScan, ScanSourceKind};
+
+use super::{SnapshotPathPresence, ValidatedScanSnapshot};
 
 use super::schema::{open_runtime_connection, try_ensure_sqlite_db};
 
@@ -36,6 +43,81 @@ pub fn reconcile_complete_source(
     snapshot: &CompleteSourceScan,
 ) -> Result<SourceReconcileReport, WcError> {
     reconcile_complete_source_with_presence(cd, source_id, snapshot, filesystem_path_presence)
+}
+
+/// Return the paths currently published by one source. The caller places these
+/// in the private worker request so all filesystem-presence decisions happen
+/// inside the isolated process rather than while publishing.
+pub fn source_snapshot_prior_paths(
+    cd: &ConfigDir,
+    source_id: i64,
+) -> Result<Vec<PathBuf>, WcError> {
+    try_ensure_sqlite_db(cd)?;
+    let conn = open_runtime_connection(cd)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT wallpaper.path
+             FROM wallpaper_sources membership
+             JOIN wallpapers wallpaper ON wallpaper.id = membership.wallpaper_id
+             WHERE membership.source_id = ?1
+             ORDER BY wallpaper.id",
+        )
+        .map_err(sqlite_err)?;
+    let paths = statement
+        .query_map(params![source_id], |row| {
+            row.get::<_, String>(0).map(PathBuf::from)
+        })
+        .map_err(sqlite_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_err);
+    paths
+}
+
+/// Publish a validated worker snapshot using database reads/writes only.
+/// Filesystem existence and enumeration have already been captured by the
+/// worker in `prior_path_presence`.
+pub fn reconcile_scan_snapshot(
+    cd: &ConfigDir,
+    source_id: i64,
+    snapshot: &ValidatedScanSnapshot,
+) -> Result<SourceReconcileReport, WcError> {
+    if snapshot.source_id() != source_id {
+        return Err(WcError::Other(
+            "validated scan snapshot source mismatch".to_string(),
+        ));
+    }
+    if let Some((snapshot_path, snapshot_kind, snapshot_recursive)) = snapshot.source_config() {
+        let configured = super::source_get(cd, source_id)?;
+        if enumeration_root_identity(Path::new(&configured.path))
+            != enumeration_root_identity(snapshot_path)
+            || configured.kind.as_str() != snapshot_kind
+            || configured.recursive != snapshot_recursive
+        {
+            return Err(WcError::Other(format!(
+                "source snapshot no longer matches configured source {source_id}"
+            )));
+        }
+    }
+    let entries = snapshot
+        .read_entries()
+        .map_err(|error| WcError::Other(error.to_string()))?;
+    let presence = snapshot
+        .read_prior_presence()
+        .map_err(|error| WcError::Other(error.to_string()))?
+        .into_iter()
+        .collect::<HashMap<_, _>>();
+    reconcile_entries_with_seams(
+        cd,
+        source_id,
+        &entries,
+        None,
+        move |path| match presence.get(&path.to_string_lossy().into_owned()) {
+            Some(SnapshotPathPresence::Present) => PathPresence::Present,
+            Some(SnapshotPathPresence::Missing) => PathPresence::Missing,
+            Some(SnapshotPathPresence::Unknown) | None => PathPresence::Unknown,
+        },
+        |_| Ok(()),
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,11 +162,33 @@ where
     P: Fn(&Path) -> PathPresence,
     F: FnOnce(&Connection) -> Result<(), WcError>,
 {
+    reconcile_entries_with_seams(
+        cd,
+        source_id,
+        snapshot.entries(),
+        Some(snapshot),
+        path_presence,
+        before_commit,
+    )
+}
+
+fn reconcile_entries_with_seams<P, F>(
+    cd: &ConfigDir,
+    source_id: i64,
+    entries: &[WallpaperEntry],
+    complete_scan: Option<&CompleteSourceScan>,
+    path_presence: P,
+    before_commit: F,
+) -> Result<SourceReconcileReport, WcError>
+where
+    P: Fn(&Path) -> PathPresence,
+    F: FnOnce(&Connection) -> Result<(), WcError>,
+{
     try_ensure_sqlite_db(cd)?;
     let mut conn = open_runtime_connection(cd)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     let source_config = tx
         .query_row(
@@ -99,30 +203,33 @@ where
             },
         )
         .optional()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let Some((source_path, source_kind, source_recursive)) = source_config else {
         return Err(WcError::Other(format!("source id {source_id} not found")));
     };
 
-    let request = snapshot.request();
-    let request_kind = match request.kind {
-        ScanSourceKind::Directory => "directory",
-        ScanSourceKind::WallpaperEngineWorkshop => "wallpaper_engine_workshop",
-    };
-    let configured_root = enumeration_root_identity(Path::new(&source_path));
-    let snapshot_root = enumeration_root_identity(&request.path);
-    let request_recursive = i64::from(request.recursive);
-    if configured_root != snapshot_root
-        || source_kind != request_kind
-        || source_recursive != request_recursive
-    {
-        return Err(WcError::Other(format!(
-            "source snapshot no longer matches configured source {source_id}"
-        )));
+    if let Some(snapshot) = complete_scan {
+        let request = snapshot.request();
+        let request_kind = match request.kind {
+            ScanSourceKind::Directory => "directory",
+            ScanSourceKind::WallpaperEngineWorkshop => "wallpaper_engine_workshop",
+        };
+        let configured_root = enumeration_root_identity(Path::new(&source_path));
+        let snapshot_root = enumeration_root_identity(&request.path);
+        let request_recursive = i64::from(request.recursive);
+        if configured_root != snapshot_root
+            || source_kind != request_kind
+            || source_recursive != request_recursive
+        {
+            return Err(WcError::Other(format!(
+                "source snapshot no longer matches configured source {source_id}"
+            )));
+        }
     }
 
     tx.execute_batch(
-        "CREATE TEMP TABLE wc_source_scan_stage (
+        "DROP TABLE IF EXISTS wc_source_scan_stage;
+         CREATE TEMP TABLE wc_source_scan_stage (
              path               TEXT PRIMARY KEY,
              type               TEXT NOT NULL,
              ext                TEXT NOT NULL,
@@ -138,9 +245,9 @@ where
              unsupported_reason TEXT NOT NULL
          );",
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
-    for entry in snapshot.entries() {
+    for entry in entries {
         let project = entry.project.as_ref();
         tx.execute(
             "INSERT INTO wc_source_scan_stage
@@ -188,14 +295,14 @@ where
                     .unwrap_or(""),
             ],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     }
 
     let indexed = tx
         .query_row("SELECT COUNT(*) FROM wc_source_scan_stage", [], |row| {
             row.get::<_, i64>(0)
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let wallpapers_added = tx
         .query_row(
             "SELECT COUNT(*)
@@ -205,7 +312,7 @@ where
             [],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let memberships_added = tx
         .query_row(
             "SELECT COUNT(*)
@@ -218,7 +325,7 @@ where
             params![source_id],
             |row| row.get::<_, i64>(0),
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
 
     tx.execute(
         "INSERT INTO wallpapers
@@ -244,7 +351,7 @@ where
              last_seen = excluded.last_seen",
         [],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
     tx.execute(
         "INSERT INTO wallpaper_sources (wallpaper_id, source_id, last_seen_at)
          SELECT wallpaper.id, ?1, datetime('now')
@@ -255,7 +362,7 @@ where
              last_seen_at = excluded.last_seen_at",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
     let removed_memberships = {
         let mut statement = tx
@@ -270,7 +377,7 @@ where
                    )
                  ORDER BY wallpaper.id",
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = statement
             .query_map(params![source_id], |row| {
                 Ok((
@@ -279,9 +386,9 @@ where
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
     tx.execute(
@@ -295,7 +402,7 @@ where
            )",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
 
     let mut report = SourceReconcileReport {
         indexed: indexed.max(0) as usize,
@@ -311,19 +418,19 @@ where
                 params![wallpaper_id],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if remaining_memberships != 0 || path_presence(Path::new(&path)) != PathPresence::Missing {
             continue;
         }
         report.favorites_removed += tx
             .execute("DELETE FROM favorites WHERE path = ?1", params![path])
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         report.wallpapers_removed += tx
             .execute(
                 "DELETE FROM wallpapers WHERE id = ?1",
                 params![wallpaper_id],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if !workshop_id.is_empty() {
             report.removed_we_workshop_ids.push(workshop_id);
         }
@@ -335,10 +442,10 @@ where
         "UPDATE sources SET availability = 'available' WHERE id = ?1",
         params![source_id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
+    super::bump_library_revision(&tx)?;
     before_commit(&tx)?;
-    tx.commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(report)
 }
 
@@ -358,6 +465,26 @@ mod tests {
         source_create, source_get, source_set_availability, source_set_recursive,
         SourceAvailability,
     };
+
+    fn revision(cd: &ConfigDir) -> u64 {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        crate::sqlite::read_library_revision(&conn).unwrap()
+    }
+
+    #[test]
+    fn each_complete_source_publish_bumps_revision_once() {
+        let (tmp, cd) = storage();
+        let source_path = tmp.path().join("revision-source");
+        std::fs::create_dir(&source_path).unwrap();
+        std::fs::write(source_path.join("a.jpg"), b"image").unwrap();
+        let (source, _) = source_create(&cd, &source_path.to_string_lossy()).unwrap();
+        assert_eq!(revision(&cd), 1);
+
+        reconcile_complete_source(&cd, source.id, &complete_scan(&source_path, true)).unwrap();
+        assert_eq!(revision(&cd), 2);
+        reconcile_complete_source(&cd, source.id, &complete_scan(&source_path, true)).unwrap();
+        assert_eq!(revision(&cd), 3);
+    }
 
     fn storage() -> (tempfile::TempDir, ConfigDir) {
         let tmp = tempfile::tempdir().unwrap();
@@ -397,6 +524,100 @@ mod tests {
             panic!("workshop fixture scan must be complete");
         };
         snapshot
+    }
+
+    #[test]
+    fn validated_worker_snapshot_publishes_from_database_only_presence_evidence() {
+        let (tmp, cd) = storage();
+        let source_path = tmp.path().join("worker-source");
+        std::fs::create_dir(&source_path).unwrap();
+        let wallpaper = source_path.join("gone.jpg");
+        std::fs::write(&wallpaper, b"image fixture").unwrap();
+        let (source, _) = source_create(&cd, &source_path.to_string_lossy()).unwrap();
+        reconcile_complete_source(&cd, source.id, &complete_scan(&source_path, true)).unwrap();
+        let prior = source_snapshot_prior_paths(&cd, source.id).unwrap();
+        assert_eq!(prior, vec![wallpaper.clone()]);
+
+        let snapshot_path = tmp.path().join("wc-scan-worker.sqlite");
+        crate::sqlite::create_incomplete_scan_snapshot_for_source(
+            &snapshot_path,
+            source.id,
+            &source_path,
+            source.kind.as_str(),
+            source.recursive,
+        )
+        .unwrap();
+        crate::sqlite::complete_scan_snapshot(
+            &snapshot_path,
+            source.id,
+            &[],
+            &[(
+                wallpaper.to_string_lossy().into_owned(),
+                crate::sqlite::SnapshotPathPresence::Missing,
+            )],
+        )
+        .unwrap();
+        let validated =
+            crate::sqlite::validate_scan_snapshot(&snapshot_path, source.id, true).unwrap();
+
+        // Remove the whole source root before publish. Publication consumes
+        // only the worker's SQLite evidence and must not enumerate the source.
+        std::fs::remove_dir_all(&source_path).unwrap();
+        let before = revision(&cd);
+        let report = reconcile_scan_snapshot(&cd, source.id, &validated).unwrap();
+
+        assert_eq!(report.memberships_removed, 1);
+        assert_eq!(report.wallpapers_removed, 1);
+        assert_eq!(revision(&cd), before + 1);
+    }
+
+    #[test]
+    fn worker_snapshot_rejects_changed_source_configuration() {
+        let (tmp, cd) = storage();
+        let source_path = tmp.path().join("worker-config-source");
+        std::fs::create_dir(&source_path).unwrap();
+        let (source, _) = source_create(&cd, &source_path.to_string_lossy()).unwrap();
+        let snapshot_path = tmp.path().join("wc-scan-worker-config.sqlite");
+        crate::sqlite::create_incomplete_scan_snapshot_for_source(
+            &snapshot_path,
+            source.id,
+            &source_path,
+            source.kind.as_str(),
+            true,
+        )
+        .unwrap();
+        crate::sqlite::complete_scan_snapshot(&snapshot_path, source.id, &[], &[]).unwrap();
+        let validated =
+            crate::sqlite::validate_scan_snapshot(&snapshot_path, source.id, true).unwrap();
+        crate::sqlite::source_set_recursive(&cd, source.id, false).unwrap();
+
+        let error = reconcile_scan_snapshot(&cd, source.id, &validated).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("snapshot no longer matches configured source"));
+    }
+
+    #[test]
+    fn incomplete_worker_snapshot_preserves_previous_source_rows() {
+        let (tmp, cd) = storage();
+        let source_path = tmp.path().join("worker-source");
+        std::fs::create_dir(&source_path).unwrap();
+        std::fs::write(source_path.join("kept.jpg"), b"image fixture").unwrap();
+        let (source, _) = source_create(&cd, &source_path.to_string_lossy()).unwrap();
+        reconcile_complete_source(&cd, source.id, &complete_scan(&source_path, true)).unwrap();
+        let before_revision = revision(&cd);
+        let snapshot_path = tmp.path().join("wc-scan-incomplete.sqlite");
+        crate::sqlite::create_incomplete_scan_snapshot(&snapshot_path, source.id).unwrap();
+
+        assert!(crate::sqlite::validate_scan_snapshot(&snapshot_path, source.id, true).is_err());
+        let conn = Connection::open(cd.db_path()).unwrap();
+        assert_eq!(
+            conn.query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row
+                .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert_eq!(revision(&cd), before_revision);
     }
 
     fn create_scene_project(root: &Path, workshop_id: &str) -> std::path::PathBuf {

@@ -144,7 +144,7 @@ test('source panel exit accepts one request and respects reduced motion', async 
   assert.deepEqual(beginSourcePanelExit('open', false), {
     accepted: true,
     next: 'exiting',
-    delayMs: 160,
+    delayMs: 180,
   });
   assert.deepEqual(beginSourcePanelExit('exiting', false), {
     accepted: false,
@@ -249,6 +249,7 @@ test('renders a compact accessible drawer with source kind and honest availabili
   assert.match(markup, /data-source-id="41"/);
   assert.match(markup, /data-source-id="77"/);
   assert.match(markup, /aria-label="Close wallpaper sources"/);
+  assert.match(markup, /class="source-panel__close"/);
 });
 
 test('source rows route their background through the theme token with the system colour fallback', async () => {
@@ -392,7 +393,7 @@ test('rename editor closes only after its own successful request', async () => {
   );
 });
 
-test('availability badges use green, red, and yellow status backgrounds', async () => {
+test('availability badges use themeable semantic status colours', async () => {
   const { SourcePanelView } = await importTsxModule();
   const tree = SourcePanelView(noopViewProps());
   const badge = (availability: string) => findElements(
@@ -400,9 +401,12 @@ test('availability badges use green, red, and yellow status backgrounds', async 
     (element) => element.props['data-source-availability'] === availability,
   )[0];
 
-  assert.equal(badge('available').props.style.background, 'rgb(46 155 89 / 16%)');
-  assert.equal(badge('offline').props.style.background, 'rgb(217 75 75 / 16%)');
-  assert.equal(badge('unknown').props.style.background, 'rgb(183 135 0 / 16%)');
+  assert.equal(badge('available').props.style.color, 'var(--success)');
+  assert.equal(badge('available').props.style.background, 'var(--success-bg)');
+  assert.equal(badge('offline').props.style.color, 'var(--danger)');
+  assert.equal(badge('offline').props.style.background, 'var(--danger-bg)');
+  assert.equal(badge('unknown').props.style.color, 'var(--warning)');
+  assert.equal(badge('unknown').props.style.background, 'var(--warning-bg)');
 });
 
 test('refresh all is available only when configured sources can be scanned', async () => {

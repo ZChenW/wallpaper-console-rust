@@ -1,0 +1,10 @@
+[package]
+name = "wc-config"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wc-core.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

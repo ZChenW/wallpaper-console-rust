@@ -1,6 +1,8 @@
 //! wc-backend — wallpaper backend process management.
 
 use std::process::{Command, Stdio};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
 use wc_core::types::Backend;
 use wc_storage::StorageApi;
@@ -16,6 +18,10 @@ pub mod runtime_observation;
 pub mod target_commands;
 pub mod visual_handoff;
 
+pub(crate) mod driver;
+#[cfg(test)]
+pub(crate) mod test_support;
+
 mod awww;
 mod debug_log;
 mod mpvpaper;
@@ -25,45 +31,44 @@ pub use display_executor::{
     execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
     DisplayExecReport,
 };
-pub use restore::{restore, restore_clean};
+pub use restore::restore_clean;
 pub use target_commands::ExecutionScope;
 
-use awww::{
-    build_awww_img_command, build_awww_instant_command, normalize_awww_resize,
-    normalize_awww_transition_type, stop_awww,
-};
+use awww::stop_awww;
 use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
-use mpvpaper::{build_launch_command, normalize_mpvpaper_options};
 
 /// Stop all wallpaper backends via pkill.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     let user = whoami();
     linux_wallpaperengine::stop(s);
-    let _ = Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
-        .status();
+    pkill_user_pattern(&user, r"(^|/)mpvpaper\b");
     stop_awww();
     // Fallback cleanup: kill residual scene renderer processes that may not have been
     // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
     // left the process behind).
-    let _ = Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])
-        .status();
+    pkill_user_pattern(&user, r"(^|/)linux-wallpaperengine\b");
     Ok(())
 }
 
 /// Backend name constant used for LWE state tracking.
 pub const LWE_BACKEND_NAME: &str = "linux-wallpaperengine";
 
-/// Stop only non-LWE wallpaper backends (mpvpaper, awww-daemon).
-pub fn stop_non_lwe_backends(_s: &StorageApi) {
-    let user = whoami();
-    let _ = Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
+/// Run `pkill -u <user> -f <pattern>`. Exit status 1 (no matching processes) is normal.
+fn pkill_user_pattern(user: &str, pattern: &str) {
+    match Command::new("pkill")
+        .args(["-u", user, "-f", pattern])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .status();
-    stop_awww();
+        .status()
+    {
+        Ok(status) if status.success() || status.code() == Some(1) => {}
+        Ok(status) => {
+            log::warn!("pkill -u {user} -f {pattern:?} exited with unexpected status: {status}");
+        }
+        Err(err) => {
+            log::warn!("failed to execute pkill -u {user} -f {pattern:?}: {err}");
+        }
+    }
 }
 
 use lifecycle::StopPlan;
@@ -75,26 +80,42 @@ pub(crate) fn execute_stop_plan_with_runtime(
 ) -> Result<(), WcError> {
     match plan {
         lifecycle::StopPlan::All => {
-            runtime.stop_awww();
-            runtime.stop_mpvpaper();
-            runtime.stop_lwe(Some(s));
+            if let Some(d) = driver::driver_for(Backend::Awww) {
+                d.stop(runtime, Some(s));
+            }
+            if let Some(d) = driver::driver_for(Backend::Mpvpaper) {
+                d.stop(runtime, Some(s));
+            }
+            if let Some(d) = driver::driver_for(Backend::LinuxWallpaperEngine) {
+                d.stop(runtime, Some(s));
+            }
             Ok(())
         }
         lifecycle::StopPlan::AwwwDaemonOnly => {
-            runtime.stop_awww();
+            if let Some(d) = driver::driver_for(Backend::Awww) {
+                d.stop(runtime, Some(s));
+            }
             Ok(())
         }
         lifecycle::StopPlan::MpvpaperOnly => {
-            runtime.stop_mpvpaper();
+            if let Some(d) = driver::driver_for(Backend::Mpvpaper) {
+                d.stop(runtime, Some(s));
+            }
             Ok(())
         }
         lifecycle::StopPlan::LweOnly => {
-            runtime.stop_lwe(Some(s));
+            if let Some(d) = driver::driver_for(Backend::LinuxWallpaperEngine) {
+                d.stop(runtime, Some(s));
+            }
             Ok(())
         }
         lifecycle::StopPlan::NonLwe => {
-            runtime.stop_awww();
-            runtime.stop_mpvpaper();
+            if let Some(d) = driver::driver_for(Backend::Awww) {
+                d.stop(runtime, Some(s));
+            }
+            if let Some(d) = driver::driver_for(Backend::Mpvpaper) {
+                d.stop(runtime, Some(s));
+            }
             Ok(())
         }
         lifecycle::StopPlan::None => Ok(()),
@@ -233,79 +254,40 @@ pub(crate) fn apply_wallpaper_with_runtime(
         Ok(())
     } else {
         match backend {
-            Backend::Awww => (|| -> Result<(), WcError> {
-                apply_stage::report_stage(
-                    reporter,
-                    apply_stage::ApplyStage::EnsureAwwwDaemon,
-                    request_id,
-                );
-                runtime.ensure_awww_daemon_running()?;
-                apply_stage::report_stage(
-                    reporter,
-                    apply_stage::ApplyStage::AwwwSocketReady,
-                    request_id,
-                );
-                if matches!(
+            Backend::Awww => {
+                let use_instant = lifecycle.previous == lifecycle::RunningBackend::None;
+                let clear_state_hint = matches!(
                     lifecycle.previous,
                     lifecycle::RunningBackend::Mpvpaper
                         | lifecycle::RunningBackend::LinuxWallpaperEngine
                         | lifecycle::RunningBackend::Unknown
-                ) {
-                    runtime.clear_awww_state_hint();
-                }
-                let fps_raw = s.config_get("wallpaper_transition_fps", "60");
-                let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
-                let resize_raw = s.config_get("awww_resize", "crop");
-                let resize = normalize_awww_resize(&resize_raw);
-                let mut cmd = if lifecycle.previous == lifecycle::RunningBackend::None {
-                    build_awww_instant_command(path, resize, &fps)
-                } else {
-                    let transition_raw = s.config_get("awww_transition_type", "fade");
-                    let transition_type = normalize_awww_transition_type(&transition_raw);
-                    let duration_raw = s.config_get("awww_transition_duration", "1");
-                    let duration = wc_core::config_normalizer::normalize_awww_transition_duration(
-                        &duration_raw,
-                    );
-                    let mut cmd =
-                        build_awww_img_command(path, resize, transition_type, &duration, &fps);
-                    cmd.arg("--filter").arg("Lanczos3");
-                    cmd
-                };
-                let output = runtime
-                    .command_output(&mut cmd)
-                    .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-                if !output.status.success() {
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let detail = if !stderr.is_empty() {
-                        stderr
-                    } else if !stdout.is_empty() {
-                        stdout
-                    } else {
-                        "no renderer output".into()
-                    };
-                    return Err(WcError::Other(format!(
-                        "awww apply failed with status {}: {}",
-                        output.status, detail
-                    )));
-                }
-                Ok(())
-            })(),
+                );
+                driver::apply_awww(
+                    s,
+                    &driver::AwwwApplyRequest {
+                        path,
+                        scope: &ExecutionScope::AllDisplays,
+                        use_instant,
+                        clear_state_hint,
+                        request_id,
+                    },
+                    runtime,
+                    Some(reporter),
+                )
+            }
             Backend::Mpvpaper => {
-                let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
-                let opts = normalize_mpvpaper_options(&opts_raw);
                 let output = s.config_get("mpvpaper_output", "*");
-                let mut cmd = build_launch_command(opts, &output, path);
-                let status = runtime
-                    .command_status(&mut cmd)
-                    .map_err(|e| WcError::Other(format!("mpvpaper failed: {}", e)))?;
-                if !status.success() {
-                    Err(WcError::Other("mpvpaper failed to apply wallpaper".into()))
-                } else {
-                    mpvpaper_launcher_succeeded = true;
-                    runtime
-                        .wait_for_mpvpaper_ready(&previous_mpvpaper_pids)
-                        .map(|pid| launched_mpvpaper_pid = Some(pid))
+                match driver::launch_mpvpaper(s, path, &output, &previous_mpvpaper_pids, runtime) {
+                    Ok(pid) => {
+                        mpvpaper_launcher_succeeded = true;
+                        launched_mpvpaper_pid = Some(pid);
+                        Ok(())
+                    }
+                    Err(driver::MpvpaperApplyError::Start(error)) => Err(error),
+                    Err(driver::MpvpaperApplyError::Ready(error)) => {
+                        mpvpaper_launcher_succeeded = true;
+                        Err(error)
+                    }
                 }
             }
             Backend::LinuxWallpaperEngine => {
@@ -316,12 +298,9 @@ pub(crate) fn apply_wallpaper_with_runtime(
                     apply_stage::ApplyStage::WaitRendererAlive,
                     request_id,
                 );
-                match linux_wallpaperengine::apply(s, project) {
-                    Ok(()) => Ok(()),
-                    Err(e) => Err(e),
-                }
+                linux_wallpaperengine::apply(s, project)
             }
-            Backend::Unsupported => unreachable!(),
+            Backend::Unsupported => Err(WcError::UnsupportedFileType(path.to_string())),
         }
     };
     let target_elapsed = timing_start.elapsed();
@@ -414,46 +393,14 @@ fn apply_awww_instant_with_runtime(
     reporter: Option<&mut dyn apply_stage::ApplyStageReporter>,
     request_id: Option<&str>,
 ) -> Result<(), WcError> {
-    match reporter {
-        Some(reporter) => {
-            apply_stage::report_stage(
-                reporter,
-                apply_stage::ApplyStage::EnsureAwwwDaemon,
-                request_id,
-            );
-            runtime.ensure_awww_daemon_running()?;
-            apply_stage::report_stage(
-                reporter,
-                apply_stage::ApplyStage::AwwwSocketReady,
-                request_id,
-            );
-        }
-        None => runtime.ensure_awww_daemon_running()?,
-    }
-    let resize_raw = s.config_get("awww_resize", "crop");
-    let resize = normalize_awww_resize(&resize_raw);
-    let fps_raw = s.config_get("wallpaper_transition_fps", "60");
-    let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
-    let mut cmd = build_awww_instant_command(path, resize, &fps);
-    let output = runtime
-        .command_output(&mut cmd)
-        .map_err(|e| WcError::Other(format!("awww instant failed: {}", e)))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let detail = if !stderr.is_empty() {
-            stderr
-        } else if !stdout.is_empty() {
-            stdout
-        } else {
-            "no renderer output".into()
-        };
-        return Err(WcError::Other(format!(
-            "awww instant apply failed with status {}: {}",
-            output.status, detail
-        )));
-    }
-    Ok(())
+    driver::apply_awww_instant(
+        s,
+        path,
+        &ExecutionScope::AllDisplays,
+        runtime,
+        reporter,
+        request_id,
+    )
 }
 
 fn rollback_visual_fallback_after_target_failure_with_runtime(
@@ -504,7 +451,9 @@ pub(crate) fn whoami() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::awww::{build_awww_img_command, build_awww_instant_command};
     use crate::runtime::BackendRuntime;
+    use crate::test_support::FakeRuntime;
     use wc_core::config::ConfigDir;
 
     fn temp_storage() -> (tempfile::TempDir, StorageApi) {
@@ -513,7 +462,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         (tmp, s)
     }
@@ -571,7 +520,7 @@ mod tests {
 
         let history_before = history_rows(&s);
 
-        let err = restore(&s).unwrap_err();
+        let err = restore_clean(&s).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("unsupported") || msg.contains("Unsupported"),
@@ -605,7 +554,7 @@ mod tests {
 
         let err = apply_wallpaper(
             &s,
-            &img.to_string_lossy().to_string(),
+            img.to_string_lossy().as_ref(),
             Backend::Unsupported,
             None,
         )
@@ -871,11 +820,12 @@ mod tests {
         )
         .unwrap();
 
+        let preview_path = preview.to_string_lossy();
         let err = apply_wallpaper(
             &s,
             &scene.to_string_lossy(),
             Backend::LinuxWallpaperEngine,
-            Some(&preview.to_string_lossy().to_string()),
+            Some(preview_path.as_ref()),
         )
         .unwrap_err();
         assert!(
@@ -921,11 +871,12 @@ mod tests {
         )
         .unwrap();
 
+        let preview_path = preview.to_string_lossy();
         let err = apply_wallpaper(
             &s,
             &scene.to_string_lossy(),
             Backend::LinuxWallpaperEngine,
-            Some(&preview.to_string_lossy().to_string()),
+            Some(preview_path.as_ref()),
         )
         .unwrap_err();
         assert!(
@@ -970,11 +921,12 @@ mod tests {
         )
         .unwrap();
 
+        let preview_path = preview.to_string_lossy();
         let err = apply_wallpaper(
             &s,
             &scene.to_string_lossy(),
             Backend::LinuxWallpaperEngine,
-            Some(&preview.to_string_lossy().to_string()),
+            Some(preview_path.as_ref()),
         )
         .unwrap_err();
         assert!(
@@ -1070,15 +1022,11 @@ mod tests {
 
         let stages = reporter.stages();
         assert!(
-            stages
-                .iter()
-                .any(|stage| *stage == apply_stage::ApplyStage::EnsureAwwwDaemon),
+            stages.contains(&apply_stage::ApplyStage::EnsureAwwwDaemon),
             "fallback instant path must emit EnsureAwwwDaemon"
         );
         assert!(
-            stages
-                .iter()
-                .any(|stage| *stage == apply_stage::ApplyStage::AwwwSocketReady),
+            stages.contains(&apply_stage::ApplyStage::AwwwSocketReady),
             "fallback instant path must emit AwwwSocketReady"
         );
     }
@@ -1217,163 +1165,6 @@ mod tests {
             args.iter().any(|arg| arg == "--no-cache"),
             "daemon startup args must include --no-cache, got {args:?}"
         );
-    }
-
-    // -----------------------------------------------------------------
-    // FakeRuntime for testing the backend runtime seam
-    // -----------------------------------------------------------------
-
-    #[derive(Default)]
-    struct FakeRuntime {
-        stop_awww_count: usize,
-        stop_mpvpaper_count: usize,
-        stop_lwe_count: usize,
-        command_output_count: usize,
-        command_status_count: usize,
-        clear_awww_state_hint_count: usize,
-        command_output_success: bool,
-        command_status_success: bool,
-        command_output_programs: Vec<String>,
-        command_status_programs: Vec<String>,
-        command_output_args: Vec<Vec<String>>,
-        command_status_args: Vec<Vec<String>>,
-        awww_readiness_sequence: std::cell::RefCell<Vec<crate::runtime::AwwwReadiness>>,
-        running_mpvpaper_pids: Vec<u32>,
-        mpvpaper_pids_error: Option<String>,
-        mpvpaper_pids_count: usize,
-        mpvpaper_readiness_error: Option<String>,
-        mpvpaper_wait_count: usize,
-        mpvpaper_wait_previous_pids: Vec<Vec<u32>>,
-        mpvpaper_ready_pid: Option<u32>,
-        dead_mpvpaper_pids: Vec<u32>,
-        mpvpaper_pid_running_error: Option<String>,
-        mpvpaper_pid_running_checks: Vec<u32>,
-    }
-
-    impl crate::runtime::BackendRuntime for FakeRuntime {
-        fn command_output(
-            &mut self,
-            command: &mut std::process::Command,
-        ) -> Result<std::process::Output, WcError> {
-            self.command_output_count += 1;
-            self.command_output_programs
-                .push(command.get_program().to_string_lossy().to_string());
-            self.command_output_args.push(
-                command
-                    .get_args()
-                    .map(|arg| arg.to_string_lossy().to_string())
-                    .collect(),
-            );
-            let program = if self.command_output_success {
-                "true"
-            } else {
-                "false"
-            };
-            std::process::Command::new(program)
-                .output()
-                .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
-        }
-
-        fn command_status(
-            &mut self,
-            command: &mut std::process::Command,
-        ) -> Result<std::process::ExitStatus, WcError> {
-            self.command_status_count += 1;
-            self.command_status_programs
-                .push(command.get_program().to_string_lossy().to_string());
-            self.command_status_args.push(
-                command
-                    .get_args()
-                    .map(|arg| arg.to_string_lossy().to_string())
-                    .collect(),
-            );
-            let program = if self.command_status_success {
-                "true"
-            } else {
-                "false"
-            };
-            std::process::Command::new(program)
-                .status()
-                .map_err(|e| WcError::Other(format!("fake command failed: {}", e)))
-        }
-
-        fn stop_awww(&mut self) {
-            self.stop_awww_count += 1;
-        }
-
-        fn stop_mpvpaper(&mut self) {
-            self.stop_mpvpaper_count += 1;
-            self.running_mpvpaper_pids.clear();
-        }
-
-        fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
-            self.stop_lwe_count += 1;
-        }
-
-        fn apply_lwe_to_outputs(
-            &mut self,
-            _s: &wc_storage::StorageApi,
-            _project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
-            _outputs: &[String],
-        ) -> Result<(), WcError> {
-            Ok(())
-        }
-
-        fn awww_socket_ready(&mut self) -> crate::runtime::AwwwReadiness {
-            let mut seq = self.awww_readiness_sequence.borrow_mut();
-            if seq.len() > 1 {
-                seq.remove(0)
-            } else if !seq.is_empty() {
-                seq[0].clone()
-            } else {
-                crate::runtime::AwwwReadiness::Ready
-            }
-        }
-
-        fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
-            self.mpvpaper_pids_count += 1;
-            match &self.mpvpaper_pids_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(self.running_mpvpaper_pids.clone()),
-            }
-        }
-
-        fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
-            self.mpvpaper_wait_count += 1;
-            self.mpvpaper_wait_previous_pids
-                .push(previous_pids.to_vec());
-            match &self.mpvpaper_readiness_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(self.mpvpaper_ready_pid.unwrap_or(1)),
-            }
-        }
-
-        fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
-            self.mpvpaper_pid_running_checks.push(pid);
-            match &self.mpvpaper_pid_running_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(!self.dead_mpvpaper_pids.contains(&pid)),
-            }
-        }
-
-        fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            if matches!(
-                self.awww_socket_ready(),
-                crate::runtime::AwwwReadiness::Ready
-            ) {
-                return Ok(());
-            }
-            let user = crate::whoami();
-            if !crate::awww::is_awww_daemon_running(&user) {
-                let mut cmd = crate::runtime::build_awww_daemon_command();
-                let _ = self.command_status(&mut cmd);
-            }
-            crate::runtime::wait_for_awww_socket_ready(self, &user)
-        }
-
-        fn clear_awww_state_hint(&mut self) {
-            self.clear_awww_state_hint_count += 1;
-        }
     }
 
     #[test]

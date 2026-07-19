@@ -1,18 +1,21 @@
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
 use crate::flat;
 
 use super::connection::{
-    acquire_maintenance_lock, open_or_create_connection,
+    acquire_maintenance_lock, invalidate_cached_connections, open_or_create_connection,
     open_runtime_connection as open_runtime_connection_with_version,
 };
-pub use super::connection::{apply_runtime_pragmas, RuntimeConnection, RUNTIME_BUSY_TIMEOUT_MS};
+pub use super::connection::{apply_runtime_pragmas, RuntimeConnection};
 
 const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE UNIQUE INDEX IF NOT EXISTS idx_wallpapers_path ON wallpapers(path);
@@ -21,9 +24,10 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_size ON wallpapers(size DESC, path ASC);
     CREATE INDEX IF NOT EXISTS idx_wallpapers_type_mtime ON wallpapers(type, mtime DESC, path ASC);
     CREATE INDEX IF NOT EXISTS idx_wallpapers_type_size ON wallpapers(type, size DESC, path ASC);
+    CREATE INDEX IF NOT EXISTS idx_wallpapers_added_at ON wallpapers(added_at DESC, id DESC);
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
-pub const CURRENT_SCHEMA_VERSION: i64 = 3;
+pub const CURRENT_SCHEMA_VERSION: i64 = 6;
 pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "config",
     "sources",
@@ -33,6 +37,7 @@ pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "history",
     "state",
     "display_state",
+    "source_refresh_state",
     "db_meta",
 ];
 
@@ -46,25 +51,24 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
     // Foreign-key enforcement is connection-local and cannot be enabled from
     // inside a transaction.
     conn.execute_batch("PRAGMA foreign_keys = ON;")
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let version = conn
         .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     if version > CURRENT_SCHEMA_VERSION {
-        return Err(WcError::Sqlite(format!(
-            "database schema version {version} is newer than supported version {CURRENT_SCHEMA_VERSION}"
-        )));
+        return Err(WcError::SchemaTooNew {
+            supported: CURRENT_SCHEMA_VERSION,
+            observed: version,
+        });
     }
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;
          PRAGMA temp_store = MEMORY;",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
 
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
     let migration = (|| {
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS db_meta (
@@ -131,6 +135,26 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             value TEXT NOT NULL
         );
 
+        CREATE TABLE IF NOT EXISTS source_refresh_state (
+            source_id             INTEGER PRIMARY KEY
+                                  REFERENCES sources(id) ON DELETE CASCADE,
+            last_success_at       INTEGER,
+            dirty                INTEGER NOT NULL DEFAULT 1 CHECK (dirty IN (0, 1)),
+            failure_category     TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_failures >= 0),
+            next_retry_at         INTEGER
+        );
+
+        CREATE TABLE IF NOT EXISTS library_fts_state (
+            singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+            status TEXT NOT NULL CHECK (status IN ('pending', 'ready')),
+            revision INTEGER NOT NULL,
+            next_wallpaper_id INTEGER NOT NULL
+        ) STRICT;
+        INSERT OR IGNORE INTO library_fts_state
+            (singleton, status, revision, next_wallpaper_id)
+            VALUES (1, 'pending', -1, 0);
+
         CREATE VIRTUAL TABLE IF NOT EXISTS wallpapers_fts USING fts5(
             path,
             title,
@@ -158,7 +182,7 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             VALUES (new.id, new.path, new.title, new.workshop_id, new.project_type);
         END;",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         ensure_wallpaper_metadata_columns(&tx)?;
         drop_wallpapers_fts_triggers(&tx)?;
         ensure_v2_columns(&tx)?;
@@ -169,12 +193,17 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             // Force one rebuild after commit even if the old database already
             // carried the current FTS marker.
             tx.execute("DELETE FROM db_meta WHERE key = 'fts_schema_version'", [])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
         ensure_v3_columns(&tx)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO db_meta (key, value) VALUES ('library_revision', '0')",
+            [],
+        )
+        .map_err(sqlite_err)?;
         if version < CURRENT_SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
         tx.execute(
             "INSERT INTO db_meta (key, value) VALUES ('schema_version', ?1)
@@ -182,7 +211,7 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
              WHERE db_meta.value != excluded.value",
             params![CURRENT_SCHEMA_VERSION.to_string()],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         // The v1 schema allowed duplicate paths. Build the unique index only
         // after canonical/exact aliases have merged.
         ensure_wallpaper_query_indexes(&tx)?;
@@ -194,7 +223,12 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
         let _ = tx.rollback();
         return Err(err);
     }
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
+
+    // Browser FTS is derived state. Builds without trigram support or a
+    // corrupt derived index continue with exact LIKE search and can rebuild
+    // later without blocking database open/migration.
+    let _ = super::library_fts::create_library_fts_schema(conn);
 
     super::display_state::ensure_display_state(conn)?;
     Ok(())
@@ -206,7 +240,7 @@ fn drop_wallpapers_fts_triggers(conn: &Connection) -> Result<(), WcError> {
          DROP TRIGGER IF EXISTS wallpapers_ad;
          DROP TRIGGER IF EXISTS wallpapers_au;",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -228,7 +262,7 @@ fn ensure_wallpapers_fts_triggers(conn: &Connection) -> Result<(), WcError> {
              VALUES (new.id, new.path, new.title, new.workshop_id, new.project_type);
          END;",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -239,6 +273,7 @@ const REQUIRED_CURRENT_INDEXES: &[&str] = &[
     "idx_wallpapers_size",
     "idx_wallpapers_type_mtime",
     "idx_wallpapers_type_size",
+    "idx_wallpapers_added_at",
     "idx_wallpaper_sources_source",
 ];
 
@@ -372,7 +407,7 @@ fn schema_object_sql(conn: &Connection, object_type: &str, name: &str) -> Result
         |row| row.get::<_, String>(0),
     )
     .map(|sql| normalize_schema_fragment(&sql))
-    .map_err(|error| WcError::Sqlite(error.to_string()))
+    .map_err(sqlite_err)
 }
 
 fn table_column_signatures(
@@ -385,7 +420,7 @@ fn table_column_signatures(
              FROM pragma_table_xinfo(?1)
              ORDER BY name",
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let signatures = statement
         .query_map([table], |row| {
             Ok(ColumnSignature {
@@ -399,9 +434,9 @@ fn table_column_signatures(
                 hidden: row.get(5)?,
             })
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(signatures)
 }
 
@@ -414,7 +449,7 @@ fn table_foreign_key_signatures(
             "SELECT \"table\", \"from\", \"to\", on_update, on_delete, \"match\"
              FROM pragma_foreign_key_list(?1)",
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut signatures = statement
         .query_map([table], |row| {
             Ok(ForeignKeySignature {
@@ -426,9 +461,9 @@ fn table_foreign_key_signatures(
                 match_mode: row.get(5)?,
             })
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     signatures.sort();
     Ok(signatures)
 }
@@ -440,12 +475,12 @@ fn table_unique_index_signatures(
     let index_names = {
         let mut statement = conn
             .prepare("SELECT name FROM pragma_index_list(?1) WHERE \"unique\" = 1")
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let names = statement
             .query_map([table], |row| row.get::<_, String>(0))
-            .map_err(|error| WcError::Sqlite(error.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         names
     };
     let mut signatures = Vec::with_capacity(index_names.len());
@@ -469,7 +504,7 @@ fn trigger_signatures(conn: &Connection) -> Result<Vec<TriggerSignature>, WcErro
              WHERE type = 'trigger'
              ORDER BY name",
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let signatures = statement
         .query_map([], |row| {
             let sql = row.get::<_, String>(2)?;
@@ -479,9 +514,9 @@ fn trigger_signatures(conn: &Connection) -> Result<Vec<TriggerSignature>, WcErro
                 normalized_sql: sql.split_whitespace().collect::<Vec<_>>().join(" "),
             })
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(signatures)
 }
 
@@ -496,7 +531,7 @@ fn named_index_signature(
             |row| row.get::<_, String>(0),
         )
         .optional()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let Some(table_name) = table_name else {
         return Ok(None);
     };
@@ -514,7 +549,7 @@ fn named_index_signature(
                 ))
             },
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut statement = conn
         .prepare(
             "SELECT cid, name, \"desc\", coll
@@ -522,7 +557,7 @@ fn named_index_signature(
              WHERE key = 1
              ORDER BY seqno",
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let columns = statement
         .query_map([index_name], |row| {
             Ok(IndexColumnSignature {
@@ -532,9 +567,9 @@ fn named_index_signature(
                 collation: row.get(3)?,
             })
         })
-        .map_err(|error| WcError::Sqlite(error.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(Some(IndexSignature {
         table_name,
         unique,
@@ -545,8 +580,7 @@ fn named_index_signature(
 }
 
 fn validate_table_shapes_against_current_schema(conn: &Connection) -> Result<(), WcError> {
-    let reference =
-        Connection::open_in_memory().map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let reference = Connection::open_in_memory().map_err(sqlite_err)?;
     create_schema(&reference)?;
     for table in CURRENT_PERSISTENT_TABLES {
         let expected_columns = table_column_signatures(&reference, table)?;
@@ -659,16 +693,14 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                 params![path, source_path],
                 |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if !collision.0 && !collision.1 {
             break (counter, path, source_path);
         }
     };
     let inserted_token = format!("wcschemainsert{}{}", std::process::id(), counter);
     let updated_token = format!("wcschemaupdate{}{}", std::process::id(), counter);
-    let transaction = conn
-        .unchecked_transaction()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    let transaction = conn.unchecked_transaction().map_err(sqlite_err)?;
     let validation = (|| {
         let invalid_sources = transaction
             .query_row(
@@ -679,7 +711,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                 [],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if invalid_sources != 0 {
             return Err(WcError::Other(
                 "current schema contains invalid typed source values".into(),
@@ -692,7 +724,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                  VALUES (?1, 'schema validation', 'directory', 1, 'unknown')",
                 params![source_path],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let source_id = transaction.last_insert_rowid();
         for kind in ["directory", "wallpaper_engine_workshop"] {
             for recursive in [0_i64, 1_i64] {
@@ -734,7 +766,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
         }
         transaction
             .execute("DELETE FROM sources WHERE id = ?1", params![source_id])
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         transaction
             .execute(
                 "INSERT INTO sources
@@ -742,7 +774,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                  VALUES (?1 || '-next', 'schema validation', 'directory', 1, 'unknown')",
                 params![source_path],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if transaction.last_insert_rowid() <= source_id {
             return Err(WcError::Other(
                 "current schema does not preserve monotonic source identities".into(),
@@ -755,7 +787,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                  VALUES (?1, 'image', 'jpg', 'awww', ?2)",
                 params![path, inserted_token],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let wallpaper_id = transaction.last_insert_rowid();
         let (added_at, author, filename) = transaction
             .query_row(
@@ -769,7 +801,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                     ))
                 },
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if added_at.is_empty() {
             return Err(WcError::Other(
                 "current schema does not populate wallpapers.added_at".into(),
@@ -787,7 +819,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                 params![inserted_token],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if inserted_fts != 1 {
             return Err(WcError::Other(
                 "current schema does not index inserted wallpapers".into(),
@@ -810,21 +842,21 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                 "UPDATE wallpapers SET title = ?1 WHERE id = ?2",
                 params![updated_token, wallpaper_id],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let old_fts = transaction
             .query_row(
                 "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
                 params![inserted_token],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let updated_fts = transaction
             .query_row(
                 "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
                 params![updated_token],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if old_fts != 0 || updated_fts != 1 {
             return Err(WcError::Other(
                 "current schema does not update wallpaper search rows".into(),
@@ -835,14 +867,14 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                 "DELETE FROM wallpapers WHERE id = ?1",
                 params![wallpaper_id],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         let deleted_fts = transaction
             .query_row(
                 "SELECT COUNT(*) FROM wallpapers_fts WHERE wallpapers_fts MATCH ?1",
                 params![updated_token],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if deleted_fts != 0 {
             return Err(WcError::Other(
                 "current schema does not remove deleted wallpaper search rows".into(),
@@ -855,7 +887,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
                  VALUES (?1 || '-next', 'image', 'jpg', 'awww')",
                 params![path],
             )
-            .map_err(|error| WcError::Sqlite(error.to_string()))?;
+            .map_err(sqlite_err)?;
         if transaction.last_insert_rowid() <= wallpaper_id {
             return Err(WcError::Other(
                 "current schema does not preserve monotonic wallpaper identities".into(),
@@ -863,9 +895,7 @@ pub(crate) fn validate_current_schema_objects(conn: &Connection) -> Result<(), W
         }
         Ok(())
     })();
-    transaction
-        .rollback()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    transaction.rollback().map_err(sqlite_err)?;
     validation
 }
 
@@ -875,12 +905,12 @@ fn table_columns(
 ) -> Result<std::collections::HashSet<String>, WcError> {
     let mut stmt = conn
         .prepare(&format!("PRAGMA table_xinfo({table})"))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<std::collections::HashSet<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(columns)
 }
 
@@ -905,7 +935,7 @@ fn ensure_v2_columns(conn: &Connection) -> Result<(), WcError> {
             conn.execute_batch(&format!(
                 "ALTER TABLE sources ADD COLUMN {name} {definition};"
             ))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
     }
 
@@ -913,7 +943,7 @@ fn ensure_v2_columns(conn: &Connection) -> Result<(), WcError> {
     if !wallpaper_columns.contains("added_at") {
         // SQLite cannot add a column with a non-constant datetime default.
         conn.execute_batch("ALTER TABLE wallpapers ADD COLUMN added_at TEXT NOT NULL DEFAULT ''; ")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
     }
     conn.execute_batch(
         "CREATE TRIGGER IF NOT EXISTS wallpapers_added_at_ai
@@ -924,7 +954,7 @@ fn ensure_v2_columns(conn: &Connection) -> Result<(), WcError> {
          END;
          UPDATE wallpapers SET added_at = datetime('now') WHERE added_at = '';",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -932,7 +962,7 @@ fn ensure_v3_columns(conn: &Connection) -> Result<(), WcError> {
     let wallpaper_columns = table_columns(conn, "wallpapers")?;
     if !wallpaper_columns.contains("author") {
         conn.execute_batch("ALTER TABLE wallpapers ADD COLUMN author TEXT NOT NULL DEFAULT ''; ")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
     }
     if !wallpaper_columns.contains("filename") {
         conn.execute_batch(
@@ -940,7 +970,7 @@ fn ensure_v3_columns(conn: &Connection) -> Result<(), WcError> {
                  substr(path, length(rtrim(path, replace(path, '/', ''))) + 1)
              ) VIRTUAL;",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
     Ok(())
 }
@@ -956,7 +986,7 @@ fn ensure_wallpaper_sources_schema(conn: &Connection) -> Result<(), WcError> {
          CREATE INDEX IF NOT EXISTS idx_wallpaper_sources_source
              ON wallpaper_sources(source_id, wallpaper_id);",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1014,14 +1044,14 @@ fn migrate_sources_and_memberships(conn: &Connection) -> Result<(), WcError> {
     let source_rows = {
         let mut stmt = conn
             .prepare("SELECT id, path FROM sources ORDER BY id")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
 
@@ -1043,19 +1073,19 @@ fn migrate_sources_and_memberships(conn: &Connection) -> Result<(), WcError> {
                  FROM wallpaper_sources WHERE source_id = ?2",
                 params![survivor_id, alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             conn.execute(
                 "UPDATE wallpapers SET source_id = ?1 WHERE source_id = ?2",
                 params![survivor_id, alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             conn.execute(
                 "DELETE FROM wallpaper_sources WHERE source_id = ?1",
                 params![alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             conn.execute("DELETE FROM sources WHERE id = ?1", params![alias_id])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
 
         let kind = if wc_scan::is_wallpaper_engine_source(&canonical_path) {
@@ -1078,7 +1108,7 @@ fn migrate_sources_and_memberships(conn: &Connection) -> Result<(), WcError> {
              WHERE id = ?5",
             params![canonical_path, display_name, kind, recursive, survivor_id],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
 
     // Preserve explicit v1 ownership even if the path is outside the source.
@@ -1090,12 +1120,12 @@ fn migrate_sources_and_memberships(conn: &Connection) -> Result<(), WcError> {
          WHERE wallpapers.source_id IS NOT NULL",
         [],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     merge_wallpaper_aliases(conn)?;
     // Then add every component-aware containment membership for overlaps.
     backfill_containment_memberships(conn)?;
     conn.execute("UPDATE wallpapers SET source_id = NULL", [])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1103,14 +1133,14 @@ fn merge_wallpaper_aliases(conn: &Connection) -> Result<(), WcError> {
     let wallpaper_rows = {
         let mut stmt = conn
             .prepare("SELECT id, path FROM wallpapers ORDER BY id")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
     let mut aliases: BTreeMap<String, Vec<(i64, String)>> = BTreeMap::new();
@@ -1131,23 +1161,23 @@ fn merge_wallpaper_aliases(conn: &Connection) -> Result<(), WcError> {
                  FROM wallpaper_sources WHERE wallpaper_id = ?2",
                 params![survivor_id, alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             merge_wallpaper_metadata(conn, survivor_id, *alias_id)?;
             migrate_wallpaper_path_references(conn, alias_path, &canonical_path)?;
             conn.execute(
                 "DELETE FROM wallpaper_sources WHERE wallpaper_id = ?1",
                 params![alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             conn.execute("DELETE FROM wallpapers WHERE id = ?1", params![alias_id])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
         migrate_wallpaper_path_references(conn, &rows[0].1, &canonical_path)?;
         conn.execute(
             "UPDATE wallpapers SET path = ?1 WHERE id = ?2",
             params![canonical_path, survivor_id],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
     Ok(())
 }
@@ -1191,7 +1221,7 @@ fn merge_wallpaper_metadata(
          WHERE id = ?1",
         params![survivor_id, alias_id],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1208,19 +1238,19 @@ fn migrate_wallpaper_path_references(
          SELECT ?1, added_at FROM favorites WHERE path = ?2",
         params![canonical_path, old_path],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     conn.execute("DELETE FROM favorites WHERE path = ?1", params![old_path])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     conn.execute(
         "UPDATE history SET path = ?1 WHERE path = ?2",
         params![canonical_path, old_path],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     conn.execute(
         "UPDATE state SET value = ?1 WHERE key = 'current' AND value = ?2",
         params![canonical_path, old_path],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     let display_state_exists = conn
         .query_row(
             "SELECT EXISTS(
@@ -1230,13 +1260,13 @@ fn migrate_wallpaper_path_references(
             [],
             |row| row.get::<_, bool>(0),
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     if display_state_exists {
         conn.execute(
             "UPDATE display_state SET wallpaper_path = ?1 WHERE wallpaper_path = ?2",
             params![canonical_path, old_path],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
     Ok(())
 }
@@ -1245,20 +1275,20 @@ fn backfill_containment_memberships(conn: &Connection) -> Result<(), WcError> {
     let sources = {
         let mut stmt = conn
             .prepare("SELECT id, path FROM sources ORDER BY id")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
     let wallpapers = {
         let mut stmt = conn
             .prepare("SELECT id, path, last_seen FROM wallpapers ORDER BY id")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((
@@ -1267,9 +1297,9 @@ fn backfill_containment_memberships(conn: &Connection) -> Result<(), WcError> {
                     row.get::<_, String>(2)?,
                 ))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
 
@@ -1282,7 +1312,7 @@ fn backfill_containment_memberships(conn: &Connection) -> Result<(), WcError> {
                      (wallpaper_id, source_id, last_seen_at) VALUES (?1, ?2, ?3)",
                     params![wallpaper_id, source_id, last_seen],
                 )
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
             }
         }
     }
@@ -1303,24 +1333,24 @@ fn ensure_wallpapers_fts_rebuilt(conn: &Connection) -> Result<(), WcError> {
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_schema_version', ?1)",
             params![FTS_SCHEMA_VERSION],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         conn.execute(
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('fts_rebuilt_at', datetime('now'))",
             [],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
     Ok(())
 }
 
 pub fn wallpapers_count(conn: &Connection) -> Result<i64, WcError> {
     conn.query_row("SELECT COUNT(*) FROM wallpapers", [], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))
+        .map_err(sqlite_err)
 }
 
 pub fn wallpapers_fts_count(conn: &Connection) -> Result<i64, WcError> {
     conn.query_row("SELECT COUNT(*) FROM wallpapers_fts", [], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))
+        .map_err(sqlite_err)
 }
 
 pub fn check_wallpapers_fts_integrity(conn: &Connection) -> Result<(), WcError> {
@@ -1329,7 +1359,7 @@ pub fn check_wallpapers_fts_integrity(conn: &Connection) -> Result<(), WcError> 
         [],
     )
     .map(|_| ())
-    .map_err(|e| WcError::Sqlite(e.to_string()))
+    .map_err(sqlite_err)
 }
 
 pub fn rebuild_wallpapers_fts(conn: &Connection) -> Result<(), WcError> {
@@ -1337,7 +1367,7 @@ pub fn rebuild_wallpapers_fts(conn: &Connection) -> Result<(), WcError> {
         "INSERT INTO wallpapers_fts(wallpapers_fts) VALUES ('rebuild')",
         [],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1345,12 +1375,12 @@ pub fn rebuild_wallpapers_fts(conn: &Connection) -> Result<(), WcError> {
 pub fn ensure_wallpaper_metadata_columns(conn: &Connection) -> Result<(), WcError> {
     let mut stmt = conn
         .prepare("PRAGMA table_info(wallpapers)")
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let columns: Vec<String> = stmt
         .query_map([], |row| row.get::<_, String>(1))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let existing: std::collections::HashSet<String> = columns.into_iter().collect();
     for (name, sql_type) in [
         ("project_type", "TEXT NOT NULL DEFAULT ''"),
@@ -1364,7 +1394,7 @@ pub fn ensure_wallpaper_metadata_columns(conn: &Connection) -> Result<(), WcErro
             conn.execute_batch(&format!(
                 "ALTER TABLE wallpapers ADD COLUMN {name} {sql_type};"
             ))
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
     }
     Ok(())
@@ -1374,7 +1404,7 @@ pub fn ensure_wallpaper_metadata_columns(conn: &Connection) -> Result<(), WcErro
 pub fn ensure_wallpaper_query_indexes(conn: &Connection) -> Result<(), WcError> {
     ensure_wallpaper_metadata_columns(conn)?;
     conn.execute_batch(WALLPAPER_QUERY_INDEXES_SQL)
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1471,23 +1501,21 @@ fn reserve_migration_temp_path(db_path: &Path) -> Result<PathBuf, WcError> {
 }
 
 fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError> {
-    let conn = Connection::open(temp_path).map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let conn = Connection::open(temp_path).map_err(sqlite_err)?;
     create_schema(&conn)?;
     let now = super::chrono_now();
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
     {
         let conn: &Connection = &tx;
 
         // Config
-        let config_map = wc_core::config::parse_config_file(&cd.config_path())?;
+        let config_map = wc_config::parse_config_file(&cd.config_path())?;
         for (key, value) in &config_map {
             conn.execute(
                 "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
                 params![key, value],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
 
         // Sources
@@ -1499,7 +1527,7 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
              VALUES (?1, ?2, ?3, ?4, ?5, 'unknown')",
                 params![path, now, display_name, kind.as_str(), recursive],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
 
         // Favorites
@@ -1508,7 +1536,7 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
                 "INSERT OR IGNORE INTO favorites (path, added_at) VALUES (?1, ?2)",
                 params![path, now],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
 
         // History — canonical-deduplicate keeping newest (first occurrence in flat file),
@@ -1524,7 +1552,7 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
                 "INSERT INTO history (path, backend, applied_at) VALUES (?1, 'unknown', ?2)",
                 params![path, now],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
 
         // State
@@ -1533,14 +1561,14 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
                 "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
                 params![cur],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
         if let Some(be) = flat::last_backend_read(cd)? {
             conn.execute(
                 "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
                 params![be],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         }
 
         // Meta
@@ -1548,24 +1576,24 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('schema_version', ?1)",
             params![CURRENT_SCHEMA_VERSION.to_string()],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         conn.execute(
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('migrated_at', ?1)",
             params![now],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         conn.execute(
             "INSERT OR REPLACE INTO db_meta (key, value) VALUES ('source_runtime_dir', ?1)",
             params![cd.path.to_string_lossy().as_ref()],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
 
         // Wallpapers — import from library.tsv if present. This helper writes
         // through the caller's transaction and must not start a nested one.
         super::import_library_tsv_into(conn, cd)?;
         backfill_containment_memberships(conn)?;
     }
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
 
     // Publish only a self-contained main database. Switching out of WAL after
     // a checkpoint removes any dependency on temp-path sidecars before close.
@@ -1573,7 +1601,7 @@ fn migrate_into_temp_db(cd: &ConfigDir, temp_path: &Path) -> Result<(), WcError>
         "PRAGMA wal_checkpoint(TRUNCATE);
          PRAGMA journal_mode = DELETE;",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     drop(conn);
 
     Ok(())
@@ -1591,6 +1619,24 @@ fn try_ensure_sqlite_db_with_seam(
     cd: &ConfigDir,
     before_create_schema: impl FnOnce(),
 ) -> Result<(), WcError> {
+    // Same-version fast path: if the DB file already exists, probe its
+    // version under a shared schema lock first. Only fall through to
+    // exclusive when the schema is older or the probe fails for a
+    // non-SchemaTooNew reason.
+    if cd.db_path().exists() {
+        match try_warm_ensure_sqlite_db(cd) {
+            Ok(true) => return Ok(()),
+            // `false` is the only signal that an older schema needs the
+            // exclusive migration path. Lock/IO/SQLite failures are not
+            // evidence of an old schema and must remain bounded.
+            Ok(false) => {
+                invalidate_cached_connections();
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    // Fresh database or older schema requiring migration: acquire exclusive
+    // schema lock and bootstrap/migrate.
     let conn = open_or_create_connection(cd)?;
     before_create_schema();
     create_schema(&conn)?;
@@ -1599,10 +1645,12 @@ fn try_ensure_sqlite_db_with_seam(
 }
 
 /// Ensure wallpapers.db exists with the full schema.
-/// No-op if the file already exists. Failures are logged and silently ignored
-/// so that callers never get blocked by bootstrap failures.
+/// No-op if the file already exists. Failures are logged as warnings so
+/// callers are not blocked by bootstrap failures.
 pub fn ensure_sqlite_db(cd: &ConfigDir) {
-    let _ = try_ensure_sqlite_db(cd);
+    if let Err(err) = try_ensure_sqlite_db(cd) {
+        log::warn!("ensure_sqlite_db failed: {err}");
+    }
 }
 
 /// Ensure SQLite exists, importing legacy flat files only when the DB is absent.
@@ -1617,6 +1665,20 @@ fn ensure_or_import_legacy_flat_with_seam(
     before_migrate: impl FnOnce(),
 ) -> Result<bool, WcError> {
     if cd.db_path().exists() {
+        // Same-version fast path: inspect the schema version without
+        // acquiring an exclusive schema lock. Only enter the full
+        // migration path when the DB needs an upgrade.
+        match try_warm_ensure_sqlite_db(cd) {
+            Ok(true) => return Ok(false),
+            Ok(false) => {}
+            // A failed shared warm probe must not be retried through the
+            // exclusive migration path. In particular this avoids turning a
+            // two-second contention timeout into a roughly nine-second one.
+            Err(error) => return Err(error),
+        }
+        // DB exists but the fast path rejected it (wrong version or
+        // validation failure). Fall through to the full migration path
+        // which acquires exclusive schema lock and repairs/migrates.
         try_ensure_sqlite_db(cd)?;
         return Ok(false);
     }
@@ -1636,9 +1698,131 @@ fn ensure_or_import_legacy_flat_with_seam(
     }
 }
 
+/// Inexpensive warm-start check: opens the DB with shared locks only,
+/// verifies the schema version is current, applies runtime PRAGMAs, and
+/// returns `Ok(true)` when no migration work is required. Returns
+/// `Ok(false)` or an error when the DB needs the full migration path.
+fn try_warm_ensure_sqlite_db(cd: &ConfigDir) -> Result<bool, WcError> {
+    use super::connection::open_runtime_connection as open_runtime;
+    let conn = open_runtime(cd, CURRENT_SCHEMA_VERSION)?;
+    let version = conn
+        .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+        .map_err(sqlite_err)?;
+    if version == CURRENT_SCHEMA_VERSION {
+        apply_runtime_pragmas(&conn)?;
+        Ok(true)
+    } else {
+        // Older schema — drop the shared lock so the caller can acquire
+        // exclusive and migrate.
+        drop(conn);
+        Ok(false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn source_refresh_state_table_exists(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM sqlite_master
+                 WHERE type = 'table' AND name = 'source_refresh_state'
+             )",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn fresh_v6_schema_initializes_revision_refresh_and_derived_search_state() {
+        let conn = Connection::open_in_memory().unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(CURRENT_SCHEMA_VERSION, 6);
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
+        assert!(source_refresh_state_table_exists(&conn));
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM library_fts_state WHERE singleton = 1",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .unwrap(),
+            "pending"
+        );
+    }
+
+    #[test]
+    fn v3_migration_preserves_data_and_initializes_library_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_v3_schema(&conn);
+        conn.execute(
+            "INSERT INTO favorites (path) VALUES ('/walls/kept.jpg')",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM favorites WHERE path = '/walls/kept.jpg'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn v4_migration_adds_source_refresh_state_without_changing_library_revision() {
+        let conn = Connection::open_in_memory().unwrap();
+        create_schema(&conn).unwrap();
+        conn.execute("DROP TABLE source_refresh_state", []).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '41' WHERE key = 'library_revision'",
+            [],
+        )
+        .unwrap();
+        conn.pragma_update(None, "user_version", 4).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '4' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+
+        create_schema(&conn).unwrap();
+
+        assert_eq!(
+            conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                .unwrap(),
+            CURRENT_SCHEMA_VERSION
+        );
+        assert!(source_refresh_state_table_exists(&conn));
+        assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 41);
+    }
+
+    fn create_v3_schema(conn: &Connection) {
+        create_schema(conn).unwrap();
+        conn.execute("DELETE FROM db_meta WHERE key = 'library_revision'", [])
+            .unwrap();
+        conn.pragma_update(None, "user_version", 3).unwrap();
+        conn.execute(
+            "UPDATE db_meta SET value = '3' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    }
 
     #[test]
     fn schema_normalization_ignores_formatting_and_comments_but_not_constraint_tokens() {
@@ -1708,7 +1892,7 @@ mod tests {
         let upgrader = std::thread::spawn(move || -> Result<(), WcError> {
             let conn = open_or_create_connection(&upgrader_cd)?;
             conn.pragma_update(None, "user_version", future_version)
-                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+                .map_err(sqlite_err)?;
             upgraded_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             Ok(())
@@ -1787,7 +1971,7 @@ mod tests {
             let conn = open_runtime_connection(&runtime_cd)?;
             let version = conn
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+                .map_err(sqlite_err)?;
             let core_tables: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master
@@ -1796,7 +1980,7 @@ mod tests {
                     [],
                     |row| row.get(0),
                 )
-                .map_err(|error| WcError::Sqlite(error.to_string()))?;
+                .map_err(sqlite_err)?;
             observed_tx.send((version, core_tables)).unwrap();
             Ok(())
         });
@@ -1958,7 +2142,7 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v3_schema_has_author_and_generated_filename() {
+    fn fresh_schema_has_author_and_generated_filename() {
         let conn = Connection::open_in_memory().unwrap();
 
         create_schema(&conn).unwrap();
@@ -1966,7 +2150,7 @@ mod tests {
         assert_eq!(
             conn.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                 .unwrap(),
-            3
+            CURRENT_SCHEMA_VERSION
         );
         let columns = {
             let mut stmt = conn.prepare("PRAGMA table_xinfo(wallpapers)").unwrap();
@@ -2555,7 +2739,7 @@ mod tests {
             path: tmp.path().join("wallpaper-console"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "custom_name", "artist's value").unwrap();
+        wc_config::write_config_value(&cd.path, "custom_name", "artist's value").unwrap();
         flat::sources_add(&cd, "/wall's/source").unwrap();
         flat::favorites_add(&cd, "/wall's/favorite.jpg").unwrap();
         flat::history_add(&cd, "/wall's/history.jpg", 100).unwrap();
@@ -2946,5 +3130,351 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[test]
+    fn ensure_or_import_legacy_flat_returns_schema_too_new_without_acquiring_exclusive_lock() {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        // Hold a shared schema lock to prove ensure_or_import_legacy_flat
+        // does NOT block waiting for exclusive access.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        let started = std::time::Instant::now();
+        let result = ensure_or_import_legacy_flat(&cd);
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        match result {
+            Err(WcError::SchemaTooNew {
+                supported,
+                observed,
+            }) => {
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(observed, future_version);
+            }
+            other => panic!(
+                "expected SchemaTooNew, got {:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "SchemaTooNew must return immediately (took {elapsed:?}), not block on exclusive lock"
+        );
+
+        // Database must be unchanged.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, future_version);
+    }
+
+    #[test]
+    fn try_new_returns_schema_too_new_without_writing_config() {
+        use std::time::Duration;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let future_version = CURRENT_SCHEMA_VERSION + 1;
+        let conn = Connection::open(cd.db_path()).unwrap();
+        create_schema(&conn).unwrap();
+        conn.pragma_update(None, "user_version", future_version)
+            .unwrap();
+        drop(conn);
+
+        let path = cd.path.clone();
+        let started = std::time::Instant::now();
+        let result = crate::StorageApi::try_new(ConfigDir { path });
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(WcError::SchemaTooNew {
+                supported,
+                observed,
+            }) => {
+                assert_eq!(supported, CURRENT_SCHEMA_VERSION);
+                assert_eq!(observed, future_version);
+            }
+            other => panic!(
+                "expected SchemaTooNew, got {:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "try_new must return SchemaTooNew quickly (took {elapsed:?})"
+        );
+
+        // Database version must be unchanged.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, future_version);
+    }
+
+    // ── Same-version fast path tests ─────────────────────────────────────
+
+    #[test]
+    fn same_version_try_ensure_uses_shared_lock_not_exclusive() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold a shared schema lock from a separate thread.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        // Same-version try_ensure_sqlite_db must use the fast path (shared
+        // schema lock) and complete quickly without blocking on exclusive.
+        let started = Instant::now();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "same-version try_ensure must use shared lock (fast path), took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn same_version_write_paths_succeed_under_shared_schema_lock() {
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold a shared schema lock from a separate thread.
+        let blocker_cd = ConfigDir {
+            path: cd.path.clone(),
+        };
+        let (ready_tx, ready_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let blocker = std::thread::spawn(move || {
+            let guard = crate::sqlite::connection::acquire_schema_shared_lock(&blocker_cd).unwrap();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            drop(guard);
+        });
+        ready_rx.recv().unwrap();
+
+        // Each write path calls try_ensure_sqlite_db internally — after the
+        // fast-path fix, none should request exclusive schema lock.
+        let started = Instant::now();
+        crate::sqlite::sqlite_config_set(&cd, "test_key", "test_value").unwrap();
+        crate::sqlite::sqlite_favorite_add(&cd, "/walls/fast.jpg").unwrap();
+        let elapsed = started.elapsed();
+
+        release_tx.send(()).unwrap();
+        blocker.join().unwrap();
+
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "same-version writes must use shared lock, took {elapsed:?}"
+        );
+
+        // Verify the writes actually persisted.
+        let conn = open_runtime_connection(&cd).unwrap();
+        let config_val: String = conn
+            .query_row(
+                "SELECT value FROM config WHERE key = 'test_key'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(config_val, "test_value");
+        let fav_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM favorites WHERE path = '/walls/fast.jpg'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(fav_count, 1);
+    }
+
+    #[test]
+    fn older_schema_migration_acquires_exclusive_and_completes_quickly() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+
+        // Create a v1-schema database.
+        {
+            let conn = Connection::open(cd.db_path()).unwrap();
+            create_v1_schema(&conn);
+            conn.execute("INSERT INTO sources (id, path) VALUES (1, '/walls')", [])
+                .unwrap();
+            insert_v1_wallpaper(&conn, "/walls/a.jpg", Some(1));
+        }
+
+        let started = Instant::now();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "older schema migration must complete <1s, took {elapsed:?}"
+        );
+
+        // Verify migration actually happened.
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let version = conn
+            .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+            .unwrap();
+        assert_eq!(version, CURRENT_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn exclusive_maintenance_blocks_ordinary_runtime_open_with_typed_timeout() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+
+        // Hold exclusive maintenance lock for the duration of this test.
+        let _guard = crate::sqlite::connection::acquire_maintenance_lock(&cd).unwrap();
+
+        // Ordinary runtime open should time out with typed LockTimeout.
+        let started = Instant::now();
+        let result = open_runtime_connection(&cd);
+        let elapsed = started.elapsed();
+
+        match result {
+            Err(WcError::LockTimeout {
+                category,
+                operation,
+                stage,
+                waited,
+                deadline,
+            }) => {
+                assert_eq!(category, wc_core::error::LockCategory::Maintenance);
+                assert_eq!(operation, wc_core::error::LockOperation::Shared);
+                assert!(
+                    stage.contains("runtime"),
+                    "stage should mention runtime, got: {stage}"
+                );
+                assert!(
+                    waited >= Duration::from_millis(1500),
+                    "should wait ~2s, waited {waited:?}"
+                );
+                assert!(
+                    deadline >= Duration::from_secs(2),
+                    "deadline should be ~2s, got {deadline:?}"
+                );
+            }
+            other => panic!(
+                "expected LockTimeout after ~2s, got {:?} after {elapsed:?}",
+                other.as_ref().map(|_| &())
+            ),
+        }
+        assert!(
+            elapsed >= Duration::from_millis(1500),
+            "should have waited ~2s, only took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn warm_ensure_propagates_maintenance_timeout_without_exclusive_retry() {
+        use std::time::{Duration, Instant};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        try_ensure_sqlite_db(&cd).unwrap();
+        let _guard = crate::sqlite::connection::acquire_maintenance_lock(&cd).unwrap();
+
+        for operation in [
+            try_ensure_sqlite_db as fn(&ConfigDir) -> Result<(), WcError>,
+            |cd| ensure_or_import_legacy_flat(cd).map(|_| ()),
+        ] {
+            let started = Instant::now();
+            let error = operation(&cd).unwrap_err();
+            let elapsed = started.elapsed();
+            assert!(
+                matches!(
+                    error,
+                    WcError::LockTimeout {
+                        category: wc_core::error::LockCategory::Maintenance,
+                        operation: wc_core::error::LockOperation::Shared,
+                        ..
+                    }
+                ),
+                "unexpected warm-probe error: {error}"
+            );
+            assert!(
+                elapsed >= Duration::from_millis(1_500),
+                "returned too early: {elapsed:?}"
+            );
+            assert!(
+                elapsed < Duration::from_secs(3),
+                "warm probe appears to have retried through the exclusive path: {elapsed:?}"
+            );
+        }
     }
 }

@@ -1,4 +1,6 @@
 use std::collections::HashMap;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 
 use super::common::{fail, format_bytes, ok, storage, CommandResult, ScanProgressDto};
 
@@ -40,31 +42,38 @@ pub async fn config_set(key: String, value: String) -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn export_diagnostics() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => {
-            let dir = s.cd.path.join("diagnostics");
-            if let Err(e) = std::fs::create_dir_all(&dir) {
-                return fail(e.to_string());
+pub async fn export_diagnostics(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => {
+                let dir = s.cd.path.join("diagnostics");
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    return fail(e.to_string());
+                }
+                let path = dir.join(format!(
+                    "wallpaper-console-diagnostics-{}.txt",
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .unwrap_or_default()
+                        .as_secs()
+                ));
+                let scan_snapshot = super::scan::current_scan_progress_snapshot();
+                let library = service.diagnostics_snapshot(&s.cd);
+                let content =
+                    build_diagnostics_content_with_library(s, &scan_snapshot, Some(&library));
+                match std::fs::write(&path, content) {
+                    Ok(()) => ok(path.to_string_lossy().to_string()),
+                    Err(e) => fail(e.to_string()),
+                }
             }
-            let path = dir.join(format!(
-                "wallpaper-console-diagnostics-{}.txt",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_secs()
-            ));
-            let scan_snapshot = super::scan::current_scan_progress_snapshot();
-            let content = build_diagnostics_content(s, &scan_snapshot);
-            match std::fs::write(&path, content) {
-                Ok(()) => ok(path.to_string_lossy().to_string()),
-                Err(e) => fail(e.to_string()),
-            }
-        }
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 /// Build the privacy-safe diagnostics text written to the diagnostics file.
@@ -73,9 +82,18 @@ pub async fn export_diagnostics() -> CommandResult {
 /// paths (config dir, DB, wallpaper/source paths, LWE executable, thumbnail
 /// cache dir, scan `current_path`) are deliberately redacted. LWE stderr is
 /// reported as length + short hash only, never the raw content.
+#[cfg(test)]
 pub(crate) fn build_diagnostics_content(
     s: &wc_storage::StorageApi,
     scan_snapshot: &ScanProgressDto,
+) -> String {
+    build_diagnostics_content_with_library(s, scan_snapshot, None)
+}
+
+fn build_diagnostics_content_with_library(
+    s: &wc_storage::StorageApi,
+    scan_snapshot: &ScanProgressDto,
+    library: Option<&crate::library_service::LibraryServiceDiagnostics>,
 ) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::Hasher;
@@ -177,6 +195,44 @@ pub(crate) fn build_diagnostics_content(
     out.push_str(&format!("scan_scanned={}\n", scan_snapshot.scanned));
     out.push_str(&format!("scan_staged={}\n", scan_snapshot.staged));
     out.push_str(&format!("scan_skipped={}\n", scan_snapshot.skipped));
+
+    if let Some(library) = library {
+        out.push_str(&format!("library_cache_hits={}\n", library.page_hits));
+        out.push_str(&format!("library_cache_misses={}\n", library.page_misses));
+        out.push_str(&format!("library_cache_waiters={}\n", library.page_waiters));
+        out.push_str(&format!(
+            "library_query_timeouts={}\n",
+            library.query_timeouts
+        ));
+        out.push_str(&format!("library_cached_pages={}\n", library.cached_pages));
+        out.push_str(&format!("library_cached_bytes={}\n", library.cached_bytes));
+        out.push_str(&format!(
+            "library_cached_totals={}\n",
+            library.cached_totals
+        ));
+        out.push_str(&format!(
+            "library_observer_started={}\n",
+            library.observer_started
+        ));
+        out.push_str(&format!(
+            "library_watcher_started={}\n",
+            library.scheduler_started
+        ));
+        out.push_str(&format!("library_fts_status={}\n", library.fts_status));
+        out.push_str(&format!("library_fts_revision={}\n", library.fts_revision));
+        out.push_str(&format!(
+            "library_fts_next_wallpaper_id={}\n",
+            library.fts_next_wallpaper_id
+        ));
+    }
+    out.push_str("ordinary_lock_deadline_ms=2000\n");
+    out.push_str("maintenance_lock_deadline_ms=5000\n");
+    out.push_str("scan_worker_heartbeat_timeout_ms=30000\n");
+    out.push_str("display_probe_overall_budget_ms=3000\n");
+    out.push_str(&format!(
+        "legacy_snapshot_dirty={}\n",
+        wc_app::library_rescan::library_dirty_marker_path(s).exists()
+    ));
 
     let stderr = s.config_get("lwe_last_stderr", "");
     let exit_status = s.config_get("lwe_last_exit_status", "");

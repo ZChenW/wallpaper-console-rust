@@ -20,14 +20,100 @@ export interface NextPageRequestState {
   readonly loadingMore: boolean;
 }
 
+export interface StableViewportAnchor {
+  readonly wallpaperId: number;
+  readonly rowOffset: number;
+}
+
+export function wallpaperIdNearestGridViewportCenter<
+  T extends { readonly wallpaperId: number },
+>({
+  entries,
+  columns,
+  rowHeight,
+  scrollTop,
+  viewportHeight,
+}: {
+  readonly entries: readonly T[];
+  readonly columns: number;
+  readonly rowHeight: number;
+  readonly scrollTop: number;
+  readonly viewportHeight: number;
+}): number | null {
+  if (entries.length === 0) return null;
+  const safeColumns = Math.max(1, Math.trunc(columns));
+  const safeRowHeight = Number.isFinite(rowHeight) ? Math.max(1, rowHeight) : 1;
+  const safeScrollTop = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  const safeViewportHeight = Number.isFinite(viewportHeight)
+    ? Math.max(0, viewportHeight)
+    : 0;
+  const centerRow = Math.floor(
+    (safeScrollTop + safeViewportHeight / 2) / safeRowHeight,
+  );
+  const centerColumn = Math.floor((safeColumns - 1) / 2);
+  const index = Math.min(
+    entries.length - 1,
+    centerRow * safeColumns + centerColumn,
+  );
+  return entries[Math.max(0, index)]?.wallpaperId ?? null;
+}
+
+export function captureStableViewportAnchor<T extends { readonly wallpaperId: number }>(
+  entries: readonly T[],
+  columns: number,
+  rowHeight: number,
+  scrollTop: number,
+): StableViewportAnchor | null {
+  const safeColumns = Math.max(1, columns);
+  const safeRowHeight = Math.max(1, rowHeight);
+  const top = Math.max(0, scrollTop);
+  const row = Math.floor(top / safeRowHeight);
+  const entry = entries[row * safeColumns];
+  return entry
+    ? { wallpaperId: entry.wallpaperId, rowOffset: top - row * safeRowHeight }
+    : null;
+}
+
+export function restoreStableViewportAnchor<T extends { readonly wallpaperId: number }>(
+  entries: readonly T[],
+  anchor: StableViewportAnchor | null,
+  columns: number,
+  rowHeight: number,
+): number | null {
+  if (!anchor) return null;
+  const index = entries.findIndex((entry) => entry.wallpaperId === anchor.wallpaperId);
+  if (index < 0) return null;
+  return Math.floor(index / Math.max(1, columns)) * Math.max(1, rowHeight)
+    + anchor.rowOffset;
+}
+
 const NEXT_PAGE_PREFETCH_ROWS = 2;
 
 export function shouldPauseThumbnailReveal(active: boolean, scrolling: boolean): boolean {
   return !active || scrolling;
 }
 
-export function shouldStartAnimatedHover(scrolling: boolean): boolean {
-  return !scrolling;
+export function shouldStartAnimatedHover(
+  scrolling: boolean,
+  reducedMotion = false,
+): boolean {
+  return !scrolling && !reducedMotion;
+}
+
+export function wallpaperOrdinal(index: number): string {
+  return String(Math.max(0, Math.trunc(index)) + 1).padStart(2, '0');
+}
+
+export function wallpaperApplyFlags(
+  path: string,
+  applying: boolean,
+  activePath: string | null | undefined,
+  pendingPath: string | null | undefined,
+): { applying: boolean; pending: boolean } {
+  return {
+    applying: applying && activePath === path,
+    pending: pendingPath === path,
+  };
 }
 
 export function previewAssetPath(entry: WallpaperDTO): string {
@@ -38,8 +124,9 @@ export function animatedPreviewPath(
   entry: WallpaperDTO,
   hovered: boolean,
   scrolling: boolean,
+  reducedMotion = false,
 ): string | null {
-  if (!hovered || scrolling || !entry.previewPath) return null;
+  if (!hovered || scrolling || reducedMotion || !entry.previewPath) return null;
   const pathWithoutQuery = entry.previewPath.split(/[?#]/, 1)[0].toLowerCase();
   return pathWithoutQuery.endsWith('.gif') ? entry.previewPath : null;
 }
@@ -68,7 +155,7 @@ export function anchoredScrollTopForLayoutChange({
 }
 
 export function visibleThumbnailPaths(
-  entries: WallpaperDTO[],
+  entries: readonly WallpaperDTO[],
   colCount: number,
   range: GridRange | null | undefined,
   fallbackRows: number,

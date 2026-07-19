@@ -1,4 +1,5 @@
 use super::common::{fail, ok, storage, CommandResult};
+use super::path_guard;
 
 /// Resolve a path for opening: directories are opened directly, files reveal their parent,
 /// except WE project directories (containing project.json) which open directly.
@@ -81,6 +82,26 @@ fn terminal_candidates(term_var: Option<&str>) -> Vec<&str> {
     list
 }
 
+/// Reject relative path executables (CWD hijack). Bare names stay PATH-resolved;
+/// any path containing a separator must be absolute and exist on disk.
+fn validate_custom_executable(prog: &str) -> Result<(), String> {
+    let path = std::path::Path::new(prog);
+    let has_separator = prog.contains('/') || prog.contains('\\');
+    if !has_separator {
+        return Ok(());
+    }
+    if !path.is_absolute() {
+        return Err(
+            "Custom command executable must be an absolute path when it contains a directory separator."
+                .into(),
+        );
+    }
+    if !path.exists() {
+        return Err(format!("Custom command executable not found: {prog}"));
+    }
+    Ok(())
+}
+
 /// Split a custom command string, replacing `{path}` with target or appending it.
 fn custom_command_parts(custom_cmd: &str, target: &str) -> Result<Vec<String>, String> {
     let trimmed = custom_cmd.trim();
@@ -101,6 +122,7 @@ fn custom_command_parts(custom_cmd: &str, target: &str) -> Result<Vec<String>, S
     if !has_placeholder {
         result.push(target.to_string());
     }
+    validate_custom_executable(&result[0])?;
     Ok(result)
 }
 
@@ -227,12 +249,15 @@ fn open_terminal_file_manager(
 #[tauri::command]
 pub async fn open_project_location(path: String, mode: Option<String>) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || {
-        let target = match open_location_target(&path) {
-            Ok(t) => t,
-            Err(e) => return fail(e),
-        };
         let s = match storage() {
             Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
+            return fail(e);
+        }
+        let target = match open_location_target(&path) {
+            Ok(t) => t,
             Err(e) => return fail(e),
         };
         let mode = mode.unwrap_or_else(|| s.config_get("open_project_location_mode", "ask"));
@@ -265,6 +290,13 @@ pub async fn open_project_location(path: String, mode: Option<String>) -> Comman
 #[tauri::command]
 pub async fn open_path(path: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || {
+        let s = match storage() {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
+            return fail(e);
+        }
         let p = std::path::Path::new(&path);
         // If it's a directory, open it directly; otherwise reveal parent.
         let target = if p.is_dir() {
@@ -287,15 +319,18 @@ pub async fn open_path(path: String) -> CommandResult {
 #[tauri::command]
 pub async fn reveal_in_file_manager(path: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || {
+        let s = match storage() {
+            Ok(s) => s,
+            Err(e) => return fail(e),
+        };
+        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
+            return fail(e);
+        }
         let p = std::path::Path::new(&path);
         let target = if p.is_dir() {
             p.to_path_buf()
         } else {
             p.parent().unwrap_or(p).to_path_buf()
-        };
-        let s = match storage() {
-            Ok(s) => s,
-            Err(e) => return fail(e),
         };
         let file_mgr = s.config_get("gui_file_manager", "auto");
         let custom = s.config_get("gui_file_manager_custom", "");
@@ -604,6 +639,43 @@ mod tests {
     fn custom_command_parts_empty_errors() {
         assert!(custom_command_parts("", "/tmp/walls").is_err());
         assert!(custom_command_parts("   ", "/tmp/walls").is_err());
+    }
+
+    #[test]
+    fn custom_command_rejects_relative_path_executable() {
+        let error = custom_command_parts("./evil-fm {path}", "/tmp/walls").unwrap_err();
+        assert!(error.contains("absolute path"), "{error}");
+    }
+
+    #[test]
+    fn custom_command_rejects_missing_absolute_executable() {
+        let error = custom_command_parts("/definitely/missing/file-manager {path}", "/tmp/walls")
+            .unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+    }
+
+    #[test]
+    fn custom_command_allows_bare_name() {
+        let parts = custom_command_parts("nautilus {path}", "/tmp/walls").unwrap();
+        assert_eq!(parts, vec!["nautilus", "/tmp/walls"]);
+    }
+
+    #[test]
+    fn custom_command_allows_existing_absolute_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("my-fm");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(&exe).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&exe, perms).unwrap();
+        }
+        let parts =
+            custom_command_parts(&format!("{} {{path}}", exe.display()), "/tmp/walls").unwrap();
+        assert_eq!(parts[0], exe.to_string_lossy());
+        assert_eq!(parts[1], "/tmp/walls");
     }
 
     #[test]

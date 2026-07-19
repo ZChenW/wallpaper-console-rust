@@ -1,4 +1,7 @@
 import type { WallpaperCardSize } from '../utils/layout.ts';
+import { isShellTheme, type ShellTheme } from './shellThemes.ts';
+
+export type { ShellTheme } from './shellThemes.ts';
 
 export type SourceFilter =
   | { readonly kind: 'all' }
@@ -13,14 +16,13 @@ export type LibraryTypeFilter =
   | 'unsupported';
 
 export type LibrarySort = 'recentlyAdded' | 'nameAsc' | 'nameDesc';
+export type LibraryViewMode = 'grid' | 'flow';
 
 export type DisplayTarget =
   | { readonly kind: 'allDisplays' }
   | { readonly kind: 'output'; readonly output: string };
 
 export type ApplyGesture = 'single' | 'double';
-export type ShellTheme = 'system' | 'light' | 'dark' | 'glass';
-
 /**
  * The complete persisted App Shell state. Search, selection, scroll position,
  * scan progress, and feedback deliberately have no place in this interface.
@@ -34,6 +36,7 @@ export interface ShellPreferences {
   displayTarget: DisplayTarget;
   applyGesture: ApplyGesture;
   theme: ShellTheme;
+  libraryViewMode: LibraryViewMode;
 }
 
 export const DEFAULT_SHELL_PREFERENCES: Readonly<ShellPreferences> = Object.freeze({
@@ -45,6 +48,7 @@ export const DEFAULT_SHELL_PREFERENCES: Readonly<ShellPreferences> = Object.free
   displayTarget: Object.freeze({ kind: 'allDisplays' as const }),
   applyGesture: 'single',
   theme: 'system',
+  libraryViewMode: 'grid',
 });
 
 const TYPE_FILTERS = new Set<LibraryTypeFilter>([
@@ -58,7 +62,7 @@ const TYPE_FILTERS = new Set<LibraryTypeFilter>([
 const SORTS = new Set<LibrarySort>(['recentlyAdded', 'nameAsc', 'nameDesc']);
 const CARD_SIZES = new Set<WallpaperCardSize>(['small', 'medium', 'large']);
 const APPLY_GESTURES = new Set<ApplyGesture>(['single', 'double']);
-const THEMES = new Set<ShellTheme>(['system', 'light', 'dark', 'glass']);
+const LIBRARY_VIEW_MODES = new Set<LibraryViewMode>(['grid', 'flow']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -107,7 +111,8 @@ export function normalizeShellPreferences(value: unknown): ShellPreferences {
     cardSize: memberOf(record.cardSize, CARD_SIZES, 'medium'),
     displayTarget: normalizeDisplayTarget(record.displayTarget),
     applyGesture: memberOf(record.applyGesture, APPLY_GESTURES, 'single'),
-    theme: memberOf(record.theme, THEMES, 'system'),
+    theme: isShellTheme(record.theme) ? record.theme : 'system',
+    libraryViewMode: memberOf(record.libraryViewMode, LIBRARY_VIEW_MODES, 'grid'),
   };
 }
 
@@ -136,5 +141,6 @@ export function serializeShellPreferences(preferences: ShellPreferences): string
     displayTarget: normalized.displayTarget,
     applyGesture: normalized.applyGesture,
     theme: normalized.theme,
+    libraryViewMode: normalized.libraryViewMode,
   });
 }

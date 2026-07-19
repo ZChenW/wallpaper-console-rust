@@ -6,8 +6,11 @@
 use std::collections::HashSet;
 use std::path::Path;
 
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -133,7 +136,7 @@ fn source_get_from_conn(conn: &Connection, id: i64) -> Result<SourceRecord, WcEr
             },
         )
         .optional()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .ok_or_else(|| WcError::Other(format!("source id {id} not found")))?;
     source_from_values(
         values.0, values.1, values.2, values.3, values.4, values.5, values.6,
@@ -198,7 +201,7 @@ pub fn sources_list_typed(cd: &ConfigDir) -> Result<Vec<SourceRecord>, WcError> 
             "SELECT id, path, display_name, kind, recursive, availability, added_at
              FROM sources ORDER BY path, id",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let values = stmt
         .query_map([], |row| {
             Ok((
@@ -211,9 +214,9 @@ pub fn sources_list_typed(cd: &ConfigDir) -> Result<Vec<SourceRecord>, WcError> 
                 row.get::<_, String>(6)?,
             ))
         })
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     values
         .into_iter()
         .map(|value| {
@@ -236,24 +239,27 @@ pub fn source_create(cd: &ConfigDir, path: &str) -> Result<(SourceRecord, bool),
     let mut conn = source_connection(cd)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let rows = {
         let mut stmt = tx
             .prepare("SELECT id, path FROM sources ORDER BY id")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
-    let matching_ids: Vec<i64> = rows
+    let matching_rows: Vec<(i64, String)> = rows
         .into_iter()
-        .filter_map(|(id, candidate)| (current_source_identity(&candidate) == path).then_some(id))
+        .filter(|(_, candidate)| current_source_identity(candidate) == path)
         .collect();
+    let matching_ids: Vec<i64> = matching_rows.iter().map(|(id, _)| *id).collect();
+    let visible_changed =
+        matching_rows.is_empty() || matching_rows.len() > 1 || matching_rows[0].1 != path;
 
     let (id, created) = if matching_ids.is_empty() {
         tx.execute(
@@ -262,14 +268,14 @@ pub fn source_create(cd: &ConfigDir, path: &str) -> Result<(SourceRecord, bool),
              VALUES (?1, ?2, ?3, ?4, 'unknown')",
             params![path, display_name, kind.as_str(), recursive],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         let id = tx
             .query_row(
                 "SELECT id FROM sources WHERE path = ?1",
                 params![path],
                 |row| row.get::<_, i64>(0),
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         (id, true)
     } else {
         let survivor_id = *matching_ids
@@ -284,29 +290,32 @@ pub fn source_create(cd: &ConfigDir, path: &str) -> Result<(SourceRecord, bool),
                  FROM wallpaper_sources WHERE source_id = ?2",
                 params![survivor_id, alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             tx.execute(
                 "UPDATE wallpapers SET source_id = ?1 WHERE source_id = ?2",
                 params![survivor_id, alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             tx.execute(
                 "DELETE FROM wallpaper_sources WHERE source_id = ?1",
                 params![alias_id],
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
             tx.execute("DELETE FROM sources WHERE id = ?1", params![alias_id])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
         tx.execute(
             "UPDATE sources SET path = ?1 WHERE id = ?2",
             params![path, survivor_id],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         (survivor_id, false)
     };
     let source = source_get_from_conn(&tx, id)?;
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    if visible_changed {
+        super::bump_library_revision(&tx)?;
+    }
+    tx.commit().map_err(sqlite_err)?;
     Ok((source, created))
 }
 
@@ -317,14 +326,23 @@ pub fn source_rename(cd: &ConfigDir, id: i64, display_name: &str) -> Result<Sour
             "source display name must not be blank".into(),
         ));
     }
-    let conn = source_connection(cd)?;
-    source_get_from_conn(&conn, id)?;
-    conn.execute(
-        "UPDATE sources SET display_name = ?1 WHERE id = ?2",
-        params![display_name, id],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    source_get_from_conn(&conn, id)
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    source_get_from_conn(&tx, id)?;
+    let changed = tx
+        .execute(
+            "UPDATE sources SET display_name = ?1 WHERE id = ?2 AND display_name != ?1",
+            params![display_name, id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_set_recursive(
@@ -332,19 +350,28 @@ pub fn source_set_recursive(
     id: i64,
     recursive: bool,
 ) -> Result<SourceRecord, WcError> {
-    let conn = source_connection(cd)?;
-    let source = source_get_from_conn(&conn, id)?;
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    let source = source_get_from_conn(&tx, id)?;
     if source.kind == SourceKind::WallpaperEngineWorkshop {
         return Err(WcError::Other(
             "Wallpaper Engine Workshop recursion is managed by its specialized scanner".into(),
         ));
     }
-    conn.execute(
-        "UPDATE sources SET recursive = ?1 WHERE id = ?2",
-        params![recursive, id],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    source_get_from_conn(&conn, id)
+    let changed = tx
+        .execute(
+            "UPDATE sources SET recursive = ?1 WHERE id = ?2 AND recursive != ?1",
+            params![recursive, id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_set_availability(
@@ -352,14 +379,23 @@ pub fn source_set_availability(
     id: i64,
     availability: SourceAvailability,
 ) -> Result<SourceRecord, WcError> {
-    let conn = source_connection(cd)?;
-    source_get_from_conn(&conn, id)?;
-    conn.execute(
-        "UPDATE sources SET availability = ?1 WHERE id = ?2",
-        params![availability.as_str(), id],
-    )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    source_get_from_conn(&conn, id)
+    let mut conn = source_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    source_get_from_conn(&tx, id)?;
+    let changed = tx
+        .execute(
+            "UPDATE sources SET availability = ?1 WHERE id = ?2 AND availability != ?1",
+            params![availability.as_str(), id],
+        )
+        .map_err(sqlite_err)?;
+    if changed > 0 {
+        super::bump_library_revision(&tx)?;
+    }
+    let source = source_get_from_conn(&tx, id)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(source)
 }
 
 pub fn source_remove_by_id(cd: &ConfigDir, id: i64) -> Result<SourceRecord, WcError> {
@@ -377,18 +413,18 @@ where
     let mut conn = source_connection(cd)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let source = source_get_from_conn(&tx, id)?;
     tx.execute(
         "UPDATE wallpapers SET source_id = NULL WHERE source_id = ?1",
         params![id],
     )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    .map_err(sqlite_err)?;
     tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
+    super::bump_library_revision(&tx)?;
     before_commit(&tx)?;
-    tx.commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(source)
 }
 
@@ -396,12 +432,12 @@ pub(crate) fn source_paths_list_compat(cd: &ConfigDir) -> Result<Vec<String>, Wc
     let conn = source_connection(cd)?;
     let mut stmt = conn
         .prepare("SELECT path FROM sources ORDER BY path")
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let paths = stmt
         .query_map([], |row| row.get::<_, String>(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))?
+        .map_err(sqlite_err)?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut seen = HashSet::new();
     Ok(paths
         .into_iter()
@@ -410,42 +446,23 @@ pub(crate) fn source_paths_list_compat(cd: &ConfigDir) -> Result<Vec<String>, Wc
         .collect())
 }
 
-pub(crate) fn source_remove_exact_path_compat(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
-    let mut conn = source_connection(cd)?;
-    let tx = conn
-        .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    tx.execute(
-        "UPDATE wallpapers SET source_id = NULL
-         WHERE source_id IN (SELECT id FROM sources WHERE path = ?1)",
-        params![path],
-    )
-    .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    let removed = tx
-        .execute("DELETE FROM sources WHERE path = ?1", params![path])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
-    tx.commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
-    Ok(removed > 0)
-}
-
 pub(crate) fn source_remove_canonical_compat(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {
     let mut conn = source_connection(cd)?;
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
     let target = wc_scan::normalize_source_path(path);
     let rows = {
         let mut stmt = tx
             .prepare("SELECT id, path FROM sources")
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         let rows = stmt
             .query_map([], |row| {
                 Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
             })
-            .map_err(|e| WcError::Sqlite(e.to_string()))?
+            .map_err(sqlite_err)?
             .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         rows
     };
     let ids: Vec<i64> = rows
@@ -459,12 +476,14 @@ pub(crate) fn source_remove_canonical_compat(cd: &ConfigDir, path: &str) -> Resu
             "UPDATE wallpapers SET source_id = NULL WHERE source_id = ?1",
             params![id],
         )
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+        .map_err(sqlite_err)?;
         tx.execute("DELETE FROM sources WHERE id = ?1", params![id])
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
     }
-    tx.commit()
-        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    if !ids.is_empty() {
+        super::bump_library_revision(&tx)?;
+    }
+    tx.commit().map_err(sqlite_err)?;
     Ok(!ids.is_empty())
 }
 
@@ -474,6 +493,35 @@ mod tests {
     use wc_core::config::ConfigDir;
 
     use super::*;
+
+    fn revision(cd: &ConfigDir) -> u64 {
+        let conn = Connection::open(cd.db_path()).unwrap();
+        crate::sqlite::read_library_revision(&conn).unwrap()
+    }
+
+    #[test]
+    fn source_visible_transactions_each_bump_revision_exactly_once() {
+        let (tmp, cd) = storage();
+        let path = tmp.path().join("revision-walls");
+        std::fs::create_dir(&path).unwrap();
+
+        let (source, created) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        assert!(created);
+        assert_eq!(revision(&cd), 1);
+        let (_, created) = source_create(&cd, &path.to_string_lossy()).unwrap();
+        assert!(!created);
+        assert_eq!(revision(&cd), 1);
+        source_rename(&cd, source.id, "Curated").unwrap();
+        assert_eq!(revision(&cd), 2);
+        source_rename(&cd, source.id, "Curated").unwrap();
+        assert_eq!(revision(&cd), 2);
+        source_set_availability(&cd, source.id, SourceAvailability::Offline).unwrap();
+        assert_eq!(revision(&cd), 3);
+        source_set_recursive(&cd, source.id, false).unwrap();
+        assert_eq!(revision(&cd), 4);
+        source_remove_by_id(&cd, source.id).unwrap();
+        assert_eq!(revision(&cd), 5);
+    }
 
     fn storage() -> (tempfile::TempDir, ConfigDir) {
         let tmp = tempfile::tempdir().unwrap();

@@ -1,14 +1,20 @@
 import { memo, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/bridge';
+import type { LibraryBrowserItemDTO } from '../api/bridge';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
+import type { ContextAction } from './libraryViewModel.ts';
 import {
   anchoredScrollTopForLayoutChange,
+  captureStableViewportAnchor,
+  restoreStableViewportAnchor,
   shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
   visibleThumbnailPaths,
+  wallpaperIdNearestGridViewportCenter,
+  wallpaperApplyFlags,
+  wallpaperOrdinal,
 } from './wallpaperGridHelpers';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import { recordMetric } from '../perf/metrics';
@@ -23,34 +29,31 @@ import {
 import type { ApplyGesture } from '../shell/shellPreferences';
 
 interface Props {
-  entries: LibraryBrowserItemDTO[];
-  onApply: (path: string) => void;
-  onSelect?: (entry: WallpaperDTO) => void;
+  entries: readonly LibraryBrowserItemDTO[];
+  onApply: (entry: LibraryBrowserItemDTO) => void;
+  onSelect?: (entry: LibraryBrowserItemDTO) => void;
   onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   applying: boolean;
   emptyText?: string;
   contextActions?: ContextAction[];
-  buildContextActions?: (entry: WallpaperDTO) => ContextAction[];
+  buildContextActions?: (entry: LibraryBrowserItemDTO) => ContextAction[];
   active?: boolean;
   refreshing?: boolean;
   resetKey?: string;
   cardSize?: WallpaperCardSize;
   applyGesture?: ApplyGesture;
   selectedPath?: string | null;
+  activePath?: string | null;
   pendingPath?: string | null;
   favoritePendingPaths?: ReadonlySet<string>;
   currentPath?: string | null;
-  isEntryApplicable?: (entry: WallpaperDTO) => boolean;
+  isEntryApplicable?: (entry: LibraryBrowserItemDTO) => boolean;
   hasMore?: boolean;
   loadingMore?: boolean;
   onLoadMore?: () => void | Promise<void>;
-}
-
-export interface ContextAction {
-  label: string;
-  action: (path: string) => void;
-  danger?: boolean;
-  visible?: (entry: WallpaperDTO) => boolean;
+  initialAnchorWallpaperId?: number | null;
+  focusToken?: number;
+  onAnchorChange?: (wallpaperId: number) => void;
 }
 
 const SCROLL_IDLE_MS = 180;
@@ -85,6 +88,7 @@ function WallpaperGridImpl({
   cardSize = 'medium',
   applyGesture = 'single',
   selectedPath = null,
+  activePath = null,
   pendingPath = null,
   favoritePendingPaths = new Set(),
   currentPath = null,
@@ -92,6 +96,9 @@ function WallpaperGridImpl({
   hasMore = false,
   loadingMore = false,
   onLoadMore,
+  initialAnchorWallpaperId = null,
+  focusToken = 0,
+  onAnchorChange,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -107,8 +114,12 @@ function WallpaperGridImpl({
   const pendingScrollTopRef = useRef<number | null>(null);
   const lastEnqueueKeyRef = useRef('');
   const suppressScrollPauseRef = useRef(false);
+  const viewportAnchorRef = useRef<ReturnType<typeof captureStableViewportAnchor>>(null);
+  const previousEntriesRef = useRef(entries);
+  const previousEntriesResetKeyRef = useRef(resetKey);
   const colCountRef = useRef(colCount);
   const entriesLengthRef = useRef(entries.length);
+  const initialAnchorAppliedRef = useRef(false);
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
   activeRef.current = active;
@@ -194,6 +205,19 @@ function WallpaperGridImpl({
     }
   }, [updateGridLayoutFromWidth]);
 
+  const publishViewportCenter = useCallback(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const wallpaperId = wallpaperIdNearestGridViewportCenter({
+      entries,
+      columns: colCount,
+      rowHeight: gridLayout.rowHeight,
+      scrollTop: el.scrollTop,
+      viewportHeight: el.clientHeight,
+    });
+    if (wallpaperId !== null) onAnchorChange?.(wallpaperId);
+  }, [colCount, entries, gridLayout.rowHeight, onAnchorChange]);
+
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
@@ -209,6 +233,12 @@ function WallpaperGridImpl({
     if (!active) return;
     remeasure();
   }, [active, remeasure]);
+
+  useEffect(() => {
+    if (!active || entries.length === 0) return undefined;
+    const frame = window.requestAnimationFrame(publishViewportCenter);
+    return () => window.cancelAnimationFrame(frame);
+  }, [active, entries, publishViewportCenter]);
 
   const rowCount = Math.ceil(entries.length / colCount);
 
@@ -253,6 +283,61 @@ function WallpaperGridImpl({
       }
     }
   }, [resetKey, active, virtualizer]);
+
+  useEffect(() => {
+    if (!active || initialAnchorAppliedRef.current || entries.length === 0) return;
+    initialAnchorAppliedRef.current = true;
+    const anchorIndex = initialAnchorWallpaperId === null
+      ? 0
+      : entries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
+    const index = anchorIndex >= 0 ? anchorIndex : 0;
+    suppressScrollPauseRef.current = true;
+    virtualizer.scrollToIndex(Math.floor(index / colCount), { align: 'start' });
+    requestAnimationFrame(() => {
+      suppressScrollPauseRef.current = false;
+      publishViewportCenter();
+    });
+  }, [active, colCount, entries, initialAnchorWallpaperId, publishViewportCenter, virtualizer]);
+
+  useEffect(() => {
+    if (!active || focusToken <= 0 || entries.length === 0) return;
+    const anchorIndex = initialAnchorWallpaperId === null
+      ? 0
+      : entries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
+    const entry = entries[anchorIndex >= 0 ? anchorIndex : 0];
+    if (!entry) return;
+    virtualizer.scrollToIndex(Math.floor((anchorIndex >= 0 ? anchorIndex : 0) / colCount), {
+      align: 'start',
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      containerRef.current
+        ?.querySelector<HTMLButtonElement>(
+          `[data-wallpaper-id="${entry.wallpaperId}"] .wallpaper-card__primary`,
+        )
+        ?.focus();
+    }));
+  }, [active, colCount, entries, focusToken, initialAnchorWallpaperId, virtualizer]);
+
+  useEffect(() => {
+    const previous = previousEntriesRef.current;
+    previousEntriesRef.current = entries;
+    const criteriaChanged = shouldResetScroll(previousEntriesResetKeyRef.current, resetKey);
+    previousEntriesResetKeyRef.current = resetKey;
+    if (previous === entries || criteriaChanged) return;
+    const nextTop = restoreStableViewportAnchor(
+      entries,
+      viewportAnchorRef.current,
+      colCount,
+      gridLayout.rowHeight,
+    );
+    const el = containerRef.current;
+    if (nextTop === null || !el) return;
+    suppressScrollPauseRef.current = true;
+    el.scrollTop = nextTop;
+    requestAnimationFrame(() => {
+      suppressScrollPauseRef.current = false;
+    });
+  }, [colCount, entries, gridLayout.rowHeight, resetKey]);
 
   const shouldSampleGridMetrics =
     import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
@@ -314,8 +399,18 @@ function WallpaperGridImpl({
 
   const handleScroll = useCallback(() => {
     if (suppressScrollPauseRef.current) return;
+    const el = containerRef.current;
+    if (el) {
+      viewportAnchorRef.current = captureStableViewportAnchor(
+        entries,
+        colCount,
+        gridLayout.rowHeight,
+        el.scrollTop,
+      );
+      publishViewportCenter();
+    }
     beginScrolling();
-  }, [beginScrolling]);
+  }, [beginScrolling, colCount, entries, gridLayout.rowHeight, publishViewportCenter]);
 
   const isScrolling = useCallback(() => isScrollingRef.current, []);
 
@@ -344,7 +439,7 @@ function WallpaperGridImpl({
       ref={containerRef}
       onScroll={handleScroll}
       aria-label="Wallpaper library"
-      role="listbox"
+      role="list"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -365,26 +460,35 @@ function WallpaperGridImpl({
                 gap: `${GRID_GAP}px`,
               }}
             >
-              {rowEntries.map((e) => (
-                <WallpaperCard
-                  key={e.path}
-                  entry={e}
-                  applying={applying}
-                  onApply={onApply}
-                  onSelect={onSelect}
-                  onToggleFavorite={onToggleFavorite}
-                  onContextMenu={handleContextMenu}
-                  onKeyboardContextMenu={handleKeyboardContextMenu}
-                  cardSize={cardSize}
-                  applyGesture={applyGesture}
-                  selected={selectedPath === e.path}
-                  pending={pendingPath === e.path}
-                  favoritePending={favoritePendingPaths.has(e.path)}
-                  current={currentPath === e.path}
-                  applyAvailable={isEntryApplicable?.(e)}
-                  isScrolling={isScrolling}
-                />
-              ))}
+              {rowEntries.map((e, offset) => {
+                const activity = wallpaperApplyFlags(
+                  e.path,
+                  applying,
+                  activePath,
+                  pendingPath,
+                );
+                return (
+                  <WallpaperCard
+                    key={e.path}
+                    entry={e}
+                    ordinal={wallpaperOrdinal(start + offset)}
+                    applying={activity.applying}
+                    onApply={onApply}
+                    onSelect={onSelect}
+                    onToggleFavorite={onToggleFavorite}
+                    onContextMenu={handleContextMenu}
+                    onKeyboardContextMenu={handleKeyboardContextMenu}
+                    cardSize={cardSize}
+                    applyGesture={applyGesture}
+                    selected={selectedPath === e.path}
+                    pending={activity.pending}
+                    favoritePending={favoritePendingPaths.has(e.path)}
+                    current={currentPath === e.path}
+                    applyAvailable={isEntryApplicable?.(e)}
+                    isScrolling={isScrolling}
+                  />
+                );
+              })}
             </div>
           );
         })}

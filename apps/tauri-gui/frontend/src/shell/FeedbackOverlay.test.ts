@@ -95,7 +95,7 @@ test('renders concurrent channels with severity, accessible labels, and escaped 
   assert.match(markup, /&lt;img src=x onerror=alert\(1\)&gt;/);
 });
 
-test('dispatches dismiss and hover pause/resume with the observed timestamp', async () => {
+test('dispatches dismiss and resumes only after both pointer and focus leave', async () => {
   const { FeedbackOverlay } = await importTsxModule();
   const state = show(EMPTY_FEEDBACK_STATE, 'apply', 'success', 'Wallpaper applied');
   const actions: FeedbackAction[] = [];
@@ -112,14 +112,37 @@ test('dispatches dismiss and hover pause/resume with the observed timestamp', as
   assert.ok(card);
   assert.ok(closeButton);
   (card.props.onMouseEnter as () => void)();
-  (card.props.onMouseLeave as () => void)();
+  (card.props.onMouseLeave as (event: unknown) => void)({
+    currentTarget: { matches: () => false },
+  });
+  (card.props.onFocus as () => void)();
+  (card.props.onMouseLeave as (event: unknown) => void)({
+    currentTarget: { matches: (selector: string) => selector === ':focus-within' },
+  });
+  (card.props.onBlur as (event: unknown) => void)({
+    currentTarget: { contains: () => false, matches: (selector: string) => selector === ':hover' },
+    relatedTarget: null,
+  });
+  (card.props.onBlur as (event: unknown) => void)({
+    currentTarget: { contains: () => false, matches: () => false },
+    relatedTarget: null,
+  });
   (closeButton.props.onClick as () => void)();
 
   assert.deepEqual(actions, [
     { type: 'pause', channel: 'apply', nowMs: 2_000 },
     { type: 'resume', channel: 'apply', nowMs: 2_000 },
+    { type: 'pause', channel: 'apply', nowMs: 2_000 },
+    { type: 'resume', channel: 'apply', nowMs: 2_000 },
     { type: 'dismiss', channel: 'apply' },
   ]);
+});
+
+test('severity colours remain themeable CSS semantics instead of inline hex values', async () => {
+  const source = await readFile(new URL('./FeedbackOverlay.tsx', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /severityColours/);
+  assert.doesNotMatch(source, /#[0-9a-f]{6}/i);
+  assert.match(source, /feedback-overlay__severity/);
 });
 
 test('puts countdown progress last on timed cards and omits it for persistent errors', async () => {

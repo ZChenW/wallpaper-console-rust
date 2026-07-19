@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/wc-core",
+    "crates/wc-config",
     "crates/wc-storage",
     "crates/wc-scan",
     "crates/wc-backend",
@@ -25,7 +26,7 @@ anyhow = "1"
 thiserror = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.32", features = ["bundled", "hooks"] }
 walkdir = "2"
 rand = "0.8"
 camino = { version = "1", features = ["serde1"] }
@@ -34,8 +35,11 @@ clap = { version = "4", features = ["derive"] }
 dirs = "5"
 which = "7"
 fs2 = "0.4.3"
+log = "0.4"
+libc = "0.2"
 
 wc-core = { path = "crates/wc-core" }
+wc-config = { path = "crates/wc-config" }
 wc-storage = { path = "crates/wc-storage" }
 wc-scan = { path = "crates/wc-scan" }
 wc-backend = { path = "crates/wc-backend" }

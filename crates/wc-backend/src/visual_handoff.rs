@@ -1,3 +1,9 @@
+//! Visual handoff planning for *(previous, target)* transitions.
+//!
+//! Handoff is a pairwise policy (prefer no stale frame; short black is OK).
+//! It stays outside [`crate::driver::BackendDriver`] — see `driver.rs` for
+//! per-backend stop/apply primitives.
+
 use crate::lifecycle::RunningBackend;
 use wc_core::types::Backend;
 
@@ -69,61 +75,25 @@ fn plan_awww_handoff(previous: RunningBackend, fallback_path: Option<&str>) -> V
 }
 
 fn plan_mpvpaper_handoff(
-    previous: RunningBackend,
+    _previous: RunningBackend,
     _fallback_path: Option<&str>,
 ) -> VisualHandoffPlan {
-    match previous {
-        RunningBackend::Mpvpaper => VisualHandoffPlan {
-            fallback_stage: FallbackStage::None,
-            target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-            stop_previous_after_fallback: false,
-            stop_fallback_after_target_settle: false,
-        },
-        RunningBackend::Awww => VisualHandoffPlan {
-            fallback_stage: FallbackStage::None,
-            target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-            stop_previous_after_fallback: false,
-            stop_fallback_after_target_settle: false,
-        },
-        RunningBackend::LinuxWallpaperEngine => VisualHandoffPlan {
-            fallback_stage: FallbackStage::None,
-            target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-            stop_previous_after_fallback: false,
-            stop_fallback_after_target_settle: false,
-        },
-        RunningBackend::None | RunningBackend::Unknown | RunningBackend::Unsupported => {
-            VisualHandoffPlan {
-                fallback_stage: FallbackStage::None,
-                target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: false,
-                stop_fallback_after_target_settle: false,
-            }
-        }
+    // Startup settle is independent of previous backend (no preview fallback).
+    VisualHandoffPlan {
+        fallback_stage: FallbackStage::None,
+        target_startup_settle_ms: MPVPAPER_STARTUP_SETTLE_MS,
+        stop_previous_after_fallback: false,
+        stop_fallback_after_target_settle: false,
     }
 }
 
-fn plan_lwe_handoff(previous: RunningBackend, _fallback_path: Option<&str>) -> VisualHandoffPlan {
-    match previous {
-        RunningBackend::LinuxWallpaperEngine => VisualHandoffPlan {
-            fallback_stage: FallbackStage::None,
-            target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
-            stop_previous_after_fallback: false,
-            stop_fallback_after_target_settle: false,
-        },
-        RunningBackend::Awww | RunningBackend::Mpvpaper => VisualHandoffPlan {
-            fallback_stage: FallbackStage::None,
-            target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
-            stop_previous_after_fallback: false,
-            stop_fallback_after_target_settle: false,
-        },
-        RunningBackend::None | RunningBackend::Unknown | RunningBackend::Unsupported => {
-            VisualHandoffPlan {
-                fallback_stage: FallbackStage::None,
-                target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
-                stop_previous_after_fallback: false,
-                stop_fallback_after_target_settle: false,
-            }
-        }
+fn plan_lwe_handoff(_previous: RunningBackend, _fallback_path: Option<&str>) -> VisualHandoffPlan {
+    // Startup settle is independent of previous backend (no preview fallback).
+    VisualHandoffPlan {
+        fallback_stage: FallbackStage::None,
+        target_startup_settle_ms: LWE_STARTUP_SETTLE_MS,
+        stop_previous_after_fallback: false,
+        stop_fallback_after_target_settle: false,
     }
 }
 

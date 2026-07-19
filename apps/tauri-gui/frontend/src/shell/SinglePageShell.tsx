@@ -7,16 +7,22 @@ import {
   useState,
 } from 'react';
 import { FolderPlus, Heart, Search, Settings, Shuffle } from 'lucide-react';
+import { listen } from '@tauri-apps/api/event';
 
 import { api } from '../api/bridge.ts';
 import type {
   CommandResult,
   FirstRunSourceSuggestionDTO,
   LibraryBrowserItemDTO,
-  WallpaperDTO,
 } from '../api/types.ts';
 import { commandErrorFeedback } from '../api/feedback.ts';
-import WallpaperGrid, { type ContextAction } from '../components/WallpaperGrid.tsx';
+import LibraryViewport from '../components/LibraryViewport.tsx';
+import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
+import {
+  resolveLibraryModeSwitchAnchor,
+  type ContextAction,
+  type LibraryViewModel,
+} from '../components/libraryViewModel.ts';
 import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
@@ -27,8 +33,7 @@ import DisplayTargetSelector from './DisplayTargetSelector.tsx';
 import { FeedbackOverlay } from './FeedbackOverlay.tsx';
 import FirstRunSuggestions from './FirstRunSuggestions.tsx';
 import LibraryRepairPrompt from './LibraryRepairPrompt.tsx';
-import WallpaperDetailsDialog from './WallpaperDetailsDialog.tsx';
-import { safeFileSrc } from '../components/WallpaperCard.tsx';
+import WallpaperDetailsDialog from './AuthorizedWallpaperDetailsDialog.tsx';
 import { ScanActivity } from './ScanActivity.tsx';
 import { SourcePanel, type SourcePanelNotice } from './SourcePanel.tsx';
 import CompactSettingsPanel from './CompactSettingsPanel.tsx';
@@ -45,11 +50,13 @@ import { RuntimeObservationController } from './runtimeObservationController.ts'
 import {
   canChooseRandomWallpaper,
   currentWallpaperLabel,
-  reconcileSelectedEntry,
+  effectiveSourceFilter,
+  reconcileSelectedEntryByStableId,
   reconcileSourceFilter,
   shouldOfferFirstRun,
   targetArgument,
 } from './singlePageShellModel.ts';
+
 import type {
   LibrarySort,
   LibraryTypeFilter,
@@ -70,6 +77,14 @@ import {
   shouldVerifyLibraryIntegrity,
   verifyLibraryIntegrity,
 } from './libraryRepair.ts';
+import {
+  createLibraryReadyGate,
+  createLibraryWatchdog,
+  shouldSignalLibraryPaint,
+} from './startupWatchdog.ts';
+
+const LIBRARY_REVISION_EVENT = 'library-revision-changed';
+const LIBRARY_REFRESH_EVENT = 'wallpaper-console:library-revision-changed';
 
 function commandDetails(result: CommandResult): string {
   return [
@@ -138,8 +153,19 @@ export default function SinglePageShell() {
   const [firstRunSuggestionReload, setFirstRunSuggestionReload] = useState(0);
   const [libraryRepairFault, setLibraryRepairFault] = useState<LibraryRepairFault | null>(null);
   const [libraryRepairPending, setLibraryRepairPending] = useState(false);
+  const [initialRequestTimedOut, setInitialRequestTimedOut] = useState(false);
+  const [watchdogRetryCount, setWatchdogRetryCount] = useState(0);
   const overlayReturnFocusRef = useRef<HTMLElement | null>(null);
   const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
+  const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
+  const libraryViewportAnchorRef = useRef<number | null>(null);
+  const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
+  const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
+
+  // ── startup controllers (stable across renders) ─────────────────────────
+  const libraryWatchdog = useRef(createLibraryWatchdog()).current;
+  const libraryReadyGate = useRef(createLibraryReadyGate()).current;
+  const WATCHDOG_MS = 500;
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -149,6 +175,20 @@ export default function SinglePageShell() {
     overlayReturnFocusRef.current = null;
     if (!trigger) return;
     window.requestAnimationFrame(() => trigger.focus());
+  }, []);
+  const closeDetails = useCallback(() => {
+    setDetailsEntry(null);
+    const trigger = detailsReturnFocusRef.current;
+    detailsReturnFocusRef.current = null;
+    if (!trigger?.isConnected) return;
+    window.requestAnimationFrame(() => trigger.focus());
+  }, []);
+  const openLibraryDetails = useCallback((
+    entry: LibraryBrowserItemDTO,
+    returnFocus: HTMLElement | null = null,
+  ) => {
+    detailsReturnFocusRef.current = returnFocus;
+    setDetailsEntry(entry);
   }, []);
   const openSources = useCallback((returnToSettings = false) => {
     setRestoreSourceCardFocus(false);
@@ -170,7 +210,7 @@ export default function SinglePageShell() {
     saveError: preferencesSaveError,
     updatePreferences,
   } = useShellPreferences(api);
-  useShellTheme(preferences.theme);
+  useShellTheme(preferences.theme, preferencesReady);
 
   const behavior = useWallpaperBehaviorSettings(api);
   const rendererStatuses = useRendererStatuses(api, settingsOpen);
@@ -226,20 +266,108 @@ export default function SinglePageShell() {
     };
   }, [firstRunEligible, firstRunSuggestionReload]);
 
+  // ── effective source filter ──────────────────────────────────────────
+  // When the source catalog has an error, the effective filter is forced to
+  // 'all' so the Library can still render. The persisted preference is NOT
+  // overwritten — only the runtime value passed to the browser changes.
+  const effectiveSrcFilter = effectiveSourceFilter(
+    preferences.sourceFilter,
+    catalog.errors.sources,
+  );
+
+  useEffect(() => {
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen<number>(LIBRARY_REVISION_EVENT, () => {
+      window.dispatchEvent(new Event(LIBRARY_REFRESH_EVENT));
+    }).then((stop) => {
+      if (disposed) stop();
+      else unlisten = stop;
+    }).catch(() => {
+      // Browser-only tests and the mock frontend do not provide Tauri events.
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, []);
+
   const browser = useLibraryBrowser({
-    sourceFilter: preferences.sourceFilter,
+    sourceFilter: effectiveSrcFilter,
     typeFilter: preferences.typeFilter,
     favoritesOnly: preferences.favoritesOnly,
     sort: preferences.sort,
     search,
+    refreshEvent: LIBRARY_REFRESH_EVENT,
   });
+
+  // ── library_ready signal ────────────────────────────────────────────
+  // Sent exactly once after the first Library paint (cards, empty, error, or
+  // timeout retry state). Uses a pure gate so the "exactly once" guarantee is
+  // testable without mounting the full shell.
+  const libraryPaintActive = shouldSignalLibraryPaint({
+    initialLoading: browser.initialLoading,
+    hasEntries: browser.entries.length > 0,
+    emptyConfirmed: browser.emptyConfirmed,
+    loadError: browser.loadError,
+    timedOut: initialRequestTimedOut,
+  });
+  useEffect(() => {
+    if (!libraryReadyGate.shouldSignal({
+      initialLoading: browser.initialLoading,
+      hasEntries: browser.entries.length > 0,
+      emptyConfirmed: browser.emptyConfirmed,
+      loadError: browser.loadError,
+      timedOut: initialRequestTimedOut,
+    })) return;
+    libraryReadyGate.markCalled();
+    void api.libraryReady().catch(() => {
+      // library_ready is fire-and-forget; the backend handles idempotency.
+    });
+  }, [
+    browser.emptyConfirmed,
+    browser.entries.length,
+    browser.initialLoading,
+    browser.loadError,
+    initialRequestTimedOut,
+    libraryReadyGate,
+  ]);
+
+  // ── initial request watchdog (500 ms) ──────────────────────────────────
+  // If the first browser request never resolves (perpetual loading),
+  // surface an interactive retry after a bounded wait. Each retry arms a
+  // fresh 500 ms watchdog even when browser.initialLoading stays true.
+  const armWatchdog = useCallback(() => {
+    return libraryWatchdog.arm(WATCHDOG_MS, () => {
+      setInitialRequestTimedOut(true);
+    });
+  }, [libraryWatchdog]);
+  const watchdogCleanupRef = useRef<(() => void) | null>(null);
+  useEffect(() => {
+    if (!libraryPaintActive) {
+      watchdogCleanupRef.current = armWatchdog();
+    } else {
+      // Loading resolved normally — disarm.
+      if (watchdogCleanupRef.current) {
+        watchdogCleanupRef.current();
+        watchdogCleanupRef.current = null;
+      }
+    }
+    return () => {
+      if (watchdogCleanupRef.current) {
+        watchdogCleanupRef.current();
+        watchdogCleanupRef.current = null;
+      }
+    };
+  }, [libraryPaintActive, armWatchdog, watchdogRetryCount]);
+
   const libraryVerificationRequest = useRef(0);
   const shouldVerifyLibrary = shouldVerifyLibraryIntegrity({
     browserLoadError: browser.loadError,
     sourceLoadError: Boolean(catalog.errors.sources),
     sourceCount: catalog.sources.length,
     emptyConfirmed: browser.emptyConfirmed,
-    sourceFilter: preferences.sourceFilter,
+    sourceFilter: effectiveSrcFilter,
     typeFilter: preferences.typeFilter,
     favoritesOnly: preferences.favoritesOnly,
     search: browser.debouncedSearch,
@@ -325,6 +453,7 @@ export default function SinglePageShell() {
     [],
     createRuntimeWallpaperSession,
   );
+  const [runtimeObservationReady, setRuntimeObservationReady] = useState(false);
   const connectedOutputsKey = catalog.connectedOutputs.join('\0');
   useEffect(() => {
     dispatchRuntimeSession({
@@ -336,12 +465,21 @@ export default function SinglePageShell() {
   const runtimeObservationController = useRef<RuntimeObservationController | null>(null);
   useEffect(() => {
     const outputs = [...catalog.connectedOutputs];
-    if (!catalog.ready || outputs.length === 0) return undefined;
+    if (!catalog.ready) {
+      setRuntimeObservationReady(false);
+      return undefined;
+    }
+    if (outputs.length === 0) {
+      setRuntimeObservationReady(true);
+      return undefined;
+    }
+    setRuntimeObservationReady(false);
     const controller = new RuntimeObservationController({
       api,
       connectedOutputs: outputs,
       onObservations: (observations) => {
         dispatchRuntimeSession({ type: 'runtimeReconciled', observations });
+        setRuntimeObservationReady(true);
       },
     });
     runtimeObservationController.current = controller;
@@ -367,6 +505,10 @@ export default function SinglePageShell() {
     invalidateLibrary,
     onApplied,
   });
+  const {
+    handleApplyActionToDisplay,
+    handleApplyToDisplay,
+  } = applyQueue;
 
   const currentWallpaper = useMemo(() => resolveCurrentWallpaperState({
     activeTarget: preferences.displayTarget,
@@ -387,7 +529,7 @@ export default function SinglePageShell() {
     preferences.displayTarget,
   );
 
-  const applyEntry = useCallback((entry: WallpaperDTO) => {
+  const applyEntry = useCallback((entry: LibraryBrowserItemDTO) => {
     if (!displayModel.canApply) {
       showNotice({
         channel: 'apply',
@@ -408,21 +550,23 @@ export default function SinglePageShell() {
     }
     const target = targetArgument(preferences.displayTarget);
     if (kind === 'retry_backend_apply') {
-      applyQueue.handleApplyActionToDisplay({ kind, path: entry.path }, target);
+      handleApplyActionToDisplay({ kind, path: entry.path }, target);
       return;
     }
-    applyQueue.handleApplyToDisplay(entry.path, target);
-  }, [applyQueue, displayModel.canApply, preferences.displayTarget, showNotice]);
+    handleApplyToDisplay(entry.path, target);
+  }, [
+    displayModel.canApply,
+    handleApplyActionToDisplay,
+    handleApplyToDisplay,
+    preferences.displayTarget,
+    showNotice,
+  ]);
 
-  const applyPath = useCallback((path: string) => {
-    const entry = browser.entryByPath.get(path);
-    if (entry) applyEntry(entry);
-  }, [applyEntry, browser.entryByPath]);
-  const selectLibraryEntry = useCallback((entry: WallpaperDTO) => {
-    setSelectedEntry(entry as LibraryBrowserItemDTO);
+  const selectLibraryEntry = useCallback((entry: LibraryBrowserItemDTO) => {
+    setSelectedEntry(entry);
   }, []);
   const isLibraryEntryApplicable = useCallback(
-    (entry: WallpaperDTO) => primaryApplyKind(entry) !== null,
+    (entry: LibraryBrowserItemDTO) => primaryApplyKind(entry) !== null,
     [],
   );
 
@@ -442,8 +586,41 @@ export default function SinglePageShell() {
   }, [catalog.ready, catalog.sources, preferences.sourceFilter, updatePreferences]);
 
   useEffect(() => {
-    setSelectedEntry((current) => reconcileSelectedEntry(current, browser.entryByPath));
-  }, [browser.entryByPath, browser.replaceCount]);
+    setSelectedEntry((current) => reconcileSelectedEntryByStableId(current, browser.entries));
+  }, [browser.entries, browser.replaceCount]);
+
+  const selectedExistenceRequest = useRef(0);
+  useEffect(() => {
+    const selected = selectedEntry;
+    const requestId = ++selectedExistenceRequest.current;
+    if (!selected || browser.entries.some((entry) => entry.wallpaperId === selected.wallpaperId)) {
+      return undefined;
+    }
+    void api.libraryWallpaperExists(selected.wallpaperId).then(
+      (exists) => {
+        if (exists || selectedExistenceRequest.current !== requestId) return;
+        setSelectedEntry((current) => (
+          current?.wallpaperId === selected.wallpaperId ? null : current
+        ));
+        setDetailsEntry((current) => (
+          current?.wallpaperId === selected.wallpaperId ? null : current
+        ));
+        showNotice({
+          channel: 'system',
+          severity: 'info',
+          message: 'The selected wallpaper is no longer in Library.',
+        });
+      },
+      () => {
+        // An existence probe is advisory. Preserve selection on transport failures.
+      },
+    );
+    return () => {
+      if (selectedExistenceRequest.current === requestId) {
+        selectedExistenceRequest.current += 1;
+      }
+    };
+  }, [browser.entries, browser.replaceCount, selectedEntry, showNotice]);
 
   const previousScanRunning = useRef(false);
   useEffect(() => {
@@ -453,18 +630,6 @@ export default function SinglePageShell() {
     }
     previousScanRunning.current = running;
   }, [catalog.reloadSources, scan.progress?.running]);
-
-  // A startup refresh can finish between the initial idle probe and the next
-  // poll. One delayed reconciliation closes that small observation window.
-  const startupReconciled = useRef(false);
-  useEffect(() => {
-    if (!catalog.ready || startupReconciled.current) return undefined;
-    startupReconciled.current = true;
-    const timer = window.setTimeout(() => {
-      void Promise.allSettled([reloadLibraryRef.current(), catalog.reloadSources()]);
-    }, 2_250);
-    return () => window.clearTimeout(timer);
-  }, [catalog.ready, catalog.reloadSources]);
 
   const lastScanError = useRef<string | null>(null);
   useEffect(() => {
@@ -485,7 +650,9 @@ export default function SinglePageShell() {
     showNotice({
       channel: 'settings',
       severity: 'warning',
-      message: 'Some interface preferences could not be saved.',
+      message: preferencesSaveError
+        ? 'Some interface preferences could not be saved.'
+        : 'Saved interface preferences could not be loaded; defaults are in use.',
       technicalDetails: error.message,
     });
   }, [preferencesLoadError, preferencesSaveError, showNotice]);
@@ -548,7 +715,7 @@ export default function SinglePageShell() {
     }
   }, [setCommandFeedback, showNotice]);
 
-  const openLocation = useCallback(async (entry: WallpaperDTO) => {
+  const openLocation = useCallback(async (entry: LibraryBrowserItemDTO) => {
     try {
       const result = await api.openProjectLocation(entry.path, 'file_manager');
       if (!result.success) setCommandFeedback(commandErrorFeedback('Open location', result), 'system');
@@ -557,8 +724,7 @@ export default function SinglePageShell() {
     }
   }, [setCommandFeedback]);
 
-  const buildContextActions = useCallback((wallpaper: WallpaperDTO): ContextAction[] => {
-    const entry = wallpaper as LibraryBrowserItemDTO;
+  const buildContextActions = useCallback((entry: LibraryBrowserItemDTO): ContextAction[] => {
     const actions: ContextAction[] = [
       {
         label: entry.favorite ? 'Remove from Favorites' : 'Add to Favorites',
@@ -570,9 +736,9 @@ export default function SinglePageShell() {
       },
       {
         label: 'Information',
-        action: () => {
-          setSelectedEntry(entry);
-          setDetailsEntry(entry);
+        action: (_path, returnFocus) => {
+          if (preferences.libraryViewMode === 'grid') setSelectedEntry(entry);
+          openLibraryDetails(entry, returnFocus);
         },
       },
     ];
@@ -589,7 +755,7 @@ export default function SinglePageShell() {
       });
     }
     return actions;
-  }, [openLocation, showNotice, toggleFavorite]);
+  }, [openLibraryDetails, openLocation, preferences.libraryViewMode, showNotice, toggleFavorite]);
 
   const chooseRandom = useCallback(async () => {
     const outcome = await browser.chooseRandom();
@@ -644,27 +810,109 @@ export default function SinglePageShell() {
 
   const scanRunning = scan.progress?.running === true || scan.scanState.kind === 'running';
   const resetKey = [
-    sourceFilterValue(preferences.sourceFilter),
+    sourceFilterValue(effectiveSrcFilter),
     preferences.typeFilter,
     preferences.favoritesOnly ? 'favorites' : 'all',
     preferences.sort,
     browser.debouncedSearch,
   ].join('|');
 
+  const rememberLibraryAnchor = useCallback((wallpaperId: number) => {
+    libraryViewportAnchorRef.current = wallpaperId;
+  }, []);
+  const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
+    if (mode === preferences.libraryViewMode) return;
+    const anchor = resolveLibraryModeSwitchAnchor(
+      browser.entries,
+      selectedEntry?.wallpaperId,
+      libraryViewportAnchorRef.current,
+    );
+    setLibraryModeAnchorId(anchor?.wallpaperId ?? null);
+    setLibraryViewFocusToken((token) => token + 1);
+    updatePreferences((current) => ({ ...current, libraryViewMode: mode }));
+  }, [browser.entries, preferences.libraryViewMode, selectedEntry, updatePreferences]);
+
+  const libraryViewModel = useMemo<LibraryViewModel>(() => ({
+    entries: browser.entries,
+    selectedPath: selectedEntry?.path ?? null,
+    currentPath,
+    currentObservationReady: runtimeObservationReady,
+    applying: applyQueue.applying,
+    activePath: applyQueue.activePath ?? null,
+    pendingPath: applyQueue.pendingPath ?? null,
+    favoritePendingPaths,
+    active: !settingsOpen && !sourcesOpen && detailsEntry === null,
+    refreshing: browser.refreshing || scanRunning,
+    resetKey,
+    replaceCount: browser.replaceCount,
+    queryReplacementPending: browser.criteriaReplacementPending,
+    totalKnown: browser.totalKnown,
+    total: browser.total,
+    hasMore: browser.hasMore,
+    loadingMore: browser.appending,
+    automaticAppendPaused: browser.automaticAppendPaused,
+    loadErrorDetail: browser.loadErrorDetail,
+    canApplyToDisplay: displayModel.canApply,
+    isEntryApplicable: isLibraryEntryApplicable,
+    onSelect: selectLibraryEntry,
+    onApply: applyEntry,
+    onToggleFavorite: toggleFavorite,
+    onDetails: openLibraryDetails,
+    buildContextActions,
+    onLoadMore: browser.loadMore,
+  }), [
+    applyEntry,
+    applyQueue.activePath,
+    applyQueue.applying,
+    applyQueue.pendingPath,
+    browser.appending,
+    browser.automaticAppendPaused,
+    browser.entries,
+    browser.hasMore,
+    browser.loadErrorDetail,
+    browser.loadMore,
+    browser.criteriaReplacementPending,
+    browser.refreshing,
+    browser.replaceCount,
+    browser.total,
+    browser.totalKnown,
+    buildContextActions,
+    currentPath,
+    runtimeObservationReady,
+    detailsEntry,
+    displayModel.canApply,
+    favoritePendingPaths,
+    isLibraryEntryApplicable,
+    openLibraryDetails,
+    resetKey,
+    scanRunning,
+    selectLibraryEntry,
+    selectedEntry?.path,
+    settingsOpen,
+    sourcesOpen,
+    toggleFavorite,
+  ]);
+
   const renderLibrary = () => {
-    if (!preferencesReady || !catalog.ready || browser.initialLoading) {
-      return <div className="single-page-empty" role="status">Loading wallpaper library…</div>;
-    }
-    if (catalog.errors.sources && catalog.sources.length === 0) {
+    // Library loads independently of preferences, catalog, and display probes.
+    // A failure in any of those services only disables the relevant controls.
+    if (initialRequestTimedOut
+      && browser.entries.length === 0
+      && !browser.emptyConfirmed
+      && !browser.loadError) {
       return (
-        <section className="single-page-empty" role="alert">
-          <h2>Could not load wallpaper sources</h2>
-          <p>{catalog.errors.sources}</p>
-          <button className="btn" type="button" onClick={() => void catalog.reloadSources()}>
-            Retry
-          </button>
-        </section>
+        <div className="single-page-empty" role="alert">
+          <p>Loading wallpaper library is taking longer than expected.</p>
+          <button className="btn" type="button" onClick={() => {
+            setInitialRequestTimedOut(false);
+            setWatchdogRetryCount((c) => c + 1);
+            void browser.reload();
+          }}>Retry</button>
+        </div>
       );
+    }
+    if (browser.initialLoading) {
+      return <div className="single-page-empty" role="status">Loading wallpaper library…</div>;
     }
     if (shouldOfferFirstRun(catalog.sources, catalog.errors.sources)) {
       return (
@@ -713,28 +961,18 @@ export default function SinglePageShell() {
               </button>
             </div>
           ) : null}
-          <WallpaperGrid
-            entries={browser.entries}
-            onApply={applyPath}
-            onSelect={selectLibraryEntry}
-            onToggleFavorite={toggleFavorite}
-            applying={applyQueue.applying}
-            favoritePendingPaths={favoritePendingPaths}
-            buildContextActions={buildContextActions}
-            active={!settingsOpen && !sourcesOpen}
-            refreshing={browser.refreshing || scanRunning}
-            resetKey={resetKey}
-            cardSize={preferences.cardSize}
+          <LibraryViewport
             applyGesture={preferences.applyGesture}
-            selectedPath={selectedEntry?.path ?? null}
-            pendingPath={applyQueue.pendingPath ?? applyQueue.activePath ?? null}
-            currentPath={currentPath}
-            isEntryApplicable={isLibraryEntryApplicable}
-            hasMore={browser.entries.length < browser.total && !browser.automaticAppendPaused}
-            loadingMore={browser.appending}
-            onLoadMore={browser.loadMore}
+            cardSize={preferences.cardSize}
+            focusToken={libraryViewFocusToken}
+            initialAnchorWallpaperId={libraryModeAnchorId}
+            mode={preferences.libraryViewMode}
+            model={libraryViewModel}
+            onAnchorChange={rememberLibraryAnchor}
           />
-          {!browser.refreshing && browser.entries.length < browser.total ? (
+          {!browser.refreshing
+            && browser.hasMore
+            && (preferences.libraryViewMode === 'grid' || browser.automaticAppendPaused) ? (
             <div className="single-page-load-more">
               <button
                 className="btn"
@@ -749,7 +987,9 @@ export default function SinglePageShell() {
                   ? 'Loading more…'
                   : browser.automaticAppendPaused
                     ? 'Retry loading more'
-                    : `Load more · ${browser.total - browser.entries.length} remaining`}
+                    : browser.totalKnown
+                      ? `Load more · ${Math.max(0, browser.total - browser.entries.length)} remaining`
+                      : 'Load more'}
               </button>
             </div>
           ) : null}
@@ -844,9 +1084,16 @@ export default function SinglePageShell() {
       </header>
 
       <div className="single-page-filters" aria-label="Library filters">
+        {catalog.errors.sources ? (
+          <details className="single-page-source-warning">
+            <summary>Source list unavailable</summary>
+            <p>{catalog.errors.sources}</p>
+          </details>
+        ) : null}
         <SelectField
           aria-label="Source filter"
-          value={sourceFilterValue(preferences.sourceFilter)}
+          value={sourceFilterValue(effectiveSrcFilter)}
+          disabled={Boolean(catalog.errors.sources)}
           options={[
             { value: 'all', label: 'ALL SOURCES' },
             ...catalog.sources.map((source) => ({
@@ -910,22 +1157,31 @@ export default function SinglePageShell() {
           }}
           variant="compact"
         />
-        <SelectField
-          aria-label="Card size"
-          value={preferences.cardSize}
-          options={[
-            { value: 'small', label: 'Small' },
-            { value: 'medium', label: 'Medium' },
-            { value: 'large', label: 'Large' },
-          ]}
-          onValueChange={(value) => {
-            const cardSize = value as typeof preferences.cardSize;
-            updatePreferences((current) => ({ ...current, cardSize }));
-          }}
-          variant="compact"
+        <LibraryViewSwitch
+          disabled={!preferencesReady}
+          onChange={changeLibraryViewMode}
+          value={preferences.libraryViewMode}
         />
+        {preferences.libraryViewMode === 'grid' ? (
+          <SelectField
+            aria-label="Card size"
+            value={preferences.cardSize}
+            options={[
+              { value: 'small', label: 'Small' },
+              { value: 'medium', label: 'Medium' },
+              { value: 'large', label: 'Large' },
+            ]}
+            onValueChange={(value) => {
+              const cardSize = value as typeof preferences.cardSize;
+              updatePreferences((current) => ({ ...current, cardSize }));
+            }}
+            variant="compact"
+          />
+        ) : null}
         <span className="single-page-count" aria-live="polite">
-          {browser.entries.length} / {browser.total}
+          {browser.totalKnown
+            ? `${browser.entries.length} / ${browser.total}`
+            : `${browser.entries.length} loaded`}
         </span>
       </div>
 
@@ -1003,16 +1259,7 @@ export default function SinglePageShell() {
       <WallpaperDetailsDialog
         open={detailsEntry !== null}
         wallpaper={detailsEntry}
-        previewSrc={detailsEntry
-          ? (
-            detailsEntry.previewPath
-              ? safeFileSrc(detailsEntry.previewPath)
-              : (detailsEntry.type === 'image' || detailsEntry.type === 'gif')
-                ? safeFileSrc(detailsEntry.path)
-                : null
-          )
-          : null}
-        onClose={() => setDetailsEntry(null)}
+        onClose={closeDetails}
       />
       <FeedbackOverlay
         state={feedbackState}

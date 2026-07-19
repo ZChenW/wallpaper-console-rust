@@ -8,7 +8,10 @@
 
 use std::collections::HashSet;
 
+use crate::sqlite_err;
 use rusqlite::{params, Connection, OptionalExtension};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -163,7 +166,7 @@ pub fn ensure_display_state_schema(conn: &Connection) -> Result<(), WcError> {
             updated_at     TEXT NOT NULL DEFAULT (datetime('now'))
         );",
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -175,7 +178,7 @@ fn read_state_value(conn: &Connection, key: &str) -> Result<Option<String>, WcEr
             |row| row.get::<_, i64>(0),
         )
         .map(|n| n > 0)
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     if !exists {
         return Ok(None);
     }
@@ -185,7 +188,7 @@ fn read_state_value(conn: &Connection, key: &str) -> Result<Option<String>, WcEr
         |row| row.get(0),
     )
     .optional()
-    .map_err(|e| WcError::Sqlite(e.to_string()))
+    .map_err(sqlite_err)
 }
 
 fn migration_marker_present(conn: &Connection) -> Result<bool, WcError> {
@@ -196,7 +199,7 @@ fn migration_marker_present(conn: &Connection) -> Result<bool, WcError> {
             |row| row.get::<_, i64>(0),
         )
         .map(|n| n > 0)
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     if !exists {
         return Ok(false);
     }
@@ -207,7 +210,7 @@ fn migration_marker_present(conn: &Connection) -> Result<bool, WcError> {
             |row| row.get(0),
         )
         .optional()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(value.is_some())
 }
 
@@ -216,13 +219,13 @@ fn write_migration_marker(conn: &Connection) -> Result<(), WcError> {
         "INSERT OR REPLACE INTO db_meta (key, value) VALUES (?1, ?2)",
         params![LEGACY_DISPLAY_STATE_MIGRATED_META_KEY, "1"],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
 fn display_state_row_count(conn: &Connection) -> Result<i64, WcError> {
     conn.query_row("SELECT COUNT(*) FROM display_state", [], |row| row.get(0))
-        .map_err(|e| WcError::Sqlite(e.to_string()))
+        .map_err(sqlite_err)
 }
 
 /// Migrate legacy `current` + `last_backend` into All Displays when eligible.
@@ -245,8 +248,7 @@ pub fn migrate_legacy_display_state(conn: &Connection) -> Result<(), WcError> {
     // IMMEDIATE serializes concurrent startups on the write lock so busy_timeout
     // can wait instead of deadlocking deferred upgrade races. Manual begin keeps
     // the `&Connection` API used throughout storage helpers.
-    conn.execute("BEGIN IMMEDIATE", [])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    conn.execute("BEGIN IMMEDIATE", []).map_err(sqlite_err)?;
     let result = (|| {
         if migration_marker_present(conn)? {
             return Ok(());
@@ -279,14 +281,13 @@ pub fn migrate_legacy_display_state(conn: &Connection) -> Result<(), WcError> {
              ON CONFLICT(target_key) DO NOTHING",
             params![all.storage_key(), path, normalized_backend],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         write_migration_marker(conn)?;
         Ok(())
     })();
     match &result {
         Ok(()) => {
-            conn.execute("COMMIT", [])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            conn.execute("COMMIT", []).map_err(sqlite_err)?;
         }
         Err(_) => {
             let _ = conn.execute("ROLLBACK", []);
@@ -324,7 +325,7 @@ pub fn display_state_get(
             },
         )
         .optional()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     match row {
         Some((key, path, backend, updated_at)) => {
             Ok(Some(map_row(key, path, backend, updated_at)?))
@@ -341,7 +342,7 @@ pub fn display_state_list(conn: &Connection) -> Result<Vec<DisplayStateRow>, WcE
             "SELECT target_key, wallpaper_path, backend, updated_at
              FROM display_state ORDER BY target_key ASC",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let rows = stmt
         .query_map([], |row| {
             Ok((
@@ -351,10 +352,10 @@ pub fn display_state_list(conn: &Connection) -> Result<Vec<DisplayStateRow>, WcE
                 row.get::<_, String>(3)?,
             ))
         })
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     let mut out = Vec::new();
     for row in rows {
-        let (key, path, backend, updated_at) = row.map_err(|e| WcError::Sqlite(e.to_string()))?;
+        let (key, path, backend, updated_at) = row.map_err(sqlite_err)?;
         out.push(map_row(key, path, backend, updated_at)?);
     }
     Ok(out)
@@ -379,7 +380,7 @@ pub fn display_state_upsert(
             updated_at = excluded.updated_at",
         params![target.storage_key(), wallpaper_path, backend],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -395,7 +396,7 @@ pub fn display_state_delete(
             "DELETE FROM display_state WHERE target_key = ?1",
             params![target.storage_key()],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     Ok(n > 0)
 }
 
@@ -428,27 +429,25 @@ pub fn display_state_replace_all_with_seam(
         normalized.push((target, path.as_str(), backend));
     }
     ensure_display_state_schema(conn)?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
     tx.execute("DELETE FROM display_state", [])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     {
         let mut stmt = tx
             .prepare(
                 "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
                  VALUES (?1, ?2, ?3, datetime('now'))",
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         for (target, path, backend) in normalized {
             stmt.execute(params![target.storage_key(), path, backend])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
     }
     if let Some(seam) = before_commit.as_mut() {
         seam()?;
     }
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -493,27 +492,25 @@ pub fn display_state_commit_all_displays_with_legacy(
     }
 
     ensure_display_state_schema(conn)?;
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
     tx.execute("DELETE FROM display_state", [])
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     tx.execute(
         "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
          VALUES (?1, ?2, ?3, datetime('now'))",
         params![all.storage_key(), wallpaper_path, backend],
     )
-    .map_err(|e| WcError::Sqlite(e.to_string()))?;
+    .map_err(sqlite_err)?;
     {
         let mut stmt = tx
             .prepare(
                 "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
                  VALUES (?1, ?2, ?3, datetime('now'))",
             )
-            .map_err(|e| WcError::Sqlite(e.to_string()))?;
+            .map_err(sqlite_err)?;
         for (target, path, backend) in retained {
             stmt.execute(params![target.storage_key(), path, backend])
-                .map_err(|e| WcError::Sqlite(e.to_string()))?;
+                .map_err(sqlite_err)?;
         }
     }
     if sync_legacy {
@@ -523,22 +520,22 @@ pub fn display_state_commit_all_displays_with_legacy(
                 value TEXT NOT NULL
             );",
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         tx.execute(
             "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
             params![wallpaper_path],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
         tx.execute(
             "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
             params![backend],
         )
-        .map_err(|e| WcError::Sqlite(e.to_string()))?;
+        .map_err(sqlite_err)?;
     }
     if let Some(seam) = before_commit.as_mut() {
         seam()?;
     }
-    tx.commit().map_err(|e| WcError::Sqlite(e.to_string()))?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -1354,6 +1351,10 @@ mod tests {
             "awww",
         )
         .unwrap();
+
+        // Upsert returns its runtime connection to the process cache (WAL). Drop it
+        // before forcing DELETE journal mode for the lock-contention probe.
+        crate::sqlite::invalidate_cached_connections();
 
         let db_path = cd.db_path().to_path_buf();
         {

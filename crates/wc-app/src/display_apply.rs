@@ -12,6 +12,8 @@ use wc_backend::display_executor::{
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::types::{Backend, FileType};
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
@@ -1104,7 +1106,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         (tmp, AppService::from_config_dir(cd))
     }
 

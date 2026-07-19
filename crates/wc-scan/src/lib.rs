@@ -501,7 +501,14 @@ pub fn read_we_project_info(project_dir: &Path) -> Option<WeProjectInfo> {
     }
     let content = fs::read_to_string(&proj_path).ok()?;
     let proj: serde_json::Value = serde_json::from_str(&content).ok()?;
+    we_project_info_from_json(project_dir, &proj)
+}
 
+/// Classify an already-parsed Wallpaper Engine `project.json` value.
+pub fn we_project_info_from_json(
+    project_dir: &Path,
+    proj: &serde_json::Value,
+) -> Option<WeProjectInfo> {
     let raw_type = proj.get("type").and_then(|v| v.as_str()).unwrap_or("");
     let normalized_type = raw_type.trim().to_lowercase();
     let file = proj
@@ -662,7 +669,16 @@ pub(crate) fn make_we_project_entry_cached(
         Some(info) => info,
         None => return (None, false),
     };
+    make_we_project_entry_from_info(canonical_project, info, cache)
+}
 
+/// Like [`make_we_project_entry_cached`], but reuses an already-parsed
+/// [`WeProjectInfo`] so callers that validated `project.json` need not reread it.
+pub(crate) fn make_we_project_entry_from_info(
+    canonical_project: PathBuf,
+    info: WeProjectInfo,
+    cache: &std::collections::HashMap<String, WallpaperEntry>,
+) -> (Option<WallpaperEntry>, bool) {
     if matches!(
         info.entry_type,
         FileType::Image | FileType::Gif | FileType::Video
@@ -836,56 +852,6 @@ fn detect_resolution(path: &str, ftype: wc_core::types::FileType) -> String {
     "?x?".to_string()
 }
 
-/// Load prior metadata from a library TSV file into a HashMap keyed by canonical path.
-pub fn prior_metadata_cache(tsv_path: &Path) -> std::collections::HashMap<String, WallpaperEntry> {
-    let mut cache = std::collections::HashMap::new();
-    let content = match fs::read_to_string(tsv_path) {
-        Ok(c) => c,
-        Err(_) => return cache,
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() {
-            continue;
-        }
-        let parts: Vec<&str> = line.split('\t').collect();
-        if parts.len() < 7 {
-            continue;
-        }
-        let path = parts[6];
-        let canon = std::fs::canonicalize(path)
-            .map(|p| p.to_string_lossy().to_string())
-            .unwrap_or_else(|_| path.to_string());
-        let ftype = match parts[0] {
-            "gif" => wc_core::types::FileType::Gif,
-            "video" => wc_core::types::FileType::Video,
-            _ => wc_core::types::FileType::Image,
-        };
-        let ext = parts[1].to_string();
-        let backend = match parts[2] {
-            "mpvpaper" => wc_core::types::Backend::Mpvpaper,
-            _ => wc_core::types::Backend::Awww,
-        };
-        let size: u64 = parts[3].parse().unwrap_or(0);
-        let mtime: u64 = parts[4].parse().unwrap_or(0);
-        let resolution = parts[5].to_string();
-        cache.insert(
-            canon,
-            WallpaperEntry {
-                path: Utf8PathBuf::from(path),
-                file_type: ftype,
-                ext,
-                backend,
-                size,
-                mtime,
-                resolution,
-                project: None,
-            },
-        );
-    }
-    cache
-}
-
 /// Build an entry for a wallpaper file, reusing prior metadata when the file's
 /// size and mtime haven't changed.  Returns (entry, reused).
 pub fn make_entry_cached(
@@ -893,10 +859,14 @@ pub fn make_entry_cached(
     cache: &std::collections::HashMap<String, WallpaperEntry>,
 ) -> (Option<WallpaperEntry>, bool) {
     let p = Path::new(path);
-    if p.is_dir() {
+    let meta = match fs::metadata(p) {
+        Ok(m) => m,
+        Err(_) => return (None, false),
+    };
+    if meta.is_dir() {
         return make_we_project_entry_cached(p, cache);
     }
-    if !p.is_file() {
+    if !meta.is_file() {
         return (None, false);
     }
     let ext = match formats::get_extension(path) {
@@ -906,10 +876,6 @@ pub fn make_entry_cached(
     let (ftype, backend) = match formats::classify_extension(&ext) {
         Some(fb) => fb,
         None => return (None, false),
-    };
-    let meta = match fs::metadata(path) {
-        Ok(m) => m,
-        Err(_) => return (None, false),
     };
     let size = meta.len();
     let mtime = meta
@@ -956,22 +922,6 @@ pub fn make_entry_cached(
         }),
         false, // probed
     )
-}
-
-pub fn passes_resolution_filter(resolution: &str, min_width: u32, min_height: u32) -> bool {
-    if min_width == 0 && min_height == 0 {
-        return true;
-    }
-    if resolution == "?x?" {
-        return true;
-    }
-    let parts: Vec<&str> = resolution.split('x').collect();
-    if parts.len() != 2 {
-        return true;
-    }
-    let w: u32 = parts[0].parse().unwrap_or(0);
-    let h: u32 = parts[1].parse().unwrap_or(0);
-    w >= min_width && h >= min_height
 }
 
 #[cfg(test)]
@@ -1251,7 +1201,7 @@ mod tests {
         std::fs::write(&img, b"").unwrap();
         std::fs::write(
             format!("{}/project.json", img_dir),
-            format!(r#"{{"type":"image","file":"bg.png"}}"#),
+            r#"{"type":"image","file":"bg.png"}"#,
         )
         .unwrap();
 
@@ -1311,7 +1261,7 @@ fn we_video_project_make_entry_returns_media_path_with_metadata() {
         "title": "My Video Wallpaper"
     });
     std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
-    let entry = make_entry(&dir.path().to_string_lossy().to_string());
+    let entry = make_entry(dir.path().to_string_lossy().as_ref());
     assert!(entry.is_some());
     let entry = entry.unwrap();
     assert!(
@@ -1330,7 +1280,7 @@ fn we_video_project_make_entry_returns_media_path_with_metadata() {
         proj_meta
             .preview_path
             .as_ref()
-            .map_or(false, |p| p.ends_with("preview.gif")),
+            .is_some_and(|p| p.ends_with("preview.gif")),
         "preview_path should point to preview.gif"
     );
     assert!(proj_meta.we_file.as_deref() == Some("bg.mp4"));
@@ -1378,7 +1328,7 @@ fn missing_we_video_file_returns_none() {
         "file": "nonexistent.mp4"
     });
     std::fs::write(dir.path().join("project.json"), proj.to_string()).unwrap();
-    let entry = make_entry(&dir.path().to_string_lossy().to_string());
+    let entry = make_entry(dir.path().to_string_lossy().as_ref());
     assert!(
         entry.is_none(),
         "missing WE media file should not produce an entry"
@@ -1431,7 +1381,7 @@ fn cached_entry_reuses_prior_metadata() {
     let mut cache = HashMap::new();
     cache.insert(canon, prior);
 
-    let (entry, reused) = make_entry_cached(&img.to_string_lossy().to_string(), &cache);
+    let (entry, reused) = make_entry_cached(img.to_string_lossy().as_ref(), &cache);
     assert!(entry.is_some());
     assert!(reused, "unchanged file should reuse metadata");
     assert_eq!(
@@ -1566,7 +1516,7 @@ fn cached_entry_probes_when_size_changed() {
     let mut cache = HashMap::new();
     cache.insert(canon, prior);
 
-    let (entry, reused) = make_entry_cached(&img.to_string_lossy().to_string(), &cache);
+    let (entry, reused) = make_entry_cached(img.to_string_lossy().as_ref(), &cache);
     assert!(entry.is_some());
     assert!(!reused, "changed file must be re-probed");
 }

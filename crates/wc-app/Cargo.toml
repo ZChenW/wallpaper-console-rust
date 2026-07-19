@@ -8,9 +8,12 @@ license.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 wc-core.workspace = true
+wc-config.workspace = true
 wc-scan.workspace = true
 wc-storage.workspace = true
 wc-backend.workspace = true
+libc.workspace = true
+fs2.workspace = true
 
 [dev-dependencies]
 camino.workspace = true

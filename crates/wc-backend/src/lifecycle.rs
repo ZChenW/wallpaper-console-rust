@@ -1,3 +1,10 @@
+//! Apply lifecycle planning for *(previous, target)* backend pairs.
+//!
+//! Cross-backend stop/settle decisions are intentionally **not** on
+//! [`crate::driver::BackendDriver`]: a single driver cannot describe
+//! transitions such as mpvpaper→awww. Per-backend stop primitives live in
+//! `driver.rs`; this module composes them into [`StopPlan`]s.
+
 use wc_core::types::Backend;
 
 use crate::LWE_BACKEND_NAME;

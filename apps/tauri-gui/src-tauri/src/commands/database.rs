@@ -1,6 +1,13 @@
-use std::path::PathBuf;
+use wc_config::ConfigDirExt;
 
 use super::common::{fail, ok, storage, CommandErrorDto, CommandResult};
+use super::path_guard;
+
+fn initialized_config_dir() -> Result<wc_core::ConfigDir, String> {
+    let cd = wc_core::ConfigDir::new().map_err(|error| error.to_string())?;
+    cd.init().map_err(|error| error.to_string())?;
+    Ok(cd)
+}
 
 fn integrity_failure(errors: Vec<String>) -> CommandResult {
     let detail = format!(
@@ -50,8 +57,8 @@ pub async fn import_legacy_flat_files() -> CommandResult {
 
 #[tauri::command]
 pub async fn sqlite_verify() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_storage::sqlite::verify(&s.cd) {
+    tauri::async_runtime::spawn_blocking(|| match initialized_config_dir() {
+        Ok(cd) => match wc_storage::sqlite::verify(&cd) {
             Ok(wc_storage::sqlite::VerifyResult::Ok) => ok("VERIFY OK"),
             Ok(wc_storage::sqlite::VerifyResult::OkWithWarnings(warnings)) => {
                 ok(format!("VERIFY OK WITH WARNINGS\n{}", warnings.join("\n")))
@@ -65,22 +72,33 @@ pub async fn sqlite_verify() -> CommandResult {
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
-#[tauri::command]
-pub async fn sqlite_repair() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match wc_storage::sqlite::repair(&s.cd) {
-            Ok(()) => ok("Repair complete."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
+async fn run_sqlite_repair(service: crate::library_service::LibraryService) -> CommandResult {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _pause = service.pause_for_maintenance();
+        match initialized_config_dir() {
+            Ok(cd) => match wc_storage::sqlite::repair(&cd) {
+                Ok(()) => ok("Repair complete."),
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        }
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
 }
 
 #[tauri::command]
-pub async fn sqlite_resync() -> CommandResult {
-    sqlite_repair().await
+pub async fn sqlite_repair(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    Ok(run_sqlite_repair(state.inner().clone()).await)
+}
+
+#[tauri::command]
+pub async fn sqlite_resync(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    Ok(run_sqlite_repair(state.inner().clone()).await)
 }
 
 #[tauri::command]
@@ -97,16 +115,31 @@ pub async fn sqlite_backup() -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn sqlite_restore(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match wc_storage::sqlite::restore(&s.cd, &PathBuf::from(path)) {
-            Ok(()) => ok("Restore complete."),
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
+pub async fn sqlite_restore(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
+        let _pause = service.pause_for_maintenance();
+        // Frontend exposes an arbitrary path argument (future file picker / CLI),
+        // so allow any existing file that has a valid SQLite header rather than
+        // restricting to config-dir/backups (backup() writes siblings of wallpapers.db).
+        let backup_path = match path_guard::ensure_sqlite_restore_file(std::path::Path::new(&path))
+        {
+            Ok(path) => path,
+            Err(e) => return fail(e),
+        };
+        match initialized_config_dir() {
+            Ok(cd) => match wc_storage::sqlite::restore(&cd, &backup_path) {
+                Ok(()) => ok("Restore complete."),
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        }
     })
     .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+    .unwrap_or_else(|e| fail(e.to_string())))
 }
 
 #[cfg(test)]

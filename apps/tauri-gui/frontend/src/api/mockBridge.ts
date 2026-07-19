@@ -11,6 +11,7 @@ import type {
   LibraryBrowserItemDTO,
   LibraryBrowserPageDTO,
   LibraryBrowserQueryDTO,
+  LibraryBrowserTotalDTO,
   LibraryPageDTO,
   LinuxWallpaperEngineStatusDTO,
   RendererStatusesDTO,
@@ -285,7 +286,53 @@ const defaultConfig: Record<string, string> = {
 let scanProgressState: ScanProgressDTO = { ...defaultScanProgress };
 let scanAutoAdvance = false;
 let scanStep = 5;
-let configStore: Record<string, string> = {};
+const MOCK_CONFIG_SESSION_KEY = 'wallpaper-console.mock.config';
+const MOCK_RUNTIME_HOLD_SESSION_KEY = 'wallpaper-console.mock.hold-runtime-observations';
+
+function mockSessionFlag(key: string): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    return window.sessionStorage.getItem(key) === 'true';
+  } catch {
+    return false;
+  }
+}
+
+function setMockSessionFlag(key: string, enabled: boolean): void {
+  if (typeof window === 'undefined') return;
+  try {
+    if (enabled) window.sessionStorage.setItem(key, 'true');
+    else window.sessionStorage.removeItem(key);
+  } catch {
+    // In-memory mock behavior remains usable when session storage is unavailable.
+  }
+}
+
+function loadMockConfigStore(): Record<string, string> {
+  if (typeof window === 'undefined') return {};
+  try {
+    const raw = window.sessionStorage.getItem(MOCK_CONFIG_SESSION_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return Object.fromEntries(Object.entries(parsed).filter(
+      (entry): entry is [string, string] => typeof entry[1] === 'string',
+    ));
+  } catch {
+    return {};
+  }
+}
+
+function persistMockConfigStore(): void {
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.setItem(MOCK_CONFIG_SESSION_KEY, JSON.stringify(configStore));
+  } catch {
+    // Persistence is a mock-browser convenience; in-memory behavior remains usable.
+  }
+}
+
+let configStore: Record<string, string> = loadMockConfigStore();
 const commandFailures = new Set<string>();
 const thumbnailFailures = new Set<string>();
 let libraryFirstPageEmpty = false;
@@ -296,6 +343,10 @@ type NextBrowserAppendScenario =
   | { readonly kind: 'empty' };
 let nextBrowserAppendScenario: NextBrowserAppendScenario | null = null;
 let browserAppendRequests = 0;
+let browserPageRequests = 0;
+let browserRevision = 0;
+let nextBrowserPageDelayMs = 0;
+let browserPageDelayMs = 0;
 let sourceRefreshHeld = false;
 let sourceRefreshCalls = 0;
 let sourceRefreshWaiters: Array<() => void> = [];
@@ -304,6 +355,8 @@ let nextSourceId = 4;
 let favoriteStore = new Set(MOCK_FAVORITES);
 let runtimeObservationStore: RuntimeWallpaperObservationDTO[] =
   DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+let runtimeObservationsHeld = mockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY);
+let runtimeObservationWaiters: Array<() => void> = [];
 let firstRunSuggestionStore: FirstRunSourceSuggestionDTO[] = [];
 let rendererStatusesStore: RendererStatusesDTO = cloneRendererStatuses(
   DEFAULT_RENDERER_STATUSES,
@@ -317,6 +370,12 @@ function resetScanProgressState(): void {
 
 function resetConfigStore(): void {
   configStore = {};
+  if (typeof window === 'undefined') return;
+  try {
+    window.sessionStorage.removeItem(MOCK_CONFIG_SESSION_KEY);
+  } catch {
+    // Ignore unavailable storage in constrained browser contexts.
+  }
 }
 
 function resetLibraryScenario(): void {
@@ -325,6 +384,10 @@ function resetLibraryScenario(): void {
   browserFixtureCopies = 1;
   nextBrowserAppendScenario = null;
   browserAppendRequests = 0;
+  browserPageRequests = 0;
+  browserRevision = 0;
+  nextBrowserPageDelayMs = 0;
+  browserPageDelayMs = 0;
 }
 
 function releaseHeldSourceRefreshes(): void {
@@ -349,7 +412,21 @@ function resetFavoriteStore(): void {
 }
 
 function resetRuntimeObservationStore(): void {
+  releaseHeldRuntimeObservations();
   runtimeObservationStore = DEFAULT_RUNTIME_OBSERVATIONS.map((entry) => ({ ...entry }));
+}
+
+function releaseHeldRuntimeObservations(): void {
+  runtimeObservationsHeld = false;
+  setMockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY, false);
+  const waiters = runtimeObservationWaiters;
+  runtimeObservationWaiters = [];
+  for (const resolve of waiters) resolve();
+}
+
+async function waitForRuntimeObservationRelease(): Promise<void> {
+  if (!runtimeObservationsHeld) return;
+  await new Promise<void>((resolve) => runtimeObservationWaiters.push(resolve));
 }
 
 function resetFirstRunSuggestionStore(): void {
@@ -472,8 +549,8 @@ function compareBrowserItems(
   if (sort === 'recentlyAdded') {
     return compareText(right.addedAt, left.addedAt) || right.wallpaperId - left.wallpaperId;
   }
-  const leftName = left.title?.trim() || left.path.split('/').at(-1) || '';
-  const rightName = right.title?.trim() || right.path.split('/').at(-1) || '';
+  const leftName = left.title || left.path.split('/').at(-1) || '';
+  const rightName = right.title || right.path.split('/').at(-1) || '';
   const nameOrder = compareText(leftName.toLowerCase(), rightName.toLowerCase());
   const directedNameOrder = sort === 'nameDesc' ? -nameOrder : nameOrder;
   return directedNameOrder
@@ -491,6 +568,38 @@ function filterBrowserItems(query: LibraryBrowserQueryDTO): LibraryBrowserItemDT
     .filter((item) => !query.favoritesOnly || item.favorite)
     .filter((item) => browserSearchMatches(item, query.search))
     .sort((left, right) => compareBrowserItems(left, right, query.sort));
+}
+
+function mockBrowserFingerprint(query: LibraryBrowserQueryDTO): string {
+  const normalized = JSON.stringify([
+    query.sourceId ?? null,
+    query.typeFilter,
+    query.favoritesOnly,
+    query.search.trim().split(/\s+/).filter(Boolean).join(' '),
+    query.sort,
+  ]);
+  let hash = 2166136261;
+  for (let index = 0; index < normalized.length; index += 1) {
+    hash ^= normalized.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function encodeMockBrowserCursor(query: LibraryBrowserQueryDTO, offset: number): string {
+  return `mock:${browserRevision}:${mockBrowserFingerprint(query)}:${offset}`;
+}
+
+function decodeMockBrowserCursor(query: LibraryBrowserQueryDTO): number {
+  if (!query.cursor) return 0;
+  const match = /^mock:(\d+):([0-9a-f]+):(\d+)$/.exec(query.cursor);
+  if (!match) throw { kind: 'invalid_cursor', message: 'invalid_cursor: malformed token' };
+  const revision = Number(match[1]);
+  const fingerprint = match[2];
+  if (revision !== browserRevision || fingerprint !== mockBrowserFingerprint(query)) {
+    throw { kind: 'revision_changed', message: 'revision_changed: library snapshot changed' };
+  }
+  return Number(match[3]);
 }
 
 const mockBridgeAdapter = {
@@ -538,8 +647,10 @@ const mockBridgeAdapter = {
   }),
   displayStateList: async (): Promise<DisplayStateDTO[]> =>
     DEFAULT_DISPLAY_STATE.map((row) => ({ ...row })),
-  runtimeWallpaperObservations: async (): Promise<RuntimeWallpaperObservationDTO[]> =>
-    runtimeObservationStore.map((entry) => ({ ...entry })),
+  runtimeWallpaperObservations: async (): Promise<RuntimeWallpaperObservationDTO[]> => {
+    await waitForRuntimeObservationRelease();
+    return runtimeObservationStore.map((entry) => ({ ...entry }));
+  },
   applyToDisplay: async (request: TargetedApplyRequestDTO): Promise<CommandResult> => {
     lastTargetedApplyRequest = { ...request };
     const kind = request.kind ?? 'apply';
@@ -597,8 +708,14 @@ const mockBridgeAdapter = {
   libraryBrowserPage: async (
     query: LibraryBrowserQueryDTO,
   ): Promise<LibraryBrowserPageDTO> => {
+    browserPageRequests += 1;
+    const delayMs = nextBrowserPageDelayMs || browserPageDelayMs;
+    nextBrowserPageDelayMs = 0;
+    if (delayMs > 0) {
+      await new Promise((resolve) => globalThis.setTimeout(resolve, delayMs));
+    }
     const items = filterBrowserItems(query);
-    const offset = Math.max(0, Math.trunc(query.offset));
+    const offset = decodeMockBrowserCursor(query);
     const limit = Math.min(500, Math.max(0, Math.trunc(query.limit)));
 
     if (offset > 0) {
@@ -607,13 +724,36 @@ const mockBridgeAdapter = {
       nextBrowserAppendScenario = null;
       if (scenario?.kind === 'reject') throw new Error(scenario.message);
       if (scenario?.kind === 'empty') {
-        return { total: items.length, items: [] };
+        return {
+          revision: browserRevision,
+          nextCursor: null,
+          total: null,
+          items: [],
+        };
       }
     }
 
+    const pageItems = items.slice(offset, offset + limit);
+    const nextOffset = offset + pageItems.length;
     return {
-      total: items.length,
-      items: items.slice(offset, offset + limit),
+      revision: browserRevision,
+      nextCursor: nextOffset < items.length
+        ? encodeMockBrowserCursor(query, nextOffset)
+        : null,
+      total: null,
+      items: pageItems,
+    };
+  },
+  libraryBrowserTotal: async (
+    query: LibraryBrowserQueryDTO,
+    expectedRevision: number,
+  ): Promise<LibraryBrowserTotalDTO> => {
+    if (expectedRevision !== browserRevision) {
+      throw { kind: 'revision_changed', message: 'revision_changed: library snapshot changed' };
+    }
+    return {
+      revision: browserRevision,
+      total: filterBrowserItems(query).length,
     };
   },
   libraryBrowserRandom: async (
@@ -623,6 +763,8 @@ const mockBridgeAdapter = {
     if (items.length === 0) return null;
     return items[Math.floor(Math.random() * items.length)] ?? null;
   },
+  libraryWallpaperExists: async (wallpaperId: number): Promise<boolean> =>
+    mockBrowserItems().some((item) => item.wallpaperId === wallpaperId),
 
   rescan: async (): Promise<CommandResult> => ok,
   scanProgress: async (): Promise<ScanProgressDTO> => {
@@ -671,11 +813,14 @@ const mockBridgeAdapter = {
   favoriteAdd: async (path: string): Promise<CommandResult> => {
     // Simulate failure for the WE Web mock path so smoke tests can verify error feedback
     if (path.includes('3650880224')) return failResult;
-    favoriteStore.add(path);
+    if (!favoriteStore.has(path)) {
+      favoriteStore.add(path);
+      browserRevision += 1;
+    }
     return ok;
   },
   favoriteRemove: async (path: string): Promise<CommandResult> => {
-    favoriteStore.delete(path);
+    if (favoriteStore.delete(path)) browserRevision += 1;
     return ok;
   },
 
@@ -709,17 +854,23 @@ const mockBridgeAdapter = {
       isWE,
       label: displayName,
     });
+    browserRevision += 1;
     return ok;
   },
   sourceRemove: async (path: string): Promise<CommandResult> => {
+    const before = sourceStore.length;
     sourceStore = sourceStore.filter((source) => source.path !== path);
+    if (sourceStore.length !== before) browserRevision += 1;
     return ok;
   },
   sourceRename: async (id: number, displayName: string): Promise<CommandResult> => {
     const source = sourceStore.find((candidate) => candidate.id === id);
     if (!source || !displayName.trim()) return failResult;
-    source.displayName = displayName.trim();
+    const nextDisplayName = displayName.trim();
+    if (source.displayName === nextDisplayName) return ok;
+    source.displayName = nextDisplayName;
     source.label = source.displayName;
+    browserRevision += 1;
     return ok;
   },
   sourceSetRecursive: async (id: number, recursive: boolean): Promise<CommandResult> => {
@@ -739,7 +890,9 @@ const mockBridgeAdapter = {
   sourceRemoveById: async (id: number): Promise<CommandResult> => {
     const before = sourceStore.length;
     sourceStore = sourceStore.filter((source) => source.id !== id);
-    return sourceStore.length === before ? failResult : ok;
+    if (sourceStore.length === before) return failResult;
+    browserRevision += 1;
+    return ok;
   },
   validateSources: async (): Promise<CommandResult> => ok,
   removeMissingSources: async (): Promise<CommandResult> => ok,
@@ -754,6 +907,7 @@ const mockBridgeAdapter = {
 
   configSet: async (key: string, value: string): Promise<CommandResult> => {
     configStore[key] = value;
+    persistMockConfigStore();
     return ok;
   },
 
@@ -782,6 +936,8 @@ const mockBridgeAdapter = {
     return { path, cacheHit: false };
   },
 
+  previewAssetAuthorize: async (path: string, _wallpaperPath: string): Promise<string> => path,
+
   thumbnailCacheStatus: async () => ({
     dir: '/mock/cache/thumbs',
     size: '12.3 MB',
@@ -796,6 +952,9 @@ const mockBridgeAdapter = {
   openPath: async (): Promise<CommandResult> => ok,
   revealInFileManager: async (): Promise<CommandResult> => ok,
   browseDirectory: async (): Promise<string> => '/mock/selected/dir',
+  libraryReady: async (): Promise<void> => {
+    // No-op in mock: the real backend handles idempotency.
+  },
   exportDiagnostics: async (): Promise<CommandResult> => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     return commandFailures.has('exportDiagnostics') ? failResult : ok;
@@ -821,6 +980,7 @@ const mockControl = {
   },
   setConfig: (key: string, value: string): void => {
     configStore[key] = value;
+    persistMockConfigStore();
   },
   resetConfig: (): void => {
     resetConfigStore();
@@ -838,6 +998,15 @@ const mockControl = {
   setBrowserFixtureCopies: (copies: number): void => {
     browserFixtureCopies = Math.max(0, Math.trunc(copies));
   },
+  advanceBrowserRevision: (): void => {
+    browserRevision += 1;
+  },
+  delayNextBrowserPage: (delayMs: number): void => {
+    nextBrowserPageDelayMs = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 0;
+  },
+  setBrowserPageDelay: (delayMs: number): void => {
+    browserPageDelayMs = Number.isFinite(delayMs) ? Math.max(0, delayMs) : 0;
+  },
   rejectNextBrowserAppend: (message = 'mock append request failed'): void => {
     nextBrowserAppendScenario = { kind: 'reject', message };
   },
@@ -845,6 +1014,7 @@ const mockControl = {
     nextBrowserAppendScenario = { kind: 'empty' };
   },
   browserAppendRequestCount: (): number => browserAppendRequests,
+  browserPageRequestCount: (): number => browserPageRequests,
   holdSourceRefresh: (): void => {
     sourceRefreshHeld = true;
   },
@@ -863,6 +1033,13 @@ const mockControl = {
     observations: RuntimeWallpaperObservationDTO[],
   ): void => {
     runtimeObservationStore = observations.map((entry) => ({ ...entry }));
+  },
+  holdRuntimeWallpaperObservations: (): void => {
+    runtimeObservationsHeld = true;
+    setMockSessionFlag(MOCK_RUNTIME_HOLD_SESSION_KEY, true);
+  },
+  releaseRuntimeWallpaperObservations: (): void => {
+    releaseHeldRuntimeObservations();
   },
   setFirstRunSourceSuggestions: (suggestions: FirstRunSourceSuggestionDTO[]): void => {
     firstRunSuggestionStore = suggestions.map((suggestion) => (

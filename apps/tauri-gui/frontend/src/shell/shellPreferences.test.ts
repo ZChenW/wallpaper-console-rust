@@ -19,6 +19,7 @@ test('shell preferences default to the direct single-click library experience', 
     displayTarget: { kind: 'allDisplays' },
     applyGesture: 'single',
     theme: 'system',
+    libraryViewMode: 'grid',
   });
 });
 
@@ -32,6 +33,7 @@ test('shell preferences serialize and parse every remembered value', () => {
     displayTarget: { kind: 'output', output: 'DP-2' },
     applyGesture: 'double',
     theme: 'dark',
+    libraryViewMode: 'flow',
   };
 
   assert.deepEqual(parseShellPreferences(serializeShellPreferences(preferences)), preferences);
@@ -49,6 +51,7 @@ test('shell preferences repair malformed JSON and unknown legacy values field by
       displayTarget: { kind: 'output', output: '  ' },
       applyGesture: 'click',
       theme: 'obsidian_warm',
+      libraryViewMode: 'masonry',
     })),
     DEFAULT_SHELL_PREFERENCES,
   );
@@ -68,6 +71,17 @@ test('shell preferences repair malformed JSON and unknown legacy values field by
       sort: 'nameAsc',
       theme: 'light',
     },
+  );
+});
+
+test('library view mode repairs missing and unknown persisted values to grid', () => {
+  assert.equal(
+    parseShellPreferences(JSON.stringify({ theme: 'dark' })).libraryViewMode,
+    'grid',
+  );
+  assert.equal(
+    parseShellPreferences(JSON.stringify({ libraryViewMode: 'masonry' })).libraryViewMode,
+    'grid',
   );
 });
 
@@ -92,12 +106,24 @@ test('glass theme survives persistence', () => {
   );
 });
 
+test('editorial theme survives persistence', () => {
+  assert.equal(
+    parseShellPreferences(serializeShellPreferences({
+      ...DEFAULT_SHELL_PREFERENCES,
+      theme: 'editorial',
+    })).theme,
+    'editorial',
+  );
+});
+
 test('serialization excludes transient shell state even when extra properties reach runtime', () => {
   const runtimeState = {
     ...DEFAULT_SHELL_PREFERENCES,
     search: 'must not return',
     selectedPath: '/walls/secret.jpg',
     scrollTop: 820,
+    flowCenteredWallpaperId: 'wallpaper-42',
+    flowScrollTop: 1640,
     scanProgress: { scanned: 9 },
     feedback: { message: 'done' },
   };
@@ -110,6 +136,7 @@ test('serialization excludes transient shell state even when extra properties re
     'cardSize',
     'displayTarget',
     'favoritesOnly',
+    'libraryViewMode',
     'sort',
     'sourceFilter',
     'theme',
@@ -119,6 +146,8 @@ test('serialization excludes transient shell state even when extra properties re
   assert.equal('search' in value, false);
   assert.equal('selectedPath' in value, false);
   assert.equal('scrollTop' in value, false);
+  assert.equal('flowCenteredWallpaperId' in value, false);
+  assert.equal('flowScrollTop' in value, false);
   assert.equal('scanProgress' in value, false);
   assert.equal('feedback' in value, false);
 });

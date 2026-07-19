@@ -1,8 +1,7 @@
 use super::common::{fail, ok, storage, CommandResult, SourceDto};
 use super::scan::{
-    finish_scan_error, finish_scan_success, format_index_sources_message, index_current_sources,
-    index_source_by_id, mark_scan_started, update_scan_stage, with_scan_idle_operation,
-    IndexSourcesResult,
+    finish_scan_error, finish_scan_success, index_source_by_id, mark_scan_started,
+    scan_steam_workshop_and_index, update_scan_stage, with_scan_idle_operation, IndexSourcesResult,
 };
 use std::path::Path;
 use wc_storage::{SourceKind, SourceRecord, StorageApi};
@@ -204,78 +203,149 @@ pub async fn first_run_source_suggestions() -> Result<Vec<FirstRunSourceSuggesti
 }
 
 #[tauri::command]
-pub async fn source_add(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => source_add_with_storage(s, &path),
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn source_add(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => {
+                let result = source_add_with_storage(s, &path);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_rename(id: i64, display_name: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_rename_with_storage(storage, id, &display_name),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_rename(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+    display_name: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_rename_with_storage(storage, id, &display_name);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_set_recursive(id: i64, recursive: bool) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_set_recursive_with_storage(storage, id, recursive),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_set_recursive(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+    recursive: bool,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_set_recursive_with_storage(storage, id, recursive);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_refresh(id: i64) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_refresh_with_storage(storage, id),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_refresh(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    service.manual_refresh_requested(id);
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_refresh_with_storage(storage, id);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_remove_by_id(id: i64) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_remove_by_id_with_storage(storage, id),
-        Err(error) => fail(error),
-    })
-    .await
-    .unwrap_or_else(|error| fail(error.to_string()))
+pub async fn source_remove_by_id(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_remove_by_id_with_storage(storage, id);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn source_remove(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(storage) => source_remove_with_storage(storage, &path),
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+pub async fn source_remove(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    path: String,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => {
+                let result = source_remove_with_storage(storage, &path);
+                if result.success {
+                    service.invalidate_local_write();
+                }
+                result
+            }
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
 pub async fn validate_sources() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match s.sources_list() {
-            Ok(src) => {
-                let missing = src
-                    .iter()
-                    .filter(|p| !std::path::Path::new(p).exists())
-                    .count();
-                if missing == 0 {
+        Ok(s) => match wc_app::sources_maintenance::validate_sources(s) {
+            Ok(report) => {
+                if report.missing.is_empty() {
                     ok("All sources are valid.")
                 } else {
-                    fail(format!("{} source(s) are missing.", missing))
+                    fail(format!("{} source(s) are missing.", report.missing.len()))
                 }
             }
             Err(e) => fail(e.to_string()),
@@ -287,31 +357,38 @@ pub async fn validate_sources() -> CommandResult {
 }
 
 #[tauri::command]
-pub async fn remove_missing_sources() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| match storage() {
-        Ok(s) => match s.sources_list() {
-            Ok(src) => {
-                let mut removed = 0;
-                for path in src {
-                    if !std::path::Path::new(&path).exists()
-                        && s.sources_remove(&path).unwrap_or(false)
-                    {
-                        removed += 1;
+pub async fn remove_missing_sources(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(s) => match wc_app::sources_maintenance::remove_missing_sources(s) {
+                Ok(report) => {
+                    if !report.removed.is_empty() {
+                        service.invalidate_local_write();
                     }
+                    ok(format!(
+                        "Removed {} missing source(s).",
+                        report.removed.len()
+                    ))
                 }
-                ok(format!("Removed {} missing source(s).", removed))
-            }
-            Err(e) => fail(e.to_string()),
-        },
-        Err(e) => fail(e),
-    })
-    .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+                Err(e) => fail(e.to_string()),
+            },
+            Err(e) => fail(e),
+        })
+        .await
+        .unwrap_or_else(|e| fail(e.to_string())),
+    )
 }
 
 #[tauri::command]
-pub async fn scan_steam_workshop() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn scan_steam_workshop(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    service.manual_refresh_all_requested();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         if let Err(err) = mark_scan_started("discovering Wallpaper Engine") {
             return fail(err);
         }
@@ -319,35 +396,13 @@ pub async fn scan_steam_workshop() -> CommandResult {
         let result: Result<String, String> = (|| {
             let s = storage()?;
             let home = std::env::var("HOME").map_err(|_| "HOME is not set.".to_string())?;
-            let roots = wc_scan::discover_steam_workshop_roots(Path::new(&home));
-            if roots.is_empty() {
-                return Ok(
-                    "No Wallpaper Engine workshop directory found. Install or download Wallpaper Engine workshop content in Steam, then scan again."
-                        .to_string(),
-                );
-            }
-
-            let mut added = 0usize;
             update_scan_stage("adding Wallpaper Engine sources");
-            for root in &roots {
-                if s.sources_add(&root.to_string_lossy())
-                    .map_err(|e| e.to_string())?
-                {
-                    added += 1;
-                }
-            }
-
-            let index_result = index_current_sources(s)?;
-            Ok(format!(
-                "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s). {}",
-                roots.len(),
-                added,
-                format_index_sources_message(&index_result)
-            ))
+            scan_steam_workshop_and_index(s, Path::new(&home))
         })();
 
         match result {
             Ok(msg) => {
+                service.invalidate_local_write();
                 finish_scan_success();
                 ok(msg)
             }
@@ -358,7 +413,7 @@ pub async fn scan_steam_workshop() -> CommandResult {
         }
     })
     .await
-    .unwrap_or_else(|e| fail(e.to_string()))
+    .unwrap_or_else(|e| fail(e.to_string())))
 }
 
 #[cfg(test)]

@@ -1,11 +1,17 @@
 pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
+mod command_probe;
 pub mod display_apply;
 mod display_discovery;
 pub mod display_plan;
 pub mod display_restore;
+pub mod display_target;
 pub mod library_refresh;
+pub mod library_rescan;
+pub mod scan_worker;
+pub mod scan_worker_snapshot;
+pub mod sources_maintenance;
 
 #[cfg(test)]
 mod display_discovery_tests;
@@ -13,6 +19,8 @@ mod display_discovery_tests;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+#[cfg(test)]
+use wc_config::ConfigDirExt;
 use wc_core::error::WcError;
 use wc_core::types::{Backend, FileType, WallpaperEntry};
 use wc_storage::StorageApi;
@@ -488,7 +496,7 @@ mod tests {
             path: tmp.path().join("config"),
         };
         cd.init().unwrap();
-        wc_core::config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         (tmp, AppService::from_config_dir(cd))
     }
 
