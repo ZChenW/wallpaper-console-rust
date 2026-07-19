@@ -2,6 +2,8 @@ import type { LibraryBrowserItemDTO, WallpaperDTO } from '../api/types.ts';
 
 export type EnhancedMediaKind = 'image' | 'video';
 
+export const ENHANCED_MEDIA_ACTIVATION_DELAY_MS = 180;
+
 export interface EnhancedMediaCandidate {
   readonly kind: EnhancedMediaKind;
   readonly path: string;
@@ -41,17 +43,31 @@ export function staticPreviewAssetPath(entry: WallpaperDTO): string {
   return entry.previewPath || entry.path;
 }
 
-function canEnhance(entry: WallpaperDTO, eligibility: EnhancedMediaEligibility): boolean {
-  if (
-    !eligibility.active
-    || !eligibility.centered
-    || !eligibility.selected
-    || !eligibility.settled
-    || eligibility.reducedMotion
-  ) {
-    return false;
+function hasEnhancedMediaIdentity(
+  entry: WallpaperDTO,
+  eligibility: EnhancedMediaEligibility,
+): boolean {
+  return eligibility.active
+    && eligibility.centered
+    && eligibility.selected
+    && !eligibility.reducedMotion
+    && (entry.type === 'image' || entry.type === 'gif' || entry.type === 'video');
+}
+
+export function enhancedMediaActivationPlan(
+  entry: WallpaperDTO,
+  activated: boolean,
+  eligibility: EnhancedMediaEligibility,
+): { readonly retain: boolean; readonly schedule: boolean } {
+  if (!hasEnhancedMediaIdentity(entry, eligibility)) {
+    return { retain: false, schedule: false };
   }
-  return entry.type === 'image' || entry.type === 'gif' || entry.type === 'video';
+  if (activated) return { retain: true, schedule: false };
+  return { retain: false, schedule: eligibility.settled };
+}
+
+function canEnhance(entry: WallpaperDTO, eligibility: EnhancedMediaEligibility): boolean {
+  return eligibility.settled && hasEnhancedMediaIdentity(entry, eligibility);
 }
 
 export function enhancedMediaCandidates(

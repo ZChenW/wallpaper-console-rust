@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
+import * as previewMedia from './wallpaperPreviewMedia.ts';
 import {
   attachVideoDecoder,
   enhancedMediaCandidates,
@@ -58,6 +59,40 @@ test('enhanced media is limited to the one centered selected settled item', () =
   ]) {
     assert.deepEqual(enhancedMediaCandidates(entry(), disabled), []);
   }
+});
+
+test('enhanced media activation waits for dwell and survives only transient unsettled motion', () => {
+  type ActivationPlanner = (
+    target: LibraryBrowserItemDTO,
+    activated: boolean,
+    eligibility: Parameters<typeof enhancedMediaCandidates>[1],
+  ) => { readonly retain: boolean; readonly schedule: boolean };
+  const planner = (previewMedia as typeof previewMedia & {
+    enhancedMediaActivationPlan?: ActivationPlanner;
+  }).enhancedMediaActivationPlan;
+
+  assert.equal(typeof planner, 'function');
+  if (!planner) return;
+  assert.deepEqual(planner(entry(), false, { ...eligible, settled: false }), {
+    retain: false,
+    schedule: false,
+  });
+  assert.deepEqual(planner(entry(), false, eligible), {
+    retain: false,
+    schedule: true,
+  });
+  assert.deepEqual(planner(entry(), true, { ...eligible, settled: false }), {
+    retain: true,
+    schedule: false,
+  });
+  assert.deepEqual(planner(entry(), true, { ...eligible, centered: false }), {
+    retain: false,
+    schedule: false,
+  });
+  assert.deepEqual(planner(entry({ type: 'we_scene' }), false, eligible), {
+    retain: false,
+    schedule: false,
+  });
 });
 
 test('GIF and video originals use one decoder candidate with a static preview fallback', () => {

@@ -23,6 +23,7 @@ import FlowIndexDialog from './FlowIndexDialog.tsx';
 import FlowIndexRail, { type FlowIndexRailEntry } from './FlowIndexRail.tsx';
 import FlowMetadataRail from './FlowMetadataRail.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
+import { applyFlowHover } from './flowHoverDom.ts';
 import {
   resolveLibraryFlowStartupAnchor,
   resolveLibraryQueryResetAnchor,
@@ -114,6 +115,7 @@ function WallpaperFlowImpl({
   focusToken = 0,
   onAnchorChange,
 }: WallpaperFlowProps) {
+  const flowRef = useRef<HTMLElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
   const { enqueueVisible, setRevealPaused } = useThumbnailStore();
   const reducedMotion = useReducedMotion();
@@ -126,7 +128,7 @@ function WallpaperFlowImpl({
   const [centeredIndex, setCenteredIndex] = useState(initialIndex);
   const centeredIndexRef = useRef(initialIndex);
   const centeredIdRef = useRef(model.entries[initialIndex]?.wallpaperId ?? null);
-  const [hoveredWallpaperId, setHoveredWallpaperId] = useState<number | null>(null);
+  const hoveredWallpaperIdRef = useRef<number | null>(null);
   const [settled, setSettled] = useState(true);
   const [indexOpen, setIndexOpen] = useState(false);
   const [pageVisible, setPageVisible] = useState(() => (
@@ -166,6 +168,11 @@ function WallpaperFlowImpl({
   const interactionActive = model.active && pageVisible && windowFocused && !indexOpen;
   const interactionActiveRef = useRef(interactionActive);
   interactionActiveRef.current = interactionActive;
+
+  const handleFlowHover = useCallback((wallpaperId: number | null) => {
+    hoveredWallpaperIdRef.current = wallpaperId;
+    applyFlowHover(flowRef.current, wallpaperId);
+  }, []);
 
   const estimateEntrySize = useCallback((index: number) => {
     const entry = model.entries[index];
@@ -609,11 +616,19 @@ function WallpaperFlowImpl({
   }, [model.entries.length, model.hasMore]);
 
   useEffect(() => {
-    if (!hoveredWallpaperId) return;
-    if (!model.entries.some((entry) => entry.wallpaperId === hoveredWallpaperId)) {
-      setHoveredWallpaperId(null);
+    const hoveredWallpaperId = hoveredWallpaperIdRef.current;
+    if (hoveredWallpaperId !== null
+      && !model.entries.some((entry) => entry.wallpaperId === hoveredWallpaperId)) {
+      handleFlowHover(null);
+      return;
     }
-  }, [hoveredWallpaperId, model.entries]);
+    applyFlowHover(flowRef.current, hoveredWallpaperId);
+  }, [
+    handleFlowHover,
+    model.entries,
+    virtualizer.range?.endIndex,
+    virtualizer.range?.startIndex,
+  ]);
 
   useEffect(() => {
     const shouldSample = import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
@@ -764,14 +779,14 @@ function WallpaperFlowImpl({
       className={`wallpaper-flow${model.refreshing ? ' is-refreshing' : ''}`}
       data-active={interactionActive || undefined}
       data-scrolling={!settled || undefined}
+      ref={flowRef}
     >
       <FlowIndexRail
         centeredWallpaperId={centeredEntry?.wallpaperId ?? null}
         entries={localEntries}
-        hoveredWallpaperId={hoveredWallpaperId}
         loadedCount={model.entries.length}
         onActivate={selectEntry}
-        onHover={setHoveredWallpaperId}
+        onHover={handleFlowHover}
         onOpenIndex={() => setIndexOpen(true)}
         total={model.total}
         totalKnown={model.totalKnown}
@@ -799,7 +814,6 @@ function WallpaperFlowImpl({
             const entry = model.entries[row.index];
             if (!entry) return null;
             const centered = centeredEntry?.wallpaperId === entry.wallpaperId;
-            const hovered = hoveredWallpaperId === entry.wallpaperId;
             const selected = model.selectedPath === entry.path;
             const current = model.currentPath === entry.path;
             const applying = model.applying && model.activePath === entry.path;
@@ -808,7 +822,7 @@ function WallpaperFlowImpl({
               active: interactionActive,
               settled,
               centered,
-              hovered,
+              hovered: false,
               selected,
               current,
               applying,
@@ -843,8 +857,8 @@ function WallpaperFlowImpl({
                   openContextMenu(entry, event.clientX, event.clientY);
                 }}
                 onDoubleClick={() => applyEntry(entry)}
-                onPointerEnter={() => setHoveredWallpaperId(entry.wallpaperId)}
-                onPointerLeave={() => setHoveredWallpaperId(null)}
+                onPointerEnter={() => handleFlowHover(entry.wallpaperId)}
+                onPointerLeave={() => handleFlowHover(null)}
                 ref={virtualizer.measureElement}
                 role="option"
                 style={style}
@@ -893,7 +907,6 @@ function WallpaperFlowImpl({
         centeredIndex={centeredIndex}
         current={Boolean(centeredEntry && model.currentPath === centeredEntry.path)}
         favorite={centeredEntry?.favorite ?? false}
-        hovered={hoveredWallpaperId !== null}
         favoritePending={Boolean(centeredEntry && model.favoritePendingPaths.has(centeredEntry.path))}
         loadedCount={model.entries.length}
         onApply={applyEntry}

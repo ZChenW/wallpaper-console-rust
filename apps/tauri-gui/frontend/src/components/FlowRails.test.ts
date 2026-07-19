@@ -86,7 +86,6 @@ test('index rail exposes exact progress and visible additive persistent state te
       { entry: second, index: 9, selected: false, current: false, favorite: false },
     ],
     centeredWallpaperId: 11,
-    hoveredWallpaperId: 11,
     loadedCount: 24,
     totalKnown: true,
     total: 72,
@@ -105,7 +104,6 @@ test('index rail exposes exact progress and visible additive persistent state te
   assert.match(markup, /Current/);
   assert.match(markup, /Favorite/);
   assert.match(markup, /data-centered="true"/);
-  assert.match(markup, /data-hovered="true"/);
   assert.doesNotMatch(markup, />Apply</);
 });
 
@@ -121,7 +119,6 @@ test('index rail reserves aria-current for the runtime wallpaper instead of the 
       { entry: current, index: 1, selected: false, current: true, favorite: false },
     ],
     centeredWallpaperId: centered.wallpaperId,
-    hoveredWallpaperId: null,
     loadedCount: 2,
     totalKnown: true,
     total: 2,
@@ -150,7 +147,6 @@ test('index trigger identifies its dialog and exposes the centered ordinal at na
   const tree = FlowIndexRailView({
     entries: [{ entry, index: 8, selected: false, current: false, favorite: false }],
     centeredWallpaperId: entry.wallpaperId,
-    hoveredWallpaperId: null,
     loadedCount: 24,
     totalKnown: true,
     total: 72,
@@ -180,7 +176,6 @@ test('index rail native buttons emit activation and pointer hover without treati
   const tree = FlowIndexRailView({
     entries: [{ entry, index: 0, selected: false, current: false, favorite: false }],
     centeredWallpaperId: 17,
-    hoveredWallpaperId: null,
     loadedCount: 1,
     totalKnown: false,
     total: null,
@@ -223,7 +218,6 @@ test('metadata rail presents complete glanceable metadata while omitting absent 
     applying: true,
     pending: true,
     favorite: true,
-    hovered: true,
     favoritePending: false,
     applyAvailable: true,
     applyDisabledReason: null,
@@ -256,7 +250,6 @@ test('metadata rail presents complete glanceable metadata while omitting absent 
   assert.match(markup, /Applying/);
   assert.match(markup, /Pending/);
   assert.match(markup, /Favorite/);
-  assert.match(markup, /data-hovered="true"/);
   assert.match(markup, /Applying now[^]*Orbital Bloom/);
   assert.match(markup, /Queued next[^]*After Rain/);
 
@@ -280,7 +273,6 @@ test('metadata rail presents complete glanceable metadata while omitting absent 
     applying: false,
     pending: false,
     favorite: false,
-    hovered: false,
     favoritePending: false,
     applyAvailable: true,
     applyDisabledReason: null,

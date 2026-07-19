@@ -14,7 +14,6 @@ export interface FlowMetadataRailProps {
   readonly applying: boolean;
   readonly pending: boolean;
   readonly favorite: boolean;
-  readonly hovered: boolean;
   readonly favoritePending: boolean;
   readonly applyAvailable: boolean;
   readonly applyDisabledReason: string | null;
@@ -59,7 +58,6 @@ export function FlowMetadataRailView({
   applying,
   pending,
   favorite,
-  hovered,
   favoritePending,
   applyAvailable,
   applyDisabledReason,
@@ -95,7 +93,6 @@ export function FlowMetadataRailView({
       data-applying={applying || undefined}
       data-current={current || undefined}
       data-favorite={favorite || undefined}
-      data-hovered={hovered || undefined}
       data-pending={pending || undefined}
       data-selected={selected || undefined}
     >

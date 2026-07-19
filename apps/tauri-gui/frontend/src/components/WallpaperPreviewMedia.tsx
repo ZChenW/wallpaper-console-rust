@@ -11,6 +11,8 @@ import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { typeIcon } from './wallpaperCardHelpers.ts';
 import {
   attachVideoDecoder,
+  ENHANCED_MEDIA_ACTIVATION_DELAY_MS,
+  enhancedMediaActivationPlan,
   enhancedMediaCandidates,
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
@@ -65,10 +67,31 @@ export default function WallpaperPreviewMedia({
     getThumbnailFailure,
     getThumbnailFailure,
   );
+  const [enhancedActivatedPath, setEnhancedActivatedPath] = useState<string | null>(null);
+  const activationPlan = enhancedMediaActivationPlan(
+    entry,
+    enhancedActivatedPath === entry.path,
+    eligibility,
+  );
+  useEffect(() => {
+    if (activationPlan.retain) return undefined;
+    if (!activationPlan.schedule) {
+      setEnhancedActivatedPath(null);
+      return undefined;
+    }
+    const timer = window.setTimeout(
+      () => setEnhancedActivatedPath(entry.path),
+      ENHANCED_MEDIA_ACTIVATION_DELAY_MS,
+    );
+    return () => window.clearTimeout(timer);
+  }, [activationPlan.retain, activationPlan.schedule, entry.path]);
   const candidates = useMemo(() => {
     if (transientImagePath) return [{ kind: 'image' as const, path: transientImagePath }];
-    return enhancedMediaCandidates(entry, eligibility);
-  }, [eligibility, entry, transientImagePath]);
+    return enhancedMediaCandidates(entry, {
+      ...eligibility,
+      settled: activationPlan.retain,
+    });
+  }, [activationPlan.retain, eligibility, entry, transientImagePath]);
   const candidateKey = candidates.map((candidate) => `${candidate.kind}:${candidate.path}`).join('\0');
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);

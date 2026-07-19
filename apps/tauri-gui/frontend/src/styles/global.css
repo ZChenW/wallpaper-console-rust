@@ -1629,11 +1629,11 @@ input:focus {
   animation: flow-metadata-enter 180ms ease both;
 }
 
-.flow-metadata-rail[data-hovered] {
+.wallpaper-flow[data-hovering] .flow-metadata-rail {
   box-shadow: inset 2px 0 0 var(--border-strong);
 }
 
-.flow-metadata-rail[data-hovered] .flow-metadata-rail__action:not(.flow-metadata-rail__action--primary) {
+.wallpaper-flow[data-hovering] .flow-metadata-rail .flow-metadata-rail__action:not(.flow-metadata-rail__action--primary) {
   border-color: var(--border-strong);
   color: var(--text);
 }
@@ -1782,7 +1782,7 @@ input:focus {
   display: none;
 }
 
-.flow-index-rail__item[data-hovered] .flow-index-rail__entry {
+.flow-index-rail__entry:is(:hover, [data-hovered]) {
   background: color-mix(in srgb, var(--panel-hover) 72%, transparent);
   color: var(--text);
 }

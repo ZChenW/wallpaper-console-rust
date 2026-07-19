@@ -2,8 +2,8 @@ import { memo } from 'react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import {
-  flowIndexAlignmentOffset,
   flowStateLabels,
+  nextFlowIndexAlignmentOffset,
 } from './wallpaperFlowModel.ts';
 import { displayName } from './wallpaperCardHelpers.ts';
 
@@ -18,7 +18,6 @@ export interface FlowIndexRailEntry {
 export interface FlowIndexRailProps {
   readonly entries: readonly FlowIndexRailEntry[];
   readonly centeredWallpaperId: number | null;
-  readonly hoveredWallpaperId: number | null;
   readonly loadedCount: number;
   readonly totalKnown: boolean;
   readonly total: number | null;
@@ -41,14 +40,18 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
   if (list === null) return;
   const rail = list.closest<HTMLElement>('.flow-index-rail');
   if (rail === null) return;
+  let alignmentFrame: number | null = null;
 
   const align = () => {
-    list.style.setProperty('--flow-index-alignment', '0px');
+    alignmentFrame = null;
     const centeredItem = list.querySelector<HTMLElement>('[data-centered]');
-    if (centeredItem === null || list.getClientRects().length === 0) return;
+    if (centeredItem === null || !list.isConnected) return;
     const railBounds = rail.getBoundingClientRect();
     const itemBounds = centeredItem.getBoundingClientRect();
-    const offset = flowIndexAlignmentOffset({
+    const currentOffset = Number.parseFloat(
+      list.style.getPropertyValue('--flow-index-alignment'),
+    );
+    const offset = nextFlowIndexAlignmentOffset(currentOffset, {
       railStart: railBounds.top,
       railSize: railBounds.height,
       itemStart: itemBounds.top,
@@ -57,15 +60,20 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
     list.style.setProperty('--flow-index-alignment', `${offset}px`);
   };
 
-  align();
+  const scheduleAlign = () => {
+    if (alignmentFrame !== null) return;
+    alignmentFrame = window.requestAnimationFrame(align);
+  };
+
+  scheduleAlign();
   const resizeObserver = typeof ResizeObserver === 'undefined'
     ? null
-    : new ResizeObserver(align);
+    : new ResizeObserver(scheduleAlign);
   resizeObserver?.observe(rail);
   resizeObserver?.observe(list);
   const mutationObserver = typeof MutationObserver === 'undefined'
     ? null
-    : new MutationObserver(align);
+    : new MutationObserver(scheduleAlign);
   mutationObserver?.observe(list, {
     attributeFilter: ['data-centered'],
     attributes: true,
@@ -73,6 +81,7 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
     subtree: true,
   });
   return () => {
+    if (alignmentFrame !== null) window.cancelAnimationFrame(alignmentFrame);
     resizeObserver?.disconnect();
     mutationObserver?.disconnect();
   };
@@ -81,7 +90,6 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
 export function FlowIndexRailView({
   entries,
   centeredWallpaperId,
-  hoveredWallpaperId,
   loadedCount,
   totalKnown,
   total,
@@ -121,14 +129,12 @@ export function FlowIndexRailView({
       <ol className="flow-index-rail__list" ref={observeFlowIndexAlignment}>
         {entries.map(({ entry, index, selected, current, favorite }) => {
           const centered = entry.wallpaperId === centeredWallpaperId;
-          const hovered = entry.wallpaperId === hoveredWallpaperId;
           return (
             <li
               className="flow-index-rail__item"
               data-centered={centered || undefined}
               data-current={current || undefined}
               data-favorite={favorite || undefined}
-              data-hovered={hovered || undefined}
               data-selected={selected || undefined}
               key={entry.wallpaperId}
             >

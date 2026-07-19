@@ -302,6 +302,14 @@ export function flowIndexAlignmentOffset(input: FlowIndexAlignmentInput): number
   return railCenter - itemCenter;
 }
 
+export function nextFlowIndexAlignmentOffset(
+  currentOffset: number,
+  input: FlowIndexAlignmentInput,
+): number {
+  const normalizedCurrentOffset = Number.isFinite(currentOffset) ? currentOffset : 0;
+  return normalizedCurrentOffset + flowIndexAlignmentOffset(input);
+}
+
 export function resolveInitialFlowAnchor<TId extends FlowItemId>(
   loadedIds: readonly TId[],
   currentId: TId | null | undefined,

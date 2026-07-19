@@ -1,16 +1,6 @@
-import { Buffer } from 'node:buffer';
-
 import { expect, test, type Page } from '@playwright/test';
 
-// Generated one-frame media fixtures keep decoder lifecycle coverage self-contained.
-const TINY_WEBM = Buffer.from(
-  'GkXfo59ChoEBQveBAULygQRC84EIQoKEd2VibUKHgQJChYECGFOAZwEAAAAAAAHpEU2bdLpNu4tTq4QVSalmU6yBoU27i1OrhBZUrmtTrIHYTbuMU6uEElTDZ1OsggElTbuMU6uEHFO7a1OsggHT7AEAAAAAAABZAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVSalmsirXsYMPQkBNgI1MYXZmNjIuMTIuMTAyV0GNTGF2ZjYyLjEyLjEwMkSJiEBEAAAAAAAAFlSua8iuAQAAAAAAAD/XgQFzxYiPzLk7nm2B6ZyBACK1nIN1bmSIgQCGhVZfVlA4g4EBI+ODhAJiWgDgkLCBELqBEJqBAlWwhFW5gQESVMNn/HNzoGPAgGfImkWjh0VOQ09ERVJEh41MYXZmNjIuMTIuMTAyc3PWY8CLY8WIj8y5O55tgelnyKFFo4dFTkNPREVSRIeUTGF2YzYyLjI4LjEwMiBsaWJ2cHhnyKFFo4hEVVJBVElPTkSHkzAwOjAwOjAwLjA0MDAwMDAwMAAfQ7Z1qOeBAKOjgQAAgBACAJ0BKhAAEAAARwiFhYiFhIgCAgAMDWAA/v+rUIAcU7trkbuPs4EAt4r3gQHxggGm8IED',
-  'base64',
-);
-const TINY_GIF = Buffer.from(
-  'R0lGODlhAQABAIAAAAAAAP///ywAAAAAAQABAAACAUwAOw==',
-  'base64',
-);
+import { TINY_GIF, TINY_WEBM } from './mediaFixtures.ts';
 
 type TargetedApplyRequest = {
   requestId: string;
@@ -350,9 +340,9 @@ test('Flow scrolling only browses while explicit click and Apply own selection a
   await hoverTarget.hover();
   await expect(hoverTarget).toHaveAttribute('data-hovered', 'true');
   await expect(page.locator(
-    `.flow-index-rail__item[data-hovered] [data-wallpaper-id="${hoverTargetId!}"]`,
+    `.flow-index-rail__entry[data-hovered][data-wallpaper-id="${hoverTargetId!}"]`,
   )).toBeAttached();
-  await expect(page.locator('.flow-metadata-rail')).toHaveAttribute('data-hovered', 'true');
+  await expect(page.locator('.wallpaper-flow')).toHaveAttribute('data-hovering', '');
   await page.mouse.move(0, 0);
 
   const initialActive = await stream.getAttribute('aria-activedescendant');
@@ -425,7 +415,11 @@ test('Flow owns one enhanced preview and releases video decoders when browsing r
     '/mock/path/wallpaper-000.mp4',
   );
   await expect(videoItem).toBeAttached();
-  await videoItem.click();
+  const immediateEnhancedCount = await videoItem.evaluate((element) => {
+    (element as HTMLElement).click();
+    return element.querySelectorAll('[data-enhanced-preview]').length;
+  });
+  expect(immediateEnhancedCount).toBe(0);
   await expect(videoItem).toHaveAttribute('data-centered', 'true');
   await expect(videoItem).toHaveAttribute('data-settled', 'true');
   await expect(videoItem).toHaveAttribute('aria-selected', 'true');

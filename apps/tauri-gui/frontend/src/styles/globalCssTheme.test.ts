@@ -260,7 +260,7 @@ test('Flow exposes additive visual states without making hover equivalent to sel
     '.flow-preview-item[data-centered] .flow-preview-item__media > img',
   );
   const metadata = ruleBody(css, '.flow-metadata-rail');
-  const hoveredMetadata = ruleBody(css, '.flow-metadata-rail[data-hovered]');
+  const hoveredMetadata = ruleBody(css, '.wallpaper-flow[data-hovering] .flow-metadata-rail');
 
   assert.match(centered, /opacity:\s*1/);
   assert.match(centeredMedia, /transform:\s*scale\(/);

@@ -429,7 +429,7 @@
   border-inline-start-color: var(--text);
 }
 
-:root[data-theme="editorial"] .flow-index-rail__item[data-hovered] .flow-index-rail__entry {
+:root[data-theme="editorial"] .flow-index-rail__entry:is(:hover, [data-hovered]) {
   background: var(--panel-alt);
   color: var(--text);
 }

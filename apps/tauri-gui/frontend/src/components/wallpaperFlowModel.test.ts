@@ -223,6 +223,27 @@ test('local index alignment offset pins a boundary entry to the rail center', ()
   }), 0);
 });
 
+test('local index alignment accumulates from the current transform without resetting layout', () => {
+  assert.equal(flow.nextFlowIndexAlignmentOffset(80, {
+    railStart: 100,
+    railSize: 600,
+    itemStart: 500,
+    itemSize: 30,
+  }), -35);
+  assert.equal(flow.nextFlowIndexAlignmentOffset(-80, {
+    railStart: 100,
+    railSize: 600,
+    itemStart: 180,
+    itemSize: 30,
+  }), 125);
+  assert.equal(flow.nextFlowIndexAlignmentOffset(Number.NaN, {
+    railStart: 100,
+    railSize: 600,
+    itemStart: 180,
+    itemSize: 30,
+  }), 205);
+});
+
 test('initial flow anchor restarts at the loaded current ID or falls back to first', () => {
   const ids = ['first', 'current', 'last'];
   assert.deepEqual(flow.resolveInitialFlowAnchor(ids, 'current'), {

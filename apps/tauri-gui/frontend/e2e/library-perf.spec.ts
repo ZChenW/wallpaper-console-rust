@@ -1,5 +1,7 @@
 import { expect, test } from '@playwright/test';
 
+import { TINY_WEBM } from './mediaFixtures.ts';
+
 const FLOW_CENTER_FEEDBACK_BUDGET_MS = 250;
 const FLOW_RAIL_ACTIVATION_BUDGET_MS = 150;
 
@@ -55,6 +57,91 @@ test('Flow rail activation centers and settles without smooth-scroll latency', a
   }, targetId);
 
   expect(elapsedMs).toBeLessThanOrEqual(FLOW_RAIL_ACTIVATION_BUDGET_MS);
+});
+
+test('Flow rapid rail browsing activates enhanced media only for the final selection', async ({
+  page,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The media churn gate is desktop-only.');
+  await page.route('**/mock/path/wallpaper-000.mp4', (route) => route.fulfill({
+    body: TINY_WEBM,
+    contentType: 'video/webm',
+  }));
+  await page.goto('/');
+  await expect(page.locator('.wallpaper-grid')).toBeVisible();
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await expect(page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]'))
+    .toBeVisible();
+
+  await page.evaluate(() => {
+    const stream = document.querySelector('.flow-preview-stream');
+    if (!stream) throw new Error('Flow stream unavailable');
+    const audit = { activations: 0 };
+    const observer = new MutationObserver((records) => {
+      const activatedElements = new Set<Element>();
+      for (const record of records) {
+        if (record.type === 'attributes') {
+          const target = record.target;
+          if (!(target instanceof Element)) continue;
+          if (record.attributeName === 'data-enhanced-preview') {
+            if (record.oldValue === null) {
+              activatedElements.add(target);
+            }
+          }
+          continue;
+        }
+        for (const node of record.addedNodes) {
+          if (!(node instanceof Element)) continue;
+          if (node.matches('[data-enhanced-preview]')) activatedElements.add(node);
+          for (const enhanced of node.querySelectorAll('[data-enhanced-preview]')) {
+            activatedElements.add(enhanced);
+          }
+        }
+      }
+      audit.activations += activatedElements.size;
+    });
+    observer.observe(stream, {
+      attributeFilter: ['data-enhanced-preview'],
+      attributeOldValue: true,
+      attributes: true,
+      childList: true,
+      subtree: true,
+    });
+    Object.assign(window, { __flowMediaAudit: { audit, observer } });
+  });
+
+  await page.evaluate(() => {
+    for (let index = 0; index < 12; index += 1) {
+      const entries = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('.flow-index-rail__entry'),
+      ).filter((entry) => /\.(?:gif|jpe?g|png|mp4)$/i.test(entry.dataset.wallpaperPath ?? ''));
+      const target = index % 2 === 0 ? entries.at(-1) : entries.at(0);
+      target?.click();
+    }
+  });
+  const finalPath = '/mock/path/wallpaper-000.mp4';
+  await page.locator(
+    `.flow-index-rail__entry[data-wallpaper-path="${finalPath}"]`,
+  ).click();
+  const finalPreview = page.locator(
+    `.flow-preview-item[data-wallpaper-path="${finalPath}"]`,
+  );
+  await expect(finalPreview).toHaveAttribute('data-centered', 'true');
+  await expect(finalPreview).toHaveAttribute('data-settled', 'true');
+  await expect(finalPreview).toHaveAttribute('aria-selected', 'true');
+  await expect(finalPreview.locator('[data-enhanced-preview]')).toHaveCount(1);
+
+  const activations = await page.evaluate(() => {
+    const holder = window as unknown as {
+      __flowMediaAudit?: {
+        audit: { activations: number };
+        observer: MutationObserver;
+      };
+    };
+    holder.__flowMediaAudit?.observer.disconnect();
+    return holder.__flowMediaAudit?.audit.activations ?? 0;
+  });
+  expect(activations).toBeLessThanOrEqual(2);
 });
 
 test('Flow keeps 5000+ queried wallpapers responsive and its complete index virtualized', async ({
