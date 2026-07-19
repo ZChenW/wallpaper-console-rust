@@ -181,9 +181,11 @@ fn recover_failed_watcher<C: SchedulerClock>(
     watchers: &mut BTreeMap<i64, WatchHandle>,
     scheduler: &mut LibraryScheduler<C>,
     source_id: i64,
+    mark_dirty: impl FnOnce(i64),
 ) {
     let _ = retire_watcher(watchers, source_id);
     log::warn!("Library watcher failed for source id {source_id}; scheduling recreation");
+    mark_dirty(source_id);
     scheduler.source_changed(source_id);
 }
 
@@ -288,8 +290,9 @@ pub fn start_library_scheduler(
                         scheduler.source_changed(id);
                     }
                     WatchMessage::Failed(id) => {
-                        let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, id);
-                        recover_failed_watcher(&mut watchers, &mut scheduler, id);
+                        recover_failed_watcher(&mut watchers, &mut scheduler, id, |source_id| {
+                            let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, source_id);
+                        });
                     }
                     WatchMessage::Overflow => {
                         for id in scheduler.watcher_overflow() {
@@ -628,7 +631,7 @@ mod tests {
     }
 
     #[test]
-    fn failed_watcher_is_retired_without_losing_the_scan_schedule() {
+    fn failed_watcher_is_retired_before_dirty_mark_without_losing_the_scan_schedule() {
         let clock = ManualClock::default();
         let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
         let stop = Arc::new(AtomicBool::new(false));
@@ -639,11 +642,19 @@ mod tests {
                 stop: stop.clone(),
             },
         )]);
+        let mut dirtied_sources = Vec::new();
 
-        recover_failed_watcher(&mut watchers, &mut scheduler, 7);
+        recover_failed_watcher(&mut watchers, &mut scheduler, 7, |source_id| {
+            assert!(
+                stop.load(Ordering::Acquire),
+                "watcher must stop before its source is marked dirty"
+            );
+            dirtied_sources.push(source_id);
+        });
 
         assert!(stop.load(Ordering::Acquire));
         assert!(!watchers.contains_key(&7));
+        assert_eq!(dirtied_sources, vec![7]);
         clock.advance(1_499);
         assert!(scheduler.take_due_scans().is_empty());
         clock.advance(1);
