@@ -169,6 +169,24 @@ struct WatchHandle {
     stop: Arc<AtomicBool>,
 }
 
+fn retire_watcher(watchers: &mut BTreeMap<i64, WatchHandle>, source_id: i64) -> bool {
+    let Some(watcher) = watchers.remove(&source_id) else {
+        return false;
+    };
+    watcher.stop.store(true, Ordering::Release);
+    true
+}
+
+fn recover_failed_watcher<C: SchedulerClock>(
+    watchers: &mut BTreeMap<i64, WatchHandle>,
+    scheduler: &mut LibraryScheduler<C>,
+    source_id: i64,
+) {
+    let _ = retire_watcher(watchers, source_id);
+    log::warn!("Library watcher failed for source id {source_id}; scheduling recreation");
+    scheduler.source_changed(source_id);
+}
+
 pub fn start_library_scheduler(
     service: crate::library_service::LibraryService,
     cd: ConfigDir,
@@ -265,9 +283,13 @@ pub fn start_library_scheduler(
             while let Ok(message) = watch_rx.try_recv() {
                 let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
                 match message {
-                    WatchMessage::Changed(id) | WatchMessage::Failed(id) => {
+                    WatchMessage::Changed(id) => {
                         let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, id);
                         scheduler.source_changed(id);
+                    }
+                    WatchMessage::Failed(id) => {
+                        let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, id);
+                        recover_failed_watcher(&mut watchers, &mut scheduler, id);
                     }
                     WatchMessage::Overflow => {
                         for id in scheduler.watcher_overflow() {
@@ -350,45 +372,64 @@ fn spawn_recursive_watcher(
     sender: mpsc::Sender<WatchMessage>,
 ) {
     std::thread::spawn(move || {
-        let fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
-        if fd < 0 {
-            let _ = sender.send(WatchMessage::Failed(source_id));
-            return;
-        }
-        if add_recursive_watches(fd, &root, recursive).is_err() {
-            let _ = sender.send(WatchMessage::Failed(source_id));
-        }
-        let mut buffer = [0u8; 16 * 1024];
-        while !stop.load(Ordering::Acquire) {
-            let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
-            if read > 0 {
-                let mut offset = 0usize;
-                let mut overflow = false;
-                while offset + std::mem::size_of::<libc::inotify_event>() <= read as usize {
-                    let event =
-                        unsafe { &*(buffer.as_ptr().add(offset).cast::<libc::inotify_event>()) };
-                    overflow |= event.mask & libc::IN_Q_OVERFLOW != 0;
-                    offset = offset
-                        .saturating_add(std::mem::size_of::<libc::inotify_event>())
-                        .saturating_add(event.len as usize);
-                }
-                let _ = sender.send(if overflow {
-                    WatchMessage::Overflow
-                } else {
-                    let _ = add_recursive_watches(fd, &root, recursive);
-                    WatchMessage::Changed(source_id)
-                });
-            } else {
-                let error = std::io::Error::last_os_error();
-                if error.kind() != std::io::ErrorKind::WouldBlock {
-                    let _ = sender.send(WatchMessage::Failed(source_id));
-                    break;
-                }
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        unsafe { libc::close(fd) };
+        run_recursive_watcher(source_id, &root, recursive, stop.as_ref(), &sender);
     });
+}
+
+#[cfg(target_os = "linux")]
+fn run_recursive_watcher(
+    source_id: i64,
+    root: &std::path::Path,
+    recursive: bool,
+    stop: &AtomicBool,
+    sender: &mpsc::Sender<WatchMessage>,
+) {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+    if raw_fd < 0 {
+        let _ = sender.send(WatchMessage::Failed(source_id));
+        return;
+    }
+    // SAFETY: `inotify_init1` returned a new descriptor owned by this worker.
+    let inotify = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+    let fd = inotify.as_raw_fd();
+    if add_recursive_watches(fd, root, recursive).is_err() {
+        let _ = sender.send(WatchMessage::Failed(source_id));
+        return;
+    }
+
+    let mut buffer = [0u8; 16 * 1024];
+    while !stop.load(Ordering::Acquire) {
+        let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
+        if read > 0 {
+            let mut offset = 0usize;
+            let mut overflow = false;
+            while offset + std::mem::size_of::<libc::inotify_event>() <= read as usize {
+                let event =
+                    unsafe { &*(buffer.as_ptr().add(offset).cast::<libc::inotify_event>()) };
+                overflow |= event.mask & libc::IN_Q_OVERFLOW != 0;
+                offset = offset
+                    .saturating_add(std::mem::size_of::<libc::inotify_event>())
+                    .saturating_add(event.len as usize);
+            }
+            if overflow {
+                let _ = sender.send(WatchMessage::Overflow);
+            } else if add_recursive_watches(fd, root, recursive).is_err() {
+                let _ = sender.send(WatchMessage::Failed(source_id));
+                break;
+            } else {
+                let _ = sender.send(WatchMessage::Changed(source_id));
+            }
+        } else {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != std::io::ErrorKind::WouldBlock {
+                let _ = sender.send(WatchMessage::Failed(source_id));
+                break;
+            }
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -540,5 +581,161 @@ mod tests {
         assert!(!scheduler.scan_finished(7));
         assert!(scheduler.scan_finished(8));
         assert!(!scheduler.scan_finished(8));
+    }
+
+    #[test]
+    fn retire_watcher_stops_and_removes_only_the_requested_source() {
+        let retired_stop = Arc::new(AtomicBool::new(false));
+        let retained_stop = Arc::new(AtomicBool::new(false));
+        let mut watchers = BTreeMap::from([
+            (
+                7,
+                WatchHandle {
+                    signature: ("retired".to_owned(), true),
+                    stop: retired_stop.clone(),
+                },
+            ),
+            (
+                8,
+                WatchHandle {
+                    signature: ("retained".to_owned(), false),
+                    stop: retained_stop.clone(),
+                },
+            ),
+        ]);
+
+        assert!(retire_watcher(&mut watchers, 7));
+        assert!(retired_stop.load(Ordering::Acquire));
+        assert!(!retained_stop.load(Ordering::Acquire));
+        assert!(!watchers.contains_key(&7));
+        assert!(watchers.contains_key(&8));
+    }
+
+    #[test]
+    fn retire_watcher_returns_false_when_the_source_is_missing() {
+        let retained_stop = Arc::new(AtomicBool::new(false));
+        let mut watchers = BTreeMap::from([(
+            8,
+            WatchHandle {
+                signature: ("retained".to_owned(), false),
+                stop: retained_stop.clone(),
+            },
+        )]);
+
+        assert!(!retire_watcher(&mut watchers, 7));
+        assert!(!retained_stop.load(Ordering::Acquire));
+        assert!(watchers.contains_key(&8));
+    }
+
+    #[test]
+    fn failed_watcher_is_retired_without_losing_the_scan_schedule() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut watchers = BTreeMap::from([(
+            7,
+            WatchHandle {
+                signature: ("failed".to_owned(), true),
+                stop: stop.clone(),
+            },
+        )]);
+
+        recover_failed_watcher(&mut watchers, &mut scheduler, 7);
+
+        assert!(stop.load(Ordering::Acquire));
+        assert!(!watchers.contains_key(&7));
+        clock.advance(1_499);
+        assert!(scheduler.take_due_scans().is_empty());
+        clock.advance(1);
+        assert_eq!(scheduler.take_due_scans(), vec![7]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watcher_exits_after_initial_recursive_watch_failure() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let missing_root = temporary.path().join("missing-source");
+        let stop = Arc::new(AtomicBool::new(false));
+        let (watch_sender, watch_receiver) = mpsc::channel();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let worker_stop = stop.clone();
+        let worker = std::thread::spawn(move || {
+            run_recursive_watcher(7, &missing_root, false, worker_stop.as_ref(), &watch_sender);
+            let _ = done_sender.send(());
+        });
+
+        assert!(matches!(
+            watch_receiver.recv_timeout(Duration::from_secs(1)),
+            Ok(WatchMessage::Failed(7))
+        ));
+        let exited = done_receiver.recv_timeout(Duration::from_secs(1)).is_ok();
+        stop.store(true, Ordering::Release);
+        worker.join().expect("watcher worker should not panic");
+        assert!(exited, "watcher worker stayed alive after setup failed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn watcher_exits_when_refreshing_recursive_watches_fails() {
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let root = temporary.path().join("source");
+        std::fs::create_dir(&root).expect("create watched source");
+        let stop = Arc::new(AtomicBool::new(false));
+        let (watch_sender, watch_receiver) = mpsc::channel();
+        let (done_sender, done_receiver) = mpsc::channel();
+        let worker_stop = stop.clone();
+        let worker_root = root.clone();
+        let worker = std::thread::spawn(move || {
+            run_recursive_watcher(7, &worker_root, true, worker_stop.as_ref(), &watch_sender);
+            let _ = done_sender.send(());
+        });
+
+        let ready_deadline = Instant::now() + Duration::from_secs(2);
+        let mut ready = false;
+        let mut sequence = 0;
+        while Instant::now() < ready_deadline {
+            std::fs::write(root.join(format!("ready-{sequence}")), b"ready")
+                .expect("write readiness probe");
+            sequence += 1;
+            match watch_receiver.recv_timeout(Duration::from_millis(100)) {
+                Ok(WatchMessage::Changed(7)) => {
+                    ready = true;
+                    break;
+                }
+                Ok(WatchMessage::Overflow) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Ok(WatchMessage::Failed(7)) => break,
+                Ok(WatchMessage::Changed(id) | WatchMessage::Failed(id)) => {
+                    panic!("unexpected watcher source id {id}")
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            }
+        }
+
+        let mut failed = false;
+        if ready {
+            std::fs::remove_dir_all(&root).expect("remove watched source");
+            let failure_deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < failure_deadline {
+                match watch_receiver.recv_timeout(Duration::from_millis(100)) {
+                    Ok(WatchMessage::Failed(7)) => {
+                        failed = true;
+                        break;
+                    }
+                    Ok(WatchMessage::Changed(7) | WatchMessage::Overflow)
+                    | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    Ok(WatchMessage::Changed(id) | WatchMessage::Failed(id)) => {
+                        panic!("unexpected watcher source id {id}")
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                }
+            }
+        }
+        let exited = failed && done_receiver.recv_timeout(Duration::from_secs(1)).is_ok();
+        stop.store(true, Ordering::Release);
+        worker.join().expect("watcher worker should not panic");
+
+        assert!(ready, "watcher never observed the readiness probe");
+        assert!(failed, "watcher did not report recursive refresh failure");
+        assert!(exited, "watcher worker stayed alive after refresh failed");
     }
 }
