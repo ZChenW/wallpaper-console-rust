@@ -200,6 +200,10 @@ test('Editorial Flow is a strict monochrome portfolio composition', async () => 
     ':root[data-theme="editorial"] .flow-preview-item[data-centered] .flow-preview-item__media img',
   );
   const metadata = ruleBody(css, ':root[data-theme="editorial"] .flow-metadata-rail');
+  const metadataTitle = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .flow-metadata-rail__title',
+  );
 
   assert.match(flow, /background:\s*var\(--bg\)/);
   assert.match(flow, /border-top:\s*1px solid var\(--text\)/);
@@ -210,6 +214,8 @@ test('Editorial Flow is a strict monochrome portfolio composition', async () => 
   assert.match(restingMedia, /filter:\s*grayscale\(1\)/);
   assert.match(centeredMedia, /filter:\s*grayscale\(0\)/);
   assert.match(metadata, /animation:\s*editorial-flow-metadata-enter 180ms/);
+  const lineHeight = Number(metadataTitle.match(/line-height:\s*([\d.]+)/)?.[1]);
+  assert.ok(lineHeight >= 1, `wrapped CJK title line-height must be at least 1, got ${lineHeight}`);
 });
 
 test('Editorial Flow keeps native scrolling free of decorative transition work', async () => {
@@ -240,4 +246,12 @@ test('Editorial Flow keeps state, controls, and dialogs in the same visual langu
   assert.match(actions, /text-transform:\s*uppercase/);
   assert.match(dialog, /border-radius:\s*0/);
   assert.match(dialog, /box-shadow:\s*none/);
+});
+
+test('Editorial source close control is a visible square target', async () => {
+  const css = await readCss();
+  const close = ruleBody(css, ':root[data-theme="editorial"] .source-panel__close');
+
+  assert.match(close, /border:\s*1px solid/);
+  assert.match(close, /border-radius:\s*0\s*!important/);
 });

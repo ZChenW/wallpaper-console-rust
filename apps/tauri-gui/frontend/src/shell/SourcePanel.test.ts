@@ -249,6 +249,7 @@ test('renders a compact accessible drawer with source kind and honest availabili
   assert.match(markup, /data-source-id="41"/);
   assert.match(markup, /data-source-id="77"/);
   assert.match(markup, /aria-label="Close wallpaper sources"/);
+  assert.match(markup, /class="source-panel__close"/);
 });
 
 test('source rows route their background through the theme token with the system colour fallback', async () => {

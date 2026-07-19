@@ -349,6 +349,7 @@ export interface WallpaperConsoleApi {
   importLegacyFlatFiles(): Promise<CommandResult>;
 
   thumbnailFor(path: string): Promise<ThumbnailDTO>;
+  previewAssetAuthorize(path: string, wallpaperPath: string): Promise<string>;
   thumbnailCacheStatus(): Promise<ThumbnailCacheDTO>;
   thumbnailCacheClear(): Promise<CommandResult>;
   thumbnailCacheCleanupOld(days: number): Promise<CommandResult>;

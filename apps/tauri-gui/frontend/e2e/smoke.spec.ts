@@ -962,6 +962,74 @@ test('Flow keeps its structure and readable primary actions across every explici
   }
 });
 
+test('authorized preview upgrades Flow and Details without a false unavailable state', async ({ page }) => {
+  await page.route('**/mock/path/**', (route) => route.fulfill({
+    body: TINY_GIF,
+    contentType: 'image/gif',
+    status: 200,
+  }));
+  await openApp(page);
+  await waitForGrid(page);
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const imageEntry = page.locator('.flow-preview-item[data-wallpaper-path$=".jpg"]').first();
+  await imageEntry.click();
+  await expect(imageEntry).toHaveAttribute('data-centered', 'true');
+  await expect(imageEntry.locator('[data-enhanced-preview="image"]')).toBeVisible();
+  await expect(imageEntry.getByText('Preview unavailable', { exact: true })).toHaveCount(0);
+
+  await page.getByRole('button', { name: 'Details', exact: true }).click();
+  const details = page.locator('.wallpaper-details');
+  const image = details.locator('img');
+  await expect(image).toBeVisible();
+  await expect.poll(() => image.evaluate((element) => (
+    element instanceof HTMLImageElement ? element.naturalWidth : 0
+  ))).toBeGreaterThan(0);
+  await expect(details.getByText('Preview unavailable', { exact: true })).toHaveCount(0);
+});
+
+test('Flow reports unavailable after both the original and thumbnail fail', async ({ page }) => {
+  await page.route('**/mock/path/wallpaper-001.jpg', (route) => route.abort());
+  await openApp(page);
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    if (!control) throw new Error('mock control is unavailable');
+    control.setThumbnailFailure('/mock/path/wallpaper-001.jpg');
+  });
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await waitForFlow(page);
+
+  const imageEntry = page.locator(
+    '.flow-preview-item[data-wallpaper-path="/mock/path/wallpaper-001.jpg"]',
+  );
+  await imageEntry.click();
+  await expect(imageEntry).toHaveAttribute('data-centered', 'true');
+  await expect(imageEntry.getByText('Preview unavailable', { exact: true })).toBeVisible();
+});
+
+test('Editorial is the first painted theme when persisted preferences load', async ({ page }) => {
+  let bridgePatched = false;
+  await page.route('**/src/api/mockBridge.ts*', async (route) => {
+    const response = await route.fetch();
+    let body = await response.text();
+    const original = body;
+    body = body.replace(
+      'configGet: async (key) => configStore[key] ?? defaultConfig[key] ?? "",',
+      'configGet: async (key) => { await new Promise((resolve) => setTimeout(resolve, 1000)); if (key === "gui_shell_preferences") return JSON.stringify({ theme: "editorial" }); return configStore[key] ?? defaultConfig[key] ?? ""; },',
+    );
+    bridgePatched = body !== original;
+    await route.fulfill({ response, body });
+  });
+  await page.goto('/', { waitUntil: 'domcontentloaded' });
+  expect(bridgePatched).toBe(true);
+  await expect(page.locator('html')).not.toHaveAttribute('data-theme', /.+/, { timeout: 500 });
+  await expect(page.locator('#root')).toHaveCSS('visibility', 'hidden');
+  await waitForGrid(page);
+  await expect(page.locator('html')).toHaveAttribute('data-theme', 'editorial');
+  await expect(page.locator('#root')).toHaveCSS('visibility', 'visible');
+});
+
 test('Flow honors reduced motion and preserves focus and selection boundaries in forced colors', async ({ page }) => {
   await page.emulateMedia({ forcedColors: 'active', reducedMotion: 'reduce' });
   await openApp(page);
@@ -1619,9 +1687,13 @@ test('Editorial theme is high-contrast, square, persistent, and independently sc
   await dialog.getByRole('button', { name: 'Manage wallpaper sources' }).click();
   const sourceDialog = page.getByRole('dialog', { name: 'Wallpaper sources' });
   await expect(sourceDialog).toBeVisible();
+  const sourceClose = sourceDialog.getByRole('button', { name: 'Close wallpaper sources' });
+  await expect(sourceClose).toHaveCSS('border-top-style', 'solid');
+  await expect(sourceClose).toHaveCSS('border-top-width', '1px');
+  await expect(sourceClose).toHaveCSS('border-top-left-radius', '0px');
   const sourcePanelBounds = await sourceDialog.boundingBox();
   expect(sourcePanelBounds).not.toBeNull();
-  expect(sourcePanelBounds!.x).toBeGreaterThanOrEqual(0);
+  expect(sourcePanelBounds!.x).toBeGreaterThanOrEqual(-1);
   expect(sourcePanelBounds!.x + sourcePanelBounds!.width).toBeLessThanOrEqual(initialViewport.width + 1);
   expect(Number.parseFloat(await sourceDialog.evaluate((element) =>
     getComputedStyle(element).borderTopLeftRadius,

@@ -1,6 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const FLOW_CENTER_FEEDBACK_BUDGET_MS = 250;
+const FLOW_RAIL_ACTIVATION_BUDGET_MS = 150;
 
 test('first Library request reaches cards or an interactive fallback within one second', async ({ page }) => {
   const started = Date.now();
@@ -18,6 +19,42 @@ test('first Library request reaches cards or an interactive fallback within one 
   );
   expect(requestDuration).not.toBeNull();
   expect(requestDuration!).toBeLessThanOrEqual(1_000);
+});
+
+test('Flow rail activation centers and settles without smooth-scroll latency', async ({ page }, testInfo) => {
+  test.skip(testInfo.project.name !== 'desktop', 'The rail timing gate is desktop-only.');
+  await page.goto('/');
+  await expect(page.locator('.wallpaper-grid')).toBeVisible();
+  await page.getByRole('button', { name: 'Flow' }).click();
+  await expect(page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]'))
+    .toBeVisible();
+
+  const target = page.locator('.flow-index-rail__entry').last();
+  const targetId = await target.getAttribute('data-wallpaper-id');
+  if (!targetId) throw new Error('Flow rail target has no wallpaper ID');
+  const elapsedMs = await target.evaluate(async (button, wallpaperId) => {
+    const startedAt = performance.now();
+    button.click();
+    return new Promise<number>((resolve, reject) => {
+      const sample = () => {
+        const item = document.querySelector<HTMLElement>(
+          `.flow-preview-item[data-wallpaper-id="${wallpaperId}"]`,
+        );
+        if (item?.dataset.centered === 'true' && item.dataset.settled === 'true') {
+          resolve(performance.now() - startedAt);
+          return;
+        }
+        if (performance.now() - startedAt > 1_000) {
+          reject(new Error('Flow rail activation did not settle within one second'));
+          return;
+        }
+        requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    });
+  }, targetId);
+
+  expect(elapsedMs).toBeLessThanOrEqual(FLOW_RAIL_ACTIVATION_BUDGET_MS);
 });
 
 test('Flow keeps 5000+ queried wallpapers responsive and its complete index virtualized', async ({

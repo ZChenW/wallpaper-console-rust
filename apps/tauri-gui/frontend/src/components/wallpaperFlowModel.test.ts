@@ -434,6 +434,11 @@ test('flow scrolling becomes immediate when reduced motion is requested', () => 
   assert.equal(flow.flowScrollBehavior(true), 'auto');
 });
 
+test('direct rail activation is immediate without disabling other smooth navigation', () => {
+  assert.equal(flow.flowScrollBehavior(false, true), 'auto');
+  assert.equal(flow.flowScrollBehavior(false, false), 'smooth');
+});
+
 test('enhanced flow media requires every active settled selection gate', () => {
   const eligible = {
     mediaType: 'image',

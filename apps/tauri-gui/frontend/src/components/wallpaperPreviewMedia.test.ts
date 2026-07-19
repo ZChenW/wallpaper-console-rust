@@ -5,6 +5,7 @@ import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import {
   attachVideoDecoder,
   enhancedMediaCandidates,
+  previewFallbackState,
   releaseVideoDecoder,
   staticPreviewAssetPath,
 } from './wallpaperPreviewMedia.ts';
@@ -96,6 +97,19 @@ test('duplicate preview paths are not decoded twice', () => {
   assert.deepEqual(
     enhancedMediaCandidates(entry({ previewPath: '/walls/original.jpg' }), eligible),
     [{ kind: 'image', path: '/walls/original.jpg' }],
+  );
+});
+
+test('an enhanced-media failure remains an honest thumbnail fallback when available', () => {
+  assert.equal(previewFallbackState(true, '/cache/original-thumb.jpg'), 'thumbnail');
+  assert.equal(previewFallbackState(true, undefined), 'unavailable');
+  assert.equal(previewFallbackState(false, undefined), 'pending');
+});
+
+test('a broken thumbnail cannot hide the terminal unavailable state', () => {
+  assert.equal(
+    previewFallbackState(true, '/cache/broken-thumb.jpg', true),
+    'unavailable',
   );
 });
 

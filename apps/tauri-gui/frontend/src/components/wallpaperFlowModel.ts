@@ -436,8 +436,11 @@ export function shouldRequestFlowNextPage(input: FlowNextPageRequestInput): bool
   return Math.trunc(input.visibleEndIndex) >= Math.max(0, itemCount - 1 - threshold);
 }
 
-export function flowScrollBehavior(reducedMotion: boolean): FlowScrollBehavior {
-  return reducedMotion ? 'auto' : 'smooth';
+export function flowScrollBehavior(
+  reducedMotion: boolean,
+  immediate = false,
+): FlowScrollBehavior {
+  return reducedMotion || immediate ? 'auto' : 'smooth';
 }
 
 export function isEnhancedFlowMediaEligible(

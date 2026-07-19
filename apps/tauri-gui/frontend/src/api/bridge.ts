@@ -156,6 +156,8 @@ export const api = {
 
   thumbnailFor: (path: string): Promise<ThumbnailDTO> =>
     invoke<ThumbnailDTO>('thumbnail_for', { path }).catch(() => ({ path, cacheHit: false })),
+  previewAssetAuthorize: (path: string, wallpaperPath: string): Promise<string> =>
+    invoke<string>('preview_asset_authorize', { path, wallpaperPath }),
 
   thumbnailCacheStatus: (): Promise<ThumbnailCacheDTO> => invoke<ThumbnailCacheDTO>('thumbnail_cache_status'),
   thumbnailCacheClear: (): Promise<CommandResult> => invoke<CommandResult>('thumbnail_cache_clear'),

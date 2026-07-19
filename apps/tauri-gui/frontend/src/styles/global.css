@@ -1,6 +1,7 @@
 /* ── Reset & Base ──────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body, #root { height: 100%; }
+:root:not([data-theme]) #root { visibility: hidden; }
 .wallpaper-card__state {
   position: absolute;
   width: 1px;
@@ -1728,7 +1729,7 @@ input:focus {
   min-width: 0;
   flex: 0 0 auto;
   border-inline-start: 2px solid transparent;
-  transition: border-color 160ms ease, opacity 160ms ease;
+  transition: border-color 60ms ease, opacity 60ms ease;
 }
 
 .flow-index-rail__entry {
@@ -1746,7 +1747,7 @@ input:focus {
   font: inherit;
   text-align: start;
   cursor: pointer;
-  transition: color 160ms ease, background-color 160ms ease;
+  transition: color 60ms ease, background-color 60ms ease;
 }
 
 .flow-index-rail__ordinal {

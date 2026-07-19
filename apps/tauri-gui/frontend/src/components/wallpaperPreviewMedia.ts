@@ -21,6 +21,17 @@ export interface ReleasableVideo {
   load(): void;
 }
 
+export type PreviewFallbackState = 'pending' | 'thumbnail' | 'unavailable';
+
+export function previewFallbackState(
+  enhancedFailed: boolean,
+  thumbnail: string | undefined,
+  thumbnailFailed = false,
+): PreviewFallbackState {
+  if (thumbnail && !thumbnailFailed) return 'thumbnail';
+  return enhancedFailed ? 'unavailable' : 'pending';
+}
+
 export interface AttachableVideo extends ReleasableVideo {
   getAttribute(name: string): string | null;
   setAttribute(name: string, value: string): void;

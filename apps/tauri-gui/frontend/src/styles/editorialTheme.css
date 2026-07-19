@@ -440,7 +440,7 @@
   font-size: clamp(1.2rem, 2.2vw, 2.35rem);
   font-weight: 760;
   letter-spacing: -0.055em;
-  line-height: 0.9;
+  line-height: 1.08;
   text-transform: uppercase;
 }
 
@@ -1050,6 +1050,16 @@
 
 :root[data-theme="editorial"] .source-panel :is(button, input[type="text"]) {
   border-radius: 0 !important;
+}
+
+:root[data-theme="editorial"] .source-panel__close {
+  border: 1px solid var(--text) !important;
+  border-radius: 0 !important;
+}
+
+:root[data-theme="editorial"] .source-panel__close:hover:not(:disabled) {
+  background: var(--text) !important;
+  color: var(--bg) !important;
 }
 
 :root[data-theme="editorial"] .source-panel [data-source-action] {

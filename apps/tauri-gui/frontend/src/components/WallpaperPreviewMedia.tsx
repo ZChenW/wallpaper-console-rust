@@ -6,11 +6,8 @@ import {
   useState,
   useSyncExternalStore,
 } from 'react';
-import { convertFileSrc } from '@tauri-apps/api/core';
-
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
-import { BoundedFileSrcCache } from './fileSrcCache.ts';
 import { typeIcon } from './wallpaperCardHelpers.ts';
 import {
   attachVideoDecoder,
@@ -18,18 +15,10 @@ import {
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
 } from './wallpaperPreviewMedia.ts';
+import { useAuthorizedPreviewAsset } from './useAuthorizedPreviewAsset.ts';
+import { safeFileSrc } from './safeFileSrc.ts';
 
-const fileSrcCache = new BoundedFileSrcCache((path: string): string => {
-  try {
-    return convertFileSrc(path);
-  } catch {
-    return path;
-  }
-});
-
-export function safeFileSrc(path: string): string {
-  return fileSrcCache.get(path);
-}
+export { safeFileSrc } from './safeFileSrc.ts';
 
 const STATIC_ELIGIBILITY: EnhancedMediaEligibility = Object.freeze({
   active: false,
@@ -83,6 +72,7 @@ export default function WallpaperPreviewMedia({
   const candidateKey = candidates.map((candidate) => `${candidate.kind}:${candidate.path}`).join('\0');
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
+  const [thumbnailLoadFailed, setThumbnailLoadFailed] = useState(false);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -90,14 +80,22 @@ export default function WallpaperPreviewMedia({
     setEnhancedError(null);
   }, [candidateKey]);
 
+  useEffect(() => {
+    setThumbnailLoadFailed(false);
+  }, [assetPath, thumbnail]);
+
   const activeCandidate = candidates[candidateIndex] ?? null;
-  const activeVideoSource = activeCandidate?.kind === 'video'
-    ? safeFileSrc(activeCandidate.path)
+  const authorizedCandidate = useAuthorizedPreviewAsset(
+    activeCandidate?.path ?? null,
+    entry.path,
+  );
+  const activeVideoSource = activeCandidate?.kind === 'video' && authorizedCandidate.path
+    ? safeFileSrc(authorizedCandidate.path)
     : null;
   const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
     videoRef.current = attachVideoDecoder(videoRef.current, video, activeVideoSource);
   }, [activeVideoSource]);
-  const handleEnhancedError = () => {
+  const handleEnhancedError = useCallback(() => {
     const nextIndex = candidateIndex + 1;
     const message = `Enhanced preview unavailable for ${entry.title || entry.path}`;
     if (nextIndex < candidates.length) {
@@ -107,9 +105,14 @@ export default function WallpaperPreviewMedia({
     setCandidateIndex(candidates.length);
     setEnhancedError(message);
     onEnhancedError?.(message);
-  };
+  }, [candidateIndex, candidates.length, entry.path, entry.title, onEnhancedError]);
 
-  if (activeCandidate?.kind === 'video') {
+  useEffect(() => {
+    if (!authorizedCandidate.error) return;
+    handleEnhancedError();
+  }, [authorizedCandidate.error, handleEnhancedError]);
+
+  if (activeCandidate?.kind === 'video' && authorizedCandidate.path) {
     return (
       <>
         <video
@@ -125,26 +128,28 @@ export default function WallpaperPreviewMedia({
           ref={setVideoRef}
           src={activeVideoSource ?? undefined}
         />
-        {enhancedError ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
+        {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
       </>
     );
   }
 
-  const imagePath = activeCandidate?.path ?? thumbnail;
+  const imagePath = authorizedCandidate.path ?? (thumbnailLoadFailed ? undefined : thumbnail);
   if (imagePath) {
     return (
       <>
         <img
           alt={alt}
           className={className}
-          data-enhanced-preview={activeCandidate ? 'image' : undefined}
+          data-enhanced-preview={authorizedCandidate.path ? 'image' : undefined}
           decoding="async"
           draggable={false}
           loading={loading}
-          onError={activeCandidate ? handleEnhancedError : undefined}
+          onError={authorizedCandidate.path
+            ? handleEnhancedError
+            : () => setThumbnailLoadFailed(true)}
           src={safeFileSrc(imagePath)}
         />
-        {enhancedError ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
+        {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
       </>
     );
   }
@@ -155,7 +160,11 @@ export default function WallpaperPreviewMedia({
       title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}
     >
       <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
-      {thumbnailFailure ? <span className="wallpaper-thumb-error">Preview failed</span> : null}
+      {enhancedError ? (
+        <span className="wallpaper-preview-status" role="status">Preview unavailable</span>
+      ) : thumbnailFailure || thumbnailLoadFailed ? (
+        <span className="wallpaper-thumb-error">Preview failed</span>
+      ) : null}
     </div>
   );
 }

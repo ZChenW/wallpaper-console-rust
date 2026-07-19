@@ -756,6 +756,7 @@ export function SourcePanelView({
           <button
             autoFocus
             aria-label="Close wallpaper sources"
+            className="source-panel__close"
             disabled={presentationPhase === 'exiting' ? true : undefined}
             onClick={onClose}
             style={closeStyle}

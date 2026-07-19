@@ -290,7 +290,7 @@ function WallpaperFlowImpl({
     );
   }, [finishProgrammaticScroll, reducedMotion, virtualizer]);
 
-  const centerAtIndex = useCallback((index: number) => {
+  const centerAtIndex = useCallback((index: number, direct = false) => {
     const entry = model.entries[index];
     if (!entry) return;
     cancelInitialCenterFrame();
@@ -302,10 +302,10 @@ function WallpaperFlowImpl({
     setSettled(false);
     setRevealPaused(true);
     const targetRendered = virtualizer.getVirtualItems().some((item) => item.index === index);
-    const immediate = reducedMotion || !targetRendered;
+    const immediate = direct || reducedMotion || !targetRendered;
     virtualizer.scrollToIndex(index, {
       align: 'center',
-      behavior: immediate ? 'auto' : flowScrollBehavior(reducedMotion),
+      behavior: flowScrollBehavior(reducedMotion, immediate),
     });
     scheduleProgrammaticSettle(index, immediate);
   }, [
@@ -660,7 +660,7 @@ function WallpaperFlowImpl({
     markUserInteraction();
     const index = model.entries.findIndex((candidate) => candidate.wallpaperId === entry.wallpaperId);
     if (index < 0) return;
-    centerAtIndex(index);
+    centerAtIndex(index, true);
     model.onSelect(entry);
     window.requestAnimationFrame(() => streamRef.current?.focus());
   }, [centerAtIndex, markUserInteraction, model.entries, model.onSelect]);

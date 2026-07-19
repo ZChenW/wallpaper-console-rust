@@ -1,15 +1,27 @@
-import type { CSSProperties, KeyboardEvent } from 'react';
+import {
+  useEffect,
+  useState,
+  type CSSProperties,
+  type KeyboardEvent,
+} from 'react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
 import { trapDialogFocus } from './dialogFocus.ts';
+import { nextDetailsPreviewSource } from './wallpaperDetailsPreview.ts';
 
 export interface WallpaperDetailsDialogProps {
   readonly open: boolean;
   readonly wallpaper: LibraryBrowserItemDTO | null;
   /** Browser-ready original image, Workshop preview, or cached thumbnail URL. */
   readonly previewSrc?: string | null;
+  readonly fallbackPreviewSrc?: string | null;
+  readonly previewPending?: boolean;
   readonly onClose: () => void;
+}
+
+interface WallpaperDetailsDialogViewProps extends WallpaperDetailsDialogProps {
+  readonly onPreviewError?: () => void;
 }
 
 const overlayStyle: CSSProperties = {
@@ -122,8 +134,11 @@ export function WallpaperDetailsDialogView({
   open,
   wallpaper,
   previewSrc = null,
+  fallbackPreviewSrc = null,
+  previewPending = false,
+  onPreviewError,
   onClose,
-}: WallpaperDetailsDialogProps) {
+}: WallpaperDetailsDialogViewProps) {
   if (!open || wallpaper === null) return null;
 
   const title = displayName(wallpaper);
@@ -171,15 +186,18 @@ export function WallpaperDetailsDialogView({
           className="wallpaper-details__preview"
           style={previewFrameStyle}
         >
-          {previewSrc ? (
+          {previewSrc || fallbackPreviewSrc ? (
             <img
               alt={`${title} preview`}
               draggable={false}
-              src={previewSrc}
+              onError={onPreviewError}
+              src={previewSrc ?? fallbackPreviewSrc ?? undefined}
               style={previewStyle}
             />
           ) : (
-            <span style={placeholderStyle}>Preview unavailable</span>
+            <span style={placeholderStyle}>
+              {previewPending ? 'Loading preview…' : 'Preview unavailable'}
+            </span>
           )}
         </div>
 
@@ -206,5 +224,19 @@ export function WallpaperDetailsDialogView({
 }
 
 export default function WallpaperDetailsDialog(props: WallpaperDetailsDialogProps) {
-  return WallpaperDetailsDialogView(props);
+  const { fallbackPreviewSrc = null, previewSrc = null } = props;
+  const [currentSrc, setCurrentSrc] = useState(previewSrc ?? fallbackPreviewSrc);
+  useEffect(() => {
+    setCurrentSrc(previewSrc ?? fallbackPreviewSrc);
+  }, [fallbackPreviewSrc, previewSrc]);
+
+  return WallpaperDetailsDialogView({
+    ...props,
+    fallbackPreviewSrc: null,
+    previewSrc: currentSrc,
+    onPreviewError: () => {
+      if (!currentSrc) return;
+      setCurrentSrc(nextDetailsPreviewSource(currentSrc, fallbackPreviewSrc));
+    },
+  });
 }

@@ -1,4 +1,4 @@
-import { useEffect } from 'react';
+import { useEffect, useLayoutEffect } from 'react';
 import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 
 import type { ShellTheme } from './shellPreferences.ts';
@@ -20,6 +20,14 @@ export function resolveShellTheme(
   prefersDark: boolean,
 ): ResolvedShellTheme {
   return theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
+}
+
+export function resolvedThemeWhenReady(
+  theme: ShellTheme,
+  prefersDark: boolean,
+  ready: boolean,
+): ResolvedShellTheme | null {
+  return ready ? resolveShellTheme(theme, prefersDark) : null;
 }
 
 export async function applyShellThemeToSurface(
@@ -44,15 +52,26 @@ const browserThemeSurface: ShellThemeSurface = {
   },
 };
 
-export function useShellTheme(theme: ShellTheme): void {
-  useEffect(() => {
+export function useShellTheme(theme: ShellTheme, ready = true): void {
+  useLayoutEffect(() => {
+    if (!ready) {
+      delete document.documentElement.dataset.theme;
+      return undefined;
+    }
     const media = window.matchMedia?.('(prefers-color-scheme: dark)');
     const apply = () => {
-      void applyShellThemeToSurface(theme, media?.matches ?? false, browserThemeSurface);
+      browserThemeSurface.setDocumentTheme(resolveShellTheme(theme, media?.matches ?? false));
     };
     apply();
     if (theme !== 'system' || !media) return undefined;
     media.addEventListener('change', apply);
     return () => media.removeEventListener('change', apply);
-  }, [theme]);
+  }, [ready, theme]);
+
+  useEffect(() => {
+    if (!ready) return;
+    void browserThemeSurface.setWindowTheme(nativeWindowTheme(theme)).catch(() => {
+      // Browser, mock, and smoke environments may not expose a Tauri window.
+    });
+  }, [ready, theme]);
 }

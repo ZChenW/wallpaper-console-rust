@@ -33,8 +33,7 @@ import DisplayTargetSelector from './DisplayTargetSelector.tsx';
 import { FeedbackOverlay } from './FeedbackOverlay.tsx';
 import FirstRunSuggestions from './FirstRunSuggestions.tsx';
 import LibraryRepairPrompt from './LibraryRepairPrompt.tsx';
-import WallpaperDetailsDialog from './WallpaperDetailsDialog.tsx';
-import { safeFileSrc } from '../components/WallpaperPreviewMedia.tsx';
+import WallpaperDetailsDialog from './AuthorizedWallpaperDetailsDialog.tsx';
 import { ScanActivity } from './ScanActivity.tsx';
 import { SourcePanel, type SourcePanelNotice } from './SourcePanel.tsx';
 import CompactSettingsPanel from './CompactSettingsPanel.tsx';
@@ -211,7 +210,7 @@ export default function SinglePageShell() {
     saveError: preferencesSaveError,
     updatePreferences,
   } = useShellPreferences(api);
-  useShellTheme(preferences.theme);
+  useShellTheme(preferences.theme, preferencesReady);
 
   const behavior = useWallpaperBehaviorSettings(api);
   const rendererStatuses = useRendererStatuses(api, settingsOpen);
@@ -1260,15 +1259,6 @@ export default function SinglePageShell() {
       <WallpaperDetailsDialog
         open={detailsEntry !== null}
         wallpaper={detailsEntry}
-        previewSrc={detailsEntry
-          ? (
-            detailsEntry.previewPath
-              ? safeFileSrc(detailsEntry.previewPath)
-              : (detailsEntry.type === 'image' || detailsEntry.type === 'gif')
-                ? safeFileSrc(detailsEntry.path)
-                : null
-          )
-          : null}
         onClose={closeDetails}
       />
       <FeedbackOverlay

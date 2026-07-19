@@ -4,6 +4,7 @@ import test from 'node:test';
 import {
   applyShellThemeToSurface,
   resolveShellTheme,
+  resolvedThemeWhenReady,
 } from './useShellTheme.ts';
 
 test('system theme follows the current color-scheme preference', () => {
@@ -11,6 +12,12 @@ test('system theme follows the current color-scheme preference', () => {
   assert.equal(resolveShellTheme('system', true), 'dark');
   assert.equal(resolveShellTheme('light', true), 'light');
   assert.equal(resolveShellTheme('dark', false), 'dark');
+});
+
+test('persisted theme is withheld until preferences are ready', () => {
+  assert.equal(resolvedThemeWhenReady('system', false, false), null);
+  assert.equal(resolvedThemeWhenReady('editorial', true, false), null);
+  assert.equal(resolvedThemeWhenReady('editorial', true, true), 'editorial');
 });
 
 test('theme application updates document palette and delegates system window chrome', async () => {

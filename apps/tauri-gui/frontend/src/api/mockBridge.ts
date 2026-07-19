@@ -936,6 +936,8 @@ const mockBridgeAdapter = {
     return { path, cacheHit: false };
   },
 
+  previewAssetAuthorize: async (path: string, _wallpaperPath: string): Promise<string> => path,
+
   thumbnailCacheStatus: async () => ({
     dir: '/mock/cache/thumbs',
     size: '12.3 MB',

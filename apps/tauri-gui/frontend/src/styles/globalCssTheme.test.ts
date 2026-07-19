@@ -211,6 +211,14 @@ test('dialog and feedback skin lives in CSS while inline layout remains', async 
   assert.match(cardInline, /position:\s*'relative'/);
 });
 
+test('shell stays hidden only while its first resolved theme is unavailable', async () => {
+  const { css } = await sources();
+  const pendingTheme = ruleBody(css, ':root:not([data-theme]) #root');
+
+  assert.match(pendingTheme, /visibility:\s*hidden/);
+  assert.doesNotMatch(css, /:root\[data-theme\] #root\s*\{[^}]*visibility:\s*hidden/s);
+});
+
 test('Flow keeps scrolling in the central stream and reserves independent side rails', async () => {
   const { css } = await sources();
   const viewport = ruleBody(css, '.library-viewport');
