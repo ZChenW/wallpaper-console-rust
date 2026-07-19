@@ -136,6 +136,7 @@ export function FlowIndexRailView({
               data-current={current || undefined}
               data-favorite={favorite || undefined}
               data-selected={selected || undefined}
+              data-wallpaper-id={entry.wallpaperId}
               key={entry.wallpaperId}
             >
               <button

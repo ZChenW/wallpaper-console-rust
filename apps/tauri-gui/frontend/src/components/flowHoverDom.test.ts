@@ -40,7 +40,8 @@ test('Flow hover updates matching DOM nodes and clears stale presentation withou
   stale.setAttribute('data-hovered', 'true');
   const preview = new FakeHoverElement();
   const indexEntry = new FakeHoverElement();
-  root.elements.set('[data-wallpaper-id="42"]', [preview, indexEntry]);
+  const indexItem = new FakeHoverElement();
+  root.elements.set('[data-wallpaper-id="42"]', [preview, indexEntry, indexItem]);
   root.elements.set('stale', [stale]);
 
   applyFlowHover(root, 42);
@@ -49,10 +50,12 @@ test('Flow hover updates matching DOM nodes and clears stale presentation withou
   assert.equal(stale.attributes.has('data-hovered'), false);
   assert.equal(preview.attributes.get('data-hovered'), 'true');
   assert.equal(indexEntry.attributes.get('data-hovered'), 'true');
+  assert.equal(indexItem.attributes.get('data-hovered'), 'true');
 
   applyFlowHover(root, null);
 
   assert.equal(root.attributes.has('data-hovering'), false);
   assert.equal(preview.attributes.has('data-hovered'), false);
   assert.equal(indexEntry.attributes.has('data-hovered'), false);
+  assert.equal(indexItem.attributes.has('data-hovered'), false);
 });

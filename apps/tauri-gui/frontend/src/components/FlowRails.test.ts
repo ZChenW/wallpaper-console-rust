@@ -93,8 +93,14 @@ test('index rail exposes exact progress and visible additive persistent state te
     onHover: () => undefined,
     onOpenIndex: () => undefined,
   });
+  const [firstIndexItem] = findElements(
+    tree,
+    (element) => element.type === 'li'
+      && element.props.className === 'flow-index-rail__item',
+  );
   const markup = renderToStaticMarkup(tree);
 
+  assert.equal(firstIndexItem.props['data-wallpaper-id'], first.wallpaperId);
   assert.match(markup, /<nav[^>]+aria-label="Loaded wallpaper index"/);
   assert.match(markup, /24 loaded \/ 72 total/);
   assert.match(markup, /type="button"[^>]*>Index</);
@@ -128,11 +134,13 @@ test('index rail reserves aria-current for the runtime wallpaper instead of the 
   });
   const [centeredButton] = findElements(
     tree,
-    (element) => element.props['data-wallpaper-id'] === centered.wallpaperId,
+    (element) => element.type === 'button'
+      && element.props['data-wallpaper-id'] === centered.wallpaperId,
   );
   const [currentButton] = findElements(
     tree,
-    (element) => element.props['data-wallpaper-id'] === current.wallpaperId,
+    (element) => element.type === 'button'
+      && element.props['data-wallpaper-id'] === current.wallpaperId,
   );
 
   assert.equal(centeredButton.props['aria-current'], undefined);
@@ -184,7 +192,11 @@ test('index rail native buttons emit activation and pointer hover without treati
     onOpenIndex: () => { opened += 1; },
   });
   const [indexButton] = findElements(tree, (element) => element.props['data-flow-index-open'] === true);
-  const [nameButton] = findElements(tree, (element) => element.props['data-wallpaper-id'] === 17);
+  const [nameButton] = findElements(
+    tree,
+    (element) => element.type === 'button'
+      && element.props['data-wallpaper-id'] === 17,
+  );
 
   assert.equal(indexButton.type, 'button');
   assert.equal(nameButton.type, 'button');
