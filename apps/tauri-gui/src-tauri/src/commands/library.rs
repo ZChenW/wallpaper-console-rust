@@ -47,10 +47,11 @@ pub async fn library_page_gui(
         let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
         let routing = s.backend_routing();
+        let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         let items = page
             .items
             .into_iter()
-            .map(|entry| dto_from_entry_with_routing(entry, &routing))
+            .map(|entry| dto_from_entry_with_routing(entry, &routing, Some(&mut we_compat)))
             .collect::<Vec<_>>();
         let dto_map_end = t0.elapsed();
         maybe_write_library_page_debug_log(
@@ -117,9 +118,10 @@ fn browser_query_from_dto(
 fn browser_item_dto(
     item: wc_storage::sqlite::LibraryBrowserItem,
     routing: &wc_core::backend_routing::BackendRouting,
+    we_compat: Option<&mut wc_storage::we_compat::WeCompatCache>,
 ) -> LibraryBrowserItemDto {
     LibraryBrowserItemDto {
-        wallpaper: dto_from_entry_with_routing(item.entry, routing),
+        wallpaper: dto_from_entry_with_routing(item.entry, routing, we_compat),
         wallpaper_id: item.wallpaper_id,
         favorite: item.favorite,
         author: item.author,
@@ -143,6 +145,7 @@ fn library_browser_page_for_storage(
     let query = browser_query_from_dto(query)?;
     let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load()?;
     Ok(LibraryBrowserPageDto {
         revision: page.revision,
         next_cursor: page.next_cursor,
@@ -150,7 +153,7 @@ fn library_browser_page_for_storage(
         items: page
             .items
             .into_iter()
-            .map(|item| browser_item_dto(item, &routing))
+            .map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
             .collect(),
     })
 }
@@ -164,6 +167,8 @@ fn library_browser_page_for_service(
         browser_query_from_dto(query).map_err(crate::library_service::LibraryServiceError::from)?;
     let page = service.page(&s.cd, &query)?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load()
+        .map_err(crate::library_service::LibraryServiceError::from)?;
     Ok(LibraryBrowserPageDto {
         revision: page.revision,
         next_cursor: page.next_cursor.clone(),
@@ -172,7 +177,7 @@ fn library_browser_page_for_service(
             .items
             .iter()
             .cloned()
-            .map(|item| browser_item_dto(item, &routing))
+            .map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
             .collect(),
     })
 }
@@ -183,8 +188,11 @@ fn library_browser_random_for_storage(
 ) -> Result<Option<LibraryBrowserItemDto>, String> {
     let query = browser_query_from_dto(query).map_err(|error| error.to_string())?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
     wc_storage::sqlite::browser_library_random(&s.cd, &query)
-        .map(|item| item.map(|item| browser_item_dto(item, &routing)))
+        .map(|item| {
+            item.map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
+        })
         .map_err(|error| error.to_string())
 }
 
@@ -301,12 +309,13 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
         let page = wc_storage::sqlite::favorites_page_sqlite(&s.cd, offset, limit)
             .map_err(|e| e.to_string())?;
         let routing = s.backend_routing();
+        let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         Ok(LibraryPageDto {
             total: page.total,
             items: page
                 .items
                 .into_iter()
-                .map(|entry| dto_from_entry_with_routing(entry, &routing))
+                .map(|entry| dto_from_entry_with_routing(entry, &routing, Some(&mut we_compat)))
                 .collect(),
         })
     })

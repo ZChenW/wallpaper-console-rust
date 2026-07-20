@@ -4,6 +4,7 @@ use std::fs::File;
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 
+use rusqlite::params;
 use wc_storage::StorageApi;
 
 const SQLITE_MAGIC: &[u8; 16] = b"SQLite format 3\0";
@@ -110,6 +111,104 @@ pub fn load_source_roots(storage: &StorageApi) -> Result<Vec<PathBuf>, String> {
         .map_err(|error| error.to_string())
 }
 
+fn stored_path_matches(stored: &str, path: &Path, canonical: &Path) -> bool {
+    if stored.is_empty() {
+        return false;
+    }
+    let original = path.to_string_lossy();
+    let canon = canonical.to_string_lossy();
+    if stored == original || stored == canon {
+        return true;
+    }
+    Path::new(stored)
+        .canonicalize()
+        .ok()
+        .is_some_and(|stored_canonical| stored_canonical == canonical)
+}
+
+fn path_exists_in_table(
+    conn: &rusqlite::Connection,
+    sql: &str,
+    path: &Path,
+    canonical: &Path,
+) -> Result<bool, String> {
+    let original = path.to_string_lossy();
+    let canon = canonical.to_string_lossy();
+    conn.query_row(sql, params![original.as_ref(), canon.as_ref()], |row| row.get(0))
+        .map_err(|error| error.to_string())
+}
+
+/// Check whether `path` is recorded in library / current / history / display state.
+pub fn path_is_recorded_wallpaper_path(
+    storage: &StorageApi,
+    path: &Path,
+    canonical: &Path,
+) -> Result<bool, String> {
+    if let Some(current) = storage
+        .current_read()
+        .map_err(|error| error.to_string())?
+        .filter(|value| !value.is_empty())
+    {
+        if stored_path_matches(&current, path, canonical) {
+            return Ok(true);
+        }
+    }
+
+    if !storage.cd.db_path().exists() {
+        return Ok(false);
+    }
+
+    let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd)
+        .map_err(|error| error.to_string())?;
+
+    if path_exists_in_table(
+        &conn,
+        "SELECT EXISTS(
+            SELECT 1 FROM display_state
+            WHERE wallpaper_path IN (?1, ?2) AND wallpaper_path != ''
+        )",
+        path,
+        canonical,
+    )? {
+        return Ok(true);
+    }
+    if path_exists_in_table(
+        &conn,
+        "SELECT EXISTS(SELECT 1 FROM favorites WHERE path IN (?1, ?2))",
+        path,
+        canonical,
+    )? {
+        return Ok(true);
+    }
+    if path_exists_in_table(
+        &conn,
+        "SELECT EXISTS(SELECT 1 FROM wallpapers WHERE path IN (?1, ?2))",
+        path,
+        canonical,
+    )? {
+        return Ok(true);
+    }
+    if path_exists_in_table(
+        &conn,
+        "SELECT EXISTS(
+            SELECT 1 FROM wallpapers
+            WHERE preview_path IN (?1, ?2)
+              AND preview_path IS NOT NULL
+              AND preview_path != ''
+        )",
+        path,
+        canonical,
+    )? {
+        return Ok(true);
+    }
+    path_exists_in_table(
+        &conn,
+        "SELECT EXISTS(SELECT 1 FROM history WHERE path IN (?1, ?2))",
+        path,
+        canonical,
+    )
+}
+
 /// Paths recorded in library / current / history / display state that may sit
 /// outside currently configured sources (deleted source, manual apply, etc.).
 pub fn load_recorded_wallpaper_paths(storage: &StorageApi) -> Result<Vec<PathBuf>, String> {
@@ -165,9 +264,18 @@ pub fn load_recorded_wallpaper_paths(storage: &StorageApi) -> Result<Vec<PathBuf
 
 /// Convenience wrapper used by Tauri commands.
 pub fn ensure_command_wallpaper_path(path: &str, storage: &StorageApi) -> Result<PathBuf, String> {
+    let path = Path::new(path);
     let sources = load_source_roots(storage)?;
-    let recorded = load_recorded_wallpaper_paths(storage)?;
-    ensure_wallpaper_access_path(Path::new(path), &sources, &recorded)
+    if let Ok(canonical) = ensure_path_in_sources(path, &sources) {
+        return Ok(canonical);
+    }
+
+    let canonical = canonicalize_existing(path)?;
+    if path_is_recorded_wallpaper_path(storage, path, &canonical)? {
+        Ok(canonical)
+    } else {
+        Err("path is outside configured wallpaper sources".into())
+    }
 }
 
 #[cfg(test)]
@@ -175,6 +283,7 @@ mod tests {
     use super::*;
     use std::fs;
     use std::os::unix::fs::symlink;
+    use wc_config::ConfigDirExt;
 
     #[test]
     fn rejects_string_prefix_false_positive() {
@@ -307,5 +416,62 @@ mod tests {
         let missing = tmp.path().join("missing.bak");
         let error = ensure_sqlite_restore_file(&missing).unwrap_err();
         assert!(error.contains("not found"), "{error}");
+    }
+
+    #[test]
+    fn ensure_command_wallpaper_path_allows_recorded_orphan_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let orphan_dir = tmp.path().join("orphan");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&orphan_dir).unwrap();
+        let orphan = orphan_dir.join("old.jpg");
+        std::fs::write(&orphan, b"jpg").unwrap();
+
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+        let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend) VALUES (?1, 'image', 'jpg', 'awww')",
+            [orphan.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+
+        let allowed = ensure_command_wallpaper_path(&orphan.to_string_lossy(), &storage).unwrap();
+        assert_eq!(allowed, orphan.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn ensure_command_wallpaper_path_rejects_unrecorded_outside_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.jpg");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+
+        let error = ensure_command_wallpaper_path(&secret.to_string_lossy(), &storage).unwrap_err();
+        assert!(
+            error.contains("outside configured wallpaper sources"),
+            "{error}"
+        );
     }
 }

@@ -548,19 +548,27 @@ pub fn format_bytes(bytes: u64) -> String {
 
 #[cfg(test)]
 pub fn dto_from_entry(entry: WallpaperEntry) -> WallpaperDto {
-    dto_from_entry_with_routing(entry, &wc_core::backend_routing::BackendRouting::default())
+    dto_from_entry_with_routing(
+        entry,
+        &wc_core::backend_routing::BackendRouting::default(),
+        None,
+    )
 }
 
 pub fn dto_from_entry_with_routing(
     entry: WallpaperEntry,
     routing: &wc_core::backend_routing::BackendRouting,
+    we_compat: Option<&mut wc_storage::we_compat::WeCompatCache>,
 ) -> WallpaperDto {
     let project = entry.project.clone();
 
     let cached_failure = if entry.file_type == FileType::WeScene {
-        wc_storage::we_compat::lookup_failure(entry.path.as_ref())
-            .ok()
-            .flatten()
+        match we_compat {
+            Some(cache) => cache.lookup_failure(entry.path.as_ref()).ok().flatten(),
+            None => wc_storage::we_compat::lookup_failure(entry.path.as_ref())
+                .ok()
+                .flatten(),
+        }
     } else {
         None
     };
@@ -650,7 +658,7 @@ mod tests {
         let routing =
             wc_core::backend_routing::BackendRouting::from_raw("mpvpaper", "awww", "mpvpaper");
 
-        let dto = dto_from_entry_with_routing(entry, &routing);
+        let dto = dto_from_entry_with_routing(entry, &routing, None);
 
         assert_eq!(dto.backend, "mpvpaper");
         assert_eq!(dto.apply_backend.as_deref(), Some("mpvpaper"));
