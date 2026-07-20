@@ -57,20 +57,6 @@ const RUST_STEPS: &[Step] = &[
         program: "cargo",
         args: &["test", "--workspace"],
     },
-    Step {
-        name: "Library 10k performance gate",
-        cwd: StepCwd::RepoRoot,
-        program: "cargo",
-        args: &[
-            "test",
-            "-p",
-            "wc-storage",
-            "--test",
-            "library_browser_perf",
-            "--",
-            "--nocapture",
-        ],
-    },
 ];
 
 const FRONTEND_STEPS: &[Step] = &[
@@ -107,12 +93,20 @@ const FRONTEND_STEPS: &[Step] = &[
     },
 ];
 
-const DRIFT_STEPS: &[Step] = &[Step {
-    name: "Runtime/config drift",
-    cwd: StepCwd::RepoRoot,
-    program: "bash",
-    args: &["scripts/check_runtime_config_drift.sh"],
-}];
+const DRIFT_STEPS: &[Step] = &[
+    Step {
+        name: "Runtime/config drift",
+        cwd: StepCwd::RepoRoot,
+        program: "bash",
+        args: &["scripts/check_runtime_config_drift.sh"],
+    },
+    Step {
+        name: "Tauri before-command exit capture",
+        cwd: StepCwd::RepoRoot,
+        program: "bash",
+        args: &["scripts/test_tauri_before_commands_unit.sh"],
+    },
+];
 
 fn main() -> ExitCode {
     match run() {
@@ -308,7 +302,7 @@ mod tests {
             RUST_STEPS.len() + FRONTEND_STEPS.len() + DRIFT_STEPS.len()
         );
         assert_eq!(names.first(), Some(&"Rust format"));
-        assert_eq!(names.last(), Some(&"Runtime/config drift"));
+        assert_eq!(names.last(), Some(&"Tauri before-command exit capture"));
     }
 
     #[test]
@@ -410,6 +404,39 @@ mod tests {
         assert!(
             smoke.contains("playwright test") || smoke.contains("playwright"),
             "smoke must still run Playwright tests; got: {smoke}"
+        );
+    }
+
+    #[test]
+    fn smoke_script_runs_only_smoke_spec() {
+        let package_json =
+            std::fs::read_to_string(repo_root().join("apps/tauri-gui/frontend/package.json"))
+                .expect("frontend package.json must be readable");
+        let smoke = package_json_script_body(&package_json, "smoke")
+            .expect("package.json must declare a smoke script");
+        assert!(
+            smoke.contains("smoke.spec.ts"),
+            "smoke must target smoke.spec.ts explicitly; got: {smoke}"
+        );
+        assert!(
+            !smoke.contains("library-perf.spec.ts"),
+            "smoke must not include library performance specs; got: {smoke}"
+        );
+    }
+
+    #[test]
+    fn rust_verify_matrix_runs_library_perf_only_via_workspace_tests() {
+        assert!(
+            !RUST_STEPS.iter().any(|step| step.name.contains("10k")),
+            "RUST_STEPS must not duplicate the library 10k perf gate covered by cargo test --workspace"
+        );
+        assert_eq!(
+            FRONTEND_STEPS
+                .iter()
+                .filter(|step| step.name.contains("performance"))
+                .count(),
+            1,
+            "frontend performance gate must run exactly once via perf:library"
         );
     }
 

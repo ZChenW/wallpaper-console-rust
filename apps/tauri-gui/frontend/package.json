@@ -9,7 +9,7 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test:unit": "node --experimental-strip-types --test 'src/**/*.test.ts'",
-    "smoke": "node e2e/ensure-chromium.mjs && playwright test --config e2e/playwright.config.ts",
+    "smoke": "node e2e/ensure-chromium.mjs && playwright test --config e2e/playwright.config.ts smoke.spec.ts",
     "perf:library": "node e2e/ensure-chromium.mjs && node e2e/perf-report.mjs"
   },
   "dependencies": {
