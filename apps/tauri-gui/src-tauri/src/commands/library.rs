@@ -365,10 +365,13 @@ fn build_library_source_status(
 ) -> Result<LibrarySourceStatusDto, String> {
     let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
     let sqlite_ready = s.cd.db_path().exists();
-    let sqlite_rows = wc_storage::sqlite::source_backed_library_count(&s.cd).unwrap_or(0);
-    let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
-        .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0);
+    let sqlite_rows =
+        wc_storage::sqlite::source_backed_library_count(&s.cd).map_err(|e| e.to_string())?;
+    let tsv_rows = match std::fs::read_to_string(s.cd.library_tsv_path()) {
+        Ok(content) => content.lines().filter(|l| !l.trim().is_empty()).count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.to_string()),
+    };
     let stale = source_count > 0 && sqlite_rows == 0 && tsv_rows > 0;
     let message = if source_count == 0 {
         "No sources configured. Add a source or scan Wallpaper Engine.".to_string()
@@ -793,6 +796,62 @@ mod tests {
         assert!(status.stale);
         assert!(status.sqlite_ready);
         assert!(status.message.contains("legacy library.tsv"));
+    }
+
+    #[test]
+    fn build_library_source_status_propagates_sqlite_count_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let conn = rusqlite::Connection::open(s.cd.db_path()).unwrap();
+        conn.execute(
+            "ALTER TABLE wallpaper_sources RENAME TO wallpaper_sources_backup",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = super::build_library_source_status(&s).unwrap_err();
+        assert!(error.contains("wallpaper_sources"));
+    }
+
+    #[test]
+    fn build_library_source_status_treats_missing_tsv_as_zero_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let status = super::build_library_source_status(&s).unwrap();
+        assert_eq!(status.tsv_rows, 0);
+    }
+
+    #[test]
+    fn build_library_source_status_propagates_non_missing_tsv_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let tsv_path = cd.library_tsv_path();
+        let _ = std::fs::remove_file(&tsv_path);
+        std::fs::create_dir_all(&tsv_path).unwrap();
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let error = super::build_library_source_status(&s).unwrap_err();
+        assert!(!error.is_empty());
     }
 
     #[test]

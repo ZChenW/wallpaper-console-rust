@@ -136,35 +136,58 @@ fn build_diagnostics_content_with_library(
 
     match wc_storage::sqlite::library_counts_sqlite(&s.cd) {
         Ok(c) => {
-            out.push_str("library_counts=ok\n");
+            out.push_str("library_counts_status=ok\n");
             out.push_str(&format!("library_total={}\n", c.total));
             out.push_str(&format!("library_images={}\n", c.images));
             out.push_str(&format!("library_gifs={}\n", c.gifs));
             out.push_str(&format!("library_videos={}\n", c.videos));
         }
         Err(_) => {
-            out.push_str("library_counts=error\n");
-            out.push_str("library_total=0\n");
-            out.push_str("library_images=0\n");
-            out.push_str("library_gifs=0\n");
-            out.push_str("library_videos=0\n");
+            out.push_str("library_counts_status=error\n");
         }
     }
 
-    out.push_str(&format!(
-        "sources={}\n",
-        s.sources_list().unwrap_or_default().len()
-    ));
+    match s.sources_list() {
+        Ok(sources) => {
+            out.push_str("sources_status=ok\n");
+            out.push_str(&format!("sources={}\n", sources.len()));
+        }
+        Err(_) => {
+            out.push_str("sources_status=error\n");
+        }
+    }
 
-    let current = s.current_read().unwrap_or_default().unwrap_or_default();
-    let current_basename = std::path::Path::new(&current)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    out.push_str(&format!("current={}\n", current_basename));
+    match s.current_read() {
+        Ok(Some(current)) => {
+            out.push_str("current_status=ok\n");
+            let current_basename = std::path::Path::new(&current)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            out.push_str(&format!("current={}\n", current_basename));
+        }
+        Ok(None) => {
+            out.push_str("current_status=ok\n");
+            out.push_str("current=\n");
+        }
+        Err(_) => {
+            out.push_str("current_status=error\n");
+        }
+    }
 
-    let last_backend = s.last_backend_read().unwrap_or(None).unwrap_or_default();
-    out.push_str(&format!("last_backend={}\n", last_backend));
+    match s.last_backend_read() {
+        Ok(Some(last_backend)) => {
+            out.push_str("last_backend_status=ok\n");
+            out.push_str(&format!("last_backend={}\n", last_backend));
+        }
+        Ok(None) => {
+            out.push_str("last_backend_status=ok\n");
+            out.push_str("last_backend=\n");
+        }
+        Err(_) => {
+            out.push_str("last_backend_status=error\n");
+        }
+    }
 
     let config = wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(s);
     let lwe = wc_backend::linux_wallpaperengine::status(&config);
@@ -310,6 +333,10 @@ mod tests {
             "missing sqlite_integrity: {content}"
         );
         assert!(
+            content.contains("library_counts_status=ok"),
+            "missing library_counts_status: {content}"
+        );
+        assert!(
             content.contains("library_total="),
             "missing library_total: {content}"
         );
@@ -325,10 +352,22 @@ mod tests {
             content.contains("library_videos="),
             "missing library_videos: {content}"
         );
+        assert!(
+            content.contains("sources_status=ok"),
+            "missing sources_status: {content}"
+        );
         assert!(content.contains("sources="), "missing sources: {content}");
+        assert!(
+            content.contains("current_status=ok"),
+            "missing current_status: {content}"
+        );
         assert!(
             content.contains("current=wallpaper.jpg"),
             "missing current basename: {content}"
+        );
+        assert!(
+            content.contains("last_backend_status=ok"),
+            "missing last_backend_status: {content}"
         );
         assert!(
             content.contains("last_backend=awww"),
@@ -470,6 +509,25 @@ mod tests {
         assert!(
             !content.contains(&secret_lwe_path),
             "configured LWE path must not leak into diagnostics: {content}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_reports_library_count_errors_without_zero_placeholders() {
+        let (_tmp, s) = diagnostics_storage();
+        let conn = rusqlite::Connection::open(s.cd.db_path()).unwrap();
+        conn.execute("ALTER TABLE wallpapers RENAME TO wallpapers_backup", [])
+            .unwrap();
+        drop(conn);
+
+        let content = build_diagnostics_content(&s, &idle_scan_snapshot());
+        assert!(
+            content.contains("library_counts_status=error"),
+            "expected library_counts_status=error: {content}"
+        );
+        assert!(
+            !content.contains("library_total=0"),
+            "must not fabricate zero counts on read failure: {content}"
         );
     }
 }
