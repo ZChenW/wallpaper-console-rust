@@ -197,7 +197,7 @@ pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, &s) {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
                 return fail(e);
             }
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -224,7 +224,7 @@ pub async fn apply_action(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, &s) {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, s) {
                 return fail(e);
             }
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
@@ -425,7 +425,7 @@ pub async fn restore() -> CommandResult {
 pub async fn we_clear_backend_error(path: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, &s) {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
                 return fail(e);
             }
             match wc_storage::we_compat::clear_failure(&path) {
@@ -515,7 +515,7 @@ pub async fn apply_to_display(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, &s) {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, s) {
                 return fail(e);
             }
             let apply_request = match apply_request_from_parts(

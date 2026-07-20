@@ -57,6 +57,7 @@ pub fn ensure_path_in_config_dir(path: &Path, config_dir: &Path) -> Result<PathB
 
 /// Allow a path that is under a configured source **or** exactly matches a
 /// recorded library / current / history / display-state path.
+#[cfg(test)]
 pub fn ensure_wallpaper_access_path(
     path: &Path,
     sources: &[impl AsRef<Path>],
@@ -209,59 +210,6 @@ pub fn path_is_recorded_wallpaper_path(
         path,
         canonical,
     )
-}
-
-/// Paths recorded in library / current / history / display state that may sit
-/// outside currently configured sources (deleted source, manual apply, etc.).
-pub fn load_recorded_wallpaper_paths(storage: &StorageApi) -> Result<Vec<PathBuf>, String> {
-    let mut recorded = Vec::new();
-
-    if let Some(current) = storage
-        .current_read()
-        .map_err(|error| error.to_string())?
-        .filter(|value| !value.is_empty())
-    {
-        recorded.push(PathBuf::from(current));
-    }
-
-    if let Ok(displays) = storage.display_state_list() {
-        for row in displays {
-            if !row.wallpaper_path.is_empty() {
-                recorded.push(PathBuf::from(row.wallpaper_path));
-            }
-        }
-    }
-
-    if let Ok(favorites) = storage.favorites_list() {
-        for path in favorites {
-            if !path.is_empty() {
-                recorded.push(PathBuf::from(path));
-            }
-        }
-    }
-
-    if storage.cd.db_path().exists() {
-        if let Ok(conn) = wc_storage::sqlite::open_runtime_connection(&storage.cd) {
-            let mut collect = |sql: &str| {
-                if let Ok(mut statement) = conn.prepare(sql) {
-                    if let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) {
-                        for path in rows.flatten() {
-                            if !path.is_empty() {
-                                recorded.push(PathBuf::from(path));
-                            }
-                        }
-                    }
-                }
-            };
-            collect("SELECT path FROM wallpapers");
-            collect(
-                "SELECT preview_path FROM wallpapers WHERE preview_path IS NOT NULL AND preview_path != ''",
-            );
-            collect("SELECT path FROM history");
-        }
-    }
-
-    Ok(recorded)
 }
 
 /// Convenience wrapper used by Tauri commands.

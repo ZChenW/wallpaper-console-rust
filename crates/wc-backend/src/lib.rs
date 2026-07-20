@@ -426,6 +426,7 @@ fn rollback_visual_fallback_after_target_failure_with_runtime(
     }
 }
 
+#[cfg(test)]
 pub(crate) fn whoami() -> String {
     match current_process_user() {
         ProcessUserScope::Name(name) => name,

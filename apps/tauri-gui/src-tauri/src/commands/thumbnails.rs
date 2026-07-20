@@ -83,8 +83,6 @@ pub async fn preview_asset_authorize(
     path: String,
     wallpaper_path: String,
 ) -> Result<String, String> {
-    use tauri::Manager;
-
     tauri::async_runtime::spawn_blocking(move || {
         let storage = storage()?;
         authorize_preview_asset_with(
