@@ -3,8 +3,30 @@ use super::common::{
 };
 use super::path_guard;
 use rusqlite::params;
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
+use tauri::Manager;
 use wc_storage::StorageApi;
+
+fn preview_asset_scope_cache() -> &'static Mutex<HashSet<PathBuf>> {
+    static CACHE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+fn allow_preview_asset(app: &tauri::AppHandle, canonical: &Path) -> Result<(), String> {
+    let mut granted = preview_asset_scope_cache()
+        .lock()
+        .map_err(|_| "preview asset scope cache lock poisoned".to_string())?;
+    if granted.contains(canonical) {
+        return Ok(());
+    }
+    app.asset_protocol_scope()
+        .allow_file(canonical)
+        .map_err(|error| error.to_string())?;
+    granted.insert(canonical.to_path_buf());
+    Ok(())
+}
 
 fn ensure_preview_asset_path(
     path: &Path,
@@ -68,11 +90,7 @@ pub async fn preview_asset_authorize(
         authorize_preview_asset_with(
             Path::new(&path),
             |candidate| ensure_preview_asset_path(candidate, &wallpaper_path, storage),
-            |canonical| {
-                app.asset_protocol_scope()
-                    .allow_file(canonical)
-                    .map_err(|error| error.to_string())
-            },
+            |canonical| allow_preview_asset(&app, canonical),
         )
     })
     .await
