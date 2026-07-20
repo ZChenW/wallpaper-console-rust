@@ -170,7 +170,7 @@ export default function SinglePageShell() {
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
   const libraryReadyDelivery = useRef(createLibraryReadyDelivery(api.libraryReady)).current;
-  const WATCHDOG_MS = 500;
+  const WATCHDOG_MS = 3000;
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -338,10 +338,10 @@ export default function SinglePageShell() {
     }
   }, [initialRequestTimedOut, libraryTimeoutResolved]);
 
-  // ── initial request watchdog (500 ms) ──────────────────────────────────
+  // ── initial request watchdog (3 s) ─────────────────────────────────────
   // If the first browser request never resolves (perpetual loading),
   // surface an interactive retry after a bounded wait. Each retry arms a
-  // fresh 500 ms watchdog even when browser.initialLoading stays true.
+  // fresh 3 s watchdog even when browser.initialLoading stays true.
   const armWatchdog = useCallback(() => {
     return libraryWatchdog.arm(WATCHDOG_MS, () => {
       setInitialRequestTimedOut(true);
