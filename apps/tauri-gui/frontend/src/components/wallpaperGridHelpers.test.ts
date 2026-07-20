@@ -6,6 +6,7 @@ import {
   anchoredScrollTopForLayoutChange,
   captureStableViewportAnchor,
   previewAssetPath,
+  shouldApplyFocusToken,
   shouldPauseThumbnailReveal,
   shouldStartAnimatedHover,
   shouldRequestNextPage,
@@ -61,6 +62,14 @@ test('animated preview is exposed only for a hovered GIF while scrolling is idle
   assert.equal(animatedPreviewPath(gif, true, true), null);
   assert.equal(animatedPreviewPath(gif, true, false, true), null);
   assert.equal(animatedPreviewPath(entry('/project', '/project/preview.jpg'), true, false), null);
+});
+
+test('shouldApplyFocusToken runs only when the token advances', () => {
+  assert.equal(shouldApplyFocusToken(0, 0), false);
+  assert.equal(shouldApplyFocusToken(0, 1), true);
+  assert.equal(shouldApplyFocusToken(1, 1), false);
+  assert.equal(shouldApplyFocusToken(1, 2), true);
+  assert.equal(shouldApplyFocusToken(2, 1), true);
 });
 
 test('thumbnail reveal pauses while the grid is inactive or scrolling', () => {

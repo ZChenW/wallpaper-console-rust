@@ -8,6 +8,7 @@ import {
   anchoredScrollTopForLayoutChange,
   captureStableViewportAnchor,
   restoreStableViewportAnchor,
+  shouldApplyFocusToken,
   shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
@@ -128,6 +129,9 @@ function WallpaperGridImpl({
   const colCountRef = useRef(colCount);
   const entriesLengthRef = useRef(entries.length);
   const initialAnchorAppliedRef = useRef(false);
+  const lastHandledFocusTokenRef = useRef(0);
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
   activeRef.current = active;
@@ -308,11 +312,14 @@ function WallpaperGridImpl({
   }, [active, colCount, entries, initialAnchorWallpaperId, publishViewportCenter, virtualizer]);
 
   useEffect(() => {
-    if (!active || focusToken <= 0 || entries.length === 0) return;
+    if (!active || !shouldApplyFocusToken(lastHandledFocusTokenRef.current, focusToken)) return;
+    lastHandledFocusTokenRef.current = focusToken;
+    const currentEntries = entriesRef.current;
+    if (currentEntries.length === 0) return;
     const anchorIndex = initialAnchorWallpaperId === null
       ? 0
-      : entries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
-    const entry = entries[anchorIndex >= 0 ? anchorIndex : 0];
+      : currentEntries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
+    const entry = currentEntries[anchorIndex >= 0 ? anchorIndex : 0];
     if (!entry) return;
     virtualizer.scrollToIndex(Math.floor((anchorIndex >= 0 ? anchorIndex : 0) / colCount), {
       align: 'start',
@@ -324,7 +331,7 @@ function WallpaperGridImpl({
         )
         ?.focus();
     }));
-  }, [active, colCount, entries, focusToken, initialAnchorWallpaperId, virtualizer]);
+  }, [active, colCount, focusToken, initialAnchorWallpaperId, virtualizer]);
 
   useEffect(() => {
     const previous = previousEntriesRef.current;

@@ -177,3 +177,7 @@ export function shouldResetScroll(
 ): boolean {
   return prevResetKey !== resetKey;
 }
+
+export function shouldApplyFocusToken(prevToken: number, nextToken: number): boolean {
+  return nextToken > 0 && nextToken !== prevToken;
+}

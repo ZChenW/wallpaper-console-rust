@@ -79,17 +79,24 @@ export class ThumbnailStore {
 
   forget(paths: string[]): void {
     this.queue.forget(paths);
+    for (const path of paths) {
+      this.cache.delete(path);
+      this.failures.delete(path);
+      this.scheduleNotify(path);
+    }
   }
 
   reset(): void {
+    const listenerPaths = Array.from(this.listeners.keys());
     this.queue.reset();
     this.cache.clear();
     this.failures.clear();
-    this.listeners.clear();
     this.pendingNotifyPaths.clear();
     this.pausedNotifyPaths.clear();
     this.notifyScheduled = false;
-    this.revealPaused = false;
+    for (const path of listenerPaths) {
+      this.scheduleNotify(path);
+    }
   }
 
   snapshot() {

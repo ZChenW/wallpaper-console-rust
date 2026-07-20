@@ -28,6 +28,7 @@ import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
 import { useApplyQueue } from '../hooks/useApplyQueue.ts';
+import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
 import { buildDisplayTargetModel } from './displayTargets.ts';
 import DisplayTargetSelector from './DisplayTargetSelector.tsx';
@@ -164,6 +165,7 @@ export default function SinglePageShell() {
   const libraryViewportAnchorRef = useRef<number | null>(null);
   const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
   const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
+  const { reset: resetThumbnails } = useThumbnailStore();
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
@@ -294,6 +296,14 @@ export default function SinglePageShell() {
       unlisten?.();
     };
   }, []);
+
+  useEffect(() => {
+    const handler = () => {
+      resetThumbnails();
+    };
+    window.addEventListener(LIBRARY_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(LIBRARY_REFRESH_EVENT, handler);
+  }, [resetThumbnails]);
 
   const browser = useLibraryBrowser({
     sourceFilter: effectiveSrcFilter,
