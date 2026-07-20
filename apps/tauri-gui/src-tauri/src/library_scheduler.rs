@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -479,7 +479,7 @@ pub fn start_library_scheduler(
         let scheduler = Arc::new(Mutex::new(LibraryScheduler::new(clock.clone(), [])));
         let (watch_tx, watch_rx) = mpsc::channel();
         let mut watch_registry = WatchRegistry::default();
-        let mut last_catalog_refresh = Instant::now() - Duration::from_secs(5);
+        let mut last_catalog_refresh = catalog_refresh_anchor(Instant::now());
 
         loop {
             while let Ok(control) = control_rx.try_recv() {
@@ -639,6 +639,10 @@ pub fn start_library_scheduler(
     LibrarySchedulerHandle { sender: control_tx }
 }
 
+fn catalog_refresh_anchor(now: Instant) -> Instant {
+    now.checked_sub(Duration::from_secs(5)).unwrap_or(now)
+}
+
 #[cfg(target_os = "linux")]
 fn spawn_recursive_watcher(
     source_id: i64,
@@ -679,7 +683,8 @@ fn run_recursive_watcher(
     // SAFETY: `inotify_init1` returned a new descriptor owned by this worker.
     let inotify = unsafe { OwnedFd::from_raw_fd(raw_fd) };
     let fd = inotify.as_raw_fd();
-    if add_recursive_watches(fd, root, recursive).is_err() {
+    let mut watches = InotifyWatchTree::new(root, recursive);
+    if add_recursive_watches(fd, &mut watches).is_err() {
         let _ = sender.send(WatchMessage::Failed(source_id, generation));
         return;
     }
@@ -689,23 +694,31 @@ fn run_recursive_watcher(
     while !stop.load(Ordering::Acquire) {
         let read = unsafe { libc::read(fd, buffer.as_mut_ptr().cast(), buffer.len()) };
         if read > 0 {
-            let mut offset = 0usize;
-            let mut overflow = false;
-            while offset + std::mem::size_of::<libc::inotify_event>() <= read as usize {
-                let event =
-                    unsafe { &*(buffer.as_ptr().add(offset).cast::<libc::inotify_event>()) };
-                overflow |= event.mask & libc::IN_Q_OVERFLOW != 0;
-                offset = offset
-                    .saturating_add(std::mem::size_of::<libc::inotify_event>())
-                    .saturating_add(event.len as usize);
-            }
-            if overflow {
-                let _ = sender.send(WatchMessage::Overflow);
-            } else if add_recursive_watches(fd, root, recursive).is_err() {
-                let _ = sender.send(WatchMessage::Failed(source_id, generation));
-                break;
-            } else {
-                let _ = sender.send(WatchMessage::Changed(source_id, generation));
+            match process_inotify_buffer(fd, &mut watches, &buffer[..read as usize]) {
+                Ok(InotifyBatch {
+                    overflow: true,
+                    changed: _,
+                }) => {
+                    let _ = sender.send(WatchMessage::Overflow);
+                    if add_recursive_watches(fd, &mut watches).is_err() {
+                        let _ = sender.send(WatchMessage::Failed(source_id, generation));
+                        break;
+                    }
+                }
+                Ok(InotifyBatch {
+                    overflow: false,
+                    changed: true,
+                }) => {
+                    let _ = sender.send(WatchMessage::Changed(source_id, generation));
+                }
+                Ok(InotifyBatch {
+                    overflow: false,
+                    changed: false,
+                }) => {}
+                Err(_) => {
+                    let _ = sender.send(WatchMessage::Failed(source_id, generation));
+                    break;
+                }
             }
         } else {
             let error = std::io::Error::last_os_error();
@@ -719,24 +732,88 @@ fn run_recursive_watcher(
 }
 
 #[cfg(target_os = "linux")]
-fn add_recursive_watches(fd: i32, root: &std::path::Path, recursive: bool) -> std::io::Result<()> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut directories = vec![root.to_path_buf()];
-    let mask = libc::IN_CREATE
-        | libc::IN_DELETE
-        | libc::IN_MOVED_FROM
-        | libc::IN_MOVED_TO
-        | libc::IN_CLOSE_WRITE
-        | libc::IN_ATTRIB
-        | libc::IN_DELETE_SELF
-        | libc::IN_MOVE_SELF;
-    while let Some(directory) = directories.pop() {
-        let path = std::ffi::CString::new(directory.as_os_str().as_bytes())
-            .map_err(|_| std::io::Error::other("source path contains a NUL byte"))?;
-        if unsafe { libc::inotify_add_watch(fd, path.as_ptr(), mask) } < 0 {
-            return Err(std::io::Error::last_os_error());
+const INOTIFY_WATCH_MASK: u32 = libc::IN_CREATE
+    | libc::IN_DELETE
+    | libc::IN_MOVED_FROM
+    | libc::IN_MOVED_TO
+    | libc::IN_CLOSE_WRITE
+    | libc::IN_ATTRIB
+    | libc::IN_DELETE_SELF
+    | libc::IN_MOVE_SELF;
+
+#[cfg(target_os = "linux")]
+struct InotifyWatchTree {
+    root: std::path::PathBuf,
+    recursive: bool,
+    watched_paths: HashSet<std::path::PathBuf>,
+    wd_to_path: BTreeMap<i32, std::path::PathBuf>,
+}
+
+#[cfg(target_os = "linux")]
+impl InotifyWatchTree {
+    fn new(root: &std::path::Path, recursive: bool) -> Self {
+        Self {
+            root: root.to_path_buf(),
+            recursive,
+            watched_paths: HashSet::new(),
+            wd_to_path: BTreeMap::new(),
         }
-        if recursive {
+    }
+}
+
+#[cfg(target_os = "linux")]
+struct InotifyBatch {
+    overflow: bool,
+    changed: bool,
+}
+
+#[cfg(target_os = "linux")]
+fn inotify_event_name<'a>(
+    event: &libc::inotify_event,
+    event_ptr: *const u8,
+) -> Option<&'a std::ffi::OsStr> {
+    if event.len == 0 {
+        return None;
+    }
+    use std::os::unix::ffi::OsStrExt;
+    let name_ptr = unsafe { event_ptr.add(std::mem::size_of::<libc::inotify_event>()) };
+    let name = unsafe { std::ffi::CStr::from_ptr(name_ptr.cast()) };
+    Some(std::ffi::OsStr::from_bytes(name.to_bytes()))
+}
+
+#[cfg(target_os = "linux")]
+fn add_directory_watch(
+    fd: i32,
+    watches: &mut InotifyWatchTree,
+    directory: &std::path::Path,
+) -> std::io::Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    if watches.watched_paths.contains(directory) {
+        return Ok(());
+    }
+    let path = std::ffi::CString::new(directory.as_os_str().as_bytes())
+        .map_err(|_| std::io::Error::other("source path contains a NUL byte"))?;
+    let wd = unsafe { libc::inotify_add_watch(fd, path.as_ptr(), INOTIFY_WATCH_MASK) };
+    if wd < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    watches
+        .watched_paths
+        .insert(directory.to_path_buf());
+    watches.wd_to_path.insert(wd, directory.to_path_buf());
+    Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn add_directory_subtree(
+    fd: i32,
+    watches: &mut InotifyWatchTree,
+    directory: &std::path::Path,
+) -> std::io::Result<()> {
+    let mut directories = vec![directory.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        add_directory_watch(fd, watches, &directory)?;
+        if watches.recursive {
             for entry in std::fs::read_dir(&directory)? {
                 let entry = entry?;
                 if entry.file_type()?.is_dir() {
@@ -746,6 +823,69 @@ fn add_recursive_watches(fd: i32, root: &std::path::Path, recursive: bool) -> st
         }
     }
     Ok(())
+}
+
+#[cfg(target_os = "linux")]
+fn add_recursive_watches(fd: i32, watches: &mut InotifyWatchTree) -> std::io::Result<()> {
+    let root = watches.root.clone();
+    add_directory_subtree(fd, watches, &root)
+}
+
+#[cfg(target_os = "linux")]
+fn process_inotify_buffer(
+    fd: i32,
+    watches: &mut InotifyWatchTree,
+    buffer: &[u8],
+) -> std::io::Result<InotifyBatch> {
+    let mut offset = 0usize;
+    let mut overflow = false;
+    let mut changed = false;
+    while offset + std::mem::size_of::<libc::inotify_event>() <= buffer.len() {
+        let event_ptr = unsafe { buffer.as_ptr().add(offset) };
+        let event = unsafe { &*(event_ptr.cast::<libc::inotify_event>()) };
+        offset = offset
+            .saturating_add(std::mem::size_of::<libc::inotify_event>())
+            .saturating_add(event.len as usize);
+
+        if event.mask & libc::IN_Q_OVERFLOW != 0 {
+            overflow = true;
+            continue;
+        }
+
+        changed = true;
+
+        if event.mask & (libc::IN_DELETE_SELF | libc::IN_MOVE_SELF) != 0 {
+            let removed_root = watches
+                .wd_to_path
+                .get(&event.wd)
+                .is_some_and(|path| path == &watches.root);
+            if let Some(path) = watches.wd_to_path.remove(&event.wd) {
+                watches.watched_paths.remove(&path);
+            }
+            if removed_root {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    "watched root was removed or moved",
+                ));
+            }
+        }
+
+        if watches.recursive
+            && event.mask & (libc::IN_CREATE | libc::IN_MOVED_TO) != 0
+            && event.mask & libc::IN_ISDIR != 0
+        {
+            let Some(parent) = watches.wd_to_path.get(&event.wd).cloned() else {
+                continue;
+            };
+            let Some(name) = inotify_event_name(event, event_ptr) else {
+                continue;
+            };
+            let new_directory = parent.join(name);
+            add_directory_subtree(fd, watches, &new_directory)?;
+        }
+    }
+
+    Ok(InotifyBatch { overflow, changed })
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -1440,6 +1580,49 @@ mod tests {
         });
         assert_eq!(persist_attempts, 1);
         assert!(scheduler.take_due_scans().is_empty());
+    }
+
+    #[test]
+    fn catalog_refresh_anchor_never_panics_on_short_uptime() {
+        let now = Instant::now();
+        let anchor = catalog_refresh_anchor(now);
+        assert!(anchor <= now);
+    }
+
+    #[test]
+    fn catalog_refresh_anchor_makes_first_poll_due_when_uptime_allows() {
+        let now = Instant::now();
+        let anchor = catalog_refresh_anchor(now);
+        if anchor < now {
+            assert!(anchor.elapsed() >= Duration::from_secs(5));
+        } else {
+            assert!(anchor.elapsed() < Duration::from_secs(2));
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn add_directory_watch_skips_paths_already_registered() {
+        use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+        let temporary = tempfile::tempdir().expect("create temporary directory");
+        let root = temporary.path().join("source");
+        std::fs::create_dir(&root).expect("create watched source");
+        let raw_fd = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(raw_fd >= 0);
+        let inotify = unsafe { OwnedFd::from_raw_fd(raw_fd) };
+        let fd = inotify.as_raw_fd();
+        let mut watches = InotifyWatchTree::new(&root, false);
+
+        add_directory_watch(fd, &mut watches, &root).expect("first watch");
+        let first_wd = watches.wd_to_path.keys().copied().next().expect("watch descriptor");
+        add_directory_watch(fd, &mut watches, &root).expect("duplicate watch");
+        assert_eq!(watches.wd_to_path.len(), 1);
+        assert_eq!(
+            watches.wd_to_path.keys().copied().next(),
+            Some(first_wd),
+            "duplicate registration should not create another watch descriptor entry"
+        );
     }
 
     #[cfg(target_os = "linux")]

@@ -9,6 +9,30 @@ use tauri::{Emitter, Manager};
 
 pub use commands::path_guard::{ensure_path_in_config_dir, ensure_path_in_sources};
 
+fn configure_logging(
+    app: &tauri::AppHandle,
+    config_dir: &std::path::Path,
+) -> tauri::Result<()> {
+    use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind};
+
+    let plugin = if cfg!(debug_assertions) {
+        Builder::default()
+            .level(log::LevelFilter::Info)
+            .build()
+    } else {
+        Builder::default()
+            .level(log::LevelFilter::Info)
+            .rotation_strategy(RotationStrategy::KeepAll)
+            .targets([Target::new(TargetKind::Folder {
+                path: config_dir.to_path_buf(),
+                file_name: Some("wallpaper-console".into()),
+            })])
+            .build()
+    };
+    app.plugin(plugin)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Cross-process test entry point: when the test harness spawns this
@@ -68,13 +92,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(move |app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            let log_config_dir = cd.path.clone();
+            configure_logging(app.handle(), &log_config_dir)?;
 
             // Phase 1: manage the library service for readiness gating and
             // future Phase 2 caching / observation.
