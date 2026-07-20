@@ -27,6 +27,7 @@ import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 interface CardProps {
   entry: LibraryBrowserItemDTO;
   ordinal?: string;
+  posInSet?: number;
   applying: boolean;
   onApply: (entry: LibraryBrowserItemDTO) => void;
   onSelect?: (entry: LibraryBrowserItemDTO) => void;
@@ -49,6 +50,7 @@ const neverScrolling = () => false;
 function WallpaperCardImpl({
   entry,
   ordinal,
+  posInSet,
   applying,
   onApply,
   onSelect,
@@ -165,6 +167,7 @@ function WallpaperCardImpl({
       data-wallpaper-index={ordinal}
       data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
+      aria-posinset={posInSet}
       role="listitem"
     >
       <button

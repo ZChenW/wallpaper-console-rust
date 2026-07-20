@@ -11,6 +11,7 @@ export class ThumbnailStore {
   private queue: ThumbnailRequestQueue;
   private enqueueScheduled = false;
   private pendingPaths: string[] = [];
+  private pendingOptions?: EnqueueOptions;
   private pendingNotifyPaths = new Set<string>();
   private pausedNotifyPaths = new Set<string>();
   private notifyScheduled = false;
@@ -63,15 +64,18 @@ export class ThumbnailStore {
     };
   }
 
-  enqueueVisible(paths: string[], _options?: EnqueueOptions): void {
+  enqueueVisible(paths: string[], options?: EnqueueOptions): void {
     this.pendingPaths = paths.slice();
+    this.pendingOptions = options;
     if (this.enqueueScheduled) return;
     this.enqueueScheduled = true;
     const flush = () => {
       this.enqueueScheduled = false;
       const unique = Array.from(new Set(this.pendingPaths));
+      const opts = this.pendingOptions;
       this.pendingPaths = [];
-      this.queue.replacePending(unique);
+      this.pendingOptions = undefined;
+      this.queue.replacePending(unique, opts);
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
     else Promise.resolve().then(flush);

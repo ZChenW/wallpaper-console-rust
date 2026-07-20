@@ -7,8 +7,7 @@
 //!   4. Cached video thumbnails in cache/previews/
 //!   5. Respects preview_metadata config: compact (default), visual, full
 
-use std::collections::{hash_map::DefaultHasher, HashMap};
-use std::hash::{Hash, Hasher};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::{Mutex, OnceLock};
@@ -145,9 +144,10 @@ fn video_thumbnail(cd: &ConfigDir, file: &str) -> Option<PathBuf> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let mut hasher = DefaultHasher::new();
-    format!("{}:{}", file, mtime).hash(&mut hasher);
-    let hash = format!("{:x}.jpg", hasher.finish());
+    let hash = format!(
+        "{}.jpg",
+        stable_hash_hex(&format!("{}:{}", file, mtime))
+    );
     let thumb = cache_dir.join(&hash);
 
     if thumb.exists() {
@@ -261,8 +261,9 @@ fn preview_video(cd: &ConfigDir, file: &str, ext: &str) {
                         "format=duration",
                         "-of",
                         "csv=p=0",
-                        file,
                     ])
+                    .arg("--")
+                    .arg(file)
                     .output()
                 {
                     let dur = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -315,7 +316,10 @@ fn human_size(file: &str) -> String {
 fn detect_resolution(file: &str) -> String {
     // Try identify (ImageMagick) first
     if let Ok(out) = Command::new("identify")
-        .args(["-format", "%wx%h", file, "[0]"])
+        .arg("-format")
+        .arg("%wx%h")
+        .arg("--")
+        .arg(format!("{file}[0]"))
         .output()
     {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -334,8 +338,9 @@ fn detect_resolution(file: &str) -> String {
             "stream=width,height",
             "-of",
             "csv=p=0",
-            file,
         ])
+        .arg("--")
+        .arg(file)
         .output()
     {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
@@ -357,16 +362,24 @@ fn command_exists(cmd: &str) -> bool {
         }
     }
 
-    let exists = Command::new("which")
-        .arg(cmd)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false);
+    let exists = which::which(cmd).is_ok();
 
     if let Ok(mut guard) = cache.lock() {
         guard.insert(cmd.to_string(), exists);
     }
     exists
+}
+
+/// Stable 64-bit FNV-1a hash (deterministic across runs and platforms).
+fn stable_hash_hex(input: &str) -> String {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
+    const FNV_PRIME: u64 = 0x100000001b3;
+    let mut hash = FNV_OFFSET_BASIS;
+    for byte in input.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(FNV_PRIME);
+    }
+    format!("{hash:016x}")
 }
 
 // ── GUI Thumbnail v3 ───────────────────────────────────────────────────────
@@ -386,9 +399,7 @@ pub fn gui_thumb_cache_key_v3(path: &str, mtime: u64, size: u64) -> String {
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string());
     let raw = format!("v3-{}:{}:{}", real, mtime, size);
-    let mut hasher = DefaultHasher::new();
-    raw.hash(&mut hasher);
-    format!("{:x}.webp", hasher.finish())
+    format!("{}.webp", stable_hash_hex(&raw))
 }
 
 /// Generate a GUI thumbnail. Returns (path, was_cached) or failure reason.
@@ -986,8 +997,9 @@ fn get_video_duration(path: &str) -> Option<f64> {
             "format=duration",
             "-of",
             "csv=p=0",
-            path,
         ])
+        .arg("--")
+        .arg(path)
         .output()
         .ok()?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();

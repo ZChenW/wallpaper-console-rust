@@ -454,6 +454,7 @@ function WallpaperGridImpl({
       ref={containerRef}
       onScroll={handleScroll}
       aria-label="Wallpaper library"
+      aria-setsize={entries.length}
       role="list"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
@@ -463,6 +464,7 @@ function WallpaperGridImpl({
           return (
             <div
               key={virtualRow.key}
+              role="presentation"
               style={{
                 position: 'absolute',
                 top: 0,
@@ -486,6 +488,7 @@ function WallpaperGridImpl({
                   <WallpaperCard
                     key={e.path}
                     entry={e}
+                    posInSet={start + offset + 1}
                     ordinal={wallpaperOrdinal(start + offset)}
                     applying={activity.applying}
                     onApply={onApply}

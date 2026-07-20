@@ -74,6 +74,12 @@ window-rule {
 }
 ```
 
+## Verification
+
+```bash
+cargo run -p xtask -- verify all
+```
+
 ## License
 
 MIT
