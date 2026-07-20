@@ -1,6 +1,7 @@
 use super::common::{
     fail, ok, storage, BackendStatusDto, CommandErrorDto, CommandResult, StatusDto, WeDebugInfoDto,
 };
+use super::path_guard;
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use tauri::Emitter;
@@ -196,6 +197,9 @@ pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, &s) {
+                return fail(e);
+            }
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
@@ -220,6 +224,9 @@ pub async fn apply_action(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, &s) {
+                return fail(e);
+            }
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
@@ -416,11 +423,17 @@ pub async fn restore() -> CommandResult {
 
 #[tauri::command]
 pub async fn we_clear_backend_error(path: String) -> CommandResult {
-    tauri::async_runtime::spawn_blocking(move || {
-        match wc_storage::we_compat::clear_failure(&path) {
-            Ok(()) => ok("Cleared backend error."),
-            Err(e) => fail(e.to_string()),
+    tauri::async_runtime::spawn_blocking(move || match storage() {
+        Ok(s) => {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, &s) {
+                return fail(e);
+            }
+            match wc_storage::we_compat::clear_failure(&path) {
+                Ok(()) => ok("Cleared backend error."),
+                Err(e) => fail(e.to_string()),
+            }
         }
+        Err(e) => fail(e),
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
@@ -502,6 +515,9 @@ pub async fn apply_to_display(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
+            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, &s) {
+                return fail(e);
+            }
             let apply_request = match apply_request_from_parts(
                 &request.kind,
                 request.path.clone(),
@@ -807,6 +823,35 @@ mod tests {
             .unwrap()
             .collect::<Result<Vec<_>, _>>()
             .unwrap()
+    }
+
+    #[test]
+    fn apply_commands_require_path_guard_before_side_effects() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.jpg");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+
+        let error =
+            super::path_guard::ensure_command_wallpaper_path(&secret.to_string_lossy(), &storage)
+                .unwrap_err();
+        assert!(
+            error.contains("outside configured wallpaper sources"),
+            "{error}"
+        );
     }
 
     #[test]

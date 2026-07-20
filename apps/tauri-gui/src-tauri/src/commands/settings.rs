@@ -3,6 +3,97 @@ use std::collections::HashMap;
 use wc_config::ConfigDirExt;
 
 use super::common::{fail, format_bytes, ok, storage, CommandResult, ScanProgressDto};
+use super::files;
+
+/// Keys the GUI may write via `config_set` IPC.
+///
+/// Mirrors `apps/tauri-gui/frontend/src/settings/configSchema.ts` plus keys
+/// written directly from shell preference hooks.
+const WRITABLE_CONFIG_KEYS: &[&str] = &[
+    "gui_theme",
+    "image_backend",
+    "gif_backend",
+    "video_backend",
+    "awww_resize",
+    "awww_transition_type",
+    "awww_transition_duration",
+    "wallpaper_transition_fps",
+    "mpvpaper_options",
+    "mpvpaper_output",
+    "linux_wallpaperengine_enabled",
+    "linux_wallpaperengine_path",
+    "linux_wallpaperengine_target_mode",
+    "linux_wallpaperengine_target",
+    "linux_wallpaperengine_scaling",
+    "linux_wallpaperengine_fps",
+    "linux_wallpaperengine_muted",
+    "linux_wallpaperengine_volume",
+    "gui_thumbnail_mode",
+    "gui_thumbnail_cleanup_days",
+    "gui_thumbnail_failure_ttl_secs",
+    "preview_metadata",
+    "gui_debug_logs",
+    "open_project_location_mode",
+    "gui_file_manager",
+    "gui_file_manager_custom",
+    "gui_terminal_file_manager",
+    "gui_terminal_file_manager_custom",
+    "gui_shell_preferences",
+    "restore_on_login",
+];
+
+fn config_key_writable_from_gui(key: &str) -> bool {
+    WRITABLE_CONFIG_KEYS.contains(&key)
+}
+
+fn validate_writable_config_set(key: &str, value: &str) -> Result<(), String> {
+    if !config_key_writable_from_gui(key) {
+        return Err(format!(
+            "Config key is not writable from the GUI: {key}"
+        ));
+    }
+
+    if value.contains('\n') || value.contains('\r') {
+        return Err(format!("Config value for {key} must not contain line breaks."));
+    }
+
+    match key {
+        "linux_wallpaperengine_path" => validate_linux_wallpaperengine_path(value),
+        "gui_file_manager_custom" | "gui_terminal_file_manager_custom" => {
+            validate_custom_command_config(value)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_linux_wallpaperengine_path(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err(
+            "linux_wallpaperengine_path must be an absolute path or \"auto\".".into(),
+        );
+    }
+    if !path.is_file() {
+        return Err(format!("linux_wallpaperengine_path not found: {trimmed}"));
+    }
+    Ok(())
+}
+
+fn validate_custom_command_config(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let first_token = trimmed
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "Custom command is empty.".to_string())?;
+    files::validate_custom_executable(first_token)
+}
 
 #[tauri::command]
 pub async fn config_get(key: String) -> Result<String, String> {
@@ -31,10 +122,15 @@ pub async fn config_get_many(keys: Vec<String>) -> Result<HashMap<String, String
 #[tauri::command]
 pub async fn config_set(key: String, value: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match s.config_set(&key, &value) {
-            Ok(()) => ok(format!("{} = {}", key, value)),
-            Err(e) => fail(e.to_string()),
-        },
+        Ok(s) => {
+            if let Err(error) = validate_writable_config_set(&key, &value) {
+                return fail(error);
+            }
+            match s.config_set(&key, &value) {
+                Ok(()) => ok(format!("{} = {}", key, value)),
+                Err(e) => fail(e.to_string()),
+            }
+        }
         Err(e) => fail(e),
     })
     .await
@@ -299,6 +395,68 @@ mod tests {
         cd.init().unwrap();
         let s = wc_storage::StorageApi::new(cd);
         (tmp, s)
+    }
+
+    #[test]
+    fn config_set_allows_known_gui_keys() {
+        assert!(validate_writable_config_set("gui_theme", "light").is_ok());
+        assert!(validate_writable_config_set("restore_on_login", "on").is_ok());
+        assert!(validate_writable_config_set("linux_wallpaperengine_path", "auto").is_ok());
+    }
+
+    #[test]
+    fn config_set_rejects_unknown_keys() {
+        let error = validate_writable_config_set("lwe_last_stderr", "evil").unwrap_err();
+        assert!(
+            error.contains("Config key is not writable from the GUI: lwe_last_stderr"),
+            "{error}"
+        );
+
+        let error = validate_writable_config_set("linux_wallpaperengine_pid", "1234").unwrap_err();
+        assert!(
+            error.contains("Config key is not writable from the GUI"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn config_set_rejects_multiline_values() {
+        let error = validate_writable_config_set("gui_theme", "light\nevil").unwrap_err();
+        assert!(error.contains("line breaks"), "{error}");
+    }
+
+    #[test]
+    fn config_set_validates_linux_wallpaperengine_path() {
+        let error = validate_writable_config_set("linux_wallpaperengine_path", "./evil").unwrap_err();
+        assert!(error.contains("absolute path"), "{error}");
+
+        let error =
+            validate_writable_config_set("linux_wallpaperengine_path", "/definitely/missing/lwe")
+                .unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("linux-wallpaperengine");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        assert!(
+            validate_writable_config_set(
+                "linux_wallpaperengine_path",
+                &exe.to_string_lossy()
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn config_set_validates_custom_executable_commands() {
+        let error =
+            validate_writable_config_set("gui_file_manager_custom", "./evil-fm {path}").unwrap_err();
+        assert!(error.contains("absolute path"), "{error}");
+
+        assert!(
+            validate_writable_config_set("gui_terminal_file_manager_custom", "yazi {path}")
+                .is_ok()
+        );
     }
 
     #[test]
