@@ -797,9 +797,7 @@ fn add_directory_watch(
     if wd < 0 {
         return Err(std::io::Error::last_os_error());
     }
-    watches
-        .watched_paths
-        .insert(directory.to_path_buf());
+    watches.watched_paths.insert(directory.to_path_buf());
     watches.wd_to_path.insert(wd, directory.to_path_buf());
     Ok(())
 }
@@ -1615,7 +1613,12 @@ mod tests {
         let mut watches = InotifyWatchTree::new(&root, false);
 
         add_directory_watch(fd, &mut watches, &root).expect("first watch");
-        let first_wd = watches.wd_to_path.keys().copied().next().expect("watch descriptor");
+        let first_wd = watches
+            .wd_to_path
+            .keys()
+            .copied()
+            .next()
+            .expect("watch descriptor");
         add_directory_watch(fd, &mut watches, &root).expect("duplicate watch");
         assert_eq!(watches.wd_to_path.len(), 1);
         assert_eq!(

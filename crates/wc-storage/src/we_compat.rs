@@ -83,9 +83,7 @@ fn save(map: &HashMap<String, WeCompatEntry>) -> Result<(), WcError> {
 
 impl WeCompatCache {
     pub fn load() -> Result<Self, WcError> {
-        Ok(Self {
-            map: load_map()?,
-        })
+        Ok(Self { map: load_map()? })
     }
 
     pub fn lookup_failure(&mut self, project_path: &str) -> Result<Option<WeCompatEntry>, WcError> {

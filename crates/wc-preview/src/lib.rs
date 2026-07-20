@@ -144,10 +144,7 @@ fn video_thumbnail(cd: &ConfigDir, file: &str) -> Option<PathBuf> {
         .map(|d| d.as_secs())
         .unwrap_or(0);
 
-    let hash = format!(
-        "{}.jpg",
-        stable_hash_hex(&format!("{}:{}", file, mtime))
-    );
+    let hash = format!("{}.jpg", stable_hash_hex(&format!("{}:{}", file, mtime)));
     let thumb = cache_dir.join(&hash);
 
     if thumb.exists() {

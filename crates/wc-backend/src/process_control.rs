@@ -88,8 +88,7 @@ where
     if pid <= 0 {
         return false;
     }
-    if read_tokens(pid)
-        .is_some_and(|tokens| tokens.iter().any(|token| token_is_lwe_program(token)))
+    if read_tokens(pid).is_some_and(|tokens| tokens.iter().any(|token| token_is_lwe_program(token)))
     {
         return true;
     }
@@ -603,8 +602,12 @@ pub(crate) mod test_support {
 
     #[test]
     fn cmdline_pattern_rejects_less_viewing_mpvpaper_log() {
-        assert!(!super::cmdline_looks_like_mpvpaper("less /tmp/mpvpaper.log"));
-        assert!(!super::cmdline_looks_like_lwe("less /tmp/linux-wallpaperengine.log"));
+        assert!(!super::cmdline_looks_like_mpvpaper(
+            "less /tmp/mpvpaper.log"
+        ));
+        assert!(!super::cmdline_looks_like_lwe(
+            "less /tmp/linux-wallpaperengine.log"
+        ));
     }
 
     #[test]

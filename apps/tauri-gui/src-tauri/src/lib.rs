@@ -14,16 +14,11 @@ fn fatal_startup_error(message: impl AsRef<str>) -> ! {
     std::process::exit(1);
 }
 
-fn configure_logging(
-    app: &tauri::AppHandle,
-    config_dir: &std::path::Path,
-) -> tauri::Result<()> {
+fn configure_logging(app: &tauri::AppHandle, config_dir: &std::path::Path) -> tauri::Result<()> {
     use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind};
 
     let plugin = if cfg!(debug_assertions) {
-        Builder::default()
-            .level(log::LevelFilter::Info)
-            .build()
+        Builder::default().level(log::LevelFilter::Info).build()
     } else {
         Builder::default()
             .level(log::LevelFilter::Info)
@@ -206,5 +201,7 @@ pub fn run() {
             commands::export_diagnostics,
         ])
         .run(tauri::generate_context!())
-        .unwrap_or_else(|error| fatal_startup_error(format!("error while running application: {error}")));
+        .unwrap_or_else(|error| {
+            fatal_startup_error(format!("error while running application: {error}"))
+        });
 }

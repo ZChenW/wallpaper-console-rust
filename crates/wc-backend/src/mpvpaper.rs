@@ -42,7 +42,10 @@ fn parse_running_pids(exit_code: Option<i32>, stdout: &[u8]) -> Result<Vec<u32>,
     }
 }
 
-fn running_pids_for_scope_with<F>(user: &crate::ProcessUserScope, mut run: F) -> Result<Vec<u32>, WcError>
+fn running_pids_for_scope_with<F>(
+    user: &crate::ProcessUserScope,
+    mut run: F,
+) -> Result<Vec<u32>, WcError>
 where
     F: FnMut(&mut Command) -> std::io::Result<Output>,
 {

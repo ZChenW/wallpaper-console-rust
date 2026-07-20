@@ -47,7 +47,8 @@ pub async fn library_page_gui(
         let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
         let routing = s.backend_routing();
-        let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
+        let mut we_compat =
+            wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         let items = page
             .items
             .into_iter()
@@ -190,9 +191,7 @@ fn library_browser_random_for_storage(
     let routing = s.backend_routing();
     let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
     wc_storage::sqlite::browser_library_random(&s.cd, &query)
-        .map(|item| {
-            item.map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
-        })
+        .map(|item| item.map(|item| browser_item_dto(item, &routing, Some(&mut we_compat))))
         .map_err(|error| error.to_string())
 }
 
@@ -309,7 +308,8 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
         let page = wc_storage::sqlite::favorites_page_sqlite(&s.cd, offset, limit)
             .map_err(|e| e.to_string())?;
         let routing = s.backend_routing();
-        let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
+        let mut we_compat =
+            wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         Ok(LibraryPageDto {
             total: page.total,
             items: page

@@ -48,13 +48,13 @@ fn config_key_writable_from_gui(key: &str) -> bool {
 
 fn validate_writable_config_set(key: &str, value: &str) -> Result<(), String> {
     if !config_key_writable_from_gui(key) {
-        return Err(format!(
-            "Config key is not writable from the GUI: {key}"
-        ));
+        return Err(format!("Config key is not writable from the GUI: {key}"));
     }
 
     if value.contains('\n') || value.contains('\r') {
-        return Err(format!("Config value for {key} must not contain line breaks."));
+        return Err(format!(
+            "Config value for {key} must not contain line breaks."
+        ));
     }
 
     match key {
@@ -73,9 +73,7 @@ fn validate_linux_wallpaperengine_path(value: &str) -> Result<(), String> {
     }
     let path = std::path::Path::new(trimmed);
     if !path.is_absolute() {
-        return Err(
-            "linux_wallpaperengine_path must be an absolute path or \"auto\".".into(),
-        );
+        return Err("linux_wallpaperengine_path must be an absolute path or \"auto\".".into());
     }
     if !path.is_file() {
         return Err(format!("linux_wallpaperengine_path not found: {trimmed}"));
@@ -427,7 +425,8 @@ mod tests {
 
     #[test]
     fn config_set_validates_linux_wallpaperengine_path() {
-        let error = validate_writable_config_set("linux_wallpaperengine_path", "./evil").unwrap_err();
+        let error =
+            validate_writable_config_set("linux_wallpaperengine_path", "./evil").unwrap_err();
         assert!(error.contains("absolute path"), "{error}");
 
         let error =
@@ -439,23 +438,19 @@ mod tests {
         let exe = tmp.path().join("linux-wallpaperengine");
         std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
         assert!(
-            validate_writable_config_set(
-                "linux_wallpaperengine_path",
-                &exe.to_string_lossy()
-            )
-            .is_ok()
+            validate_writable_config_set("linux_wallpaperengine_path", &exe.to_string_lossy())
+                .is_ok()
         );
     }
 
     #[test]
     fn config_set_validates_custom_executable_commands() {
-        let error =
-            validate_writable_config_set("gui_file_manager_custom", "./evil-fm {path}").unwrap_err();
+        let error = validate_writable_config_set("gui_file_manager_custom", "./evil-fm {path}")
+            .unwrap_err();
         assert!(error.contains("absolute path"), "{error}");
 
         assert!(
-            validate_writable_config_set("gui_terminal_file_manager_custom", "yazi {path}")
-                .is_ok()
+            validate_writable_config_set("gui_terminal_file_manager_custom", "yazi {path}").is_ok()
         );
     }
 

@@ -134,8 +134,10 @@ fn path_exists_in_table(
 ) -> Result<bool, String> {
     let original = path.to_string_lossy();
     let canon = canonical.to_string_lossy();
-    conn.query_row(sql, params![original.as_ref(), canon.as_ref()], |row| row.get(0))
-        .map_err(|error| error.to_string())
+    conn.query_row(sql, params![original.as_ref(), canon.as_ref()], |row| {
+        row.get(0)
+    })
+    .map_err(|error| error.to_string())
 }
 
 /// Check whether `path` is recorded in library / current / history / display state.

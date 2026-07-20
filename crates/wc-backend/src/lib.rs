@@ -556,10 +556,7 @@ mod tests {
     #[test]
     fn append_pgrep_user_scope_uses_name_or_uid_flag() {
         let mut name_cmd = std::process::Command::new("pgrep");
-        append_pgrep_user_scope(
-            &mut name_cmd,
-            &ProcessUserScope::Name("alice".to_string()),
-        );
+        append_pgrep_user_scope(&mut name_cmd, &ProcessUserScope::Name("alice".to_string()));
         let name_args: Vec<String> = name_cmd
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())

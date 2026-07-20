@@ -354,9 +354,7 @@ mod tests {
             write_config_value(tmp.path(), "lwe_last_stderr", "line one\nline two").unwrap_err();
 
         assert!(
-            error
-                .to_string()
-                .contains("must be a single line"),
+            error.to_string().contains("must be a single line"),
             "unexpected error: {error}"
         );
     }
