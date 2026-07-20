@@ -3,10 +3,13 @@ import test from 'node:test';
 
 import {
   instantiateActiveLibraryAdapter,
+  libraryEntryApplyAvailable,
+  libraryEntryApplyDisabledReason,
   resolveLibraryFlowStartupAnchor,
   resolveLibraryModeSwitchAnchor,
   resolveLibraryQueryResetAnchor,
 } from './libraryViewModel.ts';
+import type { LibraryBrowserItemDTO } from '../api/types.ts';
 
 const entries = [
   { wallpaperId: 11, path: '/wallpapers/first.jpg' },
@@ -73,4 +76,45 @@ test('a query reset always anchors the first loaded item', () => {
     index: 0,
   });
   assert.equal(resolveLibraryQueryResetAnchor([]), null);
+});
+
+const applicableEntry = {
+  wallpaperId: 1,
+  path: '/wallpapers/live.webm',
+  type: 'video',
+} as LibraryBrowserItemDTO;
+
+test('libraryEntryApplyAvailable requires both display and entry eligibility', () => {
+  const isApplicable = () => true;
+  assert.equal(
+    libraryEntryApplyAvailable(false, isApplicable, applicableEntry),
+    false,
+  );
+  assert.equal(
+    libraryEntryApplyAvailable(true, () => false, applicableEntry),
+    false,
+  );
+  assert.equal(
+    libraryEntryApplyAvailable(true, isApplicable, applicableEntry),
+    true,
+  );
+});
+
+test('libraryEntryApplyDisabledReason prefers display blocking over entry reasons', () => {
+  const entry = {
+    ...applicableEntry,
+    applyReason: 'Compatible renderer unavailable',
+  } as LibraryBrowserItemDTO;
+  assert.equal(
+    libraryEntryApplyDisabledReason(
+      false,
+      'The selected display is unavailable.',
+      entry,
+    ),
+    'The selected display is unavailable.',
+  );
+  assert.equal(
+    libraryEntryApplyDisabledReason(true, null, entry),
+    'Compatible renderer unavailable',
+  );
 });

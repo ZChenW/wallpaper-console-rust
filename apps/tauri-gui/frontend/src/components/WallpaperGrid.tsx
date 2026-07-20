@@ -27,6 +27,10 @@ import {
   type WallpaperCardSize,
 } from '../utils/layout';
 import type { ApplyGesture } from '../shell/shellPreferences';
+import {
+  libraryEntryApplyAvailable,
+  libraryEntryApplyDisabledReason,
+} from './libraryViewModel.ts';
 
 interface Props {
   entries: readonly LibraryBrowserItemDTO[];
@@ -47,6 +51,8 @@ interface Props {
   pendingPath?: string | null;
   favoritePendingPaths?: ReadonlySet<string>;
   currentPath?: string | null;
+  canApplyToDisplay?: boolean;
+  displayApplyDisabledReason?: string | null;
   isEntryApplicable?: (entry: LibraryBrowserItemDTO) => boolean;
   hasMore?: boolean;
   loadingMore?: boolean;
@@ -92,6 +98,8 @@ function WallpaperGridImpl({
   pendingPath = null,
   favoritePendingPaths = new Set(),
   currentPath = null,
+  canApplyToDisplay = true,
+  displayApplyDisabledReason = null,
   isEntryApplicable,
   hasMore = false,
   loadingMore = false,
@@ -484,7 +492,16 @@ function WallpaperGridImpl({
                     pending={activity.pending}
                     favoritePending={favoritePendingPaths.has(e.path)}
                     current={currentPath === e.path}
-                    applyAvailable={isEntryApplicable?.(e)}
+                    applyAvailable={libraryEntryApplyAvailable(
+                      canApplyToDisplay,
+                      isEntryApplicable ?? (() => true),
+                      e,
+                    )}
+                    applyDisabledReason={libraryEntryApplyDisabledReason(
+                      canApplyToDisplay,
+                      displayApplyDisabledReason,
+                      e,
+                    )}
                     isScrolling={isScrolling}
                   />
                 );

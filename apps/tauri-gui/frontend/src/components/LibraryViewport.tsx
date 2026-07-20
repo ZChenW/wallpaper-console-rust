@@ -55,6 +55,8 @@ function LibraryViewportImpl({
           hasMore={model.hasMore && !model.automaticAppendPaused && !model.refreshing}
           initialAnchorWallpaperId={initialAnchorWallpaperId}
           isEntryApplicable={model.isEntryApplicable}
+          canApplyToDisplay={model.canApplyToDisplay}
+          displayApplyDisabledReason={model.displayApplyDisabledReason}
           loadingMore={model.loadingMore}
           onAnchorChange={onAnchorChange}
           onApply={model.onApply}

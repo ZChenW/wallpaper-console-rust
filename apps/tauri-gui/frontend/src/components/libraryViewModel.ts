@@ -2,6 +2,8 @@ import type { LibraryBrowserItemDTO } from '../api/types.ts';
 
 export type LibraryAdapterMode = 'grid' | 'flow';
 
+export const DISPLAY_APPLY_DISABLED_REASON = 'The selected display is unavailable.';
+
 export interface LibraryStableAnchor {
   readonly wallpaperId: number;
   readonly index: number;
@@ -135,6 +137,8 @@ export interface LibraryViewModel {
   readonly automaticAppendPaused: boolean;
   readonly loadErrorDetail: string | null;
   readonly canApplyToDisplay: boolean;
+  /** When non-null, display targeting blocks apply for every entry. */
+  readonly displayApplyDisabledReason: string | null;
   readonly isEntryApplicable: (entry: LibraryBrowserItemDTO) => boolean;
   readonly onSelect: (entry: LibraryBrowserItemDTO) => void;
   readonly onApply: (entry: LibraryBrowserItemDTO) => void;
@@ -145,4 +149,31 @@ export interface LibraryViewModel {
   ) => void;
   readonly buildContextActions: (entry: LibraryBrowserItemDTO) => ContextAction[];
   readonly onLoadMore: () => void | Promise<void>;
+}
+
+/** Shared Grid/Flow apply eligibility: display target must allow apply and entry must be applicable. */
+export function libraryEntryApplyAvailable(
+  canApplyToDisplay: boolean,
+  isEntryApplicable: (entry: LibraryBrowserItemDTO) => boolean,
+  entry: LibraryBrowserItemDTO,
+): boolean {
+  return canApplyToDisplay && isEntryApplicable(entry);
+}
+
+/** Prefer the display-level reason before per-entry renderer compatibility reasons. */
+export function libraryEntryApplyDisabledReason(
+  canApplyToDisplay: boolean,
+  displayApplyDisabledReason: string | null,
+  entry: LibraryBrowserItemDTO,
+): string | null {
+  if (!canApplyToDisplay) {
+    return displayApplyDisabledReason;
+  }
+  if (entry.applyReason?.trim()) {
+    return entry.applyReason.trim();
+  }
+  if (entry.unsupportedReason?.trim()) {
+    return entry.unsupportedReason.trim();
+  }
+  return null;
 }

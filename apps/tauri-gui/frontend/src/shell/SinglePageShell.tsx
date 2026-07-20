@@ -19,6 +19,7 @@ import { commandErrorFeedback } from '../api/feedback.ts';
 import LibraryViewport from '../components/LibraryViewport.tsx';
 import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
 import {
+  DISPLAY_APPLY_DISABLED_REASON,
   resolveLibraryModeSwitchAnchor,
   type ContextAction,
   type LibraryViewModel,
@@ -528,7 +529,7 @@ export default function SinglePageShell() {
       showNotice({
         channel: 'apply',
         severity: 'error',
-        message: 'The selected display is not connected.',
+        message: DISPLAY_APPLY_DISABLED_REASON,
       });
       return;
     }
@@ -850,6 +851,7 @@ export default function SinglePageShell() {
     automaticAppendPaused: browser.automaticAppendPaused,
     loadErrorDetail: browser.loadErrorDetail,
     canApplyToDisplay: displayModel.canApply,
+    displayApplyDisabledReason: displayModel.canApply ? null : DISPLAY_APPLY_DISABLED_REASON,
     isEntryApplicable: isLibraryEntryApplicable,
     onSelect: selectLibraryEntry,
     onApply: applyEntry,
