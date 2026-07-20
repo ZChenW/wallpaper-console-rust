@@ -15,6 +15,18 @@ const SYSTEM_CANDIDATES = [
  * Never downloads browsers.
  */
 export function resolveSystemChromiumExecutable() {
+  const explicitPath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH?.trim();
+  if (explicitPath) {
+    try {
+      accessSync(explicitPath, constants.X_OK);
+      return explicitPath;
+    } catch (error) {
+      throw new Error(
+        `PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH is set but not executable: ${explicitPath} (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+  }
+
   for (const candidate of SYSTEM_CANDIDATES) {
     try {
       accessSync(candidate, constants.X_OK);

@@ -31,7 +31,7 @@ export default defineConfig({
   testDir: '.',
   // System Chromium + mock Vite is more stable under serial workers.
   workers: systemChromium ? 1 : undefined,
-  fullyParallel: !systemChromium,
+  fullyParallel: false,
   timeout: 30_000,
   webServer: {
     command: 'npx vite --config vite.mock.config.ts --host 127.0.0.1 --port 4174',
