@@ -22,6 +22,7 @@ import {
 } from './useWallpaperBehaviorSettings.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
 import { trapDialogFocus } from './dialogFocus.ts';
+import { DeferredNumberInput } from './DeferredNumberInput.tsx';
 
 export interface CompactSettingsPanelProps {
   readonly open: boolean;
@@ -99,28 +100,24 @@ export function CompactSettingsPanelView({
     const awwwTransitionType = value as AwwwTransitionType;
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionType }));
   };
-  const updateAwwwTransitionDuration = (event: ChangeEvent<HTMLInputElement>) => {
-    const awwwTransitionDuration = Number(event.currentTarget.value);
+  const updateAwwwTransitionDuration = (awwwTransitionDuration: number) => {
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionDuration }));
   };
-  const updateAwwwTransitionFps = (event: ChangeEvent<HTMLInputElement>) => {
-    const awwwTransitionFps = Number(event.currentTarget.value);
+  const updateAwwwTransitionFps = (awwwTransitionFps: number) => {
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionFps }));
   };
   const updateLweScaling = (value: string) => {
     const lweScaling = value as LweScalingMode;
     updateBehaviorSettings((current) => ({ ...current, lweScaling }));
   };
-  const updateLweFps = (event: ChangeEvent<HTMLInputElement>) => {
-    const lweFps = Number(event.currentTarget.value);
+  const updateLweFps = (lweFps: number) => {
     updateBehaviorSettings((current) => ({ ...current, lweFps }));
   };
   const updateLweMuted = (event: ChangeEvent<HTMLInputElement>) => {
     const lweMuted = event.currentTarget.checked;
     updateBehaviorSettings((current) => ({ ...current, lweMuted }));
   };
-  const updateLweVolume = (event: ChangeEvent<HTMLInputElement>) => {
-    const lweVolume = Number(event.currentTarget.value);
+  const updateLweVolume = (lweVolume: number) => {
     updateBehaviorSettings((current) => ({ ...current, lweVolume }));
   };
   const updateRestoreOnLogin = (event: ChangeEvent<HTMLInputElement>) => {
@@ -348,37 +345,31 @@ export function CompactSettingsPanelView({
                 </label>
                 <label className="settings-behavior-row">
                   <span>Transition duration</span>
-                  <span className="settings-number-control">
-                    <input
-                      aria-label="awww transition duration"
-                      data-behavior-control={true}
-                      disabled={!behaviorReady}
-                      max={60}
-                      min={0}
-                      onChange={updateAwwwTransitionDuration}
-                      step={0.1}
-                      type="number"
-                      value={behaviorSettings.awwwTransitionDuration}
-                    />
-                    <span aria-hidden="true" data-control-unit="seconds">s</span>
-                  </span>
+                  <DeferredNumberInput
+                    aria-label="awww transition duration"
+                    confirmed={behaviorSettings.awwwTransitionDuration}
+                    disabled={!behaviorReady}
+                    max={60}
+                    min={0}
+                    onCommit={updateAwwwTransitionDuration}
+                    step={0.1}
+                    unit="s"
+                    unitKind="seconds"
+                  />
                 </label>
                 <label className="settings-behavior-row">
                   <span>Transition FPS</span>
-                  <span className="settings-number-control">
-                    <input
-                      aria-label="awww transition FPS"
-                      data-behavior-control={true}
-                      disabled={!behaviorReady}
-                      max={240}
-                      min={1}
-                      onChange={updateAwwwTransitionFps}
-                      step={1}
-                      type="number"
-                      value={behaviorSettings.awwwTransitionFps}
-                    />
-                    <span aria-hidden="true" data-control-unit="transition-fps">FPS</span>
-                  </span>
+                  <DeferredNumberInput
+                    aria-label="awww transition FPS"
+                    confirmed={behaviorSettings.awwwTransitionFps}
+                    disabled={!behaviorReady}
+                    max={240}
+                    min={1}
+                    onCommit={updateAwwwTransitionFps}
+                    step={1}
+                    unit="FPS"
+                    unitKind="transition-fps"
+                  />
                 </label>
               </div>
             </div>
@@ -412,37 +403,31 @@ export function CompactSettingsPanelView({
               </label>
               <label className="settings-behavior-row">
                 <span>Scene FPS</span>
-                <span className="settings-number-control">
-                  <input
-                    aria-label="Wallpaper Engine FPS"
-                    data-behavior-control={true}
-                    disabled={!behaviorReady || lweUnavailable}
-                    max={240}
-                    min={1}
-                    onChange={updateLweFps}
-                    step={1}
-                    type="number"
-                    value={behaviorSettings.lweFps}
-                  />
-                  <span aria-hidden="true" data-control-unit="scene-fps">FPS</span>
-                </span>
+                <DeferredNumberInput
+                  aria-label="Wallpaper Engine FPS"
+                  confirmed={behaviorSettings.lweFps}
+                  disabled={!behaviorReady || lweUnavailable}
+                  max={240}
+                  min={1}
+                  onCommit={updateLweFps}
+                  step={1}
+                  unit="FPS"
+                  unitKind="scene-fps"
+                />
               </label>
               <label className="settings-behavior-row">
                 <span>Scene volume</span>
-                <span className="settings-number-control">
-                  <input
-                    aria-label="Wallpaper Engine volume"
-                    data-behavior-control={true}
-                    disabled={!behaviorReady || lweUnavailable || behaviorSettings.lweMuted}
-                    max={100}
-                    min={0}
-                    onChange={updateLweVolume}
-                    step={1}
-                    type="number"
-                    value={behaviorSettings.lweVolume}
-                  />
-                  <span aria-hidden="true" data-control-unit="scene-volume">%</span>
-                </span>
+                <DeferredNumberInput
+                  aria-label="Wallpaper Engine volume"
+                  confirmed={behaviorSettings.lweVolume}
+                  disabled={!behaviorReady || lweUnavailable || behaviorSettings.lweMuted}
+                  max={100}
+                  min={0}
+                  onCommit={updateLweVolume}
+                  step={1}
+                  unit="%"
+                  unitKind="scene-volume"
+                />
               </label>
               <label className="settings-behavior-row settings-behavior-row--switch">
                 <span>Mute scene audio</span>
