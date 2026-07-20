@@ -42,29 +42,22 @@ fn parse_running_pids(exit_code: Option<i32>, stdout: &[u8]) -> Result<Vec<u32>,
     }
 }
 
-fn running_pids_for_user_with<F>(user: &str, mut run: F) -> Result<Vec<u32>, WcError>
+fn running_pids_for_scope_with<F>(user: &crate::ProcessUserScope, mut run: F) -> Result<Vec<u32>, WcError>
 where
-    F: FnMut(&str) -> std::io::Result<Output>,
+    F: FnMut(&mut Command) -> std::io::Result<Output>,
 {
-    let user = user.trim();
-    if user.is_empty() {
-        return Err(WcError::Other(
-            "USER is not set; cannot query mpvpaper processes".into(),
-        ));
-    }
-    let output = run(user).map_err(|error| {
+    let mut cmd = Command::new("pgrep");
+    crate::append_pgrep_user_scope(&mut cmd, user);
+    cmd.args(["-x", "mpvpaper"]);
+    let output = run(&mut cmd).map_err(|error| {
         WcError::Other(format!("failed to execute pgrep for mpvpaper: {error}"))
     })?;
     parse_running_pids(output.status.code(), &output.stdout)
 }
 
 pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
-    let user = crate::whoami();
-    running_pids_for_user_with(&user, |user| {
-        Command::new("pgrep")
-            .args(["-u", user, "-x", "mpvpaper"])
-            .output()
-    })
+    let user = crate::current_process_user();
+    running_pids_for_scope_with(&user, |cmd| cmd.output())
 }
 
 pub(crate) fn stop_mpvpaper() {
@@ -130,17 +123,23 @@ mod tests {
     }
 
     #[test]
-    fn mpvpaper_pid_query_rejects_empty_user_before_spawning() {
-        let error =
-            running_pids_for_user_with("", |_| panic!("pgrep must not be spawned without a user"))
-                .unwrap_err();
-
-        assert!(error.to_string().contains("USER"));
+    fn mpvpaper_pgrep_scope_uses_uid_flag_for_numeric_scope() {
+        let scope = crate::ProcessUserScope::Uid(1000);
+        let mut cmd = Command::new("pgrep");
+        crate::append_pgrep_user_scope(&mut cmd, &scope);
+        cmd.args(["-x", "mpvpaper"]);
+        let args: Vec<String> = cmd
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        assert!(args.contains(&"-U".to_string()));
+        assert!(args.contains(&"1000".to_string()));
     }
 
     #[test]
     fn mpvpaper_pid_query_propagates_pgrep_spawn_failure() {
-        let error = running_pids_for_user_with("test-user", |_| {
+        let scope = crate::ProcessUserScope::Name("test-user".to_string());
+        let error = running_pids_for_scope_with(&scope, |_| {
             Err(std::io::Error::new(
                 std::io::ErrorKind::NotFound,
                 "pgrep unavailable",

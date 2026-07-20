@@ -75,15 +75,20 @@ where
     .map_err(anyhow::Error::msg)
 }
 
+fn app_service_from_storage(s: &StorageApi) -> anyhow::Result<wc_app::AppService> {
+    wc_app::AppService::try_from_config_dir(wc_core::ConfigDir {
+        path: s.cd.path.clone(),
+    })
+    .map_err(|error| anyhow::anyhow!(error.message))
+}
+
 pub(crate) fn apply(
     s: &StorageApi,
     file: String,
     target: Option<String>,
     explicit_outputs: Vec<String>,
 ) -> anyhow::Result<()> {
-    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
-        path: s.cd.path.clone(),
-    });
+    let service = app_service_from_storage(s)?;
     let target = match target {
         None => {
             if !explicit_outputs.is_empty() {
@@ -109,9 +114,7 @@ pub(crate) fn apply(
 }
 
 pub(crate) fn inspect(s: &StorageApi, path: String) -> anyhow::Result<()> {
-    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
-        path: s.cd.path.clone(),
-    });
+    let service = app_service_from_storage(s)?;
     let inspected = service
         .inspect_path(&path)
         .map_err(|e| anyhow::anyhow!(serde_json::to_string_pretty(&e).unwrap_or(e.message)))?;
@@ -165,9 +168,7 @@ pub(crate) fn restore_displays(
     explicit_outputs: Vec<String>,
 ) -> anyhow::Result<()> {
     let known_outputs = resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
-    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
-        path: s.cd.path.clone(),
-    });
+    let service = app_service_from_storage(s)?;
     restore_displays_with(&known_outputs, |outputs| service.restore_displays(outputs))?;
     println!("Display wallpapers restored.");
     Ok(())
@@ -516,9 +517,7 @@ where
 }
 
 pub(crate) fn apply_selected(s: &StorageApi, path: &str) -> anyhow::Result<()> {
-    let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
-        path: s.cd.path.clone(),
-    });
+    let service = app_service_from_storage(s)?;
     let target = service
         .apply(path)
         .map_err(|e| anyhow::anyhow!(e.message))?;

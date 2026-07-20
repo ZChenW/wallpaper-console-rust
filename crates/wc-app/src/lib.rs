@@ -76,10 +76,14 @@ impl AppService {
         &self.storage
     }
 
+    pub fn try_from_config_dir(cd: wc_core::ConfigDir) -> Result<Self, AppError> {
+        StorageApi::try_new(cd)
+            .map(|storage| AppService { storage })
+            .map_err(AppError::from_wc_error)
+    }
+
     pub fn from_config_dir(cd: wc_core::ConfigDir) -> Self {
-        AppService {
-            storage: StorageApi::try_new(cd).expect("storage initialization failed"),
-        }
+        Self::try_from_config_dir(cd).expect("storage initialization failed")
     }
 
     pub fn apply(&self, path: &str) -> Result<ApplyTarget, AppError> {

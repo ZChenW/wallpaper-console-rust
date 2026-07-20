@@ -229,21 +229,24 @@ pub(crate) trait ProcessControl {
 
 /// Real OS process control via pgrep / ps / kill.
 pub(crate) struct RealProcessControl {
-    user: String,
+    user: crate::ProcessUserScope,
 }
 
 impl RealProcessControl {
     pub(crate) fn new() -> Self {
         Self {
-            user: crate::whoami(),
+            user: crate::current_process_user(),
         }
     }
 }
 
 impl ProcessControl for RealProcessControl {
     fn find_processes(&self, pattern: &str) -> Vec<u32> {
-        let out = Command::new("pgrep")
-            .args(["-u", &self.user, "-f", pattern])
+        let mut cmd = Command::new("pgrep");
+        crate::append_pgrep_user_scope(&mut cmd, &self.user);
+        let out = cmd
+            .arg("-f")
+            .arg(pattern)
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .output();

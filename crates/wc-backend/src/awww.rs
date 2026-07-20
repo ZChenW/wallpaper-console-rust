@@ -47,15 +47,11 @@ fn clear_awww_cache() {
         .status();
 }
 
-pub(crate) fn is_awww_daemon_running(user: &str) -> bool {
-    if user.is_empty() {
-        return false;
-    }
+pub(crate) fn is_awww_daemon_running(user: &crate::ProcessUserScope) -> bool {
+    let mut cmd = std::process::Command::new("pgrep");
+    crate::append_pgrep_user_scope(&mut cmd, user);
     matches!(
-        std::process::Command::new("pgrep")
-            .arg("-u")
-            .arg(user)
-            .arg("-x")
+        cmd.arg("-x")
             .arg("awww-daemon")
             .stdout(Stdio::null())
             .stderr(Stdio::null())
