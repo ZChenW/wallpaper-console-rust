@@ -8,6 +8,7 @@ use wc_core::config::ConfigDir;
 const DEBOUNCE_MILLIS: u64 = 1_500;
 const RATE_LIMIT_MILLIS: u64 = 10_000;
 const WATCH_RETRY_DELAYS_MILLIS: [u64; 4] = [2_000, 5_000, 15_000, 60_000];
+const RECOVERY_PERSIST_DELAYS_MILLIS: [u64; 4] = WATCH_RETRY_DELAYS_MILLIS;
 
 pub trait SchedulerClock: Clone + Send + Sync + 'static {
     fn now_millis(&self) -> u64;
@@ -183,9 +184,15 @@ struct WatchRetryState {
     next_retry_millis: u64,
 }
 
+struct PendingRecovery {
+    persist_failures: u32,
+    next_persist_millis: u64,
+}
+
 struct WatchRegistry {
     watchers: BTreeMap<i64, WatchHandle>,
     retry_states: BTreeMap<i64, WatchRetryState>,
+    pending_recoveries: BTreeMap<i64, PendingRecovery>,
     next_generation: u64,
 }
 
@@ -194,6 +201,7 @@ impl Default for WatchRegistry {
         Self {
             watchers: BTreeMap::new(),
             retry_states: BTreeMap::new(),
+            pending_recoveries: BTreeMap::new(),
             next_generation: 1,
         }
     }
@@ -220,6 +228,13 @@ fn watch_retry_delay_millis(consecutive_failures: u32) -> u64 {
         .saturating_sub(1)
         .min((WATCH_RETRY_DELAYS_MILLIS.len() - 1) as u32) as usize;
     WATCH_RETRY_DELAYS_MILLIS[index]
+}
+
+fn recovery_persist_delay_millis(persist_failures: u32) -> u64 {
+    let index = persist_failures
+        .saturating_sub(1)
+        .min((RECOVERY_PERSIST_DELAYS_MILLIS.len() - 1) as u32) as usize;
+    RECOVERY_PERSIST_DELAYS_MILLIS[index]
 }
 
 impl WatchRegistry {
@@ -285,6 +300,18 @@ impl WatchRegistry {
             keep
         });
         self.retry_states.retain(|id, _| live_ids.contains(id));
+        self.pending_recoveries
+            .retain(|id, _| live_ids.contains(id));
+    }
+
+    fn note_watcher_recovered(&mut self, source_id: i64, now_millis: u64) {
+        self.pending_recoveries.insert(
+            source_id,
+            PendingRecovery {
+                persist_failures: 0,
+                next_persist_millis: now_millis,
+            },
+        );
     }
 
     fn apply_message(&mut self, message: WatchMessage, now_millis: u64) -> WatchAction {
@@ -293,6 +320,7 @@ impl WatchRegistry {
                 if self.is_current(source_id, generation)
                     && self.retry_states.remove(&source_id).is_some()
                 {
+                    self.note_watcher_recovered(source_id, now_millis);
                     WatchAction::Recovered(source_id)
                 } else {
                     WatchAction::None
@@ -315,6 +343,7 @@ impl WatchRegistry {
                     return WatchAction::None;
                 };
                 let _ = retire_watcher(&mut self.watchers, source_id);
+                self.pending_recoveries.remove(&source_id);
                 let (consecutive_failures, first_failure) = self
                     .retry_states
                     .get(&source_id)
@@ -346,6 +375,63 @@ impl WatchRegistry {
             .get(&source_id)
             .is_some_and(|watcher| watcher.generation == generation)
     }
+
+    fn pending_recovery_ids(&self) -> impl Iterator<Item = i64> + '_ {
+        self.pending_recoveries.keys().copied()
+    }
+}
+
+/// Persist recovery-due state before scheduling a compensating rescan. Returns
+/// true only after the storage transaction succeeds and the pending entry is
+/// cleared.
+fn try_mark_recovery_due(cd: &ConfigDir, source_id: i64) -> bool {
+    if wc_storage::sqlite::mark_source_refresh_recovery_due(cd, source_id).is_err() {
+        log::warn!("Failed to mark recovered Library source id {source_id} due; will retry");
+        false
+    } else {
+        true
+    }
+}
+
+fn commit_pending_recovery(
+    registry: &mut WatchRegistry,
+    source_id: i64,
+    now_millis: u64,
+    mut mark_recovery_due: impl FnMut(i64) -> bool,
+) -> bool {
+    let Some(pending) = registry.pending_recoveries.get(&source_id) else {
+        return false;
+    };
+    if now_millis < pending.next_persist_millis {
+        return false;
+    }
+    if mark_recovery_due(source_id) {
+        registry.pending_recoveries.remove(&source_id);
+        return true;
+    }
+    let pending = registry
+        .pending_recoveries
+        .get_mut(&source_id)
+        .expect("pending recovery must still exist after a failed persist");
+    pending.persist_failures = pending.persist_failures.saturating_add(1);
+    pending.next_persist_millis =
+        now_millis.saturating_add(recovery_persist_delay_millis(pending.persist_failures));
+    false
+}
+
+fn flush_pending_recoveries<C: SchedulerClock>(
+    registry: &mut WatchRegistry,
+    scheduler: &mut LibraryScheduler<C>,
+    now_millis: u64,
+    mut mark_recovery_due: impl FnMut(i64) -> bool,
+) {
+    let pending_ids = registry.pending_recovery_ids().collect::<Vec<_>>();
+    for source_id in pending_ids {
+        if commit_pending_recovery(registry, source_id, now_millis, &mut mark_recovery_due) {
+            log::info!("Library watcher recovered for source id {source_id}; scheduling rescan");
+            scheduler.source_changed(source_id);
+        }
+    }
 }
 
 fn process_watch_message<C: SchedulerClock>(
@@ -354,7 +440,7 @@ fn process_watch_message<C: SchedulerClock>(
     message: WatchMessage,
     now_millis: u64,
     mut mark_dirty: impl FnMut(i64),
-    mut mark_recovery_due: impl FnMut(i64),
+    mut mark_recovery_due: impl FnMut(i64) -> bool,
 ) {
     match registry.apply_message(message, now_millis) {
         WatchAction::None => {}
@@ -368,9 +454,12 @@ fn process_watch_message<C: SchedulerClock>(
             scheduler.source_changed(source_id);
         }
         WatchAction::Recovered(source_id) => {
-            mark_recovery_due(source_id);
-            log::info!("Library watcher recovered for source id {source_id}; scheduling rescan");
-            scheduler.source_changed(source_id);
+            if commit_pending_recovery(registry, source_id, now_millis, &mut mark_recovery_due) {
+                log::info!(
+                    "Library watcher recovered for source id {source_id}; scheduling rescan"
+                );
+                scheduler.source_changed(source_id);
+            }
         }
         WatchAction::Overflow => {
             for source_id in scheduler.watcher_overflow() {
@@ -472,15 +561,17 @@ pub fn start_library_scheduler(
                     |source_id| {
                         let _ = wc_storage::sqlite::mark_source_refresh_dirty(&cd, source_id);
                     },
-                    |source_id| {
-                        if wc_storage::sqlite::mark_source_refresh_recovery_due(&cd, source_id)
-                            .is_err()
-                        {
-                            log::warn!(
-                                "Failed to mark recovered Library source id {source_id} due"
-                            );
-                        }
-                    },
+                    |source_id| try_mark_recovery_due(&cd, source_id),
+                );
+            }
+
+            {
+                let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
+                flush_pending_recoveries(
+                    &mut watch_registry,
+                    &mut scheduler,
+                    clock.now_millis(),
+                    |source_id| try_mark_recovery_due(&cd, source_id),
                 );
             }
 
@@ -845,7 +936,7 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
 
         assert!(!current.stop.load(Ordering::Acquire));
@@ -869,7 +960,7 @@ mod tests {
                 );
                 dirtied_sources.push(source_id);
             },
-            |_| {},
+            |_| true,
         );
 
         assert!(current.stop.load(Ordering::Acquire));
@@ -889,6 +980,9 @@ mod tests {
         assert_eq!(watch_retry_delay_millis(4), 60_000);
         assert_eq!(watch_retry_delay_millis(5), 60_000);
         assert_eq!(watch_retry_delay_millis(u32::MAX), 60_000);
+        assert_eq!(recovery_persist_delay_millis(1), 2_000);
+        assert_eq!(recovery_persist_delay_millis(4), 60_000);
+        assert_eq!(recovery_persist_delay_millis(u32::MAX), 60_000);
     }
 
     #[test]
@@ -908,7 +1002,7 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         assert_eq!(dirtied_sources, vec![7]);
         assert!(registry.reconcile(7, signature.clone(), 1_999).is_none());
@@ -922,7 +1016,7 @@ mod tests {
             WatchMessage::Ready(7, first.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         process_watch_message(
             &mut registry,
@@ -930,7 +1024,7 @@ mod tests {
             WatchMessage::Changed(7, first.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         assert!(registry.retry_states.contains_key(&7));
         assert_eq!(dirtied_sources, vec![7]);
@@ -941,7 +1035,7 @@ mod tests {
             WatchMessage::Failed(7, second.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         assert_eq!(dirtied_sources, vec![7]);
         assert!(registry.reconcile(7, signature.clone(), 6_999).is_none());
@@ -955,9 +1049,10 @@ mod tests {
             WatchMessage::Ready(7, third.generation),
             7_000,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         assert!(!registry.retry_states.contains_key(&7));
+        assert!(registry.pending_recoveries.is_empty());
 
         process_watch_message(
             &mut registry,
@@ -965,7 +1060,7 @@ mod tests {
             WatchMessage::Failed(7, third.generation),
             7_001,
             |source_id| dirtied_sources.push(source_id),
-            |_| {},
+            |_| true,
         );
         assert_eq!(dirtied_sources, vec![7, 7]);
         assert!(registry.reconcile(7, signature.clone(), 9_000).is_none());
@@ -990,7 +1085,10 @@ mod tests {
             WatchMessage::Ready(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
-            |source_id| recovered_sources.push(source_id),
+            |source_id| {
+                recovered_sources.push(source_id);
+                true
+            },
         );
         assert!(dirtied_sources.is_empty());
         assert!(recovered_sources.is_empty());
@@ -1001,7 +1099,10 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |source_id| dirtied_sources.push(source_id),
-            |source_id| recovered_sources.push(source_id),
+            |source_id| {
+                recovered_sources.push(source_id);
+                true
+            },
         );
         assert_eq!(dirtied_sources, vec![7]);
         scheduler.manual_requested(7);
@@ -1015,7 +1116,10 @@ mod tests {
             WatchMessage::Ready(7, first.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |source_id| recovered_sources.push(source_id),
+            |source_id| {
+                recovered_sources.push(source_id);
+                true
+            },
         );
         assert!(recovered_sources.is_empty());
         assert!(registry.retry_states.contains_key(&7));
@@ -1026,7 +1130,10 @@ mod tests {
             WatchMessage::Ready(7, retry.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |source_id| recovered_sources.push(source_id),
+            |source_id| {
+                recovered_sources.push(source_id);
+                true
+            },
         );
         process_watch_message(
             &mut registry,
@@ -1034,10 +1141,14 @@ mod tests {
             WatchMessage::Ready(7, retry.generation),
             2_000,
             |source_id| dirtied_sources.push(source_id),
-            |source_id| recovered_sources.push(source_id),
+            |source_id| {
+                recovered_sources.push(source_id);
+                true
+            },
         );
 
         assert_eq!(recovered_sources, vec![7]);
+        assert!(registry.pending_recoveries.is_empty());
         clock.advance(1_499);
         assert!(scheduler.take_due_scans().is_empty());
         clock.advance(1);
@@ -1059,7 +1170,7 @@ mod tests {
             WatchMessage::Failed(7, watcher.generation),
             0,
             |_| {},
-            |_| {},
+            |_| true,
         );
         assert!(registry.watchers.is_empty());
         assert!(registry.retry_states.contains_key(&7));
@@ -1089,7 +1200,7 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |_| {},
-            |_| {},
+            |_| true,
         );
 
         assert!(registry
@@ -1115,13 +1226,220 @@ mod tests {
             WatchMessage::Failed(7, first.generation),
             0,
             |_| {},
-            |_| {},
+            |_| true,
         );
 
         registry.retain_sources(&BTreeSet::new());
 
         assert!(!registry.retry_states.contains_key(&7));
+        assert!(!registry.pending_recoveries.contains_key(&7));
         assert!(registry.reconcile(7, signature, 1).is_some());
+    }
+
+    #[test]
+    fn recovery_persist_failure_keeps_pending_and_retries_with_capped_backoff() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let signature = ("recovering".to_owned(), true);
+        let first = registry
+            .reconcile(7, signature.clone(), 0)
+            .expect("initial watcher");
+        let mut persist_attempts = 0_u32;
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, first.generation),
+            0,
+            |_| {},
+            |_| true,
+        );
+        let retry = registry
+            .reconcile(7, signature, 2_000)
+            .expect("retry watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |_| {},
+            |_| {
+                persist_attempts += 1;
+                false
+            },
+        );
+
+        assert!(registry.pending_recoveries.contains_key(&7));
+        assert!(scheduler.take_due_scans().is_empty());
+
+        let pending = registry
+            .pending_recoveries
+            .get(&7)
+            .expect("pending recovery");
+        assert_eq!(pending.persist_failures, 1);
+        assert_eq!(pending.next_persist_millis, 2_000 + 2_000);
+
+        flush_pending_recoveries(&mut registry, &mut scheduler, 3_999, |_| {
+            persist_attempts += 1;
+            false
+        });
+        assert_eq!(persist_attempts, 1);
+        assert!(registry.pending_recoveries.contains_key(&7));
+        assert!(scheduler.take_due_scans().is_empty());
+
+        flush_pending_recoveries(&mut registry, &mut scheduler, 4_000, |_| {
+            persist_attempts += 1;
+            true
+        });
+        assert_eq!(persist_attempts, 2);
+        assert!(registry.pending_recoveries.is_empty());
+        clock.advance(1_500);
+        assert_eq!(scheduler.take_due_scans(), vec![7]);
+    }
+
+    #[test]
+    fn recovery_persist_failure_does_not_schedule_rescan_until_commit() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let signature = ("recovering".to_owned(), true);
+        let first = registry
+            .reconcile(7, signature.clone(), 0)
+            .expect("initial watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, first.generation),
+            0,
+            |_| {},
+            |_| true,
+        );
+        scheduler.manual_requested(7);
+        let retry = registry
+            .reconcile(7, signature, 2_000)
+            .expect("retry watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |_| {},
+            |_| false,
+        );
+
+        clock.advance(60_000);
+        assert!(scheduler.take_due_scans().is_empty());
+
+        flush_pending_recoveries(&mut registry, &mut scheduler, 62_000, |_| false);
+        assert!(scheduler.take_due_scans().is_empty());
+    }
+
+    #[test]
+    fn successful_recovery_commit_is_not_repeated_for_duplicate_ready() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let signature = ("recovering".to_owned(), true);
+        let first = registry
+            .reconcile(7, signature.clone(), 0)
+            .expect("initial watcher");
+        let mut persist_attempts = 0_u32;
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, first.generation),
+            0,
+            |_| {},
+            |_| true,
+        );
+        let retry = registry
+            .reconcile(7, signature, 2_000)
+            .expect("retry watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |_| {},
+            |_| {
+                persist_attempts += 1;
+                true
+            },
+        );
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |_| {},
+            |_| {
+                persist_attempts += 1;
+                true
+            },
+        );
+
+        assert_eq!(persist_attempts, 1);
+        assert!(registry.pending_recoveries.is_empty());
+    }
+
+    #[test]
+    fn watcher_refailure_before_recovery_commit_clears_pending_persist() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7]);
+        let mut registry = WatchRegistry::default();
+        let signature = ("recovering".to_owned(), true);
+        let first = registry
+            .reconcile(7, signature.clone(), 0)
+            .expect("initial watcher");
+        let mut persist_attempts = 0_u32;
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, first.generation),
+            0,
+            |_| {},
+            |_| true,
+        );
+        let retry = registry
+            .reconcile(7, signature.clone(), 2_000)
+            .expect("retry watcher");
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Ready(7, retry.generation),
+            2_000,
+            |_| {},
+            |_| {
+                persist_attempts += 1;
+                false
+            },
+        );
+        assert!(registry.pending_recoveries.contains_key(&7));
+
+        process_watch_message(
+            &mut registry,
+            &mut scheduler,
+            WatchMessage::Failed(7, retry.generation),
+            2_001,
+            |_| {},
+            |_| true,
+        );
+        assert!(registry.pending_recoveries.is_empty());
+
+        flush_pending_recoveries(&mut registry, &mut scheduler, 62_000, |_| {
+            persist_attempts += 1;
+            true
+        });
+        assert_eq!(persist_attempts, 1);
+        assert!(scheduler.take_due_scans().is_empty());
     }
 
     #[cfg(target_os = "linux")]
