@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { Event } from '@tauri-apps/api/event';
+
 import { APP_EVENTS, type ApplyStagePayload } from '../events/appEvents.ts';
 import { createSubscribeApplyStage } from './subscribeApplyStageCore.ts';
 
@@ -28,19 +30,21 @@ test('subscribeApplyStage disposes before listen resolves and still calls unlist
 
 test('subscribeApplyStage forwards payload events to handler', async () => {
   const payloads: ApplyStagePayload[] = [];
-  const listenFn = (async (_event, handler) => {
-    handler({
+  const stagePayload: ApplyStagePayload = {
+    requestId: 'req-1',
+    stage: 'EnsureAwwwDaemon',
+    label: 'Starting awww daemon',
+    detail: 'Starting awww daemon.',
+  };
+  const listenFn: Parameters<typeof createSubscribeApplyStage>[1] = async (_event, handler) => {
+    const event: Event<ApplyStagePayload> = {
       event: APP_EVENTS.applyStage,
       id: 1,
-      payload: {
-        requestId: 'req-1',
-        stage: 'EnsureAwwwDaemon',
-        label: 'Starting awww daemon',
-        detail: 'Starting awww daemon.',
-      },
-    });
+      payload: stagePayload,
+    };
+    (handler as (event: Event<ApplyStagePayload>) => void)(event);
     return () => {};
-  }) as Parameters<typeof createSubscribeApplyStage>[1];
+  };
 
   const subscribe = createSubscribeApplyStage(APP_EVENTS.applyStage, listenFn);
   subscribe((payload) => { payloads.push(payload); });

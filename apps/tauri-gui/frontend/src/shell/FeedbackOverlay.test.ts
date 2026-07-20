@@ -52,12 +52,13 @@ function findElements(
 
   const matches = predicate(node) ? [node] : [];
   if (typeof node.type === 'function') {
-    const rendered = node.type(node.props) as ReactNode;
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
     return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 
@@ -152,8 +153,8 @@ test('puts countdown progress last on timed cards and omits it for persistent er
   const tree = FeedbackOverlay({ state, nowMs: 2_500, dispatch: () => undefined });
   const [timedCard] = findElements(tree, (element) => element.props['data-feedback-card'] === 'apply');
   const [errorCard] = findElements(tree, (element) => element.props['data-feedback-card'] === 'system');
-  const timedChildren = Children.toArray(timedCard.props.children);
-  const errorChildren = Children.toArray(errorCard.props.children);
+  const timedChildren = Children.toArray(timedCard.props.children as ReactNode);
+  const errorChildren = Children.toArray(errorCard.props.children as ReactNode);
   const lastTimedChild = timedChildren.at(-1);
 
   assert.ok(isValidElement<Record<string, unknown>>(lastTimedChild));

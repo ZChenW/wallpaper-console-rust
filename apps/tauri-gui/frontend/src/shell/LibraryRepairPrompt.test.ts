@@ -35,11 +35,13 @@ function findElements(
   if (!isValidElement<Record<string, unknown>>(node)) return [];
   const matches = predicate(node) ? [node] : [];
   if (typeof node.type === 'function') {
-    return [...matches, ...findElements(node.type(node.props) as ReactNode, predicate)];
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
+    return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 

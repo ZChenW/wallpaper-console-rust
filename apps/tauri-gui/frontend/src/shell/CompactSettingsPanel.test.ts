@@ -106,18 +106,19 @@ function findElements(
             ? createElement('span', {
               'aria-hidden': true,
               'data-control-unit': node.props.unitKind ?? 'number',
-            }, node.props.unit)
+            }, String(node.props.unit))
             : null,
         ],
       );
       return findElements(input, predicate);
     }
-    const rendered = node.type(node.props) as ReactNode;
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
     return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 
@@ -162,7 +163,7 @@ test('settings uses an icon close action and closes on Escape or backdrop only',
 
   assert.equal(close.props.autoFocus, true);
   assert.equal(close.props['data-icon-button'], true);
-  assert.equal(overlay.props.style.zIndex, 1100);
+  assert.equal((overlay.props.style as { zIndex?: number }).zIndex, 1100);
   assert.doesNotMatch(renderToStaticMarkup(close), />Close</);
   (overlay.props.onKeyDown as (event: unknown) => void)({
     key: 'Escape',
@@ -330,7 +331,7 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
     (element) => element.props['data-behavior-card'] === 'renderer-selection',
   );
   assert.deepEqual(
-    findElements(rendererSelection, (element) => ['Image', 'GIF', 'Video'].includes(element.props['aria-label']))
+    findElements(rendererSelection, (element) => ['Image', 'GIF', 'Video'].includes(String(element.props['aria-label'])))
       .map((field) => field.props['aria-label']),
     ['Image', 'GIF', 'Video'],
   );

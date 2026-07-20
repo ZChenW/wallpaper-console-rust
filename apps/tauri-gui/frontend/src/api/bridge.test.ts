@@ -91,7 +91,7 @@ test('library browser invokes use one camelCase query object', async () => {
     favoritesOnly: true,
     search: 'aurora ada',
     sort: 'nameDesc',
-    offset: 20,
+    cursor: 'page-20',
     limit: 40,
   };
 
