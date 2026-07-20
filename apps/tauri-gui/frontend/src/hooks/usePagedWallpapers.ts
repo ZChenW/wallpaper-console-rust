@@ -89,6 +89,13 @@ export function shouldPauseAutomaticAppend(outcome: AutomaticAppendOutcome): boo
   return outcome.itemCount === 0;
 }
 
+export function shouldQuietlyRecoverRevisionChanged(
+  append: boolean,
+  error: unknown,
+): boolean {
+  return append && isRevisionChangedError(error);
+}
+
 export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   pageSize,
   loadPage,
@@ -197,14 +204,17 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       }
     } catch (error) {
       if (!isCurrent()) return;
-      setLoadError(true);
-      setLoadErrorDetail(formatLoadPageError(error));
-      if (append && isRevisionChangedError(error)) {
+      if (shouldQuietlyRecoverRevisionChanged(append, error)) {
         // Keep the old list visible while atomically replacing it with page 1
-        // from the new revision.
+        // from the new revision — no error banner for this expected race.
+        setLoadError(false);
+        setLoadErrorDetail(null);
+        setRefreshing(true);
         void load(false, null);
         return;
       }
+      setLoadError(true);
+      setLoadErrorDetail(formatLoadPageError(error));
       if (append) {
         setAutomaticAppendPaused(shouldPauseAutomaticAppend({ kind: 'error' }));
       }

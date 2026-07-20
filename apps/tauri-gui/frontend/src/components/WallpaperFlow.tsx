@@ -25,6 +25,7 @@ import FlowMetadataRail from './FlowMetadataRail.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 import { applyFlowHover } from './flowHoverDom.ts';
 import {
+  libraryEntryApplyDisabledReason,
   resolveLibraryFlowStartupAnchor,
   resolveLibraryQueryResetAnchor,
   type LibraryViewModel,
@@ -899,9 +900,13 @@ function WallpaperFlowImpl({
         activeQueueName={activeQueueName}
         allViewed={!model.hasMore && !model.loadingMore}
         applyAvailable={centeredApplicable}
-        applyDisabledReason={centeredEntry?.applyReason || centeredEntry?.unsupportedReason || (
-          !model.canApplyToDisplay ? 'The selected display is unavailable.' : null
-        )}
+        applyDisabledReason={centeredEntry
+          ? libraryEntryApplyDisabledReason(
+            model.canApplyToDisplay,
+            model.displayApplyDisabledReason,
+            centeredEntry,
+          )
+          : model.displayApplyDisabledReason}
         applying={Boolean(centeredEntry && model.applying && model.activePath === centeredEntry.path)}
         centeredEntry={centeredEntry}
         centeredIndex={centeredIndex}

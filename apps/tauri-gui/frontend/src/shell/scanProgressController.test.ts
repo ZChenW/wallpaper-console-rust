@@ -119,9 +119,9 @@ test('progress polling preserves the reducer 500ms presentation delay without re
 
   controller.start();
   await settle();
-  const startedAtMs = controller.getSnapshot().scanState.kind === 'running'
-    ? controller.getSnapshot().scanState.startedAtMs
-    : assert.fail('scan should be running');
+  const runningState = controller.getSnapshot().scanState;
+  assert.equal(runningState.kind, 'running');
+  const startedAtMs = runningState.startedAtMs;
 
   clock.nowMs = startedAtMs + 499;
   await controller.refresh();
@@ -215,13 +215,9 @@ test('cancel remains pending until backend terminal progress and cannot be reque
   const first = controller.requestCancel();
   const second = controller.requestCancel();
   assert.equal(cancelCalls, 1);
-  assert.equal(controller.getSnapshot().scanState.kind, 'running');
-  assert.notEqual(
-    controller.getSnapshot().scanState.kind === 'running'
-      ? controller.getSnapshot().scanState.cancelRequestedAtMs
-      : null,
-    null,
-  );
+  const runningAfterCancel = controller.getSnapshot().scanState;
+  assert.equal(runningAfterCancel.kind, 'running');
+  assert.notEqual(runningAfterCancel.cancelRequestedAtMs, null);
 
   resolveCancel?.(ok);
   await Promise.all([first, second]);
@@ -273,9 +269,10 @@ test('a failed cancel request restores the cancel action and polling can recover
   assert.equal(controller.getSnapshot().scanState.kind, 'running');
 
   assert.equal(await controller.requestCancel(), null);
+  const runningAfterFailedCancel = controller.getSnapshot().scanState;
   assert.equal(
-    controller.getSnapshot().scanState.kind === 'running'
-      ? controller.getSnapshot().scanState.cancelRequestedAtMs
+    runningAfterFailedCancel.kind === 'running'
+      ? runningAfterFailedCancel.cancelRequestedAtMs
       : null,
     null,
   );

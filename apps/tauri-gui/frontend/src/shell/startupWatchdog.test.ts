@@ -2,8 +2,9 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  createLibraryReadyGate,
+  createLibraryReadyDelivery,
   createLibraryWatchdog,
+  shouldClearLibraryTimeout,
   shouldSignalLibraryPaint,
   type LibraryPaintInput,
 } from './startupWatchdog.ts';
@@ -12,8 +13,46 @@ import {
 
 function deferred() {
   let resolve!: () => void;
-  const promise = new Promise<void>((r) => { resolve = r; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+class ManualTimers {
+  private nextId = 1;
+  private tasks = new Map<number, { delayMs: number; callback: () => void }>();
+
+  readonly setTimer = (callback: () => void, delayMs: number): unknown => {
+    const id = this.nextId++;
+    this.tasks.set(id, { delayMs, callback });
+    return id;
+  };
+
+  readonly clearTimer = (handle: unknown): void => {
+    if (typeof handle === 'number') this.tasks.delete(handle);
+  };
+
+  nextDelay(): number | null {
+    return this.tasks.values().next().value?.delayMs ?? null;
+  }
+
+  runNext(): void {
+    const entry = this.tasks.entries().next().value as
+      | [number, { delayMs: number; callback: () => void }]
+      | undefined;
+    assert.ok(entry, 'expected a scheduled retry');
+    this.tasks.delete(entry[0]);
+    entry[1].callback();
+  }
+}
+
+async function settle(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 function paintInput(overrides: Partial<LibraryPaintInput> = {}): LibraryPaintInput {
@@ -68,37 +107,160 @@ test('library paint does NOT signal when still loading without timeout', () => {
   );
 });
 
-// ── createLibraryReadyGate ──────────────────────────────────────────────
+// ── shouldClearLibraryTimeout ───────────────────────────────────────────
 
-test('ready gate signals exactly once', () => {
-  const gate = createLibraryReadyGate();
-
-  assert.equal(gate.called, false);
-  assert.equal(gate.shouldSignal(paintInput({ hasEntries: true })), true);
-
-  gate.markCalled();
-  assert.equal(gate.called, true);
-
-  // Subsequent calls are silent
-  assert.equal(gate.shouldSignal(paintInput({ hasEntries: true })), false);
-  assert.equal(gate.shouldSignal(paintInput({ timedOut: true })), false);
+test('library timeout clears after entries resolve', () => {
+  assert.equal(shouldClearLibraryTimeout(paintInput({ hasEntries: true })), true);
 });
 
-test('ready gate does not double-signal across timeout then success', () => {
-  const gate = createLibraryReadyGate();
+test('library timeout clears after an empty result resolves', () => {
+  assert.equal(shouldClearLibraryTimeout(paintInput({ emptyConfirmed: true })), true);
+});
 
-  // First: timeout triggers the paint
-  assert.equal(
-    gate.shouldSignal(paintInput({ initialLoading: true, timedOut: true })),
-    true,
-  );
-  gate.markCalled();
+test('library timeout clears after a load error resolves', () => {
+  assert.equal(shouldClearLibraryTimeout(paintInput({ loadError: true })), true);
+});
 
-  // Later: the actual data arrives — gate already fired, don't re-signal
+test('library timeout does not clear while initial loading is unresolved', () => {
   assert.equal(
-    gate.shouldSignal(paintInput({ hasEntries: true })),
+    shouldClearLibraryTimeout(paintInput({ initialLoading: true })),
     false,
   );
+});
+
+test('library timeout does not clear from the timeout state alone', () => {
+  assert.equal(
+    shouldClearLibraryTimeout(paintInput({ timedOut: true })),
+    false,
+  );
+});
+
+test('library timeout waits for initial loading to end before clearing', () => {
+  assert.equal(
+    shouldClearLibraryTimeout(paintInput({ initialLoading: true, hasEntries: true })),
+    false,
+  );
+});
+
+// ── createLibraryReadyDelivery ──────────────────────────────────────────
+
+test('ready delivery retries a rejected first send and acknowledges its success', async () => {
+  const timers = new ManualTimers();
+  const attempts = [deferred(), deferred()];
+  let sendCalls = 0;
+  const delivery = createLibraryReadyDelivery(
+    () => attempts[sendCalls++].promise,
+    timers,
+  );
+
+  delivery.activate();
+  assert.equal(sendCalls, 1);
+  assert.equal(delivery.acknowledged, false);
+
+  attempts[0].reject(new Error('temporary bridge failure'));
+  await settle();
+  assert.equal(timers.nextDelay(), 250);
+
+  timers.runNext();
+  assert.equal(sendCalls, 2);
+  attempts[1].resolve();
+  await settle();
+
+  assert.equal(delivery.acknowledged, true);
+  assert.equal(timers.nextDelay(), null);
+});
+
+test('ready delivery never overlaps sends across StrictMode-style reactivation', async () => {
+  const first = deferred();
+  let sendCalls = 0;
+  const delivery = createLibraryReadyDelivery(() => {
+    sendCalls += 1;
+    return first.promise;
+  });
+
+  delivery.activate();
+  delivery.activate();
+  delivery.deactivate();
+  delivery.activate();
+
+  assert.equal(sendCalls, 1);
+  first.resolve();
+  await settle();
+  assert.equal(delivery.acknowledged, true);
+});
+
+test('ready delivery treats acknowledgement as terminal', async () => {
+  const timers = new ManualTimers();
+  let sendCalls = 0;
+  const delivery = createLibraryReadyDelivery(async () => {
+    sendCalls += 1;
+  }, timers);
+
+  delivery.activate();
+  await settle();
+  assert.equal(delivery.acknowledged, true);
+
+  delivery.deactivate();
+  delivery.activate();
+  assert.equal(sendCalls, 1);
+  assert.equal(timers.nextDelay(), null);
+});
+
+test('ready delivery deactivation cancels a pending retry', async () => {
+  const timers = new ManualTimers();
+  const delivery = createLibraryReadyDelivery(
+    async () => { throw new Error('temporary bridge failure'); },
+    timers,
+  );
+
+  delivery.activate();
+  await settle();
+  assert.equal(timers.nextDelay(), 250);
+
+  delivery.deactivate();
+  assert.equal(timers.nextDelay(), null);
+  assert.equal(delivery.acknowledged, false);
+});
+
+test('ready delivery reactivation resumes after a failed send was deactivated', async () => {
+  const timers = new ManualTimers();
+  const attempts = [deferred(), deferred()];
+  let sendCalls = 0;
+  const delivery = createLibraryReadyDelivery(
+    () => attempts[sendCalls++].promise,
+    timers,
+  );
+
+  delivery.activate();
+  attempts[0].reject(new Error('temporary bridge failure'));
+  await settle();
+  delivery.deactivate();
+
+  delivery.activate();
+  assert.equal(sendCalls, 2);
+  attempts[1].resolve();
+  await settle();
+  assert.equal(delivery.acknowledged, true);
+});
+
+test('ready delivery uses capped retry delays', async () => {
+  const timers = new ManualTimers();
+  let sendCalls = 0;
+  const delivery = createLibraryReadyDelivery(async () => {
+    sendCalls += 1;
+    throw new Error('temporary bridge failure');
+  }, timers);
+
+  delivery.activate();
+
+  for (const delay of [250, 1_000, 2_000, 5_000, 5_000]) {
+    await settle();
+    assert.equal(timers.nextDelay(), delay);
+    timers.runNext();
+  }
+
+  assert.equal(sendCalls, 6);
+  delivery.deactivate();
 });
 
 // ── createLibraryWatchdog ───────────────────────────────────────────────

@@ -11,10 +11,10 @@ test('APP_EVENTS preserves public event names', () => {
 });
 
 test('emitFeedback notifies typed feedback listeners', () => {
-  const globals = globalThis as typeof globalThis & { window?: Window };
+  const globals = globalThis as typeof globalThis & { window?: EventTarget };
   const originalWindow = globals.window;
   const target = new EventTarget();
-  globals.window = target as Window;
+  globals.window = target as typeof globals.window;
   const seen: CommandFeedback[] = [];
 
   try {
@@ -22,11 +22,7 @@ test('emitFeedback notifies typed feedback listeners', () => {
     emitFeedback({ state: 'success', label: 'Saved', detail: 'ok' });
     off();
   } finally {
-    if (originalWindow) {
-      globals.window = originalWindow;
-    } else {
-      delete globals.window;
-    }
+    globals.window = originalWindow;
   }
 
   assert.deepEqual(seen, [{ state: 'success', label: 'Saved', detail: 'ok' }]);

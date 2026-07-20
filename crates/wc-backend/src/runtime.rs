@@ -82,7 +82,7 @@ pub(crate) fn build_awww_daemon_command() -> Command {
 
 pub(crate) fn wait_for_awww_socket_ready(
     runtime: &mut dyn BackendRuntime,
-    user: &str,
+    user: &crate::ProcessUserScope,
 ) -> Result<(), WcError> {
     let mut last_stderr = String::new();
     for _ in 0..40 {
@@ -222,7 +222,7 @@ impl BackendRuntime for SystemBackendRuntime {
 
     fn stop_awww_checked(&mut self) -> Result<(), WcError> {
         self.stop_awww();
-        let user = crate::whoami();
+        let user = crate::current_process_user();
         if crate::awww::is_awww_daemon_running(&user) {
             return Err(WcError::Other(
                 "awww-daemon still running after stop".into(),
@@ -297,7 +297,7 @@ impl BackendRuntime for SystemBackendRuntime {
         if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
             return Ok(());
         }
-        let user = crate::whoami();
+        let user = crate::current_process_user();
         let was_running = crate::awww::is_awww_daemon_running(&user);
         if !was_running {
             let mut cmd = build_awww_daemon_command();

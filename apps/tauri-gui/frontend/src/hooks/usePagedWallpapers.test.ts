@@ -5,6 +5,7 @@ import {
   formatLoadPageError,
   mergePagedWallpaperItems,
   shouldPauseAutomaticAppend,
+  shouldQuietlyRecoverRevisionChanged,
 } from './usePagedWallpapers.ts';
 import type { WallpaperDTO } from '../api/bridge.ts';
 
@@ -71,6 +72,15 @@ test('formatLoadPageError preserves typed backend error details', () => {
 
 test('formatLoadPageError falls back for unknown error shapes', () => {
   assert.equal(formatLoadPageError({ code: 1 }), 'Failed to load library page');
+});
+
+test('revision_changed during append is a quiet recovery, not a load error', () => {
+  const revisionChanged = { kind: 'revision_changed', message: 'Library snapshot changed.' };
+
+  assert.equal(shouldQuietlyRecoverRevisionChanged(true, revisionChanged), true);
+  assert.equal(shouldQuietlyRecoverRevisionChanged(false, revisionChanged), false);
+  assert.equal(shouldQuietlyRecoverRevisionChanged(true, new Error('network down')), false);
+  assert.equal(shouldQuietlyRecoverRevisionChanged(true, { kind: 'query_timeout', message: 'slow' }), false);
 });
 
 test('append failures pause automatic retries until an explicit retry', () => {

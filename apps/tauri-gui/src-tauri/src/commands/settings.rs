@@ -3,6 +3,95 @@ use std::collections::HashMap;
 use wc_config::ConfigDirExt;
 
 use super::common::{fail, format_bytes, ok, storage, CommandResult, ScanProgressDto};
+use super::files;
+
+/// Keys the GUI may write via `config_set` IPC.
+///
+/// Mirrors `apps/tauri-gui/frontend/src/settings/configSchema.ts` plus keys
+/// written directly from shell preference hooks.
+const WRITABLE_CONFIG_KEYS: &[&str] = &[
+    "gui_theme",
+    "image_backend",
+    "gif_backend",
+    "video_backend",
+    "awww_resize",
+    "awww_transition_type",
+    "awww_transition_duration",
+    "wallpaper_transition_fps",
+    "mpvpaper_options",
+    "mpvpaper_output",
+    "linux_wallpaperengine_enabled",
+    "linux_wallpaperengine_path",
+    "linux_wallpaperengine_target_mode",
+    "linux_wallpaperengine_target",
+    "linux_wallpaperengine_scaling",
+    "linux_wallpaperengine_fps",
+    "linux_wallpaperengine_muted",
+    "linux_wallpaperengine_volume",
+    "gui_thumbnail_mode",
+    "gui_thumbnail_cleanup_days",
+    "gui_thumbnail_failure_ttl_secs",
+    "preview_metadata",
+    "gui_debug_logs",
+    "open_project_location_mode",
+    "gui_file_manager",
+    "gui_file_manager_custom",
+    "gui_terminal_file_manager",
+    "gui_terminal_file_manager_custom",
+    "gui_shell_preferences",
+    "restore_on_login",
+];
+
+fn config_key_writable_from_gui(key: &str) -> bool {
+    WRITABLE_CONFIG_KEYS.contains(&key)
+}
+
+fn validate_writable_config_set(key: &str, value: &str) -> Result<(), String> {
+    if !config_key_writable_from_gui(key) {
+        return Err(format!("Config key is not writable from the GUI: {key}"));
+    }
+
+    if value.contains('\n') || value.contains('\r') {
+        return Err(format!(
+            "Config value for {key} must not contain line breaks."
+        ));
+    }
+
+    match key {
+        "linux_wallpaperengine_path" => validate_linux_wallpaperengine_path(value),
+        "gui_file_manager_custom" | "gui_terminal_file_manager_custom" => {
+            validate_custom_command_config(value)
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_linux_wallpaperengine_path(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("auto") {
+        return Ok(());
+    }
+    let path = std::path::Path::new(trimmed);
+    if !path.is_absolute() {
+        return Err("linux_wallpaperengine_path must be an absolute path or \"auto\".".into());
+    }
+    if !path.is_file() {
+        return Err(format!("linux_wallpaperengine_path not found: {trimmed}"));
+    }
+    Ok(())
+}
+
+fn validate_custom_command_config(value: &str) -> Result<(), String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(());
+    }
+    let first_token = trimmed
+        .split_whitespace()
+        .next()
+        .ok_or_else(|| "Custom command is empty.".to_string())?;
+    files::validate_custom_executable(first_token)
+}
 
 #[tauri::command]
 pub async fn config_get(key: String) -> Result<String, String> {
@@ -31,10 +120,15 @@ pub async fn config_get_many(keys: Vec<String>) -> Result<HashMap<String, String
 #[tauri::command]
 pub async fn config_set(key: String, value: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || match storage() {
-        Ok(s) => match s.config_set(&key, &value) {
-            Ok(()) => ok(format!("{} = {}", key, value)),
-            Err(e) => fail(e.to_string()),
-        },
+        Ok(s) => {
+            if let Err(error) = validate_writable_config_set(&key, &value) {
+                return fail(error);
+            }
+            match s.config_set(&key, &value) {
+                Ok(()) => ok(format!("{} = {}", key, value)),
+                Err(e) => fail(e.to_string()),
+            }
+        }
         Err(e) => fail(e),
     })
     .await
@@ -136,35 +230,58 @@ fn build_diagnostics_content_with_library(
 
     match wc_storage::sqlite::library_counts_sqlite(&s.cd) {
         Ok(c) => {
-            out.push_str("library_counts=ok\n");
+            out.push_str("library_counts_status=ok\n");
             out.push_str(&format!("library_total={}\n", c.total));
             out.push_str(&format!("library_images={}\n", c.images));
             out.push_str(&format!("library_gifs={}\n", c.gifs));
             out.push_str(&format!("library_videos={}\n", c.videos));
         }
         Err(_) => {
-            out.push_str("library_counts=error\n");
-            out.push_str("library_total=0\n");
-            out.push_str("library_images=0\n");
-            out.push_str("library_gifs=0\n");
-            out.push_str("library_videos=0\n");
+            out.push_str("library_counts_status=error\n");
         }
     }
 
-    out.push_str(&format!(
-        "sources={}\n",
-        s.sources_list().unwrap_or_default().len()
-    ));
+    match s.sources_list() {
+        Ok(sources) => {
+            out.push_str("sources_status=ok\n");
+            out.push_str(&format!("sources={}\n", sources.len()));
+        }
+        Err(_) => {
+            out.push_str("sources_status=error\n");
+        }
+    }
 
-    let current = s.current_read().unwrap_or_default().unwrap_or_default();
-    let current_basename = std::path::Path::new(&current)
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
-    out.push_str(&format!("current={}\n", current_basename));
+    match s.current_read() {
+        Ok(Some(current)) => {
+            out.push_str("current_status=ok\n");
+            let current_basename = std::path::Path::new(&current)
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_default();
+            out.push_str(&format!("current={}\n", current_basename));
+        }
+        Ok(None) => {
+            out.push_str("current_status=ok\n");
+            out.push_str("current=\n");
+        }
+        Err(_) => {
+            out.push_str("current_status=error\n");
+        }
+    }
 
-    let last_backend = s.last_backend_read().unwrap_or(None).unwrap_or_default();
-    out.push_str(&format!("last_backend={}\n", last_backend));
+    match s.last_backend_read() {
+        Ok(Some(last_backend)) => {
+            out.push_str("last_backend_status=ok\n");
+            out.push_str(&format!("last_backend={}\n", last_backend));
+        }
+        Ok(None) => {
+            out.push_str("last_backend_status=ok\n");
+            out.push_str("last_backend=\n");
+        }
+        Err(_) => {
+            out.push_str("last_backend_status=error\n");
+        }
+    }
 
     let config = wc_backend::linux_wallpaperengine::LinuxWallpaperEngineConfig::from_storage(s);
     let lwe = wc_backend::linux_wallpaperengine::status(&config);
@@ -279,6 +396,65 @@ mod tests {
     }
 
     #[test]
+    fn config_set_allows_known_gui_keys() {
+        assert!(validate_writable_config_set("gui_theme", "light").is_ok());
+        assert!(validate_writable_config_set("restore_on_login", "on").is_ok());
+        assert!(validate_writable_config_set("linux_wallpaperengine_path", "auto").is_ok());
+    }
+
+    #[test]
+    fn config_set_rejects_unknown_keys() {
+        let error = validate_writable_config_set("lwe_last_stderr", "evil").unwrap_err();
+        assert!(
+            error.contains("Config key is not writable from the GUI: lwe_last_stderr"),
+            "{error}"
+        );
+
+        let error = validate_writable_config_set("linux_wallpaperengine_pid", "1234").unwrap_err();
+        assert!(
+            error.contains("Config key is not writable from the GUI"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn config_set_rejects_multiline_values() {
+        let error = validate_writable_config_set("gui_theme", "light\nevil").unwrap_err();
+        assert!(error.contains("line breaks"), "{error}");
+    }
+
+    #[test]
+    fn config_set_validates_linux_wallpaperengine_path() {
+        let error =
+            validate_writable_config_set("linux_wallpaperengine_path", "./evil").unwrap_err();
+        assert!(error.contains("absolute path"), "{error}");
+
+        let error =
+            validate_writable_config_set("linux_wallpaperengine_path", "/definitely/missing/lwe")
+                .unwrap_err();
+        assert!(error.contains("not found"), "{error}");
+
+        let tmp = tempfile::tempdir().unwrap();
+        let exe = tmp.path().join("linux-wallpaperengine");
+        std::fs::write(&exe, b"#!/bin/sh\n").unwrap();
+        assert!(
+            validate_writable_config_set("linux_wallpaperengine_path", &exe.to_string_lossy())
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn config_set_validates_custom_executable_commands() {
+        let error = validate_writable_config_set("gui_file_manager_custom", "./evil-fm {path}")
+            .unwrap_err();
+        assert!(error.contains("absolute path"), "{error}");
+
+        assert!(
+            validate_writable_config_set("gui_terminal_file_manager_custom", "yazi {path}").is_ok()
+        );
+    }
+
+    #[test]
     fn diagnostics_includes_all_required_fields() {
         let (_tmp, s) = diagnostics_storage();
         s.current_write("/some/secret/path/wallpaper.jpg").unwrap();
@@ -310,6 +486,10 @@ mod tests {
             "missing sqlite_integrity: {content}"
         );
         assert!(
+            content.contains("library_counts_status=ok"),
+            "missing library_counts_status: {content}"
+        );
+        assert!(
             content.contains("library_total="),
             "missing library_total: {content}"
         );
@@ -325,10 +505,22 @@ mod tests {
             content.contains("library_videos="),
             "missing library_videos: {content}"
         );
+        assert!(
+            content.contains("sources_status=ok"),
+            "missing sources_status: {content}"
+        );
         assert!(content.contains("sources="), "missing sources: {content}");
+        assert!(
+            content.contains("current_status=ok"),
+            "missing current_status: {content}"
+        );
         assert!(
             content.contains("current=wallpaper.jpg"),
             "missing current basename: {content}"
+        );
+        assert!(
+            content.contains("last_backend_status=ok"),
+            "missing last_backend_status: {content}"
         );
         assert!(
             content.contains("last_backend=awww"),
@@ -470,6 +662,25 @@ mod tests {
         assert!(
             !content.contains(&secret_lwe_path),
             "configured LWE path must not leak into diagnostics: {content}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_reports_library_count_errors_without_zero_placeholders() {
+        let (_tmp, s) = diagnostics_storage();
+        let conn = rusqlite::Connection::open(s.cd.db_path()).unwrap();
+        conn.execute("ALTER TABLE wallpapers RENAME TO wallpapers_backup", [])
+            .unwrap();
+        drop(conn);
+
+        let content = build_diagnostics_content(&s, &idle_scan_snapshot());
+        assert!(
+            content.contains("library_counts_status=error"),
+            "expected library_counts_status=error: {content}"
+        );
+        assert!(
+            !content.contains("library_total=0"),
+            "must not fabricate zero counts on read failure: {content}"
         );
     }
 }

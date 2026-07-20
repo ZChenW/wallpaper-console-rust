@@ -56,10 +56,10 @@ export class ThumbnailRequestQueue {
     this.pump();
   }
 
-  replacePending(paths: string[]): void {
+  replacePending(paths: string[], options: EnqueueOptions = {}): void {
     this.queue = [];
     this.queuedPaths.clear();
-    this.enqueue(paths);
+    this.enqueue(paths, options);
   }
 
   forget(paths: string[]): void {

@@ -11,6 +11,7 @@ export class ThumbnailStore {
   private queue: ThumbnailRequestQueue;
   private enqueueScheduled = false;
   private pendingPaths: string[] = [];
+  private pendingOptions?: EnqueueOptions;
   private pendingNotifyPaths = new Set<string>();
   private pausedNotifyPaths = new Set<string>();
   private notifyScheduled = false;
@@ -63,15 +64,18 @@ export class ThumbnailStore {
     };
   }
 
-  enqueueVisible(paths: string[], _options?: EnqueueOptions): void {
+  enqueueVisible(paths: string[], options?: EnqueueOptions): void {
     this.pendingPaths = paths.slice();
+    this.pendingOptions = options;
     if (this.enqueueScheduled) return;
     this.enqueueScheduled = true;
     const flush = () => {
       this.enqueueScheduled = false;
       const unique = Array.from(new Set(this.pendingPaths));
+      const opts = this.pendingOptions;
       this.pendingPaths = [];
-      this.queue.replacePending(unique);
+      this.pendingOptions = undefined;
+      this.queue.replacePending(unique, opts);
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
     else Promise.resolve().then(flush);
@@ -79,17 +83,24 @@ export class ThumbnailStore {
 
   forget(paths: string[]): void {
     this.queue.forget(paths);
+    for (const path of paths) {
+      this.cache.delete(path);
+      this.failures.delete(path);
+      this.scheduleNotify(path);
+    }
   }
 
   reset(): void {
+    const listenerPaths = Array.from(this.listeners.keys());
     this.queue.reset();
     this.cache.clear();
     this.failures.clear();
-    this.listeners.clear();
     this.pendingNotifyPaths.clear();
     this.pausedNotifyPaths.clear();
     this.notifyScheduled = false;
-    this.revealPaused = false;
+    for (const path of listenerPaths) {
+      this.scheduleNotify(path);
+    }
   }
 
   snapshot() {

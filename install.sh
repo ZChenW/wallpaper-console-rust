@@ -51,6 +51,8 @@ Usage: $0 [--build-only] [--prefix DIR] [--uninstall]
   shift
 done
 
+[[ -n "$PREFIX" ]] || err "--prefix must not be empty"
+
 BIN_DIR="$PREFIX/bin"
 LIBEXEC_DIR="$PREFIX/lib/wallpaper-console-rust"
 APP_ID="wallpaper-console-gui-rust"

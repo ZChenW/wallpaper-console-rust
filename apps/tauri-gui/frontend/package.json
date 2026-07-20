@@ -8,8 +8,9 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
+    "typecheck:tests": "tsc -p tsconfig.tests.json --noEmit",
     "test:unit": "node --experimental-strip-types --test 'src/**/*.test.ts'",
-    "smoke": "node e2e/ensure-chromium.mjs && playwright test --config e2e/playwright.config.ts",
+    "smoke": "node e2e/ensure-chromium.mjs && playwright test --config e2e/playwright.config.ts smoke.spec.ts",
     "perf:library": "node e2e/ensure-chromium.mjs && node e2e/perf-report.mjs"
   },
   "dependencies": {
@@ -20,8 +21,12 @@
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
+  "engines": {
+    "node": ">=22.6.0"
+  },
   "devDependencies": {
     "@playwright/test": "^1.51.0",
+    "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "@vitejs/plugin-react": "^4.3.0",

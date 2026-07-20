@@ -9,6 +9,30 @@ use tauri::{Emitter, Manager};
 
 pub use commands::path_guard::{ensure_path_in_config_dir, ensure_path_in_sources};
 
+fn fatal_startup_error(message: impl AsRef<str>) -> ! {
+    instance_coordinator::show_error("Wallpaper Console", message.as_ref());
+    std::process::exit(1);
+}
+
+fn configure_logging(app: &tauri::AppHandle, config_dir: &std::path::Path) -> tauri::Result<()> {
+    use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind};
+
+    let plugin = if cfg!(debug_assertions) {
+        Builder::default().level(log::LevelFilter::Info).build()
+    } else {
+        Builder::default()
+            .level(log::LevelFilter::Info)
+            .rotation_strategy(RotationStrategy::KeepAll)
+            .targets([Target::new(TargetKind::Folder {
+                path: config_dir.to_path_buf(),
+                file_name: Some("wallpaper-console".into()),
+            })])
+            .build()
+    };
+    app.plugin(plugin)?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Cross-process test entry point: when the test harness spawns this
@@ -21,20 +45,26 @@ pub fn run() {
     // Phase 1: single-instance coordinator using a ConfigDir lock file and
     // Unix-domain socket. CLI paths are completely unaffected — this only
     // runs in the Tauri GUI entry point.
-    let cd = wc_core::config::ConfigDir::from_path(
-        wc_config::resolve_config_dir().expect("cannot resolve config directory"),
-    );
+    let cd = match wc_config::resolve_config_dir() {
+        Ok(path) => wc_core::config::ConfigDir::from_path(path),
+        Err(error) => fatal_startup_error(format!("cannot resolve config directory: {error}")),
+    };
 
     // Claim the instance lock BEFORE expensive init_config_dir / default
     // writes. Only resolves the path and creates the private dir (0700).
-    let claim = instance_coordinator::claim_instance(&cd).expect("cannot claim instance lock");
+    let claim = match instance_coordinator::claim_instance(&cd) {
+        Ok(claim) => claim,
+        Err(error) => fatal_startup_error(format!("cannot claim instance lock: {error}")),
+    };
 
     let (primary_socket, _lease) = match claim {
         instance_coordinator::ClaimResult::Primary(lease) => {
             // This is the first GUI instance. Bind the socket so
             // secondaries can connect while we initialise Tauri.
-            let socket = instance_coordinator::PrimarySocket::bind(&cd)
-                .expect("cannot bind instance socket");
+            let socket = match instance_coordinator::PrimarySocket::bind(&cd) {
+                Ok(socket) => socket,
+                Err(error) => fatal_startup_error(format!("cannot bind instance socket: {error}")),
+            };
             (Some(socket), Some(lease))
         }
         instance_coordinator::ClaimResult::Secondary => {
@@ -68,13 +98,8 @@ pub fn run() {
 
     tauri::Builder::default()
         .setup(move |app| {
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            let log_config_dir = cd.path.clone();
+            configure_logging(app.handle(), &log_config_dir)?;
 
             // Phase 1: manage the library service for readiness gating and
             // future Phase 2 caching / observation.
@@ -97,13 +122,11 @@ pub fn run() {
                     window.set_focus().map_err(|e| e.to_string())?;
                     Ok(())
                 });
-                // Store the handle so it lives for the app lifetime.
-                // The lease is also held in app state for cleanup.
                 let _handle = instance_coordinator::start_accept_loop(primary, on_focus);
-                // Leak both for the process lifetime (the app never
-                // returns from run()). The OS cleans up the lock file
-                // on process exit; the socket file is cleaned by the
-                // CoordinatorHandle on drop (when the process exits).
+                // Leak both for the process lifetime (run() does not return).
+                // PrimarySocket::bind already removed any stale socket inode;
+                // mem::forget skips CoordinatorHandle::shutdown, so the bound
+                // socket and instance lock file are reclaimed by the OS on exit.
                 std::mem::forget(_handle);
                 if let Some(lease) = _lease {
                     std::mem::forget(lease);
@@ -178,5 +201,7 @@ pub fn run() {
             commands::export_diagnostics,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .unwrap_or_else(|error| {
+            fatal_startup_error(format!("error while running application: {error}"))
+        });
 }

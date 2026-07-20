@@ -8,6 +8,7 @@ import {
   anchoredScrollTopForLayoutChange,
   captureStableViewportAnchor,
   restoreStableViewportAnchor,
+  shouldApplyFocusToken,
   shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
@@ -27,6 +28,10 @@ import {
   type WallpaperCardSize,
 } from '../utils/layout';
 import type { ApplyGesture } from '../shell/shellPreferences';
+import {
+  libraryEntryApplyAvailable,
+  libraryEntryApplyDisabledReason,
+} from './libraryViewModel.ts';
 
 interface Props {
   entries: readonly LibraryBrowserItemDTO[];
@@ -47,6 +52,8 @@ interface Props {
   pendingPath?: string | null;
   favoritePendingPaths?: ReadonlySet<string>;
   currentPath?: string | null;
+  canApplyToDisplay?: boolean;
+  displayApplyDisabledReason?: string | null;
   isEntryApplicable?: (entry: LibraryBrowserItemDTO) => boolean;
   hasMore?: boolean;
   loadingMore?: boolean;
@@ -92,6 +99,8 @@ function WallpaperGridImpl({
   pendingPath = null,
   favoritePendingPaths = new Set(),
   currentPath = null,
+  canApplyToDisplay = true,
+  displayApplyDisabledReason = null,
   isEntryApplicable,
   hasMore = false,
   loadingMore = false,
@@ -120,6 +129,9 @@ function WallpaperGridImpl({
   const colCountRef = useRef(colCount);
   const entriesLengthRef = useRef(entries.length);
   const initialAnchorAppliedRef = useRef(false);
+  const lastHandledFocusTokenRef = useRef(0);
+  const entriesRef = useRef(entries);
+  entriesRef.current = entries;
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
   activeRef.current = active;
@@ -300,11 +312,14 @@ function WallpaperGridImpl({
   }, [active, colCount, entries, initialAnchorWallpaperId, publishViewportCenter, virtualizer]);
 
   useEffect(() => {
-    if (!active || focusToken <= 0 || entries.length === 0) return;
+    if (!active || !shouldApplyFocusToken(lastHandledFocusTokenRef.current, focusToken)) return;
+    lastHandledFocusTokenRef.current = focusToken;
+    const currentEntries = entriesRef.current;
+    if (currentEntries.length === 0) return;
     const anchorIndex = initialAnchorWallpaperId === null
       ? 0
-      : entries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
-    const entry = entries[anchorIndex >= 0 ? anchorIndex : 0];
+      : currentEntries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
+    const entry = currentEntries[anchorIndex >= 0 ? anchorIndex : 0];
     if (!entry) return;
     virtualizer.scrollToIndex(Math.floor((anchorIndex >= 0 ? anchorIndex : 0) / colCount), {
       align: 'start',
@@ -316,7 +331,7 @@ function WallpaperGridImpl({
         )
         ?.focus();
     }));
-  }, [active, colCount, entries, focusToken, initialAnchorWallpaperId, virtualizer]);
+  }, [active, colCount, focusToken, initialAnchorWallpaperId, virtualizer]);
 
   useEffect(() => {
     const previous = previousEntriesRef.current;
@@ -439,6 +454,7 @@ function WallpaperGridImpl({
       ref={containerRef}
       onScroll={handleScroll}
       aria-label="Wallpaper library"
+      aria-setsize={entries.length}
       role="list"
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
@@ -448,6 +464,7 @@ function WallpaperGridImpl({
           return (
             <div
               key={virtualRow.key}
+              role="presentation"
               style={{
                 position: 'absolute',
                 top: 0,
@@ -471,6 +488,7 @@ function WallpaperGridImpl({
                   <WallpaperCard
                     key={e.path}
                     entry={e}
+                    posInSet={start + offset + 1}
                     ordinal={wallpaperOrdinal(start + offset)}
                     applying={activity.applying}
                     onApply={onApply}
@@ -484,7 +502,16 @@ function WallpaperGridImpl({
                     pending={activity.pending}
                     favoritePending={favoritePendingPaths.has(e.path)}
                     current={currentPath === e.path}
-                    applyAvailable={isEntryApplicable?.(e)}
+                    applyAvailable={libraryEntryApplyAvailable(
+                      canApplyToDisplay,
+                      isEntryApplicable ?? (() => true),
+                      e,
+                    )}
+                    applyDisabledReason={libraryEntryApplyDisabledReason(
+                      canApplyToDisplay,
+                      displayApplyDisabledReason,
+                      e,
+                    )}
                     isScrolling={isScrolling}
                   />
                 );

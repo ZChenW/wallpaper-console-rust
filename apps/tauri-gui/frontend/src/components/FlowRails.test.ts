@@ -41,11 +41,13 @@ function findElements(
 
   const matches = predicate(node) ? [node] : [];
   if (typeof node.type === 'function') {
-    return [...matches, ...findElements(node.type(node.props) as ReactNode, predicate)];
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
+    return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 
@@ -322,7 +324,6 @@ test('metadata never reports an inexact total as exact', async () => {
     applying: false,
     pending: false,
     favorite: false,
-    hovered: false,
     favoritePending: false,
     applyAvailable: true,
     applyDisabledReason: null,
@@ -359,7 +360,6 @@ test('metadata actions are visible native controls and invoke only their centere
     applying: false,
     pending: false,
     favorite: false,
-    hovered: false,
     favoritePending: false,
     applyAvailable: true,
     applyDisabledReason: null,
@@ -411,7 +411,6 @@ test('metadata rail disables unavailable apply with an accessible reason and pre
     applying: false,
     pending: false,
     favorite: true,
-    hovered: false,
     favoritePending: true,
     applyAvailable: false,
     applyDisabledReason: 'Compatible renderer unavailable',

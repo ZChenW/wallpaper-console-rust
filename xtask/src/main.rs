@@ -9,6 +9,7 @@ enum VerifySuite {
     Rust,
     Frontend,
     Drift,
+    Perf,
     All,
 }
 
@@ -57,20 +58,6 @@ const RUST_STEPS: &[Step] = &[
         program: "cargo",
         args: &["test", "--workspace"],
     },
-    Step {
-        name: "Library 10k performance gate",
-        cwd: StepCwd::RepoRoot,
-        program: "cargo",
-        args: &[
-            "test",
-            "-p",
-            "wc-storage",
-            "--test",
-            "library_browser_perf",
-            "--",
-            "--nocapture",
-        ],
-    },
 ];
 
 const FRONTEND_STEPS: &[Step] = &[
@@ -79,6 +66,12 @@ const FRONTEND_STEPS: &[Step] = &[
         cwd: StepCwd::Frontend,
         program: "npm",
         args: &["run", "typecheck"],
+    },
+    Step {
+        name: "Frontend test typecheck",
+        cwd: StepCwd::Frontend,
+        program: "npm",
+        args: &["run", "typecheck:tests"],
     },
     Step {
         name: "Frontend unit tests",
@@ -99,20 +92,31 @@ const FRONTEND_STEPS: &[Step] = &[
         program: "npm",
         args: &["run", "smoke"],
     },
-    Step {
-        name: "Frontend Library performance gate",
-        cwd: StepCwd::Frontend,
-        program: "npm",
-        args: &["run", "perf:library"],
-    },
 ];
 
-const DRIFT_STEPS: &[Step] = &[Step {
-    name: "Runtime/config drift",
-    cwd: StepCwd::RepoRoot,
-    program: "bash",
-    args: &["scripts/check_runtime_config_drift.sh"],
+/// Wall-clock Library performance budgets. Kept out of `verify all` so correctness
+/// gates stay reproducible on slower or contended machines.
+const PERF_STEPS: &[Step] = &[Step {
+    name: "Frontend Library performance gate",
+    cwd: StepCwd::Frontend,
+    program: "npm",
+    args: &["run", "perf:library"],
 }];
+
+const DRIFT_STEPS: &[Step] = &[
+    Step {
+        name: "Runtime/config drift",
+        cwd: StepCwd::RepoRoot,
+        program: "bash",
+        args: &["scripts/check_runtime_config_drift.sh"],
+    },
+    Step {
+        name: "Tauri before-command exit capture",
+        cwd: StepCwd::RepoRoot,
+        program: "bash",
+        args: &["scripts/test_tauri_before_commands_unit.sh"],
+    },
+];
 
 fn main() -> ExitCode {
     match run() {
@@ -141,6 +145,7 @@ fn steps_for(suite: VerifySuite) -> Vec<Step> {
         VerifySuite::Rust => RUST_STEPS.to_vec(),
         VerifySuite::Frontend => FRONTEND_STEPS.to_vec(),
         VerifySuite::Drift => DRIFT_STEPS.to_vec(),
+        VerifySuite::Perf => PERF_STEPS.to_vec(),
         VerifySuite::All => RUST_STEPS
             .iter()
             .chain(FRONTEND_STEPS.iter())
@@ -162,6 +167,7 @@ fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
         Some("rust") => VerifySuite::Rust,
         Some("frontend") => VerifySuite::Frontend,
         Some("drift") => VerifySuite::Drift,
+        Some("perf") => VerifySuite::Perf,
         Some("all") => VerifySuite::All,
         Some(other) => return Err(format!("unknown verify suite: {other}\n\n{}", usage())),
         None => return Err(usage()),
@@ -232,6 +238,7 @@ fn usage() -> String {
   cargo run -p xtask -- verify rust [--dry-run]
   cargo run -p xtask -- verify frontend [--dry-run]
   cargo run -p xtask -- verify drift [--dry-run]
+  cargo run -p xtask -- verify perf [--dry-run]
   cargo run -p xtask -- verify all [--dry-run]"
         .to_string()
 }
@@ -308,7 +315,7 @@ mod tests {
             RUST_STEPS.len() + FRONTEND_STEPS.len() + DRIFT_STEPS.len()
         );
         assert_eq!(names.first(), Some(&"Rust format"));
-        assert_eq!(names.last(), Some(&"Runtime/config drift"));
+        assert_eq!(names.last(), Some(&"Tauri before-command exit capture"));
     }
 
     #[test]
@@ -410,6 +417,69 @@ mod tests {
         assert!(
             smoke.contains("playwright test") || smoke.contains("playwright"),
             "smoke must still run Playwright tests; got: {smoke}"
+        );
+    }
+
+    #[test]
+    fn smoke_script_runs_only_smoke_spec() {
+        let package_json =
+            std::fs::read_to_string(repo_root().join("apps/tauri-gui/frontend/package.json"))
+                .expect("frontend package.json must be readable");
+        let smoke = package_json_script_body(&package_json, "smoke")
+            .expect("package.json must declare a smoke script");
+        assert!(
+            smoke.contains("smoke.spec.ts"),
+            "smoke must target smoke.spec.ts explicitly; got: {smoke}"
+        );
+        assert!(
+            !smoke.contains("library-perf.spec.ts"),
+            "smoke must not include library performance specs; got: {smoke}"
+        );
+    }
+
+    #[test]
+    fn rust_verify_matrix_keeps_library_perf_out_of_default_frontend_gate() {
+        assert!(
+            !RUST_STEPS.iter().any(|step| step.name.contains("10k")),
+            "RUST_STEPS must not duplicate the library 10k perf gate covered by cargo test --workspace"
+        );
+        assert_eq!(
+            FRONTEND_STEPS
+                .iter()
+                .filter(|step| step.name.contains("performance"))
+                .count(),
+            0,
+            "frontend correctness suite must not include wall-clock perf:library"
+        );
+        assert_eq!(
+            PERF_STEPS
+                .iter()
+                .filter(|step| step.args.get(1) == Some(&"perf:library"))
+                .count(),
+            1,
+            "perf suite must expose perf:library exactly once"
+        );
+    }
+
+    #[test]
+    fn parses_perf_suite() {
+        assert_eq!(
+            parse_verify_args(&args(&["verify", "perf"])).unwrap(),
+            VerifyArgs {
+                suite: VerifySuite::Perf,
+                dry_run: false,
+            }
+        );
+    }
+
+    #[test]
+    fn steps_for_all_excludes_perf_steps() {
+        let steps = steps_for(VerifySuite::All);
+        assert!(
+            !steps
+                .iter()
+                .any(|step| step.args.get(1) == Some(&"perf:library")),
+            "verify all must not run the Library performance gate"
         );
     }
 
@@ -550,9 +620,11 @@ export const ALL_SETTINGS = [
         "xtask/src/main.rs",
         "scripts/check_runtime_config_drift.sh",
         "apps/tauri-gui/frontend/package-lock.json",
+        "apps/tauri-gui/frontend/tsconfig.tests.json",
         "apps/tauri-gui/frontend/vite.mock.config.ts",
         "apps/tauri-gui/frontend/e2e/playwright.config.ts",
         "apps/tauri-gui/frontend/e2e/smoke.spec.ts",
+        ".github/workflows/ci.yml",
     ];
 
     fn path_is_gitignored(repo_root: &Path, rel: &str) -> bool {

@@ -812,9 +812,15 @@ test('Flow recovers an invalidated paging revision through an atomic page-one re
   await expect.poll(() => browserPageRequestCount(page), { timeout: 2_000 }).toBeLessThanOrEqual(
     initialPageRequests + 4,
   );
-  const settledPageRequests = await browserPageRequestCount(page);
-  await page.waitForTimeout(500);
-  expect(await browserPageRequestCount(page)).toBe(settledPageRequests);
+  // Quiet revision recovery can finish a trailing append after the UI has already
+  // settled visually; wait until the page-request counter is idle rather than
+  // assuming a single 500ms gap is enough.
+  await expect.poll(async () => {
+    const before = await browserPageRequestCount(page);
+    await page.waitForTimeout(500);
+    const after = await browserPageRequestCount(page);
+    return before === after ? before : -1;
+  }, { timeout: 5_000 }).toBeGreaterThan(0);
 });
 
 test('Grid and Flow round trips preserve filters, the selected anchor, and incoming focus', async ({ page }) => {

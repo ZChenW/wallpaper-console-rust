@@ -3,6 +3,12 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+
+if ! command -v rg >/dev/null 2>&1; then
+  echo "rg (ripgrep) is required for drift checks" >&2
+  exit 2
+fi
+
 SCHEMA="${DRIFT_CONFIG_SCHEMA:-$ROOT/apps/tauri-gui/frontend/src/settings/configSchema.ts}"
 
 bad=0

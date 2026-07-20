@@ -38,12 +38,13 @@ function findElements(
 
   const matches = predicate(node) ? [node] : [];
   if (typeof node.type === 'function') {
-    const rendered = node.type(node.props) as ReactNode;
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
     return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 
@@ -401,12 +402,17 @@ test('availability badges use themeable semantic status colours', async () => {
     (element) => element.props['data-source-availability'] === availability,
   )[0];
 
-  assert.equal(badge('available').props.style.color, 'var(--success)');
-  assert.equal(badge('available').props.style.background, 'var(--success-bg)');
-  assert.equal(badge('offline').props.style.color, 'var(--danger)');
-  assert.equal(badge('offline').props.style.background, 'var(--danger-bg)');
-  assert.equal(badge('unknown').props.style.color, 'var(--warning)');
-  assert.equal(badge('unknown').props.style.background, 'var(--warning-bg)');
+  const badgeStyle = (availability: string) => {
+    const element = badge(availability);
+    return element.props.style as { color: string; background: string };
+  };
+
+  assert.equal(badgeStyle('available').color, 'var(--success)');
+  assert.equal(badgeStyle('available').background, 'var(--success-bg)');
+  assert.equal(badgeStyle('offline').color, 'var(--danger)');
+  assert.equal(badgeStyle('offline').background, 'var(--danger-bg)');
+  assert.equal(badgeStyle('unknown').color, 'var(--warning)');
+  assert.equal(badgeStyle('unknown').background, 'var(--warning-bg)');
 });
 
 test('refresh all is available only when configured sources can be scanned', async () => {

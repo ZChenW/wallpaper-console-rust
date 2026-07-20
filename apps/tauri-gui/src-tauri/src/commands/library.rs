@@ -47,10 +47,12 @@ pub async fn library_page_gui(
         let page = library_page_for_storage(s, &query)?;
         let query_end = t0.elapsed();
         let routing = s.backend_routing();
+        let mut we_compat =
+            wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         let items = page
             .items
             .into_iter()
-            .map(|entry| dto_from_entry_with_routing(entry, &routing))
+            .map(|entry| dto_from_entry_with_routing(entry, &routing, Some(&mut we_compat)))
             .collect::<Vec<_>>();
         let dto_map_end = t0.elapsed();
         maybe_write_library_page_debug_log(
@@ -117,9 +119,10 @@ fn browser_query_from_dto(
 fn browser_item_dto(
     item: wc_storage::sqlite::LibraryBrowserItem,
     routing: &wc_core::backend_routing::BackendRouting,
+    we_compat: Option<&mut wc_storage::we_compat::WeCompatCache>,
 ) -> LibraryBrowserItemDto {
     LibraryBrowserItemDto {
-        wallpaper: dto_from_entry_with_routing(item.entry, routing),
+        wallpaper: dto_from_entry_with_routing(item.entry, routing, we_compat),
         wallpaper_id: item.wallpaper_id,
         favorite: item.favorite,
         author: item.author,
@@ -143,6 +146,7 @@ fn library_browser_page_for_storage(
     let query = browser_query_from_dto(query)?;
     let page = wc_storage::sqlite::browser_library_page(&s.cd, &query)?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load()?;
     Ok(LibraryBrowserPageDto {
         revision: page.revision,
         next_cursor: page.next_cursor,
@@ -150,7 +154,7 @@ fn library_browser_page_for_storage(
         items: page
             .items
             .into_iter()
-            .map(|item| browser_item_dto(item, &routing))
+            .map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
             .collect(),
     })
 }
@@ -164,6 +168,8 @@ fn library_browser_page_for_service(
         browser_query_from_dto(query).map_err(crate::library_service::LibraryServiceError::from)?;
     let page = service.page(&s.cd, &query)?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load()
+        .map_err(crate::library_service::LibraryServiceError::from)?;
     Ok(LibraryBrowserPageDto {
         revision: page.revision,
         next_cursor: page.next_cursor.clone(),
@@ -172,7 +178,7 @@ fn library_browser_page_for_service(
             .items
             .iter()
             .cloned()
-            .map(|item| browser_item_dto(item, &routing))
+            .map(|item| browser_item_dto(item, &routing, Some(&mut we_compat)))
             .collect(),
     })
 }
@@ -183,8 +189,9 @@ fn library_browser_random_for_storage(
 ) -> Result<Option<LibraryBrowserItemDto>, String> {
     let query = browser_query_from_dto(query).map_err(|error| error.to_string())?;
     let routing = s.backend_routing();
+    let mut we_compat = wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
     wc_storage::sqlite::browser_library_random(&s.cd, &query)
-        .map(|item| item.map(|item| browser_item_dto(item, &routing)))
+        .map(|item| item.map(|item| browser_item_dto(item, &routing, Some(&mut we_compat))))
         .map_err(|error| error.to_string())
 }
 
@@ -301,12 +308,14 @@ pub async fn favorites_page(offset: usize, limit: usize) -> Result<LibraryPageDt
         let page = wc_storage::sqlite::favorites_page_sqlite(&s.cd, offset, limit)
             .map_err(|e| e.to_string())?;
         let routing = s.backend_routing();
+        let mut we_compat =
+            wc_storage::we_compat::WeCompatCache::load().map_err(|e| e.to_string())?;
         Ok(LibraryPageDto {
             total: page.total,
             items: page
                 .items
                 .into_iter()
-                .map(|entry| dto_from_entry_with_routing(entry, &routing))
+                .map(|entry| dto_from_entry_with_routing(entry, &routing, Some(&mut we_compat)))
                 .collect(),
         })
     })
@@ -365,10 +374,13 @@ fn build_library_source_status(
 ) -> Result<LibrarySourceStatusDto, String> {
     let source_count = s.sources_list().map_err(|e| e.to_string())?.len();
     let sqlite_ready = s.cd.db_path().exists();
-    let sqlite_rows = wc_storage::sqlite::source_backed_library_count(&s.cd).unwrap_or(0);
-    let tsv_rows = std::fs::read_to_string(s.cd.library_tsv_path())
-        .map(|c| c.lines().filter(|l| !l.trim().is_empty()).count())
-        .unwrap_or(0);
+    let sqlite_rows =
+        wc_storage::sqlite::source_backed_library_count(&s.cd).map_err(|e| e.to_string())?;
+    let tsv_rows = match std::fs::read_to_string(s.cd.library_tsv_path()) {
+        Ok(content) => content.lines().filter(|l| !l.trim().is_empty()).count(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+        Err(error) => return Err(error.to_string()),
+    };
     let stale = source_count > 0 && sqlite_rows == 0 && tsv_rows > 0;
     let message = if source_count == 0 {
         "No sources configured. Add a source or scan Wallpaper Engine.".to_string()
@@ -793,6 +805,62 @@ mod tests {
         assert!(status.stale);
         assert!(status.sqlite_ready);
         assert!(status.message.contains("legacy library.tsv"));
+    }
+
+    #[test]
+    fn build_library_source_status_propagates_sqlite_count_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let conn = rusqlite::Connection::open(s.cd.db_path()).unwrap();
+        conn.execute(
+            "ALTER TABLE wallpaper_sources RENAME TO wallpaper_sources_backup",
+            [],
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = super::build_library_source_status(&s).unwrap_err();
+        assert!(error.contains("wallpaper_sources"));
+    }
+
+    #[test]
+    fn build_library_source_status_treats_missing_tsv_as_zero_rows() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let status = super::build_library_source_status(&s).unwrap();
+        assert_eq!(status.tsv_rows, 0);
+    }
+
+    #[test]
+    fn build_library_source_status_propagates_non_missing_tsv_read_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        wc_storage::sqlite::ensure_sqlite_db(&cd);
+        let tsv_path = cd.library_tsv_path();
+        let _ = std::fs::remove_file(&tsv_path);
+        std::fs::create_dir_all(&tsv_path).unwrap();
+        let s = wc_storage::StorageApi::new(cd);
+        s.sources_add("/tmp/wallpapers").unwrap();
+
+        let error = super::build_library_source_status(&s).unwrap_err();
+        assert!(!error.is_empty());
     }
 
     #[test]

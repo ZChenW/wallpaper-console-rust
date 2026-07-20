@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
 
@@ -37,7 +37,7 @@ function findElements(
   const matches = predicate(node) ? [node] : [];
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 

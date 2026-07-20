@@ -240,11 +240,12 @@ test('save queue reports only the latest request error and clears it on latest s
   writes[0]!.reject(new Error('stale write failed'));
   await assert.rejects(stale, /stale write failed/);
   await nextTask();
-  assert.equal(queue.latestError, null);
+  assert.ok(queue.latestError === null);
 
   writes[1]!.reject(new Error('latest write failed'));
   await assert.rejects(latest, /latest write failed/);
-  assert.equal(queue.latestError?.message, 'latest write failed');
+  const latestWriteError = queue.latestError as Error | null;
+  assert.equal(latestWriteError?.message, 'latest write failed');
 
   const recovery = queue.enqueue(preferences({ theme: 'light' }));
   assert.equal(queue.latestError, null);

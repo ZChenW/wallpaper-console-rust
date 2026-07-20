@@ -84,7 +84,7 @@ fn terminal_candidates(term_var: Option<&str>) -> Vec<&str> {
 
 /// Reject relative path executables (CWD hijack). Bare names stay PATH-resolved;
 /// any path containing a separator must be absolute and exist on disk.
-fn validate_custom_executable(prog: &str) -> Result<(), String> {
+pub(crate) fn validate_custom_executable(prog: &str) -> Result<(), String> {
     let path = std::path::Path::new(prog);
     let has_separator = prog.contains('/') || prog.contains('\\');
     if !has_separator {

@@ -1,25 +1,14 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import type { CommandFeedback } from '../api/feedback.ts';
+import type { ApplyRequestDTO } from '../api/types.ts';
 import { ApplyQueueController, createApplyQueueHandlers } from './applyQueueController.ts';
 import type { ApplyQueueDeps } from './applyQueueController.ts';
 import type { ApplyStagePayload } from '../events/appEvents.ts';
 
-type ApplyRequestDTO = {
-  kind: string;
-  path: string;
-  requestId?: string | null;
-};
-
-type CommandFeedback =
-  | { state: 'idle' }
-  | { state: 'running'; label: string; detail?: string }
-  | { state: 'success'; label: string; detail?: string }
-  | { state: 'warning'; label: string; detail: string }
-  | { state: 'error'; label: string; detail: string };
-
 const req = (id: string, path = `/wall/${id}.jpg`): ApplyRequestDTO => ({
-  kind: 'apply',
+  kind: 'apply' as const,
   path,
   requestId: id,
 });
@@ -521,7 +510,7 @@ test('apply queue runs current request then latest pending request only', async 
     'slow active request should show one generic status',
   );
   assert(
-    !feedback.some((f) => f.label.includes('awww')),
+    !feedback.some((f) => f.state !== 'idle' && f.label.includes('awww')),
     'renderer internals must stay hidden',
   );
   assert(
@@ -671,7 +660,7 @@ test('apply queue hides wc-apply-stage details and unsubscribes on success', asy
   controller.enqueue(req('stage-success'));
   await new Promise((resolve) => setTimeout(resolve, 30));
 
-  assert.equal(feedback.some((f) => f.detail?.includes('linux-wallpaperengine')), false);
+  assert.equal(feedback.some((f) => 'detail' in f && f.detail?.includes('linux-wallpaperengine')), false);
   assert.equal(unsubscribeCount, 1, 'should unsubscribe after successful apply');
 });
 
@@ -712,7 +701,9 @@ test('backend stages stay hidden until a slow apply shows one generic status', a
     [{ state: 'running', label: 'Applying wallpaper', detail: 'Applying wallpaper…' }],
   );
   assert.equal(
-    feedback.some((value) => value.label.includes('awww') || value.detail?.includes('socket')),
+    feedback.some((value) => value.state !== 'idle' && (
+      value.label.includes('awww') || value.detail?.includes('socket')
+    )),
     false,
   );
 
@@ -786,7 +777,7 @@ test('apply queue ignores wc-apply-stage events with null requestId when current
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.ok(
-    !feedback.some((f) => f.detail?.includes('Should be ignored')),
+    !feedback.some((f) => 'detail' in f && f.detail?.includes('Should be ignored')),
     'null requestId events must not update a request that has requestId',
   );
 });
@@ -823,11 +814,11 @@ test('apply queue never exposes stages for current or other request ids', async 
   await new Promise((resolve) => setTimeout(resolve, 30));
 
   assert.ok(
-    !feedback.some((f) => f.detail?.includes('Should be ignored')),
+    !feedback.some((f) => 'detail' in f && f.detail?.includes('Should be ignored')),
     'should ignore stages for other request ids',
   );
   assert.ok(
-    !feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')),
+    !feedback.some((f) => 'detail' in f && f.detail?.includes('linux-wallpaperengine to start')),
     'matching backend details must also remain out of ordinary UI',
   );
 });
@@ -868,6 +859,6 @@ test('apply queue hides both preview and scene renderer stage details', async ()
   controller.enqueue(req('scene'));
   await new Promise((resolve) => setTimeout(resolve, 20));
 
-  assert.ok(!feedback.some((f) => f.detail?.includes('Awww to display the preview')));
-  assert.ok(!feedback.some((f) => f.detail?.includes('linux-wallpaperengine to start')));
+  assert.ok(!feedback.some((f) => 'detail' in f && f.detail?.includes('Awww to display the preview')));
+  assert.ok(!feedback.some((f) => 'detail' in f && f.detail?.includes('linux-wallpaperengine to start')));
 });

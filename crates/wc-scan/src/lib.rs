@@ -277,7 +277,7 @@ where
 
         if let Some(ref wp) = we_file {
             let p = Path::new(wp);
-            let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+            let c = canonicalize_str(p);
             if seen.insert(c.clone()) {
                 sink.push_if_collecting(c.clone());
                 *count += 1;
@@ -331,7 +331,7 @@ where
 {
     if let Some(wp) = indexed_we_project_path(project_dir) {
         let p = Path::new(&wp);
-        let c = canonicalize_str(&std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()));
+        let c = canonicalize_str(p);
         if seen.insert(c.clone()) {
             sink.push_if_collecting(c.clone());
             *count += 1;
@@ -394,9 +394,7 @@ where
         }
         if let Some(ext) = formats::get_extension(&path.to_string_lossy()) {
             if formats::is_supported_extension(&ext) {
-                let canonical = canonicalize_str(
-                    &std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf()),
-                );
+                let canonical = canonicalize_str(path);
                 if seen.insert(canonical.clone()) {
                     sink.push_if_collecting(canonical.clone());
                     *count += 1;

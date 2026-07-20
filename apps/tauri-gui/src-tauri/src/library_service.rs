@@ -4,7 +4,7 @@
 //! page/total caches, cold-query single-flight, revision observation, and the
 //! frontend-ready/maintenance lifecycle.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
@@ -17,6 +17,8 @@ const MAX_PAGE_COUNT: usize = 128;
 const MAX_CACHE_BYTES: usize = 32 * 1024 * 1024;
 const FOREGROUND_SQL_DEADLINE: Duration = Duration::from_secs(2);
 const OBSERVER_INTERVAL: Duration = Duration::from_millis(500);
+const FTS_ACTIVE_INTERVAL: Duration = Duration::from_secs(1);
+const FTS_IDLE_INTERVAL: Duration = Duration::from_secs(60);
 
 type RevisionNotifier = Arc<dyn Fn(u64) + Send + Sync>;
 
@@ -270,6 +272,7 @@ struct Inner {
     config_dir: Mutex<Option<ConfigDir>>,
     cache: Mutex<CacheState>,
     flights: Mutex<HashMap<PageKey, Arc<PageFlight>>>,
+    stale_refreshes: Mutex<HashSet<QueryKey>>,
     total_flights: Mutex<HashMap<TotalKey, Arc<TotalFlight>>>,
     maintenance: Mutex<MaintenanceState>,
     background_idle: Condvar,
@@ -317,6 +320,7 @@ impl LibraryService {
                 config_dir: Mutex::new(None),
                 cache: Mutex::new(CacheState::default()),
                 flights: Mutex::new(HashMap::new()),
+                stale_refreshes: Mutex::new(HashSet::new()),
                 total_flights: Mutex::new(HashMap::new()),
                 maintenance: Mutex::new(MaintenanceState::default()),
                 background_idle: Condvar::new(),
@@ -428,17 +432,21 @@ impl LibraryService {
             return Ok(page);
         }
         if let Some(stale) = stale_page_for_query(&self.inner.cache, &query_key) {
-            let service = self.clone();
-            let cd = ConfigDir {
-                path: cd.path.clone(),
-            };
-            let query = query.clone();
-            std::thread::spawn(move || {
-                let started = Instant::now();
-                let _ = service.page_with_loader(&cd, &query, move |conn, query| {
-                    run_page_with_deadline(conn, query, remaining_budget(started))
+            if self.try_start_stale_refresh(&query_key) {
+                let service = self.clone();
+                let cd = ConfigDir {
+                    path: cd.path.clone(),
+                };
+                let query = query.clone();
+                let refresh_query = query_key.clone();
+                std::thread::spawn(move || {
+                    let started = Instant::now();
+                    let _ = service.page_with_loader(&cd, &query, move |conn, query| {
+                        run_page_with_deadline(conn, query, remaining_budget(started))
+                    });
+                    service.finish_stale_refresh(&refresh_query);
                 });
-            });
+            }
             return Ok(stale);
         }
         let started = Instant::now();
@@ -552,6 +560,22 @@ impl LibraryService {
             return Ok(stale);
         }
         Err(LibraryServiceError::from(error))
+    }
+
+    fn try_start_stale_refresh(&self, query: &QueryKey) -> bool {
+        self.inner
+            .stale_refreshes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(query.clone())
+    }
+
+    fn finish_stale_refresh(&self, query: &QueryKey) {
+        self.inner
+            .stale_refreshes
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(query);
     }
 
     pub fn exact_total(
@@ -789,20 +813,49 @@ impl LibraryService {
             return;
         }
         let inner = Arc::downgrade(&self.inner);
-        std::thread::spawn(move || loop {
-            let Some(inner) = inner.upgrade() else { break };
-            if inner
-                .maintenance
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .depth
-                == 0
-            {
-                if let Ok(mut connection) = wc_storage::sqlite::open_runtime_connection(&cd) {
-                    let _ = wc_storage::sqlite::build_library_fts_chunk(&mut connection);
+        std::thread::spawn(move || {
+            let mut fts_current = false;
+            let mut last_generation = 0;
+            loop {
+                let Some(inner) = inner.upgrade() else { break };
+                let generation = inner.maintenance_generation.load(Ordering::Acquire);
+                if generation != last_generation {
+                    last_generation = generation;
+                    fts_current = false;
                 }
+
+                let maintenance_idle = inner
+                    .maintenance
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .depth
+                    == 0;
+                let mut interval = if fts_current {
+                    FTS_IDLE_INTERVAL
+                } else {
+                    FTS_ACTIVE_INTERVAL
+                };
+
+                if maintenance_idle {
+                    if let Ok(mut connection) = wc_storage::sqlite::open_runtime_connection(&cd) {
+                        if fts_current && !library_fts_is_current(&connection).unwrap_or(false) {
+                            fts_current = false;
+                            interval = FTS_ACTIVE_INTERVAL;
+                        }
+                        if !fts_current {
+                            match wc_storage::sqlite::build_library_fts_chunk(&mut connection) {
+                                Ok(true) => {
+                                    fts_current = true;
+                                    interval = FTS_IDLE_INTERVAL;
+                                }
+                                Ok(false) => {}
+                                Err(_) => {}
+                            }
+                        }
+                    }
+                }
+                std::thread::sleep(interval);
             }
-            std::thread::sleep(Duration::from_secs(1));
         });
     }
 
@@ -931,6 +984,18 @@ fn stale_page_for_query(
 ) -> Option<Arc<LibraryBrowserPage>> {
     let cache = cache.lock().unwrap_or_else(|p| p.into_inner());
     cache.stale.get(query).map(|page| page.page.clone())
+}
+
+fn library_fts_is_current(connection: &rusqlite::Connection) -> Result<bool, WcError> {
+    let revision = wc_storage::sqlite::read_library_revision(connection)?;
+    let (status, state_revision): (String, i64) = connection
+        .query_row(
+            "SELECT status, revision FROM library_fts_state WHERE singleton = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|error| WcError::Sqlite(error.to_string()))?;
+    Ok(status == "ready" && state_revision == i64::try_from(revision).unwrap_or(i64::MAX))
 }
 
 fn run_page_with_deadline(

@@ -60,6 +60,51 @@ test('thumbnail reveal waits while paused and resumes once', async () => {
   assert.equal(notified, 1);
 });
 
+test('forget clears cached thumbnails and notifies subscribers', async () => {
+  const store = new ThumbnailStore(1, async (path) => ({
+    path,
+    cacheHit: false,
+    thumbnail: `thumb:${path}`,
+  }));
+  let notified = 0;
+  store.subscribe('a', () => { notified += 1; });
+
+  store.enqueueVisible(['a']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('a'), 'thumb:a');
+  const notifiedBeforeForget = notified;
+
+  store.forget(['a']);
+  assert.equal(store.get('a'), undefined);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(notified > notifiedBeforeForget);
+});
+
+test('reset clears cache and notifies listeners without removing subscriptions', async () => {
+  const store = new ThumbnailStore(1, async (path) => ({
+    path,
+    cacheHit: false,
+    thumbnail: `thumb:${path}`,
+  }));
+  let notified = 0;
+  store.subscribe('same', () => { notified += 1; });
+
+  store.enqueueVisible(['same']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('same'), 'thumb:same');
+  assert.equal(store.listenerPathCount(), 1);
+
+  store.reset();
+  assert.equal(store.get('same'), undefined);
+  assert.equal(store.listenerPathCount(), 1);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.ok(notified >= 2);
+
+  store.enqueueVisible(['same']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('same'), 'thumb:same');
+});
+
 test('thumbnail store removes a path after its last listener unsubscribes', () => {
   const store = new ThumbnailStore(1, async (path) => ({
     path,
@@ -73,24 +118,4 @@ test('thumbnail store removes a path after its last listener unsubscribes', () =
   assert.equal(store.listenerPathCount(), 0);
   unsubscribe();
   assert.equal(store.listenerPathCount(), 0);
-});
-
-test('an unsubscribe captured before reset cannot remove a new listener set', async () => {
-  const store = new ThumbnailStore(1, async (path) => ({
-    path,
-    cacheHit: false,
-    thumbnail: `thumb:${path}`,
-  }));
-  let notified = 0;
-  const callback = () => { notified += 1; };
-  const staleUnsubscribe = store.subscribe('same', callback);
-  store.reset();
-  store.subscribe('same', callback);
-
-  staleUnsubscribe();
-  assert.equal(store.listenerPathCount(), 1);
-
-  store.enqueueVisible(['same']);
-  await new Promise((resolve) => setTimeout(resolve, 20));
-  assert.equal(notified, 1);
 });

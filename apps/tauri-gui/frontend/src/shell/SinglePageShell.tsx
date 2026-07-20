@@ -19,6 +19,7 @@ import { commandErrorFeedback } from '../api/feedback.ts';
 import LibraryViewport from '../components/LibraryViewport.tsx';
 import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
 import {
+  DISPLAY_APPLY_DISABLED_REASON,
   resolveLibraryModeSwitchAnchor,
   type ContextAction,
   type LibraryViewModel,
@@ -27,6 +28,7 @@ import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
 import { useApplyQueue } from '../hooks/useApplyQueue.ts';
+import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
 import { buildDisplayTargetModel } from './displayTargets.ts';
 import DisplayTargetSelector from './DisplayTargetSelector.tsx';
@@ -78,10 +80,12 @@ import {
   verifyLibraryIntegrity,
 } from './libraryRepair.ts';
 import {
-  createLibraryReadyGate,
+  createLibraryReadyDelivery,
   createLibraryWatchdog,
+  shouldClearLibraryTimeout,
   shouldSignalLibraryPaint,
 } from './startupWatchdog.ts';
+import { createRecurringErrorGate } from './recurringErrorGate.ts';
 
 const LIBRARY_REVISION_EVENT = 'library-revision-changed';
 const LIBRARY_REFRESH_EVENT = 'wallpaper-console:library-revision-changed';
@@ -161,11 +165,12 @@ export default function SinglePageShell() {
   const libraryViewportAnchorRef = useRef<number | null>(null);
   const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
   const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
+  const { reset: resetThumbnails } = useThumbnailStore();
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
-  const libraryReadyGate = useRef(createLibraryReadyGate()).current;
-  const WATCHDOG_MS = 500;
+  const libraryReadyDelivery = useRef(createLibraryReadyDelivery(api.libraryReady)).current;
+  const WATCHDOG_MS = 3000;
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -292,6 +297,14 @@ export default function SinglePageShell() {
     };
   }, []);
 
+  useEffect(() => {
+    const handler = () => {
+      resetThumbnails();
+    };
+    window.addEventListener(LIBRARY_REFRESH_EVENT, handler);
+    return () => window.removeEventListener(LIBRARY_REFRESH_EVENT, handler);
+  }, [resetThumbnails]);
+
   const browser = useLibraryBrowser({
     sourceFilter: effectiveSrcFilter,
     typeFilter: preferences.typeFilter,
@@ -302,41 +315,33 @@ export default function SinglePageShell() {
   });
 
   // ── library_ready signal ────────────────────────────────────────────
-  // Sent exactly once after the first Library paint (cards, empty, error, or
-  // timeout retry state). Uses a pure gate so the "exactly once" guarantee is
-  // testable without mounting the full shell.
-  const libraryPaintActive = shouldSignalLibraryPaint({
+  // Delivered after the first Library paint (cards, empty, error, or timeout
+  // retry state) until the backend acknowledges it.
+  const libraryPaintState = {
     initialLoading: browser.initialLoading,
     hasEntries: browser.entries.length > 0,
     emptyConfirmed: browser.emptyConfirmed,
     loadError: browser.loadError,
     timedOut: initialRequestTimedOut,
-  });
+  };
+  const libraryPaintActive = shouldSignalLibraryPaint(libraryPaintState);
   useEffect(() => {
-    if (!libraryReadyGate.shouldSignal({
-      initialLoading: browser.initialLoading,
-      hasEntries: browser.entries.length > 0,
-      emptyConfirmed: browser.emptyConfirmed,
-      loadError: browser.loadError,
-      timedOut: initialRequestTimedOut,
-    })) return;
-    libraryReadyGate.markCalled();
-    void api.libraryReady().catch(() => {
-      // library_ready is fire-and-forget; the backend handles idempotency.
-    });
-  }, [
-    browser.emptyConfirmed,
-    browser.entries.length,
-    browser.initialLoading,
-    browser.loadError,
-    initialRequestTimedOut,
-    libraryReadyGate,
-  ]);
+    if (!libraryPaintActive) return undefined;
+    libraryReadyDelivery.activate();
+    return () => libraryReadyDelivery.deactivate();
+  }, [libraryPaintActive, libraryReadyDelivery]);
 
-  // ── initial request watchdog (500 ms) ──────────────────────────────────
+  const libraryTimeoutResolved = shouldClearLibraryTimeout(libraryPaintState);
+  useEffect(() => {
+    if (initialRequestTimedOut && libraryTimeoutResolved) {
+      setInitialRequestTimedOut(false);
+    }
+  }, [initialRequestTimedOut, libraryTimeoutResolved]);
+
+  // ── initial request watchdog (3 s) ─────────────────────────────────────
   // If the first browser request never resolves (perpetual loading),
   // surface an interactive retry after a bounded wait. Each retry arms a
-  // fresh 500 ms watchdog even when browser.initialLoading stays true.
+  // fresh 3 s watchdog even when browser.initialLoading stays true.
   const armWatchdog = useCallback(() => {
     return libraryWatchdog.arm(WATCHDOG_MS, () => {
       setInitialRequestTimedOut(true);
@@ -534,7 +539,7 @@ export default function SinglePageShell() {
       showNotice({
         channel: 'apply',
         severity: 'error',
-        message: 'The selected display is not connected.',
+        message: DISPLAY_APPLY_DISABLED_REASON,
       });
       return;
     }
@@ -631,18 +636,21 @@ export default function SinglePageShell() {
     previousScanRunning.current = running;
   }, [catalog.reloadSources, scan.progress?.running]);
 
-  const lastScanError = useRef<string | null>(null);
+  const scanErrorGate = useRef(createRecurringErrorGate()).current;
   useEffect(() => {
     const error = scan.scanError ?? scan.transportError;
-    if (!error || error === lastScanError.current) return;
-    lastScanError.current = error;
+    if (error === null) {
+      scanErrorGate.shouldNotify(null);
+      return;
+    }
+    if (!error || !scanErrorGate.shouldNotify(error)) return;
     showNotice({
       channel: 'scan',
       severity: scan.scanError ? 'error' : 'warning',
       message: scan.scanError ? 'Wallpaper scan failed.' : 'Scan status is temporarily unavailable.',
       technicalDetails: error,
     });
-  }, [scan.scanError, scan.transportError, showNotice]);
+  }, [scan.scanError, scan.transportError, scanErrorGate, showNotice]);
 
   useEffect(() => {
     const error = preferencesSaveError ?? preferencesLoadError;
@@ -853,6 +861,7 @@ export default function SinglePageShell() {
     automaticAppendPaused: browser.automaticAppendPaused,
     loadErrorDetail: browser.loadErrorDetail,
     canApplyToDisplay: displayModel.canApply,
+    displayApplyDisabledReason: displayModel.canApply ? null : DISPLAY_APPLY_DISABLED_REASON,
     isEntryApplicable: isLibraryEntryApplicable,
     onSelect: selectLibraryEntry,
     onApply: applyEntry,

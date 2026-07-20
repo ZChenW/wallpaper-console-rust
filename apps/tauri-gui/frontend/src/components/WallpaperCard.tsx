@@ -27,6 +27,7 @@ import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 interface CardProps {
   entry: LibraryBrowserItemDTO;
   ordinal?: string;
+  posInSet?: number;
   applying: boolean;
   onApply: (entry: LibraryBrowserItemDTO) => void;
   onSelect?: (entry: LibraryBrowserItemDTO) => void;
@@ -40,6 +41,7 @@ interface CardProps {
   favoritePending?: boolean;
   current?: boolean;
   applyAvailable?: boolean;
+  applyDisabledReason?: string | null;
   isScrolling?: () => boolean;
 }
 
@@ -48,6 +50,7 @@ const neverScrolling = () => false;
 function WallpaperCardImpl({
   entry,
   ordinal,
+  posInSet,
   applying,
   onApply,
   onSelect,
@@ -61,6 +64,7 @@ function WallpaperCardImpl({
   favoritePending = false,
   current = false,
   applyAvailable,
+  applyDisabledReason = null,
   isScrolling = neverScrolling,
 }: CardProps) {
   const [hovered, setHovered] = useState(false);
@@ -101,7 +105,10 @@ function WallpaperCardImpl({
       emitFeedback({
         state: 'warning',
         label: 'Cannot apply',
-        detail: entry.applyReason || entry.unsupportedReason || 'This item cannot be applied as a live wallpaper.',
+        detail: applyDisabledReason
+          || entry.applyReason
+          || entry.unsupportedReason
+          || 'This item cannot be applied as a live wallpaper.',
       });
     }
   };
@@ -118,7 +125,10 @@ function WallpaperCardImpl({
     emitFeedback({
       state: 'warning',
       label: 'Cannot apply',
-      detail: entry.applyReason || entry.unsupportedReason || 'This item cannot be applied as a live wallpaper.',
+      detail: applyDisabledReason
+        || entry.applyReason
+        || entry.unsupportedReason
+        || 'This item cannot be applied as a live wallpaper.',
     });
   };
 
@@ -157,6 +167,7 @@ function WallpaperCardImpl({
       data-wallpaper-index={ordinal}
       data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
+      aria-posinset={posInSet}
       role="listitem"
     >
       <button

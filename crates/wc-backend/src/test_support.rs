@@ -206,7 +206,7 @@ impl BackendRuntime for FakeRuntime {
         if !self.awww_autostart {
             return Err(WcError::Other("awww socket not ready".into()));
         }
-        let user = crate::whoami();
+        let user = crate::current_process_user();
         if !crate::awww::is_awww_daemon_running(&user) {
             let mut cmd = crate::runtime::build_awww_daemon_command();
             let _ = self.command_status(&mut cmd);

@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { readFile, unlink, writeFile } from 'node:fs/promises';
 import test from 'node:test';
 
-import { Children, isValidElement, type ReactElement, type ReactNode } from 'react';
+import { Children, createElement, isValidElement, type ReactElement, type ReactNode } from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 import ts from 'typescript';
 
@@ -18,8 +18,12 @@ import {
 
 async function importTsxModule(): Promise<typeof import('./CompactSettingsPanel.tsx')> {
   const selectFieldSourceUrl = new URL('../components/SelectField.tsx', import.meta.url);
+  const deferredNumberSourceUrl = new URL('./deferredNumberInput.ts', import.meta.url);
+  const deferredInputSourceUrl = new URL('./DeferredNumberInput.tsx', import.meta.url);
   const panelSourceUrl = new URL('./CompactSettingsPanel.tsx', import.meta.url);
   const selectFieldOutputUrl = new URL(`./.SelectField.test-${randomUUID()}.mjs`, import.meta.url);
+  const deferredNumberOutputUrl = new URL(`./.deferredNumberInput.test-${randomUUID()}.mjs`, import.meta.url);
+  const deferredInputOutputUrl = new URL(`./.DeferredNumberInput.test-${randomUUID()}.mjs`, import.meta.url);
   const panelOutputUrl = new URL(`./.CompactSettingsPanel.test-${randomUUID()}.mjs`, import.meta.url);
   const compilerOptions = {
     jsx: ts.JsxEmit.ReactJSX,
@@ -30,22 +34,45 @@ async function importTsxModule(): Promise<typeof import('./CompactSettingsPanel.
     compilerOptions,
     fileName: selectFieldSourceUrl.pathname,
   }).outputText;
+  const deferredNumberOutput = ts.transpileModule(await readFile(deferredNumberSourceUrl, 'utf8'), {
+    compilerOptions,
+    fileName: deferredNumberSourceUrl.pathname,
+  }).outputText;
+  const deferredInputOutput = ts.transpileModule(await readFile(deferredInputSourceUrl, 'utf8'), {
+    compilerOptions,
+    fileName: deferredInputSourceUrl.pathname,
+  }).outputText.replace(
+    "from './deferredNumberInput.ts';",
+    `from './${deferredNumberOutputUrl.pathname.split('/').at(-1)}';`,
+  );
   const panelOutput = ts.transpileModule(await readFile(panelSourceUrl, 'utf8'), {
     compilerOptions,
     fileName: panelSourceUrl.pathname,
-  }).outputText.replace(
-    "from '../components/SelectField.tsx';",
-    `from './${selectFieldOutputUrl.pathname.split('/').at(-1)}';`,
-  );
+  }).outputText
+    .replace(
+      "from '../components/SelectField.tsx';",
+      `from './${selectFieldOutputUrl.pathname.split('/').at(-1)}';`,
+    )
+    .replace(
+      "from './DeferredNumberInput.tsx';",
+      `from './${deferredInputOutputUrl.pathname.split('/').at(-1)}';`,
+    );
 
   await Promise.all([
     writeFile(selectFieldOutputUrl, selectFieldOutput, 'utf8'),
+    writeFile(deferredNumberOutputUrl, deferredNumberOutput, 'utf8'),
+    writeFile(deferredInputOutputUrl, deferredInputOutput, 'utf8'),
     writeFile(panelOutputUrl, panelOutput, 'utf8'),
   ]);
   try {
     return await import(panelOutputUrl.href);
   } finally {
-    await Promise.all([unlink(selectFieldOutputUrl), unlink(panelOutputUrl)]);
+    await Promise.all([
+      unlink(selectFieldOutputUrl),
+      unlink(deferredNumberOutputUrl),
+      unlink(deferredInputOutputUrl),
+      unlink(panelOutputUrl),
+    ]);
   }
 }
 
@@ -60,12 +87,38 @@ function findElements(
     if (Array.isArray(node.props.options) && typeof node.props.onValueChange === 'function') {
       return matches;
     }
-    const rendered = node.type(node.props) as ReactNode;
+    if (
+      typeof node.props.confirmed === 'number'
+      && typeof node.props.onCommit === 'function'
+    ) {
+      const input = createElement(
+        'span',
+        { className: 'settings-number-control' },
+        [
+          createElement('input', {
+            'aria-label': node.props['aria-label'],
+            'data-behavior-control': true,
+            disabled: node.props.disabled,
+            onCommit: node.props.onCommit,
+            defaultValue: String(node.props.confirmed),
+          }),
+          node.props.unit
+            ? createElement('span', {
+              'aria-hidden': true,
+              'data-control-unit': node.props.unitKind ?? 'number',
+            }, String(node.props.unit))
+            : null,
+        ],
+      );
+      return findElements(input, predicate);
+    }
+    const Component = node.type as (props: Record<string, unknown>) => ReactNode;
+    const rendered = Component(node.props);
     return [...matches, ...findElements(rendered, predicate)];
   }
   return [
     ...matches,
-    ...Children.toArray(node.props.children).flatMap((child) => findElements(child, predicate)),
+    ...Children.toArray(node.props.children as ReactNode).flatMap((child) => findElements(child, predicate)),
   ];
 }
 
@@ -110,7 +163,7 @@ test('settings uses an icon close action and closes on Escape or backdrop only',
 
   assert.equal(close.props.autoFocus, true);
   assert.equal(close.props['data-icon-button'], true);
-  assert.equal(overlay.props.style.zIndex, 1100);
+  assert.equal((overlay.props.style as { zIndex?: number }).zIndex, 1100);
   assert.doesNotMatch(renderToStaticMarkup(close), />Close</);
   (overlay.props.onKeyDown as (event: unknown) => void)({
     key: 'Escape',
@@ -278,7 +331,7 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
     (element) => element.props['data-behavior-card'] === 'renderer-selection',
   );
   assert.deepEqual(
-    findElements(rendererSelection, (element) => ['Image', 'GIF', 'Video'].includes(element.props['aria-label']))
+    findElements(rendererSelection, (element) => ['Image', 'GIF', 'Video'].includes(String(element.props['aria-label'])))
       .map((field) => field.props['aria-label']),
     ['Image', 'GIF', 'Video'],
   );
@@ -299,8 +352,8 @@ test('wallpaper controls use renderer cards and omit the duplicated display sele
   (gifMpvpaper.props.onClick as () => void)();
   (fill.props.onValueChange as (value: string) => void)('stretch');
   (transition.props.onValueChange as (value: string) => void)('wave');
-  (duration.props.onChange as (event: unknown) => void)({ currentTarget: { value: '2.5' } });
-  (transitionFps.props.onChange as (event: unknown) => void)({ currentTarget: { value: '144' } });
+  (duration.props.onCommit as (value: number) => void)(2.5);
+  (transitionFps.props.onCommit as (value: number) => void)(144);
 
   assert.deepEqual(preferences.displayTarget, DEFAULT_SHELL_PREFERENCES.displayTarget);
   assert.deepEqual(behavior, {
@@ -439,9 +492,9 @@ test('renderer-specific options update Wallpaper Engine audio and login restore 
   assert.ok(restore);
   assert.equal(volume.props.disabled, false);
   (scaling.props.onValueChange as (value: string) => void)('fit');
-  (fps.props.onChange as (event: unknown) => void)({ currentTarget: { value: '120' } });
+  (fps.props.onCommit as (value: number) => void)(120);
   (mute.props.onChange as (event: unknown) => void)({ currentTarget: { checked: true } });
-  (volume.props.onChange as (event: unknown) => void)({ currentTarget: { value: '25' } });
+  (volume.props.onCommit as (value: number) => void)(25);
   (restore.props.onChange as (event: unknown) => void)({ currentTarget: { checked: true } });
   assert.deepEqual(behavior, {
     ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS,

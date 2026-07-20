@@ -20,7 +20,7 @@ thumbnails, and backend settings.
 Install these before running the installer:
 
 - Rust 1.77+
-- Node.js 22+ and npm
+- Node.js 22.6+ and npm (see `apps/tauri-gui/frontend/package.json` `engines`)
 - `cargo-tauri`
 - Tauri 2 Linux system dependencies, including `webkit2gtk-4.1`
 
@@ -73,6 +73,39 @@ window-rule {
     open-floating true
 }
 ```
+
+## Verification
+
+Correctness gate (Rust fmt/check/clippy/test, frontend typecheck including tests,
+unit tests, production build, mock-browser smoke, and drift checks):
+
+```bash
+export TMPDIR="${TMPDIR:-$HOME/tmp/rust-tmp}"
+mkdir -p "$TMPDIR"
+cargo run -p xtask -- verify all
+```
+
+Library wall-clock performance budgets are intentionally separate:
+
+```bash
+cargo run -p xtask -- verify perf
+```
+
+### Real Tauri WebView E2E (not in CI)
+
+Automated smoke currently uses mock Vite + Playwright Chromium
+(`npm run smoke`). A minimal real Tauri WebView smoke is **not** wired yet
+because:
+
+1. Headless CI lacks a reliable Wayland/X11 + `webkit2gtk-4.1` WebView path for
+   Tauri 2 without a dedicated display server and GPU/software GL setup.
+2. Apply/backend lifecycle (`awww` / `mpvpaper` / `linux-wallpaperengine`) needs
+   compositor access that GitHub-hosted runners do not provide.
+3. There is no checked-in WebDriver/sidecar harness for the packaged GUI binary.
+
+Until those blockers are removed, treat mock-browser smoke + Rust unit/integration
+tests as the automated gate, and use a local interactive GUI run for native
+apply/runtime acceptance.
 
 ## License
 
