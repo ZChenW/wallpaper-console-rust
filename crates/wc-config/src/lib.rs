@@ -6,10 +6,12 @@
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};
-use std::fs;
+use std::fs::{self, File, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use fs2::FileExt;
 use wc_core::config::{default_config_keys, default_config_pairs, ConfigDir};
 use wc_core::error::WcError;
 
@@ -111,6 +113,23 @@ fn atomic_config_temp_path(config_path: &Path) -> PathBuf {
     config_path.with_file_name(temp_file_name)
 }
 
+fn config_lock_path(config_dir: &Path) -> PathBuf {
+    config_dir.join(".config.lock")
+}
+
+fn acquire_config_lock(config_dir: &Path) -> Result<File, WcError> {
+    let lock_path = config_lock_path(config_dir);
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&lock_path)
+        .map_err(WcError::Io)?;
+    lock.lock_exclusive().map_err(WcError::Io)?;
+    Ok(lock)
+}
+
 /// Set a config value in the flat config file (atomic write).
 pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
     if value.contains('\n') || value.contains('\r') {
@@ -118,6 +137,7 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
             "config value for {key:?} must be a single line (found newline characters)"
         )));
     }
+    let _lock = acquire_config_lock(config_dir)?;
     let config_path = config_dir.join("config");
     let mut map = if config_path.exists() {
         parse_config_file(&config_path)?
@@ -132,15 +152,23 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
     map.insert(key.to_string(), value.to_string());
 
     let content = serialize_config_map(&map);
-    // Atomic: write to temp, then rename
+    // Atomic: write to temp, fsync, then rename
     let tmp = atomic_config_temp_path(&config_path);
-    if let Err(error) = fs::write(&tmp, content) {
+    let write_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(&tmp)
+            .map_err(WcError::Io)?;
+        file.write_all(content.as_bytes()).map_err(WcError::Io)?;
+        file.sync_all().map_err(WcError::Io)?;
+        drop(file);
+        fs::rename(&tmp, &config_path).map_err(WcError::Io)
+    })();
+    if let Err(error) = write_result {
         let _ = fs::remove_file(&tmp);
-        return Err(WcError::Io(error));
-    }
-    if let Err(error) = fs::rename(&tmp, &config_path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(WcError::Io(error));
+        return Err(error);
     }
     Ok(())
 }

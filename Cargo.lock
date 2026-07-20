@@ -4548,6 +4548,7 @@ dependencies = [
 name = "wc-backend"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "log",
  "serde_json",
  "tempfile",
@@ -4582,6 +4583,7 @@ dependencies = [
 name = "wc-config"
 version = "0.1.0"
 dependencies = [
+ "fs2",
  "tempfile",
  "wc-core",
 ]
@@ -4605,6 +4607,7 @@ dependencies = [
  "tempfile",
  "wc-config",
  "wc-core",
+ "which",
 ]
 
 [[package]]
