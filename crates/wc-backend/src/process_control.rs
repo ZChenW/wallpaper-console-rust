@@ -6,9 +6,191 @@
 //! Diagnostics (pgrep failures) are emitted to stderr. In a Tauri context
 //! stderr may not be captured; this is best-effort diagnostic output.
 
+use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 use std::time::Duration;
+
+pub(crate) const LWE_PROGRAM_NAME: &str = "linux-wallpaperengine";
+pub(crate) const MPVPAPER_PROGRAM_NAME: &str = "mpvpaper";
+
+/// True when a command-line token looks like an argv0 invocation of `linux-wallpaperengine`.
+pub(crate) fn token_is_lwe_program(token: &str) -> bool {
+    Path::new(token.trim())
+        .file_name()
+        .is_some_and(|name| name == LWE_PROGRAM_NAME)
+}
+
+/// True when a command-line token looks like an argv0 invocation of `mpvpaper`.
+pub(crate) fn token_is_mpvpaper_program(token: &str) -> bool {
+    Path::new(token.trim())
+        .file_name()
+        .is_some_and(|name| name == MPVPAPER_PROGRAM_NAME)
+}
+
+/// Safer pgrep -f pattern for linux-wallpaperengine (argv0 anchored).
+pub(crate) fn lwe_pgrep_pattern() -> &'static str {
+    r"^(\S*/)?linux-wallpaperengine( |$)"
+}
+
+/// True when `cmdline` looks like an actual linux-wallpaperengine invocation.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn cmdline_looks_like_lwe(cmdline: &str) -> bool {
+    if cmdline.contains('\0') {
+        return cmdline.split('\0').any(token_is_lwe_program);
+    }
+    cmdline.split_whitespace().any(token_is_lwe_program)
+}
+
+/// True when `cmdline` looks like an actual mpvpaper invocation.
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn cmdline_looks_like_mpvpaper(cmdline: &str) -> bool {
+    if cmdline.contains('\0') {
+        return cmdline.split('\0').any(token_is_mpvpaper_program);
+    }
+    let Some(argv0) = cmdline.split_whitespace().next() else {
+        return false;
+    };
+    token_is_mpvpaper_program(argv0)
+}
+
+#[cfg(unix)]
+fn read_proc_cmdline_tokens(pid: i32) -> Option<Vec<String>> {
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
+    if raw.is_empty() {
+        return None;
+    }
+    let mut tokens = Vec::new();
+    for field in raw.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            continue;
+        }
+        let token = std::str::from_utf8(field).ok()?.to_string();
+        tokens.push(token);
+    }
+    Some(tokens)
+}
+
+#[cfg(not(unix))]
+fn read_proc_cmdline_tokens(_pid: i32) -> Option<Vec<String>> {
+    None
+}
+
+/// True when `/proc/<pid>` still looks like linux-wallpaperengine (cmdline or exe).
+pub(crate) fn pid_looks_like_lwe(pid: i32) -> bool {
+    pid_looks_like_lwe_with(pid, read_proc_cmdline_tokens)
+}
+
+pub(crate) fn pid_looks_like_lwe_with<F>(pid: i32, read_tokens: F) -> bool
+where
+    F: Fn(i32) -> Option<Vec<String>>,
+{
+    if pid <= 0 {
+        return false;
+    }
+    if read_tokens(pid)
+        .is_some_and(|tokens| tokens.iter().any(|token| token_is_lwe_program(token)))
+    {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        if let Ok(link) = std::fs::read_link(format!("/proc/{pid}/exe")) {
+            if link
+                .file_name()
+                .is_some_and(|name| name == LWE_PROGRAM_NAME)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub(crate) fn pid_looks_like_mpvpaper(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    read_proc_cmdline_tokens(pid)
+        .and_then(|tokens| tokens.first().cloned())
+        .is_some_and(|argv0| token_is_mpvpaper_program(&argv0))
+}
+
+/// Send SIGTERM then SIGKILL to `pid`'s process group when it still looks like LWE.
+pub(crate) fn kill_lwe_process_group(pid: i32) {
+    if !pid_looks_like_lwe(pid) {
+        return;
+    }
+    let pgid = format!("-{pid}");
+    let _ = Command::new("kill")
+        .args(["-TERM", &pgid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = Command::new("kill")
+        .args(["-KILL", &pgid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+/// Send SIGTERM then SIGKILL to a single PID.
+pub(crate) fn kill_pid_gracefully(pid: u32) {
+    let pid_str = pid.to_string();
+    let _ = Command::new("kill")
+        .args(["-TERM", &pid_str])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+    std::thread::sleep(Duration::from_millis(80));
+    let _ = Command::new("kill")
+        .args(["-KILL", &pid_str])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(unix)]
+pub(crate) fn find_lwe_pids_for_current_user() -> Vec<u32> {
+    use std::os::unix::fs::MetadataExt;
+
+    let current_uid = match std::fs::metadata("/proc/self") {
+        Ok(metadata) => metadata.uid(),
+        Err(_) => return Vec::new(),
+    };
+    let entries = match std::fs::read_dir("/proc") {
+        Ok(entries) => entries,
+        Err(_) => return Vec::new(),
+    };
+    let mut pids = Vec::new();
+    for entry in entries.flatten() {
+        let Some(pid) = entry
+            .file_name()
+            .to_str()
+            .and_then(|name| name.parse::<u32>().ok())
+        else {
+            continue;
+        };
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => continue,
+        };
+        if metadata.uid() != current_uid {
+            continue;
+        }
+        if pid_looks_like_lwe(pid as i32) {
+            pids.push(pid);
+        }
+    }
+    pids.sort_unstable();
+    pids
+}
+
+#[cfg(not(unix))]
+pub(crate) fn find_lwe_pids_for_current_user() -> Vec<u32> {
+    Vec::new()
+}
 
 /// Move a long-lived `Child` into a detached background thread that `wait`s
 /// so the process is reaped when it exits (or is killed elsewhere).
@@ -31,6 +213,8 @@ pub(crate) fn detach_and_reap_child(mut child: Child, thread_name: &str) {
 pub(crate) trait ProcessControl {
     /// Return PIDs of processes whose command line matches `pattern` (pgrep -f).
     fn find_processes(&self, pattern: &str) -> Vec<u32>;
+    /// Return PIDs that look like linux-wallpaperengine for the current user.
+    fn find_lwe_processes(&self) -> Vec<u32>;
     /// Return the process group ID of `pid`, if the process still exists.
     fn process_group_of(&self, pid: u32) -> Option<u32>;
     /// Send SIGTERM to `pid`.
@@ -87,6 +271,13 @@ impl ProcessControl for RealProcessControl {
                 Vec::new()
             }
         }
+    }
+
+    fn find_lwe_processes(&self) -> Vec<u32> {
+        self.find_processes(lwe_pgrep_pattern())
+            .into_iter()
+            .filter(|&pid| pid_looks_like_lwe(pid as i32))
+            .collect()
     }
 
     fn process_group_of(&self, pid: u32) -> Option<u32> {
@@ -149,7 +340,7 @@ pub(crate) fn cleanup_stale_lwe_processes_except_with(
     // and all children inherit this PGID.
     let new_pgid = new_pid;
 
-    let candidates = pc.find_processes(r"(^|/)linux-wallpaperengine\b");
+    let candidates = pc.find_lwe_processes();
     if candidates.is_empty() {
         return;
     }
@@ -298,6 +489,10 @@ pub(crate) mod test_support {
             self.find_results.borrow().clone()
         }
 
+        fn find_lwe_processes(&self) -> Vec<u32> {
+            self.find_results.borrow().clone()
+        }
+
         fn process_group_of(&self, pid: u32) -> Option<u32> {
             self.pgids.borrow().get(&pid).copied()
         }
@@ -401,5 +596,40 @@ pub(crate) mod test_support {
 
         assert!(pc.termed().is_empty());
         assert!(pc.killed().is_empty());
+    }
+
+    #[test]
+    fn cmdline_pattern_rejects_less_viewing_mpvpaper_log() {
+        assert!(!super::cmdline_looks_like_mpvpaper("less /tmp/mpvpaper.log"));
+        assert!(!super::cmdline_looks_like_lwe("less /tmp/linux-wallpaperengine.log"));
+    }
+
+    #[test]
+    fn cmdline_pattern_accepts_real_renderer_invocations() {
+        assert!(super::cmdline_looks_like_mpvpaper(
+            "/usr/bin/mpvpaper HDMI-A-1 -- /walls/night.mp4"
+        ));
+        assert!(super::cmdline_looks_like_lwe(
+            "/usr/bin/linux-wallpaperengine --screen-root eDP-1 --bg 123"
+        ));
+        assert!(super::cmdline_looks_like_lwe(
+            "setsid /usr/bin/linux-wallpaperengine --bg 123"
+        ));
+    }
+
+    #[test]
+    fn pid_looks_like_lwe_with_injected_cmdline() {
+        assert!(super::pid_looks_like_lwe_with(100, |pid| match pid {
+            100 => Some(vec![
+                "setsid".to_string(),
+                "/usr/bin/linux-wallpaperengine".to_string(),
+            ]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(200, |pid| match pid {
+            200 => Some(vec!["bash".to_string()]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(0, |_pid| None));
     }
 }

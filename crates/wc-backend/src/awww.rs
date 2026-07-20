@@ -342,6 +342,10 @@ mod tests {
             next
         }
 
+        fn find_lwe_processes(&self) -> Vec<u32> {
+            self.find_processes("")
+        }
+
         fn process_group_of(&self, _pid: u32) -> Option<u32> {
             None
         }

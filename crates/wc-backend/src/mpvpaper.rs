@@ -68,17 +68,16 @@ pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
 }
 
 pub(crate) fn stop_mpvpaper() {
-    let user = crate::whoami();
-    match Command::new("pkill")
-        .args(["-u", &user, "-f", r"(^|/)mpvpaper\b"])
-        .status()
-    {
-        Ok(status) if status.success() || status.code() == Some(1) => {}
-        Ok(status) => {
-            log::warn!("pkill -u {user} -f mpvpaper exited with unexpected status: {status}");
+    match running_pids() {
+        Ok(pids) => {
+            for pid in pids {
+                if crate::process_control::pid_looks_like_mpvpaper(pid as i32) {
+                    crate::process_control::kill_pid_gracefully(pid);
+                }
+            }
         }
         Err(err) => {
-            log::warn!("failed to execute pkill for mpvpaper: {err}");
+            log::warn!("failed to query mpvpaper PIDs for stop: {err}");
         }
     }
 }

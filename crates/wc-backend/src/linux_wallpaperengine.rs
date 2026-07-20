@@ -257,7 +257,6 @@ fn apply_with_target_args(
             Some(status) => {
                 // Read stderr from log file for diagnostics.
                 let stderr_tail = std::fs::read_to_string(&log_path).unwrap_or_default();
-                let _ = s.config_set("lwe_last_stderr", &stderr_tail);
                 let _ = s.config_set("lwe_last_exit_status", &status.to_string());
                 // New process failed — do NOT kill old LWE. Keep current wallpaper.
                 return Err(map_renderer_error(status.to_string(), &stderr_tail));
@@ -269,18 +268,11 @@ fn apply_with_target_args(
 
     // New process is alive. Safe to kill old LWE now.
     if let Some(old) = old_pid {
-        let pgid = format!("-{}", old);
-        let _ = Command::new("kill")
-            .args(["-TERM", &pgid])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
-        std::thread::sleep(Duration::from_millis(80));
-        let _ = Command::new("kill")
-            .args(["-KILL", &pgid])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+        if crate::process_control::pid_looks_like_lwe(old) {
+            crate::process_control::kill_lwe_process_group(old);
+        } else {
+            let _ = s.config_set(PID_CONFIG_KEY, "");
+        }
     }
 
     // Clean up any stale LWE processes that aren't the new one.
@@ -304,18 +296,9 @@ pub fn stop(s: Option<&StorageApi>) {
     if let Some(s) = s {
         let pid = s.config_get(PID_CONFIG_KEY, "");
         if let Ok(pid) = pid.parse::<i32>() {
-            let pgid = format!("-{}", pid);
-            let _ = Command::new("kill")
-                .args(["-TERM", &pgid])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
-            std::thread::sleep(Duration::from_millis(80));
-            let _ = Command::new("kill")
-                .args(["-KILL", &pgid])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            if crate::process_control::pid_looks_like_lwe(pid) {
+                crate::process_control::kill_lwe_process_group(pid);
+            }
             let _ = s.config_set(PID_CONFIG_KEY, "");
         }
     }
@@ -323,31 +306,15 @@ pub fn stop(s: Option<&StorageApi>) {
 }
 
 /// Kill any residual linux-wallpaperengine processes owned by current user.
-/// Uses -f (match full command line) instead of -x because Linux truncates
-/// /proc/.../comm to 15 chars.
 pub fn stop_tracked_processes() {
-    if let Ok(user) = std::env::var("USER") {
-        let _ = Command::new("pkill")
-            .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status();
+    for pid in crate::process_control::find_lwe_pids_for_current_user() {
+        crate::process_control::kill_pid_gracefully(pid);
     }
 }
 
 /// True when any linux-wallpaperengine process is owned by the current user.
 pub fn is_running_for_current_user() -> bool {
-    let Ok(user) = std::env::var("USER") else {
-        return false;
-    };
-    matches!(
-        Command::new("pgrep")
-            .args(["-u", &user, "-f", r"(^|/)linux-wallpaperengine\b"])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status(),
-        Ok(s) if s.success()
-    )
+    !crate::process_control::find_lwe_pids_for_current_user().is_empty()
 }
 
 pub(crate) fn ensure_binary_available(config: &LinuxWallpaperEngineConfig) -> Result<(), WcError> {

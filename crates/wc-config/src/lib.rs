@@ -113,6 +113,11 @@ fn atomic_config_temp_path(config_path: &Path) -> PathBuf {
 
 /// Set a config value in the flat config file (atomic write).
 pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
+    if value.contains('\n') || value.contains('\r') {
+        return Err(WcError::Other(format!(
+            "config value for {key:?} must be a single line (found newline characters)"
+        )));
+    }
     let config_path = config_dir.join("config");
     let mut map = if config_path.exists() {
         parse_config_file(&config_path)?
@@ -309,6 +314,22 @@ mod tests {
         assert_eq!(
             defaults.get("mpvpaper_options").unwrap(),
             "--loop-file=inf --panscan=1.0"
+        );
+    }
+
+    #[test]
+    fn write_config_value_rejects_multiline_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+
+        let error =
+            write_config_value(tmp.path(), "lwe_last_stderr", "line one\nline two").unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("must be a single line"),
+            "unexpected error: {error}"
         );
     }
 }

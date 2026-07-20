@@ -1,5 +1,6 @@
 //! wc-backend — wallpaper backend process management.
 
+#[cfg(test)]
 use std::process::{Command, Stdio};
 #[cfg(test)]
 use wc_config::ConfigDirExt;
@@ -37,39 +38,20 @@ pub use target_commands::ExecutionScope;
 use awww::stop_awww;
 use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
 
-/// Stop all wallpaper backends via pkill.
+/// Stop all wallpaper backends.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
-    let user = whoami();
     linux_wallpaperengine::stop(s);
-    pkill_user_pattern(&user, r"(^|/)mpvpaper\b");
+    mpvpaper::stop_mpvpaper();
     stop_awww();
     // Fallback cleanup: kill residual scene renderer processes that may not have been
     // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
     // left the process behind).
-    pkill_user_pattern(&user, r"(^|/)linux-wallpaperengine\b");
+    linux_wallpaperengine::stop_tracked_processes();
     Ok(())
 }
 
 /// Backend name constant used for LWE state tracking.
 pub const LWE_BACKEND_NAME: &str = "linux-wallpaperengine";
-
-/// Run `pkill -u <user> -f <pattern>`. Exit status 1 (no matching processes) is normal.
-fn pkill_user_pattern(user: &str, pattern: &str) {
-    match Command::new("pkill")
-        .args(["-u", user, "-f", pattern])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-    {
-        Ok(status) if status.success() || status.code() == Some(1) => {}
-        Ok(status) => {
-            log::warn!("pkill -u {user} -f {pattern:?} exited with unexpected status: {status}");
-        }
-        Err(err) => {
-            log::warn!("failed to execute pkill -u {user} -f {pattern:?}: {err}");
-        }
-    }
-}
 
 use lifecycle::StopPlan;
 
