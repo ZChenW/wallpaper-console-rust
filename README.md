@@ -91,21 +91,21 @@ Library wall-clock performance budgets are intentionally separate:
 cargo run -p xtask -- verify perf
 ```
 
-### Real Tauri WebView E2E (not in CI)
+### Real Tauri WebView E2E (not automated)
 
 Automated smoke currently uses mock Vite + Playwright Chromium
 (`npm run smoke`). A minimal real Tauri WebView smoke is **not** wired yet
 because:
 
-1. Headless CI lacks a reliable Wayland/X11 + `webkit2gtk-4.1` WebView path for
+1. Headless runners lack a reliable Wayland/X11 + `webkit2gtk-4.1` WebView path for
    Tauri 2 without a dedicated display server and GPU/software GL setup.
 2. Apply/backend lifecycle (`awww` / `mpvpaper` / `linux-wallpaperengine`) needs
-   compositor access that GitHub-hosted runners do not provide.
+   compositor access that typical CI hosts do not provide.
 3. There is no checked-in WebDriver/sidecar harness for the packaged GUI binary.
 
 Until those blockers are removed, treat mock-browser smoke + Rust unit/integration
-tests as the automated gate, and use a local interactive GUI run for native
-apply/runtime acceptance.
+tests (`cargo run -p xtask -- verify all`) as the automated gate, and use a local
+interactive GUI run for native apply/runtime acceptance.
 
 ## License
 

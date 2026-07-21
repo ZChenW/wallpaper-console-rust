@@ -624,7 +624,6 @@ export const ALL_SETTINGS = [
         "apps/tauri-gui/frontend/vite.mock.config.ts",
         "apps/tauri-gui/frontend/e2e/playwright.config.ts",
         "apps/tauri-gui/frontend/e2e/smoke.spec.ts",
-        ".github/workflows/ci.yml",
     ];
 
     fn path_is_gitignored(repo_root: &Path, rel: &str) -> bool {
