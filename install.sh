@@ -1,5 +1,10 @@
 #!/usr/bin/env bash
-# install.sh — build release Rust binaries and install Wallpaper Console.
+# install.sh — build release Rust binaries from this workspace and install them.
+#
+# Always:
+#   1) build from the directory that contains this script (project root)
+#   2) write release artifacts to $ROOT/target/release
+#   3) install only those freshly built binaries
 #
 # Usage:
 #   ./install.sh              # build + install to ~/.local/bin
@@ -17,7 +22,7 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ROOT="$(cd "$(dirname "$0")" && pwd)"
 
 # ── Colour helpers ────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -61,6 +66,9 @@ ICON_DIR="$PREFIX/share/icons/hicolor/128x128/apps"
 DESKTOP_FILE="$DESKTOP_DIR/$APP_ID.desktop"
 ICON_FILE="$ICON_DIR/$APP_ID.png"
 GUI_BIN_FILE="$LIBEXEC_DIR/wallpaper-console-gui-rust"
+TARGET_DIR="$ROOT/target"
+TAURI_BIN_NAME="wallpaper-console-tauri"
+CLI_BIN_NAME="wallpaper-console-rust"
 
 if $UNINSTALL; then
   info "Uninstalling from $PREFIX..."
@@ -77,35 +85,88 @@ fi
 # ── Prerequisites check ───────────────────────────────────────────────────
 check_cmd() { command -v "$1" >/dev/null 2>&1 || err "$1 is required but not found. Install it first."; }
 
-if [[ "${WCR_INSTALL_SKIP_BUILD:-}" != "1" ]]; then
-  info "Checking prerequisites..."
-  check_cmd cargo
-  check_cmd cargo-tauri
-  check_cmd node
-  check_cmd npm
-fi
+ensure_build_tmpdir() {
+  # cc/cargo write large temps under TMPDIR. Small/full /tmp (tmpfs + quota)
+  # fails with "Disk quota exceeded" while compiling bundled sqlite.
+  local preferred="${WCR_BUILD_TMPDIR:-$HOME/tmp/rust-tmp}"
+  local avail_kb=""
+  mkdir -p "$preferred"
+  avail_kb="$(df -Pk /tmp 2>/dev/null | awk 'NR==2 {print $4}')"
+  case "${TMPDIR:-}" in
+    ""|/tmp|/tmp/*)
+      # < 2 GiB free on /tmp → prefer home.
+      if [[ -z "$avail_kb" || "$avail_kb" -lt 2097152 ]]; then
+        export TMPDIR="$preferred"
+        info "Using TMPDIR=$TMPDIR (/tmp free space insufficient)"
+      fi
+      ;;
+  esac
+}
 
-# ── Build Tauri GUI ────────────────────────────────────────────────────────
+# ── Build from current workspace source ────────────────────────────────────
 if [[ "${WCR_INSTALL_SKIP_BUILD:-}" == "1" ]]; then
   TAURI_BIN="${WCR_INSTALL_TAURI_BIN:?WCR_INSTALL_TAURI_BIN is required when WCR_INSTALL_SKIP_BUILD=1}"
   CLI_BIN="${WCR_INSTALL_CLI_BIN:?WCR_INSTALL_CLI_BIN is required when WCR_INSTALL_SKIP_BUILD=1}"
   FRONTEND_DIST="${WCR_INSTALL_FRONTEND_DIST:?WCR_INSTALL_FRONTEND_DIST is required when WCR_INSTALL_SKIP_BUILD=1}"
   info "Skipping build; using provided test artifacts."
 else
+  info "Checking prerequisites..."
+  check_cmd cargo
+  check_cmd node
+  check_cmd npm
+
+  ensure_build_tmpdir
+
+  # Predictable artifact location — ignore Cursor/sandbox CARGO_TARGET_DIR.
+  if [[ -n "${CARGO_TARGET_DIR:-}" && "$CARGO_TARGET_DIR" != "$TARGET_DIR" ]]; then
+    warn "Overriding CARGO_TARGET_DIR=$CARGO_TARGET_DIR → $TARGET_DIR"
+  fi
+  export CARGO_TARGET_DIR="$TARGET_DIR"
+  info "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+  info "Building from workspace: $ROOT"
+
+  # Remove previous release binaries so a failed build cannot install leftovers.
+  rm -f "$TARGET_DIR/release/$TAURI_BIN_NAME" "$TARGET_DIR/release/$CLI_BIN_NAME"
+
   info "Installing frontend dependencies..."
-  cd "$SCRIPT_DIR/apps/tauri-gui/frontend"
-  npm ci
-  info "Building Tauri GUI binary..."
-  cd "$SCRIPT_DIR/apps/tauri-gui/src-tauri"
-  cargo clean --package tauri --package wallpaper-console-tauri
-  cargo tauri build --no-bundle --ci --features production
-  info "Building Rust CLI helper..."
-  cd "$SCRIPT_DIR"
-  cargo build --package wc-cli --release
-  TAURI_BIN="$(realpath "$SCRIPT_DIR/target/release/wallpaper-console-tauri")"
-  CLI_BIN="$(realpath "$SCRIPT_DIR/target/release/wallpaper-console-rust")"
-  FRONTEND_DIST="$SCRIPT_DIR/apps/tauri-gui/frontend/dist"
+  (
+    cd "$ROOT/apps/tauri-gui/frontend"
+    npm ci
+  )
+
+  info "Building frontend (production)..."
+  (
+    cd "$ROOT/apps/tauri-gui/frontend"
+    npm run build
+  )
+
+  FRONTEND_DIST="$ROOT/apps/tauri-gui/frontend/dist"
+  if [[ ! -f "$FRONTEND_DIST/index.html" ]]; then
+    err "Frontend dist/index.html missing after npm run build"
+  fi
+
+  info "Building release binaries (cargo build --release)..."
+  (
+    cd "$ROOT"
+    # No cargo clean — keep incremental cache. Fail → set -e exits before install.
+    cargo build --release \
+      --package wallpaper-console-tauri \
+      --features production
+    cargo build --release --package wc-cli
+  )
+
+  TAURI_BIN="$TARGET_DIR/release/$TAURI_BIN_NAME"
+  CLI_BIN="$TARGET_DIR/release/$CLI_BIN_NAME"
+
+  # Binaries were deleted before build; existence here proves this run produced them.
+  if [[ ! -x "$TAURI_BIN" ]]; then
+    err "Release build did not produce executable: $TAURI_BIN"
+  fi
+  if [[ ! -x "$CLI_BIN" ]]; then
+    err "Release build did not produce executable: $CLI_BIN"
+  fi
 fi
+
 info "Tauri GUI built: $TAURI_BIN"
 info "Rust CLI helper built: $CLI_BIN"
 
@@ -142,7 +203,7 @@ mkdir -p "$BIN_DIR" "$LIBEXEC_DIR"
 # Install Tauri GUI behind a launcher wrapper. Keep WebKitGTK's accelerated
 # DMABUF path by default; an explicit compatibility switch remains available
 # for Wayland setups that otherwise render a blank window.
-cp "$TAURI_BIN" "$GUI_BIN_FILE"
+cp -f "$TAURI_BIN" "$GUI_BIN_FILE"
 chmod +x "$GUI_BIN_FILE"
 cat > "$BIN_DIR/wallpaper-console-gui-rust" <<EOF_GUI_WRAPPER
 #!/usr/bin/env sh
@@ -156,13 +217,13 @@ info "  Installed: $BIN_DIR/wallpaper-console-gui-rust"
 info "  Installed: $GUI_BIN_FILE"
 
 # Install Rust CLI helper for compositor startup hooks such as restore.
-cp "$CLI_BIN" "$BIN_DIR/wallpaper-console-rust"
+cp -f "$CLI_BIN" "$BIN_DIR/wallpaper-console-rust"
 chmod +x "$BIN_DIR/wallpaper-console-rust"
 info "  Installed: $BIN_DIR/wallpaper-console-rust"
 
 # Install desktop launcher and icon for Linux desktop environments.
 mkdir -p "$DESKTOP_DIR" "$ICON_DIR"
-cp "$SCRIPT_DIR/apps/tauri-gui/src-tauri/icons/128x128.png" "$ICON_FILE"
+cp -f "$ROOT/apps/tauri-gui/src-tauri/icons/128x128.png" "$ICON_FILE"
 cat > "$DESKTOP_FILE" <<EOF_DESKTOP
 [Desktop Entry]
 Type=Application
@@ -213,4 +274,4 @@ info "For a niri launch binding:"
 info "  spawn \"$BIN_DIR/wallpaper-console-gui-rust\""
 info ""
 info "Rollback:"
-info "  ./install.sh --prefix \"$PREFIX\" --uninstall"
+info "  $ROOT/install.sh --prefix \"$PREFIX\" --uninstall"
