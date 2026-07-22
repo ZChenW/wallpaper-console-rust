@@ -14,6 +14,7 @@ import {
   ENHANCED_MEDIA_ACTIVATION_DELAY_MS,
   enhancedMediaActivationPlan,
   enhancedMediaCandidates,
+  staticFallbackAssetPath,
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
 } from './wallpaperPreviewMedia.ts';
@@ -38,6 +39,7 @@ export interface WallpaperPreviewMediaProps {
   /** Grid's existing hover-GIF seam; Flow uses `eligibility` instead. */
   readonly transientImagePath?: string | null;
   readonly loading?: 'eager' | 'lazy';
+  readonly staticFallback?: boolean;
   readonly onEnhancedError?: (message: string) => void;
 }
 
@@ -48,6 +50,7 @@ export default function WallpaperPreviewMedia({
   eligibility = STATIC_ELIGIBILITY,
   transientImagePath = null,
   loading = 'lazy',
+  staticFallback = false,
   onEnhancedError,
 }: WallpaperPreviewMediaProps) {
   const store = useThumbnailStore();
@@ -66,6 +69,12 @@ export default function WallpaperPreviewMedia({
     subscribeThumbnail,
     getThumbnailFailure,
     getThumbnailFailure,
+  );
+  const [staticFallbackLoadFailed, setStaticFallbackLoadFailed] = useState(false);
+  const fallbackAssetPath = staticFallbackAssetPath(entry, staticFallback);
+  const authorizedStaticFallback = useAuthorizedPreviewAsset(
+    thumbnail || staticFallbackLoadFailed ? null : fallbackAssetPath,
+    entry.path,
   );
   const [enhancedActivatedPath, setEnhancedActivatedPath] = useState<string | null>(null);
   const activationPlan = enhancedMediaActivationPlan(
@@ -106,6 +115,10 @@ export default function WallpaperPreviewMedia({
   useEffect(() => {
     setThumbnailLoadFailed(false);
   }, [assetPath, thumbnail]);
+
+  useEffect(() => {
+    setStaticFallbackLoadFailed(false);
+  }, [fallbackAssetPath]);
 
   const activeCandidate = candidates[candidateIndex] ?? null;
   const authorizedCandidate = useAuthorizedPreviewAsset(
@@ -156,7 +169,9 @@ export default function WallpaperPreviewMedia({
     );
   }
 
-  const imagePath = authorizedCandidate.path ?? (thumbnailLoadFailed ? undefined : thumbnail);
+  const imagePath = authorizedCandidate.path
+    ?? (staticFallbackLoadFailed ? null : authorizedStaticFallback.path)
+    ?? (thumbnailLoadFailed ? undefined : thumbnail);
   if (imagePath) {
     return (
       <>
@@ -167,9 +182,15 @@ export default function WallpaperPreviewMedia({
           decoding="async"
           draggable={false}
           loading={loading}
-          onError={authorizedCandidate.path
-            ? handleEnhancedError
-            : () => setThumbnailLoadFailed(true)}
+          onError={() => {
+            if (authorizedCandidate.path) {
+              handleEnhancedError();
+            } else if (authorizedStaticFallback.path) {
+              setStaticFallbackLoadFailed(true);
+            } else {
+              setThumbnailLoadFailed(true);
+            }
+          }}
           src={safeFileSrc(imagePath)}
         />
         {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}

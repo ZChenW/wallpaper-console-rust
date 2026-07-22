@@ -9,6 +9,7 @@ import {
   previewFallbackState,
   releaseVideoDecoder,
   staticPreviewAssetPath,
+  staticFallbackAssetPath,
 } from './wallpaperPreviewMedia.ts';
 
 function entry(overrides: Partial<LibraryBrowserItemDTO> = {}): LibraryBrowserItemDTO {
@@ -43,6 +44,16 @@ test('static preview prefers a project preview without reading the original stre
     '/cache/project-preview.jpg',
   );
   assert.equal(staticPreviewAssetPath(entry()), '/walls/original.jpg');
+});
+
+test('static fallback preloads only safe image-shaped assets when enabled', () => {
+  assert.equal(staticFallbackAssetPath(entry(), false), null);
+  assert.equal(
+    staticFallbackAssetPath(entry({ previewPath: '/cache/project-preview.jpg' }), true),
+    '/cache/project-preview.jpg',
+  );
+  assert.equal(staticFallbackAssetPath(entry(), true), '/walls/original.jpg');
+  assert.equal(staticFallbackAssetPath(entry({ type: 'video' }), true), null);
 });
 
 test('enhanced media is limited to the one centered selected settled item', () => {

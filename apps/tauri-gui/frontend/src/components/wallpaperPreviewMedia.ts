@@ -43,6 +43,16 @@ export function staticPreviewAssetPath(entry: WallpaperDTO): string {
   return entry.previewPath || entry.path;
 }
 
+export function staticFallbackAssetPath(
+  entry: WallpaperDTO,
+  enabled: boolean,
+): string | null {
+  if (!enabled) return null;
+  const previewPath = entry.previewPath?.trim();
+  if (previewPath) return previewPath;
+  return entry.type === 'image' ? entry.path : null;
+}
+
 function hasEnhancedMediaIdentity(
   entry: WallpaperDTO,
   eligibility: EnhancedMediaEligibility,

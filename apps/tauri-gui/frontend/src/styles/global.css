@@ -1849,6 +1849,16 @@ input:focus {
   scrollbar-width: thin;
 }
 
+.wallpaper-flow--preparing {
+  display: grid;
+  place-items: center;
+}
+
+.flow-preview-preparing {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+}
+
 .flow-preview-stream:focus-visible {
   box-shadow: inset 0 0 0 2px var(--primary);
 }

@@ -40,7 +40,6 @@ import {
   flowStateLabels,
   flowStatePresentation,
   localFlowIndexWindow,
-  nearestFlowCenterIndex,
   retainFlowActiveIndex,
   resolveFlowKey,
   shouldRequestFlowNextPage,
@@ -51,6 +50,7 @@ import { staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 const FLOW_ITEM_GAP = 84;
 const FLOW_OVERSCAN = 4;
 const FLOW_METRICS_SAMPLE_MS = 500;
+const FLOW_RESIZE_REANCHOR_IDLE_MS = 120;
 
 export interface WallpaperFlowProps {
   readonly model: LibraryViewModel;
@@ -110,7 +110,7 @@ function useReducedMotion(): boolean {
   return reduced;
 }
 
-function WallpaperFlowImpl({
+function WallpaperFlowReady({
   model,
   initialAnchorWallpaperId = null,
   focusToken = 0,
@@ -128,6 +128,7 @@ function WallpaperFlowImpl({
   const initialIndex = initialAnchor?.index ?? 0;
   const [centeredIndex, setCenteredIndex] = useState(initialIndex);
   const centeredIndexRef = useRef(initialIndex);
+  const pendingCenterIndexRef = useRef(initialIndex);
   const centeredIdRef = useRef(model.entries[initialIndex]?.wallpaperId ?? null);
   const hoveredWallpaperIdRef = useRef<number | null>(null);
   const [settled, setSettled] = useState(true);
@@ -139,15 +140,19 @@ function WallpaperFlowImpl({
     typeof document === 'undefined' || document.hasFocus()
   ));
   const [dimensions, setDimensions] = useState<FlowDimensions>({ width: 720, height: 600 });
+  const dimensionsRef = useRef(dimensions);
+  dimensionsRef.current = dimensions;
+  const entriesRef = useRef(model.entries);
+  entriesRef.current = model.entries;
   const [showReturnToTop, setShowReturnToTop] = useState(false);
   const [contextMenu, setContextMenu] = useState<FlowContextMenuState | null>(null);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
   const initialCenterFrameRef = useRef<number | null>(null);
-  const centerFrameRef = useRef<number | null>(null);
   const scrollingRef = useRef(false);
   const programmaticScrollRef = useRef(false);
   const programmaticTargetIndexRef = useRef<number | null>(null);
+  const programmaticReleaseFrameRef = useRef<number | null>(null);
   const initializedRef = useRef(false);
   const previousResetKeyRef = useRef(model.resetKey);
   const previousReplaceCountRef = useRef(model.replaceCount);
@@ -166,6 +171,10 @@ function WallpaperFlowImpl({
   const lastThumbnailKeyRef = useRef('');
   const endLoadRequestedRef = useRef(false);
   const pointerInteractionRef = useRef(false);
+  const previousDimensionsRef = useRef<FlowDimensions | null>(null);
+  const pendingResizeAnchorIdRef = useRef<number | null>(null);
+  const resizeReanchoringRef = useRef(false);
+  const resizeReanchorTimerRef = useRef<number | null>(null);
   const interactionActive = model.active && pageVisible && windowFocused && !indexOpen;
   const interactionActiveRef = useRef(interactionActive);
   interactionActiveRef.current = interactionActive;
@@ -199,6 +208,8 @@ function WallpaperFlowImpl({
 
   const virtualizer = useVirtualizer({
     count: model.entries.length,
+    directDomUpdates: true,
+    directDomUpdatesMode: 'transform',
     getScrollElement: () => streamRef.current,
     estimateSize: estimateEntrySize,
     getItemKey: (index) => model.entries[index]?.wallpaperId ?? index,
@@ -219,16 +230,25 @@ function WallpaperFlowImpl({
     }
   }, []);
 
+  const cancelResizeReanchor = useCallback(() => {
+    if (resizeReanchorTimerRef.current !== null) {
+      window.clearTimeout(resizeReanchorTimerRef.current);
+      resizeReanchorTimerRef.current = null;
+    }
+    pendingResizeAnchorIdRef.current = null;
+    resizeReanchoringRef.current = false;
+  }, []);
+
   const cancelInitialCenterFrame = useCallback(() => {
     if (initialCenterFrameRef.current === null) return;
     window.cancelAnimationFrame(initialCenterFrameRef.current);
     initialCenterFrameRef.current = null;
   }, []);
 
-  const cancelCenterCalculationFrame = useCallback(() => {
-    if (centerFrameRef.current === null) return;
-    window.cancelAnimationFrame(centerFrameRef.current);
-    centerFrameRef.current = null;
+  const cancelProgrammaticReleaseFrame = useCallback(() => {
+    if (programmaticReleaseFrameRef.current === null) return;
+    window.cancelAnimationFrame(programmaticReleaseFrameRef.current);
+    programmaticReleaseFrameRef.current = null;
   }, []);
 
   const markUserInteraction = useCallback(() => {
@@ -245,6 +265,7 @@ function WallpaperFlowImpl({
     ) return;
     centeredIdRef.current = entry.wallpaperId;
     centeredIndexRef.current = index;
+    pendingCenterIndexRef.current = index;
     setCenteredIndex(index);
     onAnchorChange?.(entry.wallpaperId);
   }, [model.entries, onAnchorChange]);
@@ -253,11 +274,19 @@ function WallpaperFlowImpl({
     if (programmaticTargetIndexRef.current !== targetIndex) return;
     markCentered(targetIndex);
     programmaticTargetIndexRef.current = null;
-    programmaticScrollRef.current = false;
+    cancelProgrammaticReleaseFrame();
+    programmaticReleaseFrameRef.current = window.requestAnimationFrame(() => {
+      programmaticReleaseFrameRef.current = null;
+      if (programmaticTargetIndexRef.current === null) {
+        programmaticScrollRef.current = false;
+      }
+    });
     scrollingRef.current = false;
+    pendingResizeAnchorIdRef.current = null;
+    resizeReanchoringRef.current = false;
     setSettled(true);
     setRevealPaused(!interactionActiveRef.current);
-  }, [markCentered, setRevealPaused]);
+  }, [cancelProgrammaticReleaseFrame, markCentered, setRevealPaused]);
 
   const scheduleProgrammaticSettle = useCallback((
     targetIndex: number,
@@ -301,11 +330,13 @@ function WallpaperFlowImpl({
   const centerAtIndex = useCallback((index: number, direct = false) => {
     const entry = model.entries[index];
     if (!entry) return;
+    cancelResizeReanchor();
+    cancelProgrammaticReleaseFrame();
     cancelInitialCenterFrame();
-    cancelCenterCalculationFrame();
     clearMotionTimers();
     programmaticScrollRef.current = true;
     programmaticTargetIndexRef.current = index;
+    pendingCenterIndexRef.current = index;
     scrollingRef.current = true;
     setSettled(false);
     setRevealPaused(true);
@@ -318,8 +349,9 @@ function WallpaperFlowImpl({
     scheduleProgrammaticSettle(index, immediate);
   }, [
     cancelInitialCenterFrame,
-    cancelCenterCalculationFrame,
     clearMotionTimers,
+    cancelProgrammaticReleaseFrame,
+    cancelResizeReanchor,
     model.entries,
     reducedMotion,
     scheduleProgrammaticSettle,
@@ -327,59 +359,94 @@ function WallpaperFlowImpl({
     virtualizer,
   ]);
 
+  const reanchorAfterResize = useCallback((index: number) => {
+    const entry = model.entries[index];
+    if (!entry) return;
+    cancelInitialCenterFrame();
+    clearMotionTimers();
+    resizeReanchoringRef.current = true;
+    programmaticScrollRef.current = true;
+    programmaticTargetIndexRef.current = index;
+    scrollingRef.current = true;
+    setSettled(false);
+    setRevealPaused(true);
+
+    const alignToTarget = () => {
+      virtualizer.measure();
+      virtualizer.scrollToIndex(index, { align: 'center', behavior: 'auto' });
+    };
+
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        alignToTarget();
+        window.requestAnimationFrame(() => {
+          alignToTarget();
+          finishProgrammaticScroll(index);
+        });
+      });
+    });
+  }, [
+    cancelInitialCenterFrame,
+    clearMotionTimers,
+    finishProgrammaticScroll,
+    model.entries,
+    setRevealPaused,
+    virtualizer,
+  ]);
+
   const computeCentered = useCallback(() => {
-    centerFrameRef.current = null;
+    if (pendingResizeAnchorIdRef.current !== null || resizeReanchoringRef.current) return;
     const stream = streamRef.current;
     if (!stream) return;
-    const index = nearestFlowCenterIndex({
-      items: virtualizer.getVirtualItems().map((item) => ({
-        id: model.entries[item.index]?.wallpaperId ?? item.index,
-        index: item.index,
-        start: item.start,
-        size: item.size,
-      })),
-      viewportStart: stream.scrollTop,
-      viewportSize: stream.clientHeight,
-      previousCenteredId: centeredIdRef.current,
-    });
-    if (index !== null) markCentered(index);
-  }, [markCentered, model.entries, virtualizer]);
-
-  const scheduleCenterCalculation = useCallback(() => {
-    if (centerFrameRef.current !== null) return;
-    centerFrameRef.current = window.requestAnimationFrame(computeCentered);
-  }, [computeCentered]);
+    const streamBounds = stream.getBoundingClientRect();
+    const streamCenter = streamBounds.top + streamBounds.height / 2;
+    let nearestIndex: number | null = null;
+    let nearestDelta = Number.POSITIVE_INFINITY;
+    for (const item of stream.querySelectorAll<HTMLElement>('.flow-preview-item')) {
+      const index = Number(item.dataset.index);
+      if (!Number.isInteger(index) || index < 0 || index >= model.entries.length) continue;
+      const bounds = item.getBoundingClientRect();
+      const delta = Math.abs(bounds.top + bounds.height / 2 - streamCenter);
+      if (delta >= nearestDelta) continue;
+      nearestIndex = index;
+      nearestDelta = delta;
+    }
+    if (nearestIndex !== null) pendingCenterIndexRef.current = nearestIndex;
+  }, [model.entries.length]);
 
   const scheduleIdleSnap = useCallback(() => {
     if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
-      centerAtIndex(centeredIndexRef.current);
+      computeCentered();
+      centerAtIndex(pendingCenterIndexRef.current);
     }, FLOW_SCROLL_IDLE_MS);
-  }, [centerAtIndex]);
+  }, [centerAtIndex, computeCentered]);
 
   const cancelProgrammaticScroll = useCallback(() => {
     const stream = streamRef.current;
     if (programmaticTargetIndexRef.current !== null && stream) {
       stream.scrollTo({ top: stream.scrollTop, behavior: 'auto' });
     }
+    cancelProgrammaticReleaseFrame();
     programmaticTargetIndexRef.current = null;
     programmaticScrollRef.current = false;
-  }, []);
+  }, [cancelProgrammaticReleaseFrame]);
 
   const beginInteraction = useCallback(() => {
     markUserInteraction();
+    cancelResizeReanchor();
     cancelInitialCenterFrame();
-    cancelCenterCalculationFrame();
     clearMotionTimers();
     cancelProgrammaticScroll();
+    pendingCenterIndexRef.current = centeredIndexRef.current;
     scrollingRef.current = true;
     setSettled(false);
     setRevealPaused(true);
   }, [
     cancelInitialCenterFrame,
-    cancelCenterCalculationFrame,
     cancelProgrammaticScroll,
+    cancelResizeReanchor,
     clearMotionTimers,
     markUserInteraction,
     setRevealPaused,
@@ -389,7 +456,10 @@ function WallpaperFlowImpl({
     const stream = streamRef.current;
     if (!stream) return;
     if (programmaticScrollRef.current) {
-      scheduleCenterCalculation();
+      setShowReturnToTop(stream.scrollTop > stream.clientHeight);
+      return;
+    }
+    if (pendingResizeAnchorIdRef.current !== null || resizeReanchoringRef.current) {
       setShowReturnToTop(stream.scrollTop > stream.clientHeight);
       return;
     }
@@ -406,13 +476,11 @@ function WallpaperFlowImpl({
     scrollingRef.current = true;
     setSettled(false);
     setRevealPaused(true);
-    scheduleCenterCalculation();
     scheduleIdleSnap();
     setShowReturnToTop(stream.scrollTop > stream.clientHeight);
   }, [
     cancelInitialCenterFrame,
     markUserInteraction,
-    scheduleCenterCalculation,
     scheduleIdleSnap,
     setRevealPaused,
   ]);
@@ -447,7 +515,18 @@ function WallpaperFlowImpl({
     if (!stream) return undefined;
     const update = () => {
       const next = { width: stream.clientWidth, height: stream.clientHeight };
-      if (next.width > 0 && next.height > 0) setDimensions(next);
+      if (next.width <= 0 || next.height <= 0) return;
+      const current = dimensionsRef.current;
+      if (
+        initializedRef.current
+        && (next.width !== current.width || next.height !== current.height)
+      ) {
+        const targetIndex = programmaticTargetIndexRef.current;
+        pendingResizeAnchorIdRef.current = targetIndex === null
+          ? centeredIdRef.current
+          : entriesRef.current[targetIndex]?.wallpaperId ?? centeredIdRef.current;
+      }
+      setDimensions(next);
     };
     update();
     const observer = new ResizeObserver(update);
@@ -457,7 +536,48 @@ function WallpaperFlowImpl({
 
   useEffect(() => {
     virtualizer.measure();
-  }, [dimensions.height, dimensions.width, virtualizer]);
+    const previous = previousDimensionsRef.current;
+    previousDimensionsRef.current = dimensions;
+    if (
+      previous === null
+      || (previous.width === dimensions.width && previous.height === dimensions.height)
+      || !initializedRef.current
+      || model.entries.length === 0
+    ) {
+      return undefined;
+    }
+    if (scrollingRef.current && !programmaticScrollRef.current) {
+      pendingResizeAnchorIdRef.current = null;
+      return undefined;
+    }
+    const anchorId = pendingResizeAnchorIdRef.current ?? centeredIdRef.current;
+    if (anchorId === null) return undefined;
+    const stableIndex = model.entries.findIndex(
+      (entry) => entry.wallpaperId === anchorId,
+    );
+    if (stableIndex < 0) {
+      pendingResizeAnchorIdRef.current = null;
+      return undefined;
+    }
+    if (resizeReanchorTimerRef.current !== null) {
+      window.clearTimeout(resizeReanchorTimerRef.current);
+    }
+    resizeReanchorTimerRef.current = window.setTimeout(() => {
+      resizeReanchorTimerRef.current = null;
+      reanchorAfterResize(stableIndex);
+    }, FLOW_RESIZE_REANCHOR_IDLE_MS);
+    return () => {
+      if (resizeReanchorTimerRef.current !== null) {
+        window.clearTimeout(resizeReanchorTimerRef.current);
+        resizeReanchorTimerRef.current = null;
+      }
+    };
+  }, [
+    dimensions,
+    model.entries,
+    reanchorAfterResize,
+    virtualizer,
+  ]);
 
   useEffect(() => {
     const update = () => setPageVisible(document.visibilityState !== 'hidden');
@@ -494,7 +614,7 @@ function WallpaperFlowImpl({
       if (replacementChanged) {
         pendingQueryResetRef.current = null;
         const resetAnchor = resolveLibraryQueryResetAnchor(model.entries);
-        if (resetAnchor) centerAtIndex(resetAnchor.index);
+        if (resetAnchor) centerAtIndex(resetAnchor.index, true);
       } else {
         pendingQueryResetRef.current = {
           resetKey: model.resetKey,
@@ -511,7 +631,7 @@ function WallpaperFlowImpl({
     ) {
       pendingQueryResetRef.current = null;
       const resetAnchor = resolveLibraryQueryResetAnchor(model.entries);
-      if (resetAnchor) centerAtIndex(resetAnchor.index);
+      if (resetAnchor) centerAtIndex(resetAnchor.index, true);
       return;
     }
 
@@ -520,7 +640,7 @@ function WallpaperFlowImpl({
       initializedRef.current = true;
       initialCenterFrameRef.current = window.requestAnimationFrame(() => {
         initialCenterFrameRef.current = null;
-        centerAtIndex(initialIndex);
+        centerAtIndex(initialIndex, true);
       });
       return;
     }
@@ -645,14 +765,16 @@ function WallpaperFlowImpl({
 
   useEffect(() => () => {
     initializedRef.current = false;
+    cancelResizeReanchor();
+    cancelProgrammaticReleaseFrame();
     cancelInitialCenterFrame();
-    cancelCenterCalculationFrame();
     clearMotionTimers();
     programmaticTargetIndexRef.current = null;
     setRevealPaused(false);
   }, [
-    cancelCenterCalculationFrame,
     cancelInitialCenterFrame,
+    cancelProgrammaticReleaseFrame,
+    cancelResizeReanchor,
     clearMotionTimers,
     setRevealPaused,
   ]);
@@ -705,7 +827,7 @@ function WallpaperFlowImpl({
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     if (event.target !== event.currentTarget) return;
-    const activeIndex = centeredIndexRef.current;
+    const activeIndex = programmaticTargetIndexRef.current ?? centeredIndexRef.current;
     const pageStep = flowPageStep({
       viewportSize: dimensions.height,
       itemSize: estimateEntrySize(activeIndex),
@@ -724,7 +846,6 @@ function WallpaperFlowImpl({
       endLoadRequestAllowed: !endLoadRequestedRef.current,
     });
     if (!intent) return;
-    cancelCenterCalculationFrame();
     markUserInteraction();
     event.preventDefault();
     event.stopPropagation();
@@ -756,7 +877,7 @@ function WallpaperFlowImpl({
     selectEntry(entry);
   };
   const returnToTop = () => {
-    centerAtIndex(0);
+    centerAtIndex(0, true);
     setShowReturnToTop(false);
     window.requestAnimationFrame(() => streamRef.current?.focus());
   };
@@ -809,7 +930,8 @@ function WallpaperFlowImpl({
       >
         <div
           className="flow-preview-stream__virtual"
-          style={{ height: virtualizer.getTotalSize(), position: 'relative' }}
+          ref={virtualizer.containerRef}
+          style={{ position: 'relative' }}
         >
           {virtualizer.getVirtualItems().map((row) => {
             const entry = model.entries[row.index];
@@ -819,6 +941,7 @@ function WallpaperFlowImpl({
             const current = model.currentPath === entry.path;
             const applying = model.applying && model.activePath === entry.path;
             const pending = model.pendingPath === entry.path;
+            const preloadStaticFallback = Math.abs(row.index - centeredIndex) <= 1;
             const presentation = flowStatePresentation('flow-preview-item', {
               active: interactionActive,
               settled,
@@ -836,7 +959,6 @@ function WallpaperFlowImpl({
               insetInline: 0,
               top: 0,
               minHeight: row.size,
-              transform: `translateY(${row.start}px)`,
               '--flow-media-aspect': String(aspect),
             } as CSSProperties;
             return (
@@ -875,7 +997,8 @@ function WallpaperFlowImpl({
                       reducedMotion,
                     }}
                     entry={entry}
-                    loading={centered ? 'eager' : 'lazy'}
+                    loading={preloadStaticFallback ? 'eager' : 'lazy'}
+                    staticFallback={preloadStaticFallback}
                   />
                   <span aria-hidden="true" className="flow-preview-item__ordinal">
                     {String(row.index + 1).padStart(2, '0')}
@@ -955,6 +1078,23 @@ function WallpaperFlowImpl({
       ) : null}
     </section>
   );
+}
+
+function WallpaperFlowImpl(props: WallpaperFlowProps) {
+  if (
+    props.initialAnchorWallpaperId == null
+    && !props.model.currentObservationReady
+  ) {
+    return (
+      <section className="wallpaper-flow wallpaper-flow--preparing">
+        <div className="flow-preview-preparing" role="status">
+          Preparing Flow preview…
+        </div>
+      </section>
+    );
+  }
+
+  return <WallpaperFlowReady {...props} />;
 }
 
 export default memo(WallpaperFlowImpl);

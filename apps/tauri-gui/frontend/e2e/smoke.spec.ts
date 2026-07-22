@@ -251,12 +251,12 @@ test('Flow completes its direct-start anchor when runtime Current arrives after 
   ))).toContain('libraryViewMode');
   await page.reload();
   await expect(page.locator('.single-page-shell')).toBeVisible();
-  await waitForFlow(page);
-
-  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
-    .toHaveAttribute('data-index', '0');
+  await expect(page.locator('.library-viewport[data-library-view="flow"]')).toBeVisible();
+  await expect(page.locator('.flow-preview-item')).toHaveCount(0);
+  await expect(page.getByRole('status')).toHaveText('Preparing Flow preview…');
   await page.evaluate(() => window.__mockControl?.releaseRuntimeWallpaperObservations());
 
+  await waitForFlow(page);
   await expect(page.locator('.single-page-statusbar__current'))
     .toHaveText('Current: wallpaper-001.jpg');
   await expect(page.locator('.flow-preview-item[data-centered="true"]'))
@@ -1326,6 +1326,46 @@ test.describe('Flow compact touch layout', () => {
     }
   });
 
+  test('Flow preserves the centered wallpaper when the viewport crosses compact breakpoints', async ({ page }) => {
+    await openApp(page);
+    await waitForGrid(page);
+    await page.getByRole('button', { name: 'Flow' }).click();
+    await waitForFlow(page);
+
+    const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+    await stream.evaluate((element) => {
+      element.scrollTop = Math.min(
+        element.scrollHeight - element.clientHeight,
+        Math.max(3_000, element.clientHeight * 4),
+      );
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await expect.poll(async () => Number(
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-index'),
+    ), { timeout: 2_500 }).toBeGreaterThan(10);
+
+    const centeredBefore = page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]');
+    const wallpaperId = await centeredBefore.getAttribute('data-wallpaper-id');
+    const indexBefore = await centeredBefore.getAttribute('data-index');
+    expect(wallpaperId).not.toBeNull();
+    expect(indexBefore).not.toBeNull();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(async () => (
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-wallpaper-id')
+    ), { timeout: 2_500 }).toBe(wallpaperId);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect.poll(async () => (
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-wallpaper-id')
+    ), { timeout: 800 }).toBe(wallpaperId);
+    await expect(page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]'))
+      .toHaveAttribute('data-index', indexBefore!);
+  });
+
   test('a long touch before scrolling does not snap back to the previous wallpaper', async ({ page }) => {
     await openApp(page);
     await waitForGrid(page);
@@ -1493,6 +1533,53 @@ test('single/double-click setting and display target govern apply requests', asy
     path: secondPath!,
     target: 'HDMI-A-1',
   });
+});
+
+test('settings select hover is limited to the select trigger', async ({ page }) => {
+  await openApp(page);
+  await openSettings(page);
+  await chooseSelect(page, 'Theme', 'Editorial');
+
+  const themeTrigger = page.locator('.settings-panel .select-field-trigger[aria-label="Theme"]');
+  const themeLabel = themeTrigger.locator('xpath=../span[1]');
+
+  await themeLabel.hover();
+  expect(await themeTrigger.evaluate((element) => element.matches(':hover'))).toBe(false);
+
+  await themeTrigger.hover();
+  expect(await themeTrigger.evaluate((element) => element.matches(':hover'))).toBe(true);
+  const editorialTextColor = await page.evaluate(() => {
+    const colorProbe = document.createElement('span');
+    colorProbe.style.color = 'var(--text)';
+    document.body.append(colorProbe);
+    const color = getComputedStyle(colorProbe).color;
+    colorProbe.remove();
+    return color;
+  });
+  await expect.poll(() => themeTrigger.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  )).toBe(editorialTextColor);
+});
+
+test('settings select is not activated by clicking its row text', async ({ page }) => {
+  await openApp(page);
+  await openSettings(page);
+
+  const themeTrigger = page.locator('.settings-panel .select-field-trigger[aria-label="Theme"]');
+  const themeLabel = themeTrigger.locator('xpath=../span[1]');
+  await themeTrigger.evaluate((element) => {
+    element.setAttribute('data-test-click-count', '0');
+    element.addEventListener('click', () => {
+      const count = Number(element.getAttribute('data-test-click-count') ?? 0);
+      element.setAttribute('data-test-click-count', String(count + 1));
+    });
+  });
+
+  await themeLabel.click();
+
+  await expect(themeTrigger).toHaveAttribute('data-test-click-count', '0');
+  await expect(themeTrigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('option')).toHaveCount(0);
 });
 
 test('compact settings contains exactly the three user-facing groups', async ({ page }) => {
@@ -1820,6 +1907,24 @@ test('Editorial theme is high-contrast, square, persistent, and independently sc
   await expect(sourceClose).toHaveCSS('border-top-style', 'solid');
   await expect(sourceClose).toHaveCSS('border-top-width', '1px');
   await expect(sourceClose).toHaveCSS('border-top-left-radius', '0px');
+  const sourceCloseAlignment = await sourceClose.evaluate((button) => {
+    const glyph = button.querySelector('span');
+    if (!glyph) throw new Error('Wallpaper sources close glyph is unavailable');
+    const buttonBounds = button.getBoundingClientRect();
+    const glyphBounds = glyph.getBoundingClientRect();
+    return {
+      x: Math.abs(
+        glyphBounds.left + glyphBounds.width / 2
+        - (buttonBounds.left + buttonBounds.width / 2),
+      ),
+      y: Math.abs(
+        glyphBounds.top + glyphBounds.height / 2
+        - (buttonBounds.top + buttonBounds.height / 2),
+      ),
+    };
+  });
+  expect(sourceCloseAlignment.x).toBeLessThanOrEqual(1);
+  expect(sourceCloseAlignment.y).toBeLessThanOrEqual(1);
   const sourcePanelBounds = await sourceDialog.boundingBox();
   expect(sourcePanelBounds).not.toBeNull();
   expect(sourcePanelBounds!.x).toBeGreaterThanOrEqual(-1);

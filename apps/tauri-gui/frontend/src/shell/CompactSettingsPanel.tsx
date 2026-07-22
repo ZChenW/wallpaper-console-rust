@@ -200,7 +200,7 @@ export function CompactSettingsPanelView({
           >
             <h4 id="settings-interface-heading">Interface</h4>
             <div className="settings-behavior-card__rows">
-              <label className="settings-behavior-row">
+              <div className="settings-behavior-row">
                 <span>Theme</span>
                 <SelectField
                   aria-label="Theme"
@@ -209,8 +209,8 @@ export function CompactSettingsPanelView({
                   value={preferences.theme}
                   variant="settings"
                 />
-              </label>
-              <label className="settings-behavior-row">
+              </div>
+              <div className="settings-behavior-row">
                 <span>Apply gesture</span>
                 <SelectField
                   aria-label="Apply gesture"
@@ -222,8 +222,8 @@ export function CompactSettingsPanelView({
                   value={preferences.applyGesture}
                   variant="settings"
                 />
-              </label>
-              <label className="settings-behavior-row">
+              </div>
+              <div className="settings-behavior-row">
                 <span>Card size</span>
                 <SelectField
                   aria-label="Card size"
@@ -236,7 +236,7 @@ export function CompactSettingsPanelView({
                   value={preferences.cardSize}
                   variant="settings"
                 />
-              </label>
+              </div>
             </div>
           </div>
         </section>
@@ -312,7 +312,7 @@ export function CompactSettingsPanelView({
             >
               <h5 id="settings-fill-transition-heading">Fill &amp; transition</h5>
               <div className="settings-behavior-card__rows">
-                <label className="settings-behavior-row">
+                <div className="settings-behavior-row">
                   <span>Fill behavior</span>
                   <SelectField
                     aria-label="Fill behavior"
@@ -327,8 +327,8 @@ export function CompactSettingsPanelView({
                     value={behaviorSettings.fillMode}
                     variant="settings"
                   />
-                </label>
-                <label className="settings-behavior-row">
+                </div>
+                <div className="settings-behavior-row">
                   <span>Transition</span>
                   <SelectField
                     aria-label="awww transition type"
@@ -342,7 +342,7 @@ export function CompactSettingsPanelView({
                     value={behaviorSettings.awwwTransitionType}
                     variant="settings"
                   />
-                </label>
+                </div>
                 <label className="settings-behavior-row">
                   <span>Transition duration</span>
                   <DeferredNumberInput
@@ -386,7 +386,7 @@ export function CompactSettingsPanelView({
           >
             <h5 id="settings-scene-playback-heading">Scene playback</h5>
             <div className="settings-behavior-card__rows">
-              <label className="settings-behavior-row">
+              <div className="settings-behavior-row">
                 <span>Scene scaling</span>
                 <SelectField
                   aria-label="Wallpaper Engine scaling"
@@ -400,7 +400,7 @@ export function CompactSettingsPanelView({
                   value={behaviorSettings.lweScaling}
                   variant="settings"
                 />
-              </label>
+              </div>
               <label className="settings-behavior-row">
                 <span>Scene FPS</span>
                 <DeferredNumberInput
