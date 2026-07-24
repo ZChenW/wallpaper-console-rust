@@ -140,8 +140,7 @@ pub(crate) fn status(s: &StorageApi) -> anyhow::Result<()> {
 }
 
 pub(crate) fn restore(s: &StorageApi) -> anyhow::Result<()> {
-    wc_backend::restore_clean(s)?;
-    println!("Wallpaper restored.");
+    restore_displays(s, Vec::new())?;
     Ok(())
 }
 

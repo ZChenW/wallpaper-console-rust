@@ -4,10 +4,8 @@
 //! only after every action succeeds, and reconcile after destructive stops
 //! when a later action fails. Stop runs only when present in the list.
 //!
-//! Cross-backend visual handoff is planned upstream (`wc_app::display_plan`):
-//! replacement emits an explicit Stop before Apply so this executor never keeps
-//! a stale renderer. See plan tests such as
-//! `cross_backend_target_replacement_requires_explicit_stop_before_apply`.
+//! Cross-backend visual transition (instant fallback / settle) is owned by
+//! [`crate::apply_transition`]. This executor only runs the Stop/Apply skeleton.
 
 use std::collections::HashSet;
 

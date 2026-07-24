@@ -9,6 +9,7 @@ use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod apply_stage;
+pub mod apply_transition;
 pub mod capability;
 pub mod display_executor;
 pub mod lifecycle;
@@ -29,6 +30,10 @@ mod debug_log;
 mod mpvpaper;
 mod restore;
 
+pub use apply_transition::{
+    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure, ApplyTransitionPlan,
+    ApplyTransitionReport, ApplyTransitionRequest,
+};
 pub use display_executor::{
     execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
     DisplayExecReport,
@@ -109,7 +114,13 @@ fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Re
     s.runtime_state_write_pair(state_path, backend.as_str())
 }
 
-/// Apply a wallpaper via the appropriate backend process.
+/// Apply a wallpaper with the legacy fullscreen orchestrator.
+///
+/// Prefer display-aware apply via `wc_app` (`apply_to_display` /
+/// `execute_apply_request`), which runs [`crate::apply_transition`] around the
+/// display_plan Stop/Apply skeleton. Kept for backend unit tests and
+/// [`restore::restore_clean`].
+///
 /// State is written ONLY after successful backend execution.
 pub fn apply_wallpaper(
     s: &StorageApi,

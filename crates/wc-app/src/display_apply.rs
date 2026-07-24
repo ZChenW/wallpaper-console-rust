@@ -6,9 +6,12 @@
 //! state is reconciled so it does not claim stopped renderers still run.
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
+use wc_backend::apply_transition::{
+    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure,
+    ApplyTransitionRequest,
+};
 use wc_backend::display_executor::{
-    execute_display_actions, CompletedEvent, DisplayExecAction, DisplayExecContext,
-    DisplayExecFailure, DisplayExecReport,
+    CompletedEvent, DisplayExecAction, DisplayExecContext, DisplayExecFailure, DisplayExecReport,
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
@@ -222,9 +225,24 @@ impl AppService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let exec_result = execute_display_actions(
+        let previous_backend_raw = self
+            .storage
+            .last_backend_read()
+            .map_err(AppError::from_wc_error)?
+            .unwrap_or_default();
+        let transition_scope = transition_scope_for_target(&target, known_outputs)?;
+        let transition_plan = plan_apply_transition(&ApplyTransitionRequest {
+            scope: transition_scope,
+            target: apply_target.backend,
+            previous_backend_raw: &previous_backend_raw,
+            fallback_path: apply_target.fallback_path.as_deref(),
+            core_actions: &actions,
+        })
+        .map_err(AppError::from_wc_error)?;
+
+        let exec_result = execute_apply_transition(
             &self.storage,
-            &actions,
+            &transition_plan,
             &DisplayExecContext { known_outputs },
             runtime,
             reporter,
@@ -232,7 +250,8 @@ impl AppService {
         );
 
         match exec_result {
-            Ok(report) => {
+            Ok(transition_report) => {
+                let report = transition_report.exec;
                 let intended = intended_display_state(
                     &previous_rows,
                     known_outputs,
@@ -279,6 +298,7 @@ impl AppService {
                 })
             }
             Err(failure) => {
+                let failure = display_exec_failure_from_transition(failure);
                 let compat_error = compat_failure_error(&apply_target, &failure.error);
                 let error = self.handle_exec_failure(
                     failure,
@@ -563,6 +583,28 @@ pub(crate) fn to_exec_action(
                 use_instant,
             })
         }
+    }
+}
+
+pub(crate) fn transition_scope_for_target(
+    target: &DisplayTarget,
+    _known_outputs: &[String],
+) -> Result<ExecutionScope, AppError> {
+    match target {
+        DisplayTarget::AllDisplays => Ok(ExecutionScope::AllDisplays),
+        DisplayTarget::Output(output) => {
+            ExecutionScope::named(vec![output.clone()]).map_err(AppError::from_wc_error)
+        }
+    }
+}
+
+pub(crate) fn display_exec_failure_from_transition(
+    failure: ApplyTransitionFailure,
+) -> DisplayExecFailure {
+    DisplayExecFailure {
+        report: failure.exec,
+        error: failure.error,
+        uncertain_stop: failure.uncertain_stop,
     }
 }
 

@@ -9,8 +9,11 @@
 use std::path::Path;
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
+use wc_backend::apply_transition::{
+    execute_apply_transition, plan_apply_transition, ApplyTransitionRequest,
+};
 use wc_backend::display_executor::{
-    execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecReport,
+    DisplayExecAction, DisplayExecContext, DisplayExecReport,
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
@@ -20,7 +23,8 @@ use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
 use crate::display_apply::{
-    reconcile_display_state_from_report, rejection_to_app_error, to_exec_action,
+    display_exec_failure_from_transition, reconcile_display_state_from_report,
+    rejection_to_app_error, to_exec_action, transition_scope_for_target,
 };
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
@@ -103,30 +107,18 @@ impl AppService {
 
         // Preflight the full sequence with accumulating live assignments so a
         // later coexistence/capability rejection never partially executes.
-        let mut all_actions = vec![
-            DisplayExecAction::Stop {
-                backend: Backend::Awww,
-                scope: ExecutionScope::AllDisplays,
-            },
-            DisplayExecAction::Stop {
-                backend: Backend::Mpvpaper,
-                scope: ExecutionScope::AllDisplays,
-            },
-            DisplayExecAction::Stop {
-                backend: Backend::LinuxWallpaperEngine,
-                scope: ExecutionScope::AllDisplays,
-            },
-        ];
-        let mut running: Vec<RunningAssignment> = Vec::new();
+        let mut preflight_running: Vec<RunningAssignment> = Vec::new();
+        let mut prepared_steps: Vec<(RestoreStep, Vec<DisplayExecAction>, Option<String>)> =
+            Vec::new();
         for step in steps {
-            let same_backend_already_running = running
+            let same_backend_already_running = preflight_running
                 .iter()
                 .any(|assignment| assignment.backend == step.backend);
             let request = DisplayApplyRequest {
                 target: step.target.clone(),
                 backend: step.backend,
                 known_outputs: known_outputs.to_vec(),
-                running: running.clone(),
+                running: preflight_running.clone(),
             };
             let plan = plan_display_apply(&request).map_err(rejection_to_app_error)?;
             let plan_has_stop = plan
@@ -141,28 +133,88 @@ impl AppService {
                     to_exec_action(action, &step.path, &step.target, known_outputs, use_instant)
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            update_running_after_step(&mut running, known_outputs, &step);
-            all_actions.extend(actions);
+            let fallback_path = restore_fallback_path(&step.path);
+            update_running_after_step(&mut preflight_running, known_outputs, &step);
+            prepared_steps.push((step, actions, fallback_path));
         }
 
-        let report = match execute_display_actions(
+        // Stop every backend first so restore starts from a clean renderer set,
+        // then ApplyTransition each step (fallback/settle per wallpaper).
+        let stop_all = vec![
+            DisplayExecAction::Stop {
+                backend: Backend::Awww,
+                scope: ExecutionScope::AllDisplays,
+            },
+            DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::AllDisplays,
+            },
+            DisplayExecAction::Stop {
+                backend: Backend::LinuxWallpaperEngine,
+                scope: ExecutionScope::AllDisplays,
+            },
+        ];
+        let stop_plan = plan_apply_transition(&ApplyTransitionRequest {
+            scope: ExecutionScope::AllDisplays,
+            target: Backend::Awww,
+            previous_backend_raw: "",
+            fallback_path: None,
+            core_actions: &stop_all,
+        })
+        .map_err(AppError::from_wc_error)?;
+        let mut report = match execute_apply_transition(
             &self.storage,
-            &all_actions,
+            &stop_plan,
             &DisplayExecContext { known_outputs },
             runtime,
             reporter,
             request_id,
         ) {
-            Ok(report) => report,
+            Ok(r) => r.exec,
             Err(failure) => {
                 return Err(self.handle_exec_failure(
-                    failure,
+                    display_exec_failure_from_transition(failure),
                     &previous_rows,
                     known_outputs,
                     None,
                 )?);
             }
         };
+
+        let mut previous_backend = String::new();
+        for (step, actions, fallback_path) in prepared_steps {
+            let transition_scope = transition_scope_for_target(&step.target, known_outputs)?;
+            let transition_plan = plan_apply_transition(&ApplyTransitionRequest {
+                scope: transition_scope,
+                target: step.backend,
+                previous_backend_raw: &previous_backend,
+                fallback_path: fallback_path.as_deref(),
+                core_actions: &actions,
+            })
+            .map_err(AppError::from_wc_error)?;
+            match execute_apply_transition(
+                &self.storage,
+                &transition_plan,
+                &DisplayExecContext { known_outputs },
+                runtime,
+                reporter,
+                request_id,
+            ) {
+                Ok(step_report) => {
+                    merge_exec_reports(&mut report, step_report.exec);
+                }
+                Err(failure) => {
+                    merge_exec_reports(&mut report, failure.exec.clone());
+                    return Err(self.handle_exec_failure(
+                        display_exec_failure_from_transition(failure),
+                        &previous_rows,
+                        known_outputs,
+                        None,
+                    )?);
+                }
+            }
+            previous_backend = step.backend.as_str().to_string();
+        }
 
         let commit_result = match before_state_commit.as_deref_mut() {
             Some(seam) => self
@@ -265,6 +317,22 @@ fn restored_display_state(
             )
         })
         .collect()
+}
+
+fn merge_exec_reports(into: &mut DisplayExecReport, from: DisplayExecReport) {
+    into.events.extend(from.events);
+    into.completed_stops.extend(from.completed_stops);
+    into.completed_applies.extend(from.completed_applies);
+}
+
+fn restore_fallback_path(path: &str) -> Option<String> {
+    let entry = wc_scan::make_entry(path)?;
+    match entry.file_type {
+        wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
+            Some(entry.path.to_string())
+        }
+        _ => None,
+    }
 }
 
 fn build_restore_steps(rows: &[DisplayStateRow], known_outputs: &[String]) -> Vec<RestoreStep> {

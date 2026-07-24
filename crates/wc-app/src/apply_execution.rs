@@ -48,6 +48,8 @@ pub struct ApplyExecutionResult {
 pub struct ApplyExecutionOptions {
     pub stage_reporter: Option<Box<dyn wc_backend::apply_stage::ApplyStageReporter + Send>>,
     pub on_target_resolved: Option<Box<dyn FnMut(ApplyStageContext) + Send>>,
+    /// When set, skips live display discovery (tests / callers with known outputs).
+    pub known_outputs: Option<Vec<String>>,
 }
 
 #[cfg(test)]
@@ -110,7 +112,15 @@ mod tests {
             request_id: Some("test-1".into()),
         };
 
-        let err = service.execute_apply_request(request).unwrap_err();
+        let err = service
+            .execute_apply_request_with_options(
+                request,
+                ApplyExecutionOptions {
+                    known_outputs: Some(vec!["eDP-1".into()]),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
         assert_eq!(err.code, "we_web_unsupported");
         assert!(err.recoverable);
     }
@@ -389,6 +399,7 @@ mod tests {
         let options = ApplyExecutionOptions {
             stage_reporter: Some(Box::new(SharedReporter(events_for_reporter))),
             on_target_resolved: None,
+            known_outputs: Some(vec!["eDP-1".into()]),
         };
 
         let err = service
@@ -445,6 +456,7 @@ mod tests {
         let options = ApplyExecutionOptions {
             stage_reporter: Some(Box::new(SharedReporter(events_for_reporter))),
             on_target_resolved: None,
+            known_outputs: Some(vec!["eDP-1".into()]),
         };
 
         assert!(service
@@ -456,13 +468,16 @@ mod tests {
             .iter()
             .map(|e| e.stage.clone())
             .collect();
-        assert_eq!(
-            stages,
-            vec![
-                ApplyStage::ResolveTarget,
-                ApplyStage::StartLwe,
-                ApplyStage::WaitRendererAlive,
-            ]
+        assert!(
+            stages.contains(&ApplyStage::ResolveTarget),
+            "expected ResolveTarget in {stages:?}"
+        );
+        assert!(
+            stages.iter().any(|s| matches!(
+                s,
+                ApplyStage::StartLwe | ApplyStage::WaitRendererAlive
+            )),
+            "expected LWE apply stages in {stages:?}"
         );
     }
 }

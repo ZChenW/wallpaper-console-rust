@@ -297,15 +297,11 @@ fn execute_and_format_result(
         on_target_resolved: Some(Box::new(move |ctx| {
             *context.lock().unwrap() = ctx;
         })),
+        known_outputs: None,
     };
 
     match service.execute_apply_request_with_options(request, options) {
         Ok(result) => {
-            if let Err(err) =
-                service.commit_legacy_apply_display_state(&result.applied_path, result.backend)
-            {
-                return command_error_from_app_error(err);
-            }
             let dto = super::common::ApplyResultDto {
                 request_id: result.request_id,
                 applied_path: result.applied_path.clone(),
@@ -409,10 +405,19 @@ pub async fn stop() -> CommandResult {
 pub async fn restore() -> CommandResult {
     tauri::async_runtime::spawn_blocking(|| {
         with_renderer_state_lock(&APPLY_LOCK, || match storage() {
-            Ok(s) => match wc_backend::restore_clean(s) {
-                Ok(()) => Ok(ok("Restored wallpaper.")),
-                Err(e) => Ok(fail(e.to_string())),
-            },
+            Ok(s) => {
+                let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+                    path: s.cd.path.clone(),
+                });
+                let known_outputs = match wc_app::discover_connected_outputs() {
+                    Ok(outputs) => outputs,
+                    Err(e) => return Ok(fail(e.message)),
+                };
+                match service.restore_displays(&known_outputs) {
+                    Ok(()) => Ok(ok("Restored wallpaper.")),
+                    Err(e) => Ok(fail(e.message)),
+                }
+            }
             Err(e) => Ok(fail(e)),
         })
         .unwrap_or_else(fail)
