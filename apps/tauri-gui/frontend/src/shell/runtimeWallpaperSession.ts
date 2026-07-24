@@ -3,6 +3,7 @@ import type {
   ApplyResultDTO,
   TargetedApplyRequestDTO,
 } from '../api/types.ts';
+import { applyEvidenceFromResult } from './applyResultEvidence.ts';
 import type { RuntimeDisplayWallpaper } from './currentWallpaperState.ts';
 import { normalizeDisplayOutputs } from './displayTargets.ts';
 
@@ -59,39 +60,12 @@ function targetedRequestTarget(
   return output.length > 0 ? { kind: 'output', output } : null;
 }
 
-function confirmedAppliedOutputs(result: ApplyResultDTO | undefined): string[] | null {
-  const candidate = result as unknown as Record<string, unknown> | undefined;
-  if (!candidate || !Array.isArray(candidate.appliedOutputs)) return null;
-  if (!candidate.appliedOutputs.every((output) => typeof output === 'string')) return null;
-  const outputs = normalizeDisplayOutputs(candidate.appliedOutputs as string[]);
-  return outputs.length > 0 ? outputs : null;
-}
-
 function responseMatchesRequest(
   request: ApplyRequestDTO | TargetedApplyRequestDTO,
   result: ApplyResultDTO | undefined,
 ): boolean {
   if (request.requestId === undefined) return true;
   return result?.requestId === request.requestId;
-}
-
-function confirmedStatePath(result: ApplyResultDTO | undefined): string | null {
-  const candidate = result as unknown as Record<string, unknown> | undefined;
-  if (!candidate) return null;
-  if (
-    typeof candidate.appliedPath !== 'string'
-    || candidate.appliedPath.trim().length === 0
-    || typeof candidate.statePath !== 'string'
-    || candidate.statePath.trim().length === 0
-    || typeof candidate.backend !== 'string'
-    || candidate.backend.trim().length === 0
-    || typeof candidate.fileType !== 'string'
-    || candidate.fileType.trim().length === 0
-    || typeof candidate.preview !== 'boolean'
-  ) {
-    return null;
-  }
-  return candidate.statePath;
 }
 
 function confirmationsInOutputOrder(
@@ -153,9 +127,9 @@ export function reduceRuntimeWallpaperSession(
   }
 
   const target = targetedRequestTarget(action.request);
-  const wallpaperPath = confirmedStatePath(action.result);
-  const appliedOutputs = confirmedAppliedOutputs(action.result);
-  if (target === null || wallpaperPath === null || appliedOutputs === null) return state;
+  const evidence = applyEvidenceFromResult(action.result);
+  if (target === null || evidence === null) return state;
+  const { statePath: wallpaperPath, appliedOutputs } = evidence;
 
   const affectedOutputs = target.kind === 'allDisplays'
     ? appliedOutputs.filter((output) => state.connectedOutputs.includes(output))

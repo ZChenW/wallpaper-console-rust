@@ -5,6 +5,10 @@ import type {
 } from '../api/bridge';
 import type { CommandFeedback } from '../api/feedback';
 import type { ApplyStagePayload } from '../events/appEvents';
+import {
+  applyResultMatchesRequestId,
+  parseApplyResult,
+} from '../shell/applyResultEvidence.ts';
 
 export type ApplyStage = 'queued' | 'starting backend' | 'settling' | 'applied';
 
@@ -97,49 +101,6 @@ export function createApplyQueueHandlers(
       controller.enqueueTargeted(targeted);
     },
   };
-}
-
-function parseApplyResult(stdout: string): ApplyResultDTO | undefined {
-  if (!stdout) return undefined;
-  try {
-    const parsed: unknown = JSON.parse(stdout);
-    if (typeof parsed !== 'object' || parsed === null) return undefined;
-    const value = parsed as Record<string, unknown>;
-    if (
-      typeof value.appliedPath !== 'string'
-      || typeof value.statePath !== 'string'
-      || typeof value.backend !== 'string'
-      || typeof value.fileType !== 'string'
-      || typeof value.preview !== 'boolean'
-      || (
-        value.appliedOutputs !== undefined
-        && (
-          !Array.isArray(value.appliedOutputs)
-          || !value.appliedOutputs.every((output) => typeof output === 'string')
-        )
-      )
-      || (
-        value.requestId !== undefined
-        && value.requestId !== null
-        && typeof value.requestId !== 'string'
-      )
-    ) {
-      return undefined;
-    }
-    return {
-      ...(typeof value.requestId === 'string' ? { requestId: value.requestId } : {}),
-      appliedPath: value.appliedPath,
-      statePath: value.statePath,
-      backend: value.backend,
-      fileType: value.fileType,
-      preview: value.preview,
-      ...(Array.isArray(value.appliedOutputs)
-        ? { appliedOutputs: value.appliedOutputs as string[] }
-        : {}),
-    };
-  } catch {
-    return undefined;
-  }
 }
 
 export class ApplyQueueController {
@@ -256,9 +217,9 @@ export class ApplyQueueController {
       }
 
       const detail = parseApplyResult(result.stdout);
-      const evidence = request.requestId !== undefined
-        ? detail?.requestId === request.requestId ? detail : undefined
-        : detail;
+      const evidence = applyResultMatchesRequestId(request.requestId, detail)
+        ? detail
+        : undefined;
       try {
         this.deps.onApplied?.(request, evidence, item.transport);
       } catch {
