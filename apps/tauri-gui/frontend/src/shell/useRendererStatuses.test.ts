@@ -36,6 +36,16 @@ test('renderer status errors preserve useful text and have a stable fallback', (
   assert.equal(rendererStatusErrorMessage({ code: 1 }), 'Renderer status is unavailable');
 });
 
+test('renderer status reads have a bounded detection deadline', async () => {
+  await assert.rejects(
+    loadRendererStatuses(
+      { rendererStatuses: () => new Promise(() => {}) },
+      10,
+    ),
+    /Renderer detection timed out after 10ms/,
+  );
+});
+
 test('renderer status request sequence rejects stale and invalidated loads', () => {
   const sequence = createRendererStatusRequestSequence();
   const first = sequence.begin();

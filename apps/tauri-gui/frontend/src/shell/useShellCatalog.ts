@@ -7,6 +7,7 @@ import type {
   SourceDTO,
 } from '../api/types.ts';
 import { normalizeDisplayOutputs } from './displayTargets.ts';
+import { withRequestDeadline } from './requestDeadline.ts';
 
 export interface ShellCatalogApi {
   displaysList(): Promise<DisplayListDTO>;
@@ -62,24 +63,7 @@ export function withTimeout<T>(
   timeoutMs: number,
   label: string,
 ): Promise<T> {
-  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
-
-  return new Promise<T>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
-    }, timeoutMs);
-
-    promise.then(
-      (value) => {
-        clearTimeout(timer);
-        resolve(value);
-      },
-      (err) => {
-        clearTimeout(timer);
-        reject(err);
-      },
-    );
-  });
+  return withRequestDeadline(promise, timeoutMs, label);
 }
 
 // ── loadShellCatalogSnapshot (kept for backward compatibility) ──────────
@@ -301,6 +285,7 @@ export function useShellCatalog(
 ) {
   const [catalog, setCatalog] = useState<ShellCatalogSnapshot>(EMPTY_CATALOG);
   const [ready, setReady] = useState(false);
+  const [sourcesReady, setSourcesReady] = useState(false);
 
   // Per-channel generations — shared between the initial load and explicit
   // reloads so a late initial callback cannot overwrite a fresher reload.
@@ -317,6 +302,8 @@ export function useShellCatalog(
     const fullGen = ++fullGeneration.current;
     const sourceGen = ++sourceGeneration.current;
     const displayGen = ++displayGeneration.current;
+    setReady(false);
+    setSourcesReady(false);
 
     const cleanup = subscribeCatalogChannels(catalogApi, {
       onDisplays(connectedOutputs, error) {
@@ -334,6 +321,7 @@ export function useShellCatalog(
           sources,
           errors: { ...current.errors, sources: error },
         }));
+        setSourcesReady(true);
       },
       onDisplayState(states, error) {
         if (displayGen !== displayGeneration.current) return;
@@ -375,12 +363,14 @@ export function useShellCatalog(
         sources,
         errors: { ...current.errors, sources: undefined },
       }));
+      setSourcesReady(true);
     } catch (error) {
       if (gen !== sourceGeneration.current) return;
       setCatalog((current) => ({
         ...current,
         errors: { ...current.errors, sources: errorMessage(error) },
       }));
+      setSourcesReady(true);
     }
   }, [catalogApi, channelTimeouts]);
 
@@ -435,13 +425,41 @@ export function useShellCatalog(
 
   useEffect(() => {
     if (!Number.isFinite(displayPollMs) || displayPollMs <= 0) return undefined;
-    const timer = window.setInterval(() => void reloadDisplays(), displayPollMs);
-    return () => window.clearInterval(timer);
+    let timer: number | null = null;
+    const visible = () => (
+      typeof document === 'undefined' || document.visibilityState !== 'hidden'
+    );
+    const stopTimer = () => {
+      if (timer === null) return;
+      window.clearInterval(timer);
+      timer = null;
+    };
+    const startTimer = () => {
+      stopTimer();
+      if (!visible()) return;
+      timer = window.setInterval(() => void reloadDisplays(), displayPollMs);
+    };
+    const handleVisibilityChange = () => {
+      if (!visible()) {
+        stopTimer();
+        return;
+      }
+      void reloadDisplays();
+      startTimer();
+    };
+
+    startTimer();
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      stopTimer();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
   }, [displayPollMs, reloadDisplays]);
 
   return {
     ...catalog,
     ready,
+    sourcesReady,
     reloadSources,
     reloadDisplays,
   };

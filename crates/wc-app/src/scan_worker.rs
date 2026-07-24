@@ -70,7 +70,7 @@ impl WorkerArtifactLease {
 
 impl Drop for WorkerArtifactLease {
     fn drop(&mut self) {
-        let _ = self.lock.unlock();
+        let _ = FileExt::unlock(&self.lock);
         let _ = fs::remove_dir_all(&self.directory);
     }
 }

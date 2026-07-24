@@ -137,6 +137,28 @@ test('disconnect drops evidence and reconnect cannot revive an old confirmation'
   ]);
 });
 
+test('runtime invalidation clears Current evidence without forgetting connected outputs', () => {
+  const initial = createRuntimeWallpaperSession(['eDP-1', 'HDMI-A-1']);
+  const confirmed = reduceRuntimeWallpaperSession(initial, {
+    type: 'applySucceeded',
+    transport: 'targeted',
+    request: { path: '/shared.jpg', requestId: 'shared' },
+    result: result('/shared.jpg', 'shared'),
+  });
+  const invalidated = reduceRuntimeWallpaperSession(confirmed, {
+    type: 'runtimeInvalidated',
+  });
+
+  assert.deepEqual(toRuntimeDisplayWallpapers(invalidated), [
+    { output: 'eDP-1', wallpaperPath: null, status: 'unknown' },
+    { output: 'HDMI-A-1', wallpaperPath: null, status: 'unknown' },
+  ]);
+  assert.equal(
+    reduceRuntimeWallpaperSession(invalidated, { type: 'runtimeInvalidated' }),
+    invalidated,
+  );
+});
+
 test('All Displays success confirms only outputs actually applied before a hotplug change', () => {
   const initial = createRuntimeWallpaperSession(['eDP-1', 'HDMI-A-1']);
   const afterHotplug = reduceRuntimeWallpaperSession(initial, {

@@ -35,6 +35,9 @@ export interface CompactSettingsPanelProps {
   readonly loadError: Error | null;
   readonly saveError: Error | null;
   readonly rendererStatuses: RendererStatusesDTO | null;
+  readonly rendererStatusesLoading: boolean;
+  readonly rendererStatusesError: string | null;
+  readonly onReloadRendererStatuses: () => void;
   readonly onOpenSources: (trigger: HTMLButtonElement) => void;
   readonly onClose: () => void;
 }
@@ -63,6 +66,9 @@ export function CompactSettingsPanelView({
   loadError,
   saveError,
   rendererStatuses,
+  rendererStatusesLoading,
+  rendererStatusesError,
+  onReloadRendererStatuses,
   onOpenSources,
   onClose,
 }: CompactSettingsPanelProps & { readonly presentationPhase?: 'open' | 'exiting' }) {
@@ -71,9 +77,15 @@ export function CompactSettingsPanelView({
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
-  const awwwUnavailable = rendererStatuses?.awww.available === false;
-  const mpvpaperUnavailable = rendererStatuses?.mpvpaper.available === false;
-  const lweUnavailable = rendererStatuses?.linuxWallpaperEngine.available === false;
+  const rendererDetectionReady = !rendererStatusesLoading
+    && rendererStatusesError === null
+    && rendererStatuses !== null;
+  const awwwUnavailable = !rendererDetectionReady
+    || rendererStatuses?.awww.available !== true;
+  const mpvpaperUnavailable = !rendererDetectionReady
+    || rendererStatuses?.mpvpaper.available !== true;
+  const lweUnavailable = !rendererDetectionReady
+    || rendererStatuses?.linuxWallpaperEngine.available !== true;
   const updateTheme = (value: string) => {
     if (!isShellTheme(value)) return;
     updatePreferences((current) => ({ ...current, theme: value }));
@@ -256,6 +268,20 @@ export function CompactSettingsPanelView({
           {loadError !== null && <p role="alert" className="settings-error">{errorMessage(loadError)}</p>}
           {saveError !== null && <p role="alert" className="settings-error">{errorMessage(saveError)}</p>}
           <h4 className="settings-behavior-category">Renderers</h4>
+          {rendererStatusesLoading ? (
+            <p aria-label="Renderer installation status" role="status">
+              Checking renderer availability…
+            </p>
+          ) : null}
+          {!rendererStatusesLoading && rendererStatusesError !== null ? (
+            <div aria-label="Renderer installation status" className="settings-error" role="alert">
+              <strong>Renderer detection failed.</strong>
+              <span>{rendererStatusesError}</span>
+              <button className="btn" type="button" onClick={onReloadRendererStatuses}>
+                Retry
+              </button>
+            </div>
+          ) : null}
           <div
             aria-labelledby="settings-renderer-selection-heading"
             className="settings-behavior-card"

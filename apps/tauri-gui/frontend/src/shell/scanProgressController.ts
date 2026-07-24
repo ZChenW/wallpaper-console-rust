@@ -4,6 +4,7 @@ import {
   scanReducer,
   type ScanState,
 } from './feedbackState.ts';
+import { withRequestDeadline } from './requestDeadline.ts';
 
 export interface ScanProgressApi {
   scanProgress(): Promise<ScanProgressDTO>;
@@ -31,10 +32,23 @@ export interface ScanProgressControllerOptions {
   readonly scheduler?: ScanProgressScheduler;
   readonly activePollMs?: number;
   readonly idlePollMs?: number;
+  readonly requestTimeoutMs?: number;
+  readonly cancelTimeoutMs?: number;
+}
+
+interface ProgressPoll {
+  readonly token: object;
+  readonly promise: Promise<void>;
+}
+
+interface CancelRequest {
+  readonly token: object;
+  promise: Promise<CommandResult | null>;
 }
 
 const DEFAULT_ACTIVE_POLL_MS = 250;
 const DEFAULT_IDLE_POLL_MS = 2_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 3_000;
 
 const DEFAULT_SCHEDULER: ScanProgressScheduler = {
   setTimer: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -47,6 +61,13 @@ function pollInterval(value: number | undefined, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0
     ? Math.floor(value)
     : fallback;
+}
+
+function requestTimeout(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
 }
 
 function errorMessage(error: unknown): string {
@@ -76,12 +97,14 @@ export class ScanProgressController {
   private readonly scheduler: ScanProgressScheduler;
   private readonly activePollMs: number;
   private readonly idlePollMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly cancelTimeoutMs: number;
   private readonly listeners = new Set<() => void>();
 
   private snapshot: ScanProgressSnapshot;
   private timer: unknown | null = null;
-  private currentPoll: Promise<void> | null = null;
-  private cancelRequest: Promise<CommandResult | null> | null = null;
+  private currentPoll: ProgressPoll | null = null;
+  private cancelRequest: CancelRequest | null = null;
   private repollRequested = false;
   private started = false;
   private generation = 0;
@@ -92,6 +115,10 @@ export class ScanProgressController {
     this.scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
     this.activePollMs = pollInterval(options.activePollMs, DEFAULT_ACTIVE_POLL_MS);
     this.idlePollMs = pollInterval(options.idlePollMs, DEFAULT_IDLE_POLL_MS);
+    this.requestTimeoutMs = requestTimeout(options.requestTimeoutMs);
+    this.cancelTimeoutMs = requestTimeout(
+      options.cancelTimeoutMs ?? options.requestTimeoutMs,
+    );
     this.snapshot = {
       progress: null,
       scanState: EMPTY_SCAN_STATE,
@@ -122,6 +149,9 @@ export class ScanProgressController {
     this.generation += 1;
     this.repollRequested = false;
     this.clearScheduledPoll();
+    // A hidden-window pause must not make visibility resume wait for a stale
+    // bridge request. Late settlement is ignored by its generation token.
+    this.currentPoll = null;
     this.update({ pollingMode: 'stopped', observedAtMs: this.now() });
   };
 
@@ -151,17 +181,18 @@ export class ScanProgressController {
     this.clearScheduledPoll();
     if (this.currentPoll) {
       this.repollRequested = true;
-      return this.currentPoll;
+      return this.currentPoll.promise;
     }
 
     const generation = this.generation;
-    const operation = this.readProgress(generation);
-    this.currentPoll = operation;
+    const token = {};
+    const operation = this.readProgress(generation, token);
+    this.currentPoll = { token, promise: operation };
     return operation;
   };
 
   readonly requestCancel = (): Promise<CommandResult | null> => {
-    if (this.cancelRequest) return this.cancelRequest;
+    if (this.cancelRequest) return this.cancelRequest.promise;
     const current = this.snapshot.scanState;
     if (current.kind !== 'running' || current.cancelRequestedAtMs !== null) {
       return Promise.resolve(null);
@@ -175,8 +206,14 @@ export class ScanProgressController {
     });
     if (this.started) this.scheduleNext('active');
 
-    const operation = this.sendCancelRequest();
-    this.cancelRequest = operation;
+    const token = {};
+    const request: CancelRequest = {
+      token,
+      promise: Promise.resolve(null),
+    };
+    this.cancelRequest = request;
+    const operation = this.sendCancelRequest(token);
+    request.promise = operation;
     return operation;
   };
 
@@ -187,9 +224,14 @@ export class ScanProgressController {
     });
   };
 
-  private async readProgress(generation: number): Promise<void> {
+  private async readProgress(generation: number, token: object): Promise<void> {
     try {
-      const progress = await this.api.scanProgress();
+      const progress = await withRequestDeadline(
+        this.api.scanProgress(),
+        this.requestTimeoutMs,
+        'Scan progress request',
+        this.scheduler,
+      );
       if (!this.started || generation !== this.generation) return;
       this.observeProgress(progress);
     } catch (error) {
@@ -199,6 +241,7 @@ export class ScanProgressController {
         transportError: errorMessage(error),
       });
     } finally {
+      if (this.currentPoll?.token !== token) return;
       this.currentPoll = null;
       if (!this.started) return;
       if (generation !== this.generation || this.repollRequested) {
@@ -236,17 +279,24 @@ export class ScanProgressController {
     });
   }
 
-  private async sendCancelRequest(): Promise<CommandResult | null> {
+  private async sendCancelRequest(token: object): Promise<CommandResult | null> {
     try {
-      const result = await this.api.scanCancel();
+      const result = await withRequestDeadline(
+        this.api.scanCancel(),
+        this.cancelTimeoutMs,
+        'Scan cancellation request',
+        this.scheduler,
+      );
+      if (this.cancelRequest?.token !== token) return null;
       if (!result.success) this.restoreCancelAction(commandError(result));
       else if (this.started) void this.refresh();
       return result;
     } catch (error) {
+      if (this.cancelRequest?.token !== token) return null;
       this.restoreCancelAction(errorMessage(error));
       return null;
     } finally {
-      this.cancelRequest = null;
+      if (this.cancelRequest?.token === token) this.cancelRequest = null;
     }
   }
 

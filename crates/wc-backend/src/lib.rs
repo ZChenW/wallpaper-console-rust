@@ -24,6 +24,7 @@ pub(crate) mod driver;
 pub(crate) mod test_support;
 
 mod awww;
+mod deadline_command;
 mod debug_log;
 mod mpvpaper;
 mod restore;
@@ -105,9 +106,7 @@ pub(crate) fn execute_stop_plan_with_runtime(
 }
 
 fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Result<(), WcError> {
-    s.current_write(state_path)?;
-    s.last_backend_write(backend.as_str())?;
-    Ok(())
+    s.runtime_state_write_pair(state_path, backend.as_str())
 }
 
 /// Apply a wallpaper via the appropriate backend process.
@@ -265,7 +264,23 @@ pub(crate) fn apply_wallpaper_with_runtime(
                         launched_mpvpaper_pid = Some(pid);
                         Ok(())
                     }
-                    Err(driver::MpvpaperApplyError::Start(error)) => Err(error),
+                    Err(driver::MpvpaperApplyError::Start(error)) => {
+                        // `setsid`/mpvpaper may have detached a renderer before
+                        // the launcher reports failure. Remove only PIDs that
+                        // appeared after this attempt and still match its exact
+                        // output/path so concurrent launches stay live.
+                        match runtime.cleanup_failed_mpvpaper_launch(
+                            &previous_mpvpaper_pids,
+                            &output,
+                            path,
+                        ) {
+                            Ok(()) => Err(error),
+                            Err(cleanup_error) => Err(WcError::Other(format!(
+                                "{error}; failed-launch mpvpaper cleanup could not be verified: \
+                                 {cleanup_error}"
+                            ))),
+                        }
+                    }
                     Err(driver::MpvpaperApplyError::Ready(error)) => {
                         mpvpaper_launcher_succeeded = true;
                         Err(error)
@@ -1431,6 +1446,10 @@ mod tests {
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
         assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
+        assert_eq!(
+            rt.mpvpaper_wait_targets,
+            vec![("*".to_string(), next.to_string_lossy().into_owned())]
+        );
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![404]);
     }
 

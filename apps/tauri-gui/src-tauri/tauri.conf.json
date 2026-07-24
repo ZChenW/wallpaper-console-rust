@@ -25,12 +25,7 @@
       "assetProtocol": {
         "enable": true,
         "scope": {
-          "allow": [
-            "$HOME/.config/wallpaper-console/cache/gui-thumbnails/**",
-            "$HOME/.local/share/Steam/steamapps/workshop/content/431960/**",
-            "$HOME/.steam/steam/steamapps/workshop/content/431960/**",
-            "$HOME/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960/**"
-          ]
+          "allow": []
         }
       }
     }

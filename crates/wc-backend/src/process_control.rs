@@ -55,7 +55,7 @@ pub(crate) fn cmdline_looks_like_mpvpaper(cmdline: &str) -> bool {
 }
 
 #[cfg(unix)]
-fn read_proc_cmdline_tokens(pid: i32) -> Option<Vec<String>> {
+pub(crate) fn read_proc_cmdline_tokens(pid: i32) -> Option<Vec<String>> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
     if raw.is_empty() {
         return None;
@@ -72,7 +72,7 @@ fn read_proc_cmdline_tokens(pid: i32) -> Option<Vec<String>> {
 }
 
 #[cfg(not(unix))]
-fn read_proc_cmdline_tokens(_pid: i32) -> Option<Vec<String>> {
+pub(crate) fn read_proc_cmdline_tokens(_pid: i32) -> Option<Vec<String>> {
     None
 }
 
@@ -206,6 +206,39 @@ pub(crate) fn detach_and_reap_child(mut child: Child, thread_name: &str) {
     {
         eprintln!("wc-backend: failed to start reaper thread {thread_name} for pid {pid}: {error}");
     }
+}
+
+/// Stop and synchronously reap a process group that this process just spawned.
+///
+/// Unlike [`kill_lwe_process_group`], this does not inspect `/proc`: the
+/// caller still owns the exact `Child` handle, so PID identity cannot be
+/// stale. This is used when startup succeeded but publishing ownership state
+/// failed; returning while the untracked renderer kept running would make a
+/// later stop/restore unable to manage it.
+pub(crate) fn terminate_spawned_process_group(mut child: Child) {
+    let Ok(pid) = i32::try_from(child.id()) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return;
+    };
+
+    #[cfg(unix)]
+    {
+        // SAFETY: the renderer is launched through `setsid`, so its PID is
+        // also the process-group ID. The Child handle proves this is the
+        // process we just spawned, rather than a persisted/stale PID.
+        unsafe {
+            libc::kill(-pid, libc::SIGTERM);
+        }
+        std::thread::sleep(Duration::from_millis(80));
+        // Terminate descendants as well if the group leader already exited.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Operations that interact with OS processes.

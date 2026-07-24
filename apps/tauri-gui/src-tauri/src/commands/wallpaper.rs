@@ -197,9 +197,10 @@ pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
-                return fail(e);
-            }
+            let path = match path_guard::ensure_command_wallpaper_path(&path, s) {
+                Ok(path) => path.to_string_lossy().into_owned(),
+                Err(error) => return fail(error),
+            };
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
@@ -224,13 +225,18 @@ pub async fn apply_action(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, s) {
-                return fail(e);
-            }
+            let canonical = match path_guard::ensure_command_wallpaper_path(&request.path, s) {
+                Ok(path) => path.to_string_lossy().into_owned(),
+                Err(error) => return fail(error),
+            };
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
-            let request = match apply_request_from_dto(request) {
+            let request = match apply_request_from_parts(
+                &request.kind,
+                canonical,
+                request.request_id.clone(),
+            ) {
                 Ok(r) => r,
                 Err(err) => return command_error_from_app_error(err),
             };
@@ -334,12 +340,6 @@ fn stale_apply_result() -> CommandResult {
     }
 }
 
-fn apply_request_from_dto(
-    dto: super::common::ApplyRequestDto,
-) -> Result<wc_app::ApplyRequest, wc_app::AppError> {
-    apply_request_from_parts(&dto.kind, dto.path, dto.request_id)
-}
-
 fn apply_request_from_parts(
     raw_kind: &str,
     path: String,
@@ -425,10 +425,11 @@ pub async fn restore() -> CommandResult {
 pub async fn we_clear_backend_error(path: String) -> CommandResult {
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
-                return fail(e);
-            }
-            match wc_storage::we_compat::clear_failure(&path) {
+            let canonical = match path_guard::ensure_command_wallpaper_path(&path, s) {
+                Ok(path) => path,
+                Err(error) => return fail(error),
+            };
+            match wc_storage::we_compat::clear_failure(canonical.to_string_lossy().as_ref()) {
                 Ok(()) => ok("Cleared backend error."),
                 Err(e) => fail(e.to_string()),
             }
@@ -515,12 +516,13 @@ pub async fn apply_to_display(
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
-            if let Err(e) = path_guard::ensure_command_wallpaper_path(&request.path, s) {
-                return fail(e);
-            }
+            let canonical = match path_guard::ensure_command_wallpaper_path(&request.path, s) {
+                Ok(path) => path.to_string_lossy().into_owned(),
+                Err(error) => return fail(error),
+            };
             let apply_request = match apply_request_from_parts(
                 &request.kind,
-                request.path.clone(),
+                canonical,
                 request.request_id.clone(),
             ) {
                 Ok(value) => value,

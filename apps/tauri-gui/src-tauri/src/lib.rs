@@ -22,7 +22,7 @@ fn configure_logging(app: &tauri::AppHandle, config_dir: &std::path::Path) -> ta
     } else {
         Builder::default()
             .level(log::LevelFilter::Info)
-            .rotation_strategy(RotationStrategy::KeepAll)
+            .rotation_strategy(RotationStrategy::KeepSome(5))
             .targets([Target::new(TargetKind::Folder {
                 path: config_dir.to_path_buf(),
                 file_name: Some("wallpaper-console".into()),
@@ -94,7 +94,9 @@ pub fn run() {
     };
 
     // Now safe to do expensive initialisation.
-    let _ = wc_config::init_config_dir(&cd.path);
+    if let Err(error) = wc_config::init_config_dir(&cd.path) {
+        fatal_startup_error(format!("cannot initialize config directory: {error}"));
+    }
 
     tauri::Builder::default()
         .setup(move |app| {

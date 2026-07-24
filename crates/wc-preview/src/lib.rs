@@ -8,11 +8,208 @@
 //!   5. Respects preview_metadata config: compact (default), visual, full
 
 use std::collections::HashMap;
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::{Mutex, OnceLock};
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{mpsc, Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use wc_core::config::ConfigDir;
+
+const THUMBNAIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
+const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const COMMAND_DRAIN_GRACE: Duration = Duration::from_millis(200);
+const COMMAND_OUTPUT_CAP: usize = 32 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 32_768;
+const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
+const MAX_IMAGE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_THUMBNAIL_WIDTH: u32 = 400;
+const MAX_THUMBNAIL_HEIGHT: u32 = 400;
+const MAX_THUMBNAIL_PIXELS: u64 = MAX_THUMBNAIL_WIDTH as u64 * MAX_THUMBNAIL_HEIGHT as u64;
+const FFMPEG_THUMBNAIL_SCALE_FILTER: &str =
+    "scale='min(400,iw)':'min(400,ih)':force_original_aspect_ratio=decrease:flags=lanczos";
+
+#[derive(Debug, PartialEq, Eq)]
+struct DeadlineCommandOutput {
+    success: bool,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeadlineCommandError {
+    Spawn(String),
+    Wait(String),
+    TimedOut,
+}
+
+struct DrainCapture {
+    bytes: Arc<Mutex<Vec<u8>>>,
+    finished: mpsc::Receiver<()>,
+}
+
+impl DrainCapture {
+    fn snapshot_after(self, deadline: Instant) -> Vec<u8> {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !remaining.is_zero() {
+            let _ = self.finished.recv_timeout(remaining);
+        }
+        self.bytes
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+}
+
+/// Execute a thumbnail helper within a hard deadline.
+///
+/// The child gets a fresh process group. Output is continuously drained into
+/// bounded buffers, then the group is killed and the direct child reaped on
+/// timeout. Drainers are observed only for a fixed grace period: if a detached
+/// descendant escaped the process group while retaining a pipe, the caller
+/// returns instead of joining that reader forever.
+fn run_command_with_deadline(
+    command: &mut Command,
+    timeout: Duration,
+) -> Result<DeadlineCommandOutput, DeadlineCommandError> {
+    #[cfg(unix)]
+    use std::os::unix::process::CommandExt;
+
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let mut child = command
+        .spawn()
+        .map_err(|error| DeadlineCommandError::Spawn(error.to_string()))?;
+    let child_pid = child.id();
+    let stdout = child
+        .stdout
+        .take()
+        .map(spawn_bounded_drainer)
+        .expect("piped stdout must be available");
+    let stderr = child
+        .stderr
+        .take()
+        .map(spawn_bounded_drainer)
+        .expect("piped stderr must be available");
+    let started = Instant::now();
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                kill_process_group(child_pid);
+                let drain_deadline = Instant::now() + COMMAND_DRAIN_GRACE;
+                return Ok(DeadlineCommandOutput {
+                    success: status.success(),
+                    stdout: stdout.snapshot_after(drain_deadline),
+                    stderr: stderr.snapshot_after(drain_deadline),
+                });
+            }
+            Ok(None) if started.elapsed() >= timeout => {
+                terminate_and_reap(&mut child, child_pid);
+                let drain_deadline = Instant::now() + COMMAND_DRAIN_GRACE;
+                let _ = stdout.snapshot_after(drain_deadline);
+                let _ = stderr.snapshot_after(drain_deadline);
+                return Err(DeadlineCommandError::TimedOut);
+            }
+            Ok(None) => std::thread::sleep(
+                COMMAND_POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())),
+            ),
+            Err(error) => {
+                terminate_and_reap(&mut child, child_pid);
+                let drain_deadline = Instant::now() + COMMAND_DRAIN_GRACE;
+                let _ = stdout.snapshot_after(drain_deadline);
+                let _ = stderr.snapshot_after(drain_deadline);
+                return Err(DeadlineCommandError::Wait(error.to_string()));
+            }
+        }
+    }
+}
+
+fn spawn_bounded_drainer(mut stream: impl Read + Send + 'static) -> DrainCapture {
+    let bytes = Arc::new(Mutex::new(Vec::with_capacity(COMMAND_OUTPUT_CAP)));
+    let writer = bytes.clone();
+    let (finished_tx, finished) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut chunk = [0_u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    let mut captured = writer
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    let remaining = COMMAND_OUTPUT_CAP.saturating_sub(captured.len());
+                    captured.extend_from_slice(&chunk[..read.min(remaining)]);
+                }
+            }
+        }
+        let _ = finished_tx.send(());
+    });
+    DrainCapture { bytes, finished }
+}
+
+fn terminate_and_reap(child: &mut Child, child_pid: u32) {
+    kill_process_group(child_pid);
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(unix)]
+fn kill_process_group(pid: u32) {
+    let Ok(pid) = i32::try_from(pid) else {
+        return;
+    };
+    // SAFETY: `run_command_with_deadline` creates a new process group whose
+    // group id is the direct child pid. A negative pid targets only that group.
+    unsafe {
+        libc::kill(-pid, libc::SIGKILL);
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_process_group(_pid: u32) {}
+
+fn command_succeeded(command: &mut Command, timeout: Duration, label: &str) -> bool {
+    match run_command_with_deadline(command, timeout) {
+        Ok(output) if output.success => true,
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{label} failed: {}", detail.trim());
+            false
+        }
+        Err(error) => {
+            eprintln!("{label} failed: {error:?}");
+            false
+        }
+    }
+}
+
+fn command_output(
+    command: &mut Command,
+    timeout: Duration,
+    label: &str,
+) -> Option<DeadlineCommandOutput> {
+    match run_command_with_deadline(command, timeout) {
+        Ok(output) if output.success => Some(output),
+        Ok(output) => {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            eprintln!("{label} failed: {}", detail.trim());
+            None
+        }
+        Err(error) => {
+            eprintln!("{label} failed: {error:?}");
+            None
+        }
+    }
+}
 
 /// Render the fzf preview for a file.  This is the top-level entry point
 /// called by the `__preview__` subcommand.
@@ -153,25 +350,27 @@ fn video_thumbnail(cd: &ConfigDir, file: &str) -> Option<PathBuf> {
 
     // Try ffmpegthumbnailer first, then ffmpeg
     if command_exists("ffmpegthumbnailer") {
-        let ok = Command::new("ffmpegthumbnailer")
+        let mut command = Command::new("ffmpegthumbnailer");
+        command
             .args(["-i", file, "-o"])
             .arg(thumb.to_string_lossy().as_ref())
-            .args(["-s", "0", "-q", "8"])
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .args(["-s", "0", "-q", "8"]);
+        let ok = command_succeeded(
+            &mut command,
+            THUMBNAIL_COMMAND_TIMEOUT,
+            "ffmpegthumbnailer preview",
+        );
         if ok && thumb.exists() {
             return Some(thumb);
         }
     }
 
     if command_exists("ffmpeg") {
-        let ok = Command::new("ffmpeg")
+        let mut command = Command::new("ffmpeg");
+        command
             .args(["-ss", "1", "-i", file, "-frames:v", "1", "-q:v", "2", "-y"])
-            .arg(thumb.to_string_lossy().as_ref())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
+            .arg(thumb.to_string_lossy().as_ref());
+        let ok = command_succeeded(&mut command, THUMBNAIL_COMMAND_TIMEOUT, "ffmpeg preview");
         if ok && thumb.exists() {
             return Some(thumb);
         }
@@ -250,7 +449,8 @@ fn preview_video(cd: &ConfigDir, file: &str, ext: &str) {
             preview_text_metadata(cd, file, ext);
             // Duration via ffprobe
             if command_exists("ffprobe") {
-                if let Ok(out) = Command::new("ffprobe")
+                let mut command = Command::new("ffprobe");
+                command
                     .args([
                         "-v",
                         "quiet",
@@ -260,8 +460,9 @@ fn preview_video(cd: &ConfigDir, file: &str, ext: &str) {
                         "csv=p=0",
                     ])
                     .arg("--")
-                    .arg(file)
-                    .output()
+                    .arg(file);
+                if let Some(out) =
+                    command_output(&mut command, METADATA_COMMAND_TIMEOUT, "ffprobe duration")
                 {
                     let dur = String::from_utf8_lossy(&out.stdout).trim().to_string();
                     if !dur.is_empty() {
@@ -312,20 +513,25 @@ fn human_size(file: &str) -> String {
 
 fn detect_resolution(file: &str) -> String {
     // Try identify (ImageMagick) first
-    if let Ok(out) = Command::new("identify")
+    let mut identify = Command::new("identify");
+    identify
         .arg("-format")
         .arg("%wx%h")
         .arg("--")
-        .arg(format!("{file}[0]"))
-        .output()
-    {
+        .arg(format!("{file}[0]"));
+    if let Some(out) = command_output(
+        &mut identify,
+        METADATA_COMMAND_TIMEOUT,
+        "ImageMagick resolution probe",
+    ) {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if !s.is_empty() && s.contains('x') {
             return s;
         }
     }
     // Try ffprobe for video
-    if let Ok(out) = Command::new("ffprobe")
+    let mut ffprobe = Command::new("ffprobe");
+    ffprobe
         .args([
             "-v",
             "error",
@@ -337,9 +543,12 @@ fn detect_resolution(file: &str) -> String {
             "csv=p=0",
         ])
         .arg("--")
-        .arg(file)
-        .output()
-    {
+        .arg(file);
+    if let Some(out) = command_output(
+        &mut ffprobe,
+        METADATA_COMMAND_TIMEOUT,
+        "ffprobe resolution probe",
+    ) {
         let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let parts: Vec<&str> = s.split(',').collect();
         if parts.len() >= 2 {
@@ -423,26 +632,38 @@ pub fn generate_gui_thumbnail(
         return Err(ThumbnailFailure::Unsupported);
     }
 
-    // Atomic write: generate to .tmp.webp so ffmpeg detects the output format.
-    let tmp = cache_dir.join(format!(".{}.tmp.webp", key));
-    let _ = std::fs::remove_file(&tmp);
+    // Each producer owns a unique temporary file. This avoids same-key calls
+    // deleting or partially overwriting one another before atomic publication.
+    let tmp = reserve_unique_thumbnail_temp(cache_dir, &key)?;
 
-    let ok = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
+    let generated = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
         generate_video_thumbnail_v2(path, &tmp)
+            .then_some(())
+            .ok_or(ThumbnailFailure::ProbeFailed)
     } else {
         generate_image_thumbnail(path, &tmp)
     };
 
-    if ok {
-        let _ = std::fs::rename(&tmp, &dst);
-        if dst.exists() {
-            return Ok((dst, false));
-        }
-        // rename succeeded but dst doesn't exist → cache write failed
-        return Err(ThumbnailFailure::CacheWriteFailed);
+    if let Err(failure) = generated {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(failure);
     }
-    let _ = std::fs::remove_file(&tmp);
-    Err(ThumbnailFailure::ProbeFailed)
+    if validate_generated_thumbnail(&tmp).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(ThumbnailFailure::ProbeFailed);
+    }
+
+    match std::fs::rename(&tmp, &dst) {
+        Ok(()) => Ok((dst, false)),
+        Err(_) if dst.exists() && validate_generated_thumbnail(&dst).is_ok() => {
+            let _ = std::fs::remove_file(&tmp);
+            Ok((dst, true))
+        }
+        Err(_) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(ThumbnailFailure::CacheWriteFailed)
+        }
+    }
 }
 
 /// Result of an attempted thumbnail generation.
@@ -459,6 +680,7 @@ pub struct ThumbnailResult {
 pub enum ThumbnailFailure {
     Unsupported,
     ProbeFailed,
+    ImageTooLarge,
     CacheWriteFailed,
     MissingFile,
 }
@@ -468,6 +690,7 @@ impl ThumbnailFailure {
         match self {
             ThumbnailFailure::Unsupported => "unsupported",
             ThumbnailFailure::ProbeFailed => "probe_failed",
+            ThumbnailFailure::ImageTooLarge => "image_too_large",
             ThumbnailFailure::CacheWriteFailed => "cache_write_failed",
             ThumbnailFailure::MissingFile => "missing_file",
         }
@@ -477,6 +700,7 @@ impl ThumbnailFailure {
         match value {
             "unsupported" => Some(ThumbnailFailure::Unsupported),
             "probe_failed" => Some(ThumbnailFailure::ProbeFailed),
+            "image_too_large" => Some(ThumbnailFailure::ImageTooLarge),
             "cache_write_failed" => Some(ThumbnailFailure::CacheWriteFailed),
             "missing_file" => Some(ThumbnailFailure::MissingFile),
             _ => None,
@@ -703,7 +927,7 @@ pub fn thumbnail_for_with_failure_ttl(
                 path: path.to_string(),
                 thumbnail: None,
                 cache_hit: false,
-                error: Some(format!("thumbnail generation failed: {:?}", failure)),
+                error: Some(format!("thumbnail generation failed: {}", failure.as_str())),
                 failure_reason: Some(failure),
             }
         }
@@ -768,6 +992,43 @@ fn write_failure_marker(
 
 // ── Internal generators ────────────────────────────────────────────────────
 
+fn reserve_unique_thumbnail_temp(cache_dir: &Path, key: &str) -> Result<PathBuf, ThumbnailFailure> {
+    static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    for _ in 0..128 {
+        let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
+        let path = cache_dir.join(format!(
+            ".{key}.{}.{}.tmp.webp",
+            std::process::id(),
+            sequence
+        ));
+        match OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => return Err(ThumbnailFailure::CacheWriteFailed),
+        }
+    }
+
+    Err(ThumbnailFailure::CacheWriteFailed)
+}
+
+fn validate_generated_thumbnail(path: &Path) -> Result<(), ThumbnailFailure> {
+    let reader = image::ImageReader::open(path).map_err(|_| ThumbnailFailure::ProbeFailed)?;
+    let mut reader = reader
+        .with_guessed_format()
+        .map_err(|_| ThumbnailFailure::ProbeFailed)?;
+    if reader.format() != Some(image::ImageFormat::WebP) {
+        return Err(ThumbnailFailure::ProbeFailed);
+    }
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_THUMBNAIL_WIDTH);
+    limits.max_image_height = Some(MAX_THUMBNAIL_HEIGHT);
+    limits.max_alloc = Some(MAX_THUMBNAIL_PIXELS.saturating_mul(4));
+    reader.limits(limits);
+    let image = reader.decode().map_err(|_| ThumbnailFailure::ProbeFailed)?;
+    validate_thumbnail_dimensions(image.width(), image.height())
+}
+
 pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 {
     let now = current_epoch_secs();
     let mut removed = 0u64;
@@ -801,63 +1062,108 @@ pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 
     removed
 }
 
-fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> bool {
+fn validate_image_dimensions(width: u32, height: u32) -> Result<(), ThumbnailFailure> {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0
+        || height == 0
+        || width > MAX_IMAGE_DIMENSION
+        || height > MAX_IMAGE_DIMENSION
+        || pixels > MAX_IMAGE_PIXELS
+    {
+        return Err(ThumbnailFailure::ImageTooLarge);
+    }
+    Ok(())
+}
+
+fn validate_thumbnail_dimensions(width: u32, height: u32) -> Result<(), ThumbnailFailure> {
+    let pixels = u64::from(width).saturating_mul(u64::from(height));
+    if width == 0
+        || height == 0
+        || width > MAX_THUMBNAIL_WIDTH
+        || height > MAX_THUMBNAIL_HEIGHT
+        || pixels > MAX_THUMBNAIL_PIXELS
+    {
+        return Err(ThumbnailFailure::ProbeFailed);
+    }
+    Ok(())
+}
+
+fn thumbnail_resize_bounds(width: u32, height: u32) -> (u32, u32) {
+    (
+        width.min(MAX_THUMBNAIL_WIDTH),
+        height.min(MAX_THUMBNAIL_HEIGHT),
+    )
+}
+
+fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> Result<bool, ThumbnailFailure> {
     let Ok(reader) = image::ImageReader::open(src) else {
-        return false;
+        return Ok(false);
     };
     let Ok(reader) = reader.with_guessed_format() else {
-        return false;
+        return Ok(false);
     };
+    let Ok((width, height)) = reader.into_dimensions() else {
+        return Ok(false);
+    };
+    validate_image_dimensions(width, height)?;
+
+    let Ok(reader) = image::ImageReader::open(src) else {
+        return Ok(false);
+    };
+    let Ok(mut reader) = reader.with_guessed_format() else {
+        return Ok(false);
+    };
+    let mut limits = image::Limits::default();
+    limits.max_image_width = Some(MAX_IMAGE_DIMENSION);
+    limits.max_image_height = Some(MAX_IMAGE_DIMENSION);
+    limits.max_alloc = Some(MAX_IMAGE_DECODE_BYTES);
+    reader.limits(limits);
     let Ok(img) = reader.decode() else {
-        return false;
+        return Ok(false);
     };
     let width = img.width();
     let height = img.height();
-    if width == 0 || height == 0 {
-        return false;
-    }
-    let target_width = 400u32;
-    let target_height = ((height as f64) * (target_width as f64 / width as f64))
-        .round()
-        .max(1.0) as u32;
+    validate_image_dimensions(width, height)?;
+    let (target_width, target_height) = thumbnail_resize_bounds(width, height);
     let resized = img.resize(
         target_width,
         target_height,
         image::imageops::FilterType::Lanczos3,
     );
-    resized
+    validate_thumbnail_dimensions(resized.width(), resized.height())?;
+    Ok(resized
         .save_with_format(dst, image::ImageFormat::WebP)
         .is_ok()
-        && dst.exists()
+        && dst.exists())
 }
 
 fn imagemagick_first_frame_source(src: &str) -> String {
     format!("{src}[0]")
 }
 
-fn generate_image_thumbnail(src: &str, dst: &Path) -> bool {
-    if generate_image_thumbnail_rust(src, dst) {
-        return true;
+fn generate_image_thumbnail(src: &str, dst: &Path) -> Result<(), ThumbnailFailure> {
+    if generate_image_thumbnail_rust(src, dst)? {
+        return Ok(());
     }
     let first_frame_source = imagemagick_first_frame_source(src);
     for program in &["magick", "convert"] {
         if !command_exists(program) {
             continue;
         }
-        let ok = Command::new(program)
+        let mut command = Command::new(program);
+        command
             .arg(&first_frame_source)
-            .args(["-resize", "400x", "-quality", "80", "-auto-orient"])
-            .arg(dst)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            return true;
+            .args(["-resize", "400x400>", "-quality", "80", "-auto-orient"])
+            .arg(dst);
+        if command_succeeded(
+            &mut command,
+            THUMBNAIL_COMMAND_TIMEOUT,
+            "ImageMagick thumbnail",
+        ) {
+            return Ok(());
         }
     }
-    false
+    Err(ThumbnailFailure::ProbeFailed)
 }
 
 /// Generate a video thumbnail using multi-point frame selection.
@@ -880,38 +1186,43 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
         for &ts in &candidates {
             let tmp = dst.with_extension("tmp.jpg");
             let _ = std::fs::remove_file(&tmp);
-            let ok = Command::new("ffmpegthumbnailer")
-                .args(["-i", src, "-o"])
-                .arg(&tmp)
-                .args(["-t", &format!("{}", ts as u64), "-s", "400", "-q", "8"])
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status()
-                .map(|s| s.success())
-                .unwrap_or(false);
+            let mut thumbnailer = Command::new("ffmpegthumbnailer");
+            thumbnailer.args(["-i", src, "-o"]).arg(&tmp).args([
+                "-t",
+                &format!("{}", ts as u64),
+                "-s",
+                "0",
+                "-q",
+                "8",
+            ]);
+            let ok = command_succeeded(
+                &mut thumbnailer,
+                THUMBNAIL_COMMAND_TIMEOUT,
+                "ffmpegthumbnailer GUI thumbnail",
+            );
             if ok && tmp.exists() {
                 // Convert to 400px webp.
                 let _ = std::fs::remove_file(dst);
-                let ok = Command::new("ffmpeg")
-                    .args([
-                        "-hide_banner",
-                        "-loglevel",
-                        "error",
-                        "-nostats",
-                        "-y",
-                        "-i",
-                        tmp.to_str().unwrap_or(""),
-                        "-vf",
-                        "scale=400:-1:flags=lanczos",
-                        "-quality",
-                        "80",
-                        dst.to_str().unwrap_or(""),
-                    ])
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false);
+                let mut ffmpeg = Command::new("ffmpeg");
+                ffmpeg.args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-nostats",
+                    "-y",
+                    "-i",
+                    tmp.to_str().unwrap_or(""),
+                    "-vf",
+                    FFMPEG_THUMBNAIL_SCALE_FILTER,
+                    "-quality",
+                    "80",
+                    dst.to_str().unwrap_or(""),
+                ]);
+                let ok = command_succeeded(
+                    &mut ffmpeg,
+                    THUMBNAIL_COMMAND_TIMEOUT,
+                    "ffmpeg GUI thumbnail conversion",
+                );
                 let _ = std::fs::remove_file(&tmp);
                 if ok && dst.exists() && frame_has_content(dst) {
                     return true;
@@ -925,41 +1236,8 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
     // Fallback: ffmpeg multi-point with scale filter.
     for &ts in &candidates {
         let _ = std::fs::remove_file(dst);
-        let ok = Command::new("ffmpeg")
-            .args([
-                "-hide_banner",
-                "-loglevel",
-                "error",
-                "-nostats",
-                "-y",
-                "-ss",
-                &format!("{:.1}", ts),
-                "-i",
-                src,
-                "-frames:v",
-                "1",
-                "-vf",
-                "scale=400:-1:flags=lanczos",
-                "-quality",
-                "80",
-                dst.to_str().unwrap_or(""),
-            ])
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok && dst.exists() && frame_has_content(dst) {
-            return true;
-        }
-        let _ = std::fs::remove_file(dst);
-    }
-
-    // Last resort: just pick the middle frame regardless of content.
-    let ts = duration * 0.5;
-    let _ = std::fs::remove_file(dst);
-    let ok = Command::new("ffmpeg")
-        .args([
+        let mut ffmpeg = Command::new("ffmpeg");
+        ffmpeg.args([
             "-hide_banner",
             "-loglevel",
             "error",
@@ -972,21 +1250,55 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
             "-frames:v",
             "1",
             "-vf",
-            "scale=400:-1:flags=lanczos",
+            FFMPEG_THUMBNAIL_SCALE_FILTER,
             "-quality",
             "80",
             dst.to_str().unwrap_or(""),
-        ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
+        ]);
+        let ok = command_succeeded(
+            &mut ffmpeg,
+            THUMBNAIL_COMMAND_TIMEOUT,
+            "ffmpeg GUI thumbnail",
+        );
+        if ok && dst.exists() && frame_has_content(dst) {
+            return true;
+        }
+        let _ = std::fs::remove_file(dst);
+    }
+
+    // Last resort: just pick the middle frame regardless of content.
+    let ts = duration * 0.5;
+    let _ = std::fs::remove_file(dst);
+    let mut ffmpeg = Command::new("ffmpeg");
+    ffmpeg.args([
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-nostats",
+        "-y",
+        "-ss",
+        &format!("{:.1}", ts),
+        "-i",
+        src,
+        "-frames:v",
+        "1",
+        "-vf",
+        FFMPEG_THUMBNAIL_SCALE_FILTER,
+        "-quality",
+        "80",
+        dst.to_str().unwrap_or(""),
+    ]);
+    let ok = command_succeeded(
+        &mut ffmpeg,
+        THUMBNAIL_COMMAND_TIMEOUT,
+        "ffmpeg GUI fallback thumbnail",
+    );
     ok && dst.exists()
 }
 
 fn get_video_duration(path: &str) -> Option<f64> {
-    let out = Command::new("ffprobe")
+    let mut ffprobe = Command::new("ffprobe");
+    ffprobe
         .args([
             "-v",
             "quiet",
@@ -996,9 +1308,8 @@ fn get_video_duration(path: &str) -> Option<f64> {
             "csv=p=0",
         ])
         .arg("--")
-        .arg(path)
-        .output()
-        .ok()?;
+        .arg(path);
+    let out = command_output(&mut ffprobe, METADATA_COMMAND_TIMEOUT, "ffprobe duration")?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     s.parse().ok()
 }
@@ -1033,6 +1344,174 @@ fn frame_has_content(path: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deadline_runner_times_out_kills_group_and_reaps_child() {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("child.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("echo $$ > \"$1\"; sleep 30")
+            .arg("deadline-test")
+            .arg(&pid_file);
+
+        let started = Instant::now();
+        let result = run_command_with_deadline(&mut command, Duration::from_millis(100));
+
+        assert_eq!(result, Err(DeadlineCommandError::TimedOut));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "timeout path exceeded its bounded drain grace"
+        );
+        let pid = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse::<u32>()
+            .unwrap();
+        assert!(
+            !Path::new(&format!("/proc/{pid}")).exists(),
+            "timed-out direct child was not reaped"
+        );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn deadline_runner_does_not_wait_for_detached_pipe_holder() {
+        if which::which("setsid").is_err() {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("detached.pid");
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("setsid sh -c 'echo $$ > \"$1\"; sleep 30' detached \"$1\" & exit 0")
+            .arg("deadline-test")
+            .arg(&pid_file);
+
+        let started = Instant::now();
+        let result = run_command_with_deadline(&mut command, Duration::from_secs(2)).unwrap();
+
+        assert!(result.success);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "escaped descendant kept the drain path blocked"
+        );
+
+        let mut detached_pid = None;
+        for _ in 0..50 {
+            detached_pid = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|value| value.trim().parse::<i32>().ok());
+            if detached_pid.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let detached_pid = detached_pid.expect("detached descendant should report its pid");
+        // SAFETY: the test-created process is a session/process-group leader.
+        unsafe {
+            libc::kill(-detached_pid, libc::SIGKILL);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deadline_runner_continuously_drains_and_bounds_large_output() {
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("head -c 1048576 /dev/zero; head -c 1048576 /dev/zero >&2");
+
+        let output = run_command_with_deadline(&mut command, Duration::from_secs(2)).unwrap();
+
+        assert!(output.success);
+        assert_eq!(output.stdout.len(), COMMAND_OUTPUT_CAP);
+        assert_eq!(output.stderr.len(), COMMAND_OUTPUT_CAP);
+    }
+
+    #[test]
+    fn image_dimension_limits_cover_each_axis_and_total_pixels() {
+        assert_eq!(
+            validate_image_dimensions(MAX_IMAGE_DIMENSION + 1, 1),
+            Err(ThumbnailFailure::ImageTooLarge)
+        );
+        assert_eq!(
+            validate_image_dimensions(1, MAX_IMAGE_DIMENSION + 1),
+            Err(ThumbnailFailure::ImageTooLarge)
+        );
+        assert_eq!(
+            validate_image_dimensions(8_193, 8_193),
+            Err(ThumbnailFailure::ImageTooLarge)
+        );
+        assert_eq!(validate_image_dimensions(8_192, 8_192), Ok(()));
+    }
+
+    #[test]
+    fn thumbnail_resize_bounds_never_upscale_or_exceed_output_limits() {
+        assert_eq!(thumbnail_resize_bounds(16, 9), (16, 9));
+        assert_eq!(
+            thumbnail_resize_bounds(1, MAX_IMAGE_DIMENSION),
+            (1, MAX_THUMBNAIL_HEIGHT)
+        );
+        assert_eq!(thumbnail_resize_bounds(800, 200), (400, 200));
+    }
+
+    #[test]
+    fn one_by_max_height_image_generates_a_bounded_thumbnail() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("tall.png");
+        image::RgbImage::from_pixel(1, MAX_IMAGE_DIMENSION, image::Rgb([120, 80, 40]))
+            .save(&image_path)
+            .unwrap();
+
+        let result = thumbnail_for(cache.path(), image_path.to_str().unwrap());
+        let thumbnail = result.thumbnail.expect("bounded thumbnail");
+        let decoded = image::open(thumbnail).unwrap();
+
+        assert_eq!((decoded.width(), decoded.height()), (1, 400));
+    }
+
+    #[test]
+    fn oversized_image_header_is_rejected_and_failure_is_cached() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("oversized.bmp");
+        image::RgbImage::from_pixel(1, 1, image::Rgb([1, 2, 3]))
+            .save_with_format(&image_path, image::ImageFormat::Bmp)
+            .unwrap();
+        let mut bytes = std::fs::read(&image_path).unwrap();
+        bytes[18..22].copy_from_slice(&(MAX_IMAGE_DIMENSION + 1).to_le_bytes());
+        std::fs::write(&image_path, bytes).unwrap();
+
+        let first = thumbnail_for_with_failure_ttl(
+            cache.path(),
+            image_path.to_str().unwrap(),
+            DEFAULT_FAILURE_TTL_SECS,
+        );
+
+        assert_eq!(first.failure_reason, Some(ThumbnailFailure::ImageTooLarge));
+        assert_eq!(
+            first.error.as_deref(),
+            Some("thumbnail generation failed: image_too_large")
+        );
+        assert_eq!(thumbnail_cache_info(cache.path()).failure_entries, 1);
+
+        let second = thumbnail_for_with_failure_ttl(
+            cache.path(),
+            image_path.to_str().unwrap(),
+            DEFAULT_FAILURE_TTL_SECS,
+        );
+        assert_eq!(second.failure_reason, Some(ThumbnailFailure::ImageTooLarge));
+        assert_eq!(
+            second.error.as_deref(),
+            Some("thumbnail generation skipped: cached image_too_large")
+        );
+    }
 
     #[test]
     fn cache_key_is_deterministic() {
@@ -1261,7 +1740,14 @@ mod tests {
             "first call should generate thumbnail"
         );
         assert!(!first.cache_hit);
-        assert!(std::path::Path::new(first.thumbnail.as_ref().unwrap()).exists());
+        let thumbnail = std::path::Path::new(first.thumbnail.as_ref().unwrap());
+        assert!(thumbnail.exists());
+        let decoded = image::open(thumbnail).unwrap();
+        assert_eq!(
+            (decoded.width(), decoded.height()),
+            (16, 9),
+            "small inputs must not be upscaled"
+        );
 
         let second = thumbnail_for(cache.path(), image_path.to_str().unwrap());
         assert!(
@@ -1269,6 +1755,61 @@ mod tests {
             "second call should return cached thumbnail"
         );
         assert!(second.cache_hit);
+    }
+
+    #[test]
+    fn concurrent_same_key_generation_publishes_one_valid_thumbnail() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("concurrent.png");
+        image::RgbImage::from_pixel(800, 800, image::Rgb([20, 120, 220]))
+            .save(&image_path)
+            .unwrap();
+        let cache_path = Arc::new(cache.path().to_path_buf());
+        let image_path = Arc::new(image_path);
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+
+        let handles = (0..8)
+            .map(|_| {
+                let cache_path = Arc::clone(&cache_path);
+                let image_path = Arc::clone(&image_path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    thumbnail_for(&cache_path, image_path.to_str().unwrap())
+                })
+            })
+            .collect::<Vec<_>>();
+        let results = handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect::<Vec<_>>();
+
+        let published = results[0].thumbnail.as_ref().expect("thumbnail");
+        assert!(results
+            .iter()
+            .all(|result| result.thumbnail.as_deref() == Some(published.as_str())));
+        validate_generated_thumbnail(Path::new(published)).unwrap();
+
+        let root_files = std::fs::read_dir(cache.path())
+            .unwrap()
+            .flatten()
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            root_files
+                .iter()
+                .filter(|name| !name.starts_with('.') && name.ends_with(".webp"))
+                .count(),
+            1
+        );
+        assert!(
+            root_files
+                .iter()
+                .all(|name| !name.starts_with('.') || !name.ends_with(".tmp.webp")),
+            "all producer-owned temporary files must be removed"
+        );
     }
 
     #[test]

@@ -58,6 +58,7 @@ fn nearest_rank_p95(samples: &mut [Duration]) -> Duration {
 }
 
 #[test]
+#[ignore = "wall-clock performance gate; run with `cargo run -p xtask -- verify perf`"]
 fn ten_thousand_wallpaper_browser_cold_p95_is_at_most_500ms() {
     let (_temp, cd) = fixture();
     let mut samples = Vec::new();

@@ -59,9 +59,9 @@ fn acquire_lock_with_deadline(
     let started = Instant::now();
     loop {
         let result: Result<(), std::io::Error> = if shared {
-            file.try_lock_shared().map_err(|e| e.into())
+            FileExt::try_lock_shared(file)
         } else {
-            file.try_lock_exclusive()
+            FileExt::try_lock_exclusive(file)
         };
         match result {
             Ok(()) => return Ok(()),
@@ -490,7 +490,7 @@ mod tests {
             "test_shared_lock",
         )
         .expect("shared lock on unheld file must succeed immediately");
-        file.unlock().unwrap();
+        FileExt::unlock(&file).unwrap();
     }
 
     #[test]

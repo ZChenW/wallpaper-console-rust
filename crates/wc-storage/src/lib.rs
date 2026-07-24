@@ -9,6 +9,7 @@ pub mod we_compat;
 pub use sqlite::{SourceAvailability, SourceKind, SourceRecord};
 pub(crate) use sqlite_error::sqlite_err;
 
+use rusqlite::OptionalExtension;
 use wc_config::ConfigDirExt;
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
@@ -161,11 +162,11 @@ impl StorageApi {
             sqlite::try_ensure_sqlite_db(&self.cd)?;
         }
         let conn = sqlite::open_runtime_connection(&self.cd)?;
-        Ok(conn
-            .query_row("SELECT value FROM state WHERE key='current'", [], |row| {
-                row.get(0)
-            })
-            .ok())
+        conn.query_row("SELECT value FROM state WHERE key='current'", [], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(sqlite_err)
     }
 
     pub fn last_backend_read(&self) -> Result<Option<String>, WcError> {
@@ -173,13 +174,13 @@ impl StorageApi {
             sqlite::try_ensure_sqlite_db(&self.cd)?;
         }
         let conn = sqlite::open_runtime_connection(&self.cd)?;
-        Ok(conn
-            .query_row(
-                "SELECT value FROM state WHERE key='last_backend'",
-                [],
-                |row| row.get(0),
-            )
-            .ok())
+        conn.query_row(
+            "SELECT value FROM state WHERE key='last_backend'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(sqlite_err)
     }
 
     // ── Writes (always SQLite) ────────────────────────────────────────
@@ -253,10 +254,16 @@ impl StorageApi {
         sqlite::sqlite_state_write(&self.cd, "last_backend", backend)
     }
 
+    pub fn runtime_state_write_pair(
+        &self,
+        current: &str,
+        last_backend: &str,
+    ) -> Result<(), WcError> {
+        sqlite::sqlite_runtime_state_write_pair(&self.cd, current, last_backend)
+    }
+
     pub fn runtime_state_clear(&self) -> Result<(), WcError> {
-        sqlite::sqlite_state_delete(&self.cd, "current")?;
-        sqlite::sqlite_state_delete(&self.cd, "last_backend")?;
-        Ok(())
+        sqlite::sqlite_runtime_state_clear(&self.cd)
     }
 
     // ── Per-display wallpaper state ───────────────────────────────────
@@ -302,6 +309,16 @@ impl StorageApi {
         before_commit: &mut dyn FnMut() -> Result<(), WcError>,
     ) -> Result<(), WcError> {
         sqlite::display_state_replace_all_cd_with_seam(&self.cd, rows, before_commit)
+    }
+
+    /// Atomically publish reconciled display state and retire the incompatible
+    /// legacy single-wallpaper state.
+    pub fn display_state_replace_all_and_clear_legacy(
+        &self,
+        rows: &[(sqlite::DisplayStateTarget, String, String)],
+        before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+    ) -> Result<(), WcError> {
+        sqlite::display_state_replace_all_and_clear_legacy_cd(&self.cd, rows, before_commit)
     }
 
     /// Atomically commit All Displays display_state (plus retained disconnected
@@ -654,6 +671,33 @@ mod tests {
             history_rows(&storage.cd),
             vec![("/walls/current.jpg".to_string(), "awww".to_string())]
         );
+    }
+
+    #[test]
+    fn runtime_state_reads_propagate_invalid_sqlite_value_types() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = StorageApi::new(cd);
+        let conn = sqlite::open_runtime_connection(&storage.cd).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
+            [rusqlite::types::Value::Blob(vec![1, 2, 3])],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
+            [rusqlite::types::Value::Blob(vec![4, 5, 6])],
+        )
+        .unwrap();
+        drop(conn);
+
+        let current_error = storage.current_read().unwrap_err();
+        let backend_error = storage.last_backend_read().unwrap_err();
+        assert!(current_error.to_string().contains("Invalid column type"));
+        assert!(backend_error.to_string().contains("Invalid column type"));
     }
 
     #[test]

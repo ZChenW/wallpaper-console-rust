@@ -1420,6 +1420,79 @@ test('runtime reconciliation confirms current state and clears it after renderer
   await expect(page.locator('.wallpaper-card.current')).toHaveCount(0);
 });
 
+test('visibility resume invalidates stale Current until fresh runtime evidence arrives', async ({ page }) => {
+  await openApp(page);
+  await waitForGrid(page);
+  await expect(page.locator('.single-page-statusbar__current'))
+    .toHaveText('Current: wallpaper-001.jpg');
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    control?.holdRuntimeWallpaperObservations();
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'hidden',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+    control?.setRuntimeWallpaperObservations([
+      {
+        output: 'eDP-1',
+        wallpaperPath: '/mock/path/wallpaper-002.jpg',
+        status: 'confirmed',
+      },
+      {
+        output: 'HDMI-A-1',
+        wallpaperPath: '/mock/path/wallpaper-002.jpg',
+        status: 'confirmed',
+      },
+    ]);
+    Object.defineProperty(document, 'visibilityState', {
+      configurable: true,
+      value: 'visible',
+    });
+    document.dispatchEvent(new Event('visibilitychange'));
+  });
+
+  await expect(page.locator('.single-page-statusbar__current'))
+    .toHaveText('Current: not verified');
+  await expect(page.locator('.wallpaper-card.current')).toHaveCount(0);
+
+  await page.evaluate(() => window.__mockControl?.releaseRuntimeWallpaperObservations());
+  await expect(page.locator('.single-page-statusbar__current'))
+    .toHaveText('Current: wallpaper-002.jpg');
+});
+
+test('successful apply publishes Current evidence before runtime reconciliation', async ({ page }) => {
+  await openApp(page);
+  await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await waitForGrid(page);
+
+  await page.evaluate(() => window.__mockControl?.holdRuntimeWallpaperObservations());
+  const card = page.locator('.wallpaper-card').filter({
+    hasNot: page.locator('.wallpaper-card__primary[aria-current="true"]'),
+  }).first();
+  const path = await card.getAttribute('data-wallpaper-path');
+  expect(path).toBeTruthy();
+
+  await card.click();
+  await expect.poll(() => lastApplyRequest(page)).toMatchObject({ path: path! });
+  await expect(page.locator('.single-page-statusbar__current')).toHaveText(
+    `Current: ${path!.split('/').at(-1)}`,
+  );
+
+  await page.evaluate(() => {
+    const control = window.__mockControl;
+    control?.setRuntimeWallpaperObservations([
+      { output: 'eDP-1', wallpaperPath: null, status: 'unknown', reason: 'renderer stopped' },
+      { output: 'HDMI-A-1', wallpaperPath: null, status: 'unknown', reason: 'renderer stopped' },
+    ]);
+    control?.releaseRuntimeWallpaperObservations();
+  });
+  await expect(page.locator('.single-page-statusbar__current')).toHaveText(
+    'Current: not verified',
+  );
+});
+
 test('search, source, type, favorites, and sort compose in the unified grid', async ({ page }) => {
   await openApp(page);
   await waitForGrid(page);

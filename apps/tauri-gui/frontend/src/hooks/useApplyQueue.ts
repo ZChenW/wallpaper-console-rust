@@ -1,11 +1,19 @@
 import { useRef, useState } from 'react';
-import { api } from '../api/bridge';
-import type { ApplyResultDTO } from '../api/bridge';
+import type {
+  ApplyRequestDTO,
+  ApplyResultDTO,
+  CommandResult,
+  TargetedApplyRequestDTO,
+} from '../api/bridge';
 import { commandErrorFeedback } from '../api/feedback';
 import type { CommandFeedback } from '../api/feedback';
 import { recordMetric } from '../perf/metrics';
 import { ApplyQueueController, createApplyQueueHandlers } from './applyQueueController';
-import type { AppliedRequest, ApplyQueueState, ApplyTransport } from './applyQueueController';
+import type {
+  AppliedRequest,
+  ApplyQueueState,
+  ApplyTransport,
+} from './applyQueueController';
 import { createSubscribeApplyStage } from './subscribeApplyStage';
 
 export type {
@@ -17,42 +25,53 @@ export type {
   ApplyTransport,
 } from './applyQueueController';
 
+export interface ApplyQueueApi {
+  applyAction(request: ApplyRequestDTO): Promise<CommandResult>;
+  applyToDisplay(request: TargetedApplyRequestDTO): Promise<CommandResult>;
+}
+
 export function useApplyQueue(args: {
+  api: ApplyQueueApi;
   refreshStatus: () => Promise<void>;
   setFeedbackWithAutoDismiss: (feedback: CommandFeedback) => void;
-  invalidateLibrary: () => void;
+  reloadLibrary: () => Promise<unknown>;
   onApplied?: (
     request: AppliedRequest,
     result: ApplyResultDTO | undefined,
     transport: ApplyTransport,
   ) => void;
 }) {
-  const [applying, setApplying] = useState(false);
   const [queueState, setQueueState] = useState<ApplyQueueState>({
     applying: false,
     activePath: undefined,
     pendingPath: undefined,
   });
-  const onAppliedRef = useRef(args.onApplied);
-  onAppliedRef.current = args.onApplied;
+  const argsRef = useRef(args);
+  argsRef.current = args;
   const controllerRef = useRef<ApplyQueueController | null>(null);
   const handlersRef = useRef<ReturnType<typeof createApplyQueueHandlers> | null>(null);
 
   if (!controllerRef.current) {
     controllerRef.current = new ApplyQueueController(
       {
-        applyAction: api.applyAction,
-        applyToDisplay: api.applyToDisplay,
-        refreshStatus: args.refreshStatus,
-        invalidateLibrary: args.invalidateLibrary,
-        setFeedback: args.setFeedbackWithAutoDismiss,
+        applyAction: (request) => argsRef.current.api.applyAction(request),
+        applyToDisplay: (request) => argsRef.current.api.applyToDisplay(request),
+        refreshStatus: async () => {
+          await argsRef.current.refreshStatus();
+        },
+        invalidateLibrary: () => {
+          void argsRef.current.reloadLibrary();
+        },
+        setFeedback: (feedback) => {
+          argsRef.current.setFeedbackWithAutoDismiss(feedback);
+        },
         makeErrorFeedback: (label, error) => commandErrorFeedback(label, error),
         recordMetric,
         subscribeApplyStage: createSubscribeApplyStage(),
         onApplied: (request, result, transport) =>
-          onAppliedRef.current?.(request, result, transport),
+          argsRef.current.onApplied?.(request, result, transport),
       },
-      setApplying,
+      () => {},
       setQueueState,
     );
   }
@@ -62,7 +81,7 @@ export function useApplyQueue(args: {
   }
 
   return {
-    applying,
+    applying: queueState.applying,
     activePath: queueState.activePath,
     pendingPath: queueState.pendingPath,
     ...handlersRef.current,

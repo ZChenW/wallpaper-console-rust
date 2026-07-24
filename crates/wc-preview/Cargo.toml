@@ -2,12 +2,15 @@
 name = "wc-preview"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 wc-core.workspace = true
 wc-config.workspace = true
 anyhow.workspace = true
 which.workspace = true
+libc.workspace = true
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
 
 [dev-dependencies]

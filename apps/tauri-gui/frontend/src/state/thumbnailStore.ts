@@ -3,8 +3,10 @@ import { ThumbnailRequestQueue, type EnqueueOptions } from '../hooks/thumbnailQu
 import { recordMetric } from '../perf/metrics.ts';
 
 export const MAX_REVEAL_PER_FRAME = 12;
+export const DEFAULT_THUMBNAIL_CACHE_LIMIT = 256;
 
 export class ThumbnailStore {
+  private readonly cacheLimit: number;
   private cache = new Map<string, string>();
   private failures = new Map<string, string>();
   private listeners = new Map<string, Set<() => void>>();
@@ -17,24 +19,45 @@ export class ThumbnailStore {
   private notifyScheduled = false;
   private revealPaused = false;
 
-  constructor(concurrency: number, load: (path: string) => Promise<ThumbnailDTO>) {
+  constructor(
+    concurrency: number,
+    load: (path: string) => Promise<ThumbnailDTO>,
+    cacheLimit = DEFAULT_THUMBNAIL_CACHE_LIMIT,
+  ) {
+    this.cacheLimit = Number.isFinite(cacheLimit) && cacheLimit > 0
+      ? Math.max(1, Math.floor(cacheLimit))
+      : DEFAULT_THUMBNAIL_CACHE_LIMIT;
     this.queue = new ThumbnailRequestQueue({
       concurrency,
       load,
       onThumbnail: (path, thumbnail) => {
+        // Refresh insertion order so reads and replacements implement a small
+        // LRU instead of retaining base64/file URLs for the entire session.
+        this.cache.delete(path);
         this.cache.set(path, thumbnail);
         this.failures.delete(path);
+        this.evictUnusedCacheEntries();
         this.scheduleNotify(path);
       },
       onFailure: (path, reason) => {
+        // A completed refresh failure is authoritative. Keeping the previous
+        // media here would make a changed or deleted project look healthy
+        // indefinitely, so replace it with the explicit failure state.
+        this.cache.delete(path);
+        this.failures.delete(path);
         this.failures.set(path, reason ?? 'thumbnail_failed');
+        this.evictUnusedFailures();
         this.scheduleNotify(path);
       },
     });
   }
 
   get(path: string): string | undefined {
-    return this.cache.get(path);
+    const thumbnail = this.cache.get(path);
+    if (thumbnail === undefined) return undefined;
+    this.cache.delete(path);
+    this.cache.set(path, thumbnail);
+    return thumbnail;
   }
 
   getFailure(path: string): string | undefined {
@@ -60,6 +83,8 @@ export class ThumbnailStore {
       listeners.delete(cb);
       if (listeners.size === 0 && this.listeners.get(path) === listeners) {
         this.listeners.delete(path);
+        this.evictUnusedCacheEntries();
+        this.evictUnusedFailures();
       }
     };
   }
@@ -106,6 +131,9 @@ export class ThumbnailStore {
   refreshSubscribed(): void {
     const listenerPaths = Array.from(this.listeners.keys());
     this.queue.reset();
+    for (const path of this.cache.keys()) {
+      if (!this.listeners.has(path)) this.cache.delete(path);
+    }
     this.failures.clear();
     if (listenerPaths.length > 0) {
       this.queue.enqueue(listenerPaths, { priority: 'front' });
@@ -144,6 +172,31 @@ export class ThumbnailStore {
     }
     this.pendingNotifyPaths.add(path);
     this.scheduleNotifyFlush();
+  }
+
+  private evictUnusedCacheEntries(): void {
+    while (this.cache.size > this.cacheLimit) {
+      const candidate = this.firstUnsubscribedPath(this.cache.keys());
+      if (candidate === null) return;
+      this.cache.delete(candidate);
+      this.queue.forget([candidate]);
+      this.scheduleNotify(candidate);
+    }
+  }
+
+  private evictUnusedFailures(): void {
+    while (this.failures.size > this.cacheLimit) {
+      const candidate = this.firstUnsubscribedPath(this.failures.keys());
+      if (candidate === null) return;
+      this.failures.delete(candidate);
+    }
+  }
+
+  private firstUnsubscribedPath(paths: Iterable<string>): string | null {
+    for (const path of paths) {
+      if (!this.listeners.has(path)) return path;
+    }
+    return null;
   }
 
   private recordRevealPending(): void {

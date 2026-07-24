@@ -86,6 +86,26 @@ test('criteria stay pending until a page resolves for the current query key', ()
     isLibraryCriteriaPending('all|usable|false|', 'all|usable|false|'),
     false,
   );
+  assert.equal(
+    isLibraryCriteriaPending(
+      'all|usable|false|',
+      'all|usable|false|',
+      'new search',
+      '',
+    ),
+    true,
+    'raw search changes must block actions during the debounce window',
+  );
+  assert.equal(
+    isLibraryCriteriaPending(
+      'all|usable|false|',
+      'all|usable|false|',
+      '  same query  ',
+      'same query',
+    ),
+    false,
+    'normalization-only edits do not change the active query',
+  );
 });
 
 test('a random result becomes stale as soon as raw search text changes', () => {

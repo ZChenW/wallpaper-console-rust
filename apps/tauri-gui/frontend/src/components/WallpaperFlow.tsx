@@ -988,7 +988,9 @@ function WallpaperFlowReady({
                 {...presentation.attributes}
                 aria-current={current ? 'true' : undefined}
                 aria-label={`${row.index + 1}. ${displayName(entry)}`}
+                aria-posinset={row.index + 1}
                 aria-selected={selected}
+                aria-setsize={model.totalKnown && model.total !== null ? model.total : undefined}
                 className={presentation.className}
                 data-aspect={aspectClass(entry)}
                 data-index={row.index}

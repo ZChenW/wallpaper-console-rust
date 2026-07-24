@@ -286,7 +286,20 @@ fn apply_with_target_args(
     let _ = s.config_set("lwe_last_stderr", "");
     let _ = s.config_set("lwe_last_exit_status", "");
 
-    s.config_set(PID_CONFIG_KEY, &child.id().to_string())?;
+    publish_spawned_renderer(child, |pid| s.config_set(PID_CONFIG_KEY, &pid.to_string()))
+}
+
+fn publish_spawned_renderer(
+    child: std::process::Child,
+    persist_pid: impl FnOnce(u32) -> Result<(), WcError>,
+) -> Result<(), WcError> {
+    if let Err(error) = persist_pid(child.id()) {
+        crate::process_control::terminate_spawned_process_group(child);
+        return Err(WcError::Other(format!(
+            "linux-wallpaperengine started, but its PID could not be persisted; \
+             the untracked renderer was stopped: {error}"
+        )));
+    }
     // Detach a reaper so LWE exit (or PGID kill from stop) does not leave a zombie.
     crate::process_control::detach_and_reap_child(child, "wc-lwe-reaper");
     Ok(())
@@ -294,15 +307,28 @@ fn apply_with_target_args(
 
 pub fn stop(s: Option<&StorageApi>) {
     if let Some(s) = s {
-        let pid = s.config_get(PID_CONFIG_KEY, "");
-        if let Ok(pid) = pid.parse::<i32>() {
-            if crate::process_control::pid_looks_like_lwe(pid) {
-                crate::process_control::kill_lwe_process_group(pid);
-            }
-            let _ = s.config_set(PID_CONFIG_KEY, "");
-        }
+        stop_persisted_renderer(s);
     }
     stop_tracked_processes();
+}
+
+fn stop_persisted_renderer(s: &StorageApi) {
+    let raw_pid = s.config_get(PID_CONFIG_KEY, "");
+    if !raw_pid.trim().is_empty() {
+        match raw_pid.trim().parse::<i32>() {
+            Ok(pid) if pid > 0 && crate::process_control::pid_looks_like_lwe(pid) => {
+                crate::process_control::kill_lwe_process_group(pid);
+            }
+            Ok(_) => {}
+            Err(error) => {
+                log::warn!(
+                    "discarding malformed linux-wallpaperengine PID {:?}: {error}",
+                    raw_pid
+                );
+            }
+        }
+        let _ = s.config_set(PID_CONFIG_KEY, "");
+    }
 }
 
 /// Kill any residual linux-wallpaperengine processes owned by current user.
@@ -675,5 +701,44 @@ mod tests {
         let project = project_from_path(&scene.to_string_lossy()).unwrap();
         let err = apply_to_outputs(&s, project, &[]).unwrap_err();
         assert!(err.to_string().contains("at least one output"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn pid_persist_failure_stops_and_reaps_spawned_renderer() {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0);
+        let child = command.spawn().unwrap();
+        let pid = child.id();
+
+        let error = publish_spawned_renderer(child, |_| {
+            Err(WcError::Other("injected PID write failure".into()))
+        })
+        .unwrap_err();
+
+        assert!(error.to_string().contains("PID could not be persisted"));
+        assert!(error.to_string().contains("untracked renderer was stopped"));
+        assert!(
+            !Path::new("/proc").join(pid.to_string()).exists(),
+            "spawned renderer must be synchronously reaped after PID persistence failure"
+        );
+    }
+
+    #[test]
+    fn malformed_persisted_pid_is_cleared() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("config"),
+        };
+        cd.init().unwrap();
+        wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
+        let s = StorageApi::new(cd);
+        s.config_set(PID_CONFIG_KEY, "not-a-pid").unwrap();
+
+        stop_persisted_renderer(&s);
+
+        assert_eq!(s.config_get(PID_CONFIG_KEY, "missing"), "");
     }
 }

@@ -3,9 +3,11 @@ import test from 'node:test';
 
 import {
   SHELL_PREFERENCES_CONFIG_KEY,
+  ShellPreferencesSessionController,
   createShellPreferencesLoader,
   createShellPreferencesSaveQueue,
   loadShellPreferences,
+  mergeDegradedShellPreferences,
   resolveShellPreferencesUpdate,
   saveShellPreferences,
   type ShellPreferencesClient,
@@ -13,6 +15,7 @@ import {
 } from './useShellPreferences.ts';
 import {
   DEFAULT_SHELL_PREFERENCES,
+  serializeShellPreferences,
   type ShellPreferences,
 } from './shellPreferences.ts';
 
@@ -164,6 +167,159 @@ test('functional updates are normalized without performing persistence', () => {
   assert.equal(calls, 1);
   assert.deepEqual(next, preferences({ theme: 'dark' }));
   assert.equal('search' in next, false);
+});
+
+test('degraded preference merge keeps user edits and restores untouched persisted fields', () => {
+  const fallback = preferences();
+  const current = preferences({
+    theme: 'dark',
+    displayTarget: { kind: 'output', output: 'DP-1' },
+  });
+  const persisted = preferences({
+    theme: 'light',
+    cardSize: 'large',
+    favoritesOnly: true,
+    displayTarget: { kind: 'allDisplays' },
+  });
+
+  assert.deepEqual(
+    mergeDegradedShellPreferences(fallback, current, persisted),
+    preferences({
+      theme: 'dark',
+      cardSize: 'large',
+      favoritesOnly: true,
+      displayTarget: { kind: 'output', output: 'DP-1' },
+    }),
+  );
+});
+
+test('degraded preference merge preserves a touched field even when it returns to fallback', () => {
+  const fallback = preferences({ theme: 'system', cardSize: 'medium' });
+  const current = preferences({ theme: 'system', cardSize: 'medium' });
+  const persisted = preferences({ theme: 'light', cardSize: 'large' });
+
+  assert.deepEqual(
+    mergeDegradedShellPreferences(
+      fallback,
+      current,
+      persisted,
+      new Set(['theme']),
+    ),
+    preferences({ theme: 'system', cardSize: 'large' }),
+  );
+});
+
+test('preference session preserves same-tick user update after degraded retry merge', () => {
+  const session = new ShellPreferencesSessionController(preferences());
+  session.enterDegraded(preferences());
+  session.update((current) => ({ ...current, theme: 'dark' })); // user A
+
+  const accepted = session.acceptLoaded(preferences({
+    theme: 'light',
+    cardSize: 'large',
+  })); // retry disk B
+  const final = session.update((current) => ({
+    ...current,
+    theme: 'system',
+    favoritesOnly: true,
+  })); // same-tick user C, before any React commit
+
+  assert.equal(accepted.recoveredFromDegraded, true);
+  assert.deepEqual(accepted.preferences, preferences({
+    theme: 'dark',
+    cardSize: 'large',
+  }));
+  assert.deepEqual(final, preferences({
+    theme: 'system',
+    cardSize: 'large',
+    favoritesOnly: true,
+  }));
+  assert.deepEqual(session.current(), final, 'retry B cannot overwrite same-tick C');
+});
+
+test('preference session preserves edits made before the initial load settles', () => {
+  const session = new ShellPreferencesSessionController(preferences());
+  session.update((current) => ({
+    ...current,
+    favoritesOnly: true,
+    sort: 'nameAsc',
+  }));
+
+  const accepted = session.acceptLoaded(preferences({
+    theme: 'dark',
+    cardSize: 'large',
+  }));
+
+  assert.equal(accepted.recoveredFromDegraded, false);
+  assert.deepEqual(accepted.preferences, preferences({
+    favoritesOnly: true,
+    sort: 'nameAsc',
+    theme: 'dark',
+    cardSize: 'large',
+  }));
+});
+
+test('entering degraded mode does not discard edits made while the initial load was pending', () => {
+  const session = new ShellPreferencesSessionController(preferences());
+  session.update((current) => ({ ...current, favoritesOnly: true }));
+
+  const degraded = session.enterDegraded(preferences());
+  const recovered = session.acceptLoaded(preferences({
+    favoritesOnly: false,
+    theme: 'light',
+  }));
+
+  assert.equal(degraded.favoritesOnly, true);
+  assert.equal(recovered.recoveredFromDegraded, true);
+  assert.deepEqual(recovered.preferences, preferences({
+    favoritesOnly: true,
+    theme: 'light',
+  }));
+});
+
+test('loader timeout, degraded edit, retry, and same-tick edit keep the final controller state', async () => {
+  const disk = preferences({ theme: 'light', cardSize: 'large' });
+  let reads = 0;
+  const client: ShellPreferencesClient = {
+    configGet: () => {
+      reads += 1;
+      return reads === 1
+        ? new Promise(() => {})
+        : Promise.resolve(serializeShellPreferences(disk));
+    },
+    configSet: async () => ok,
+  };
+  const loader = createShellPreferencesLoader();
+  const session = new ShellPreferencesSessionController(preferences());
+
+  await new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error('loader sequence did not finish')), 250);
+    loader.load(client, {
+      loadTimeoutMs: 10,
+      retryDelayMs: 10,
+      onDefaults: () => {
+        session.enterDegraded(preferences());
+        session.update((current) => ({ ...current, theme: 'dark' })); // A
+      },
+      onSuccess: (loaded) => {
+        session.acceptLoaded(loaded); // merge retry disk B
+        session.update((current) => ({
+          ...current,
+          theme: 'system',
+          favoritesOnly: true,
+        })); // same tick C
+        clearTimeout(timeout);
+        resolve();
+      },
+    });
+  });
+
+  assert.equal(reads, 2);
+  assert.deepEqual(session.current(), preferences({
+    theme: 'system',
+    cardSize: 'large',
+    favoritesOnly: true,
+  }));
 });
 
 test('save queue starts writes serially so an older slow write cannot finish last', async () => {
@@ -487,13 +643,13 @@ test('loader default values are never auto-written back to storage', async () =>
 
 // ── Save-order guarantees: degraded → retry → user writes ────────────────
 
-test('preferences write order: user save A in degraded state then retry B ensures B last', async () => {
+test('preferences write order: degraded user save is followed by the rebased merge, not stale disk state', async () => {
   // Scenario:
   //   1. Load times out → defaults shown (degraded). Defaults NOT written.
   //   2. User changes to A — enqueued in save queue. A starts writing.
-  //   3. Retry succeeds with B — hook enqueues B after A.
-  //   4. A finishes → B starts → B finishes.
-  //   Assertion: B was the LAST write to storage.
+  //   3. Retry succeeds with disk B and rebases A onto it to produce C.
+  //   4. A finishes → C starts → C finishes.
+  //   Assertion: only the merged C follows A; stale B is never written.
   const writes: string[] = [];
   const pendingWrites: Array<(result: typeof ok) => void> = [];
 
@@ -515,34 +671,38 @@ test('preferences write order: user save A in degraded state then retry B ensure
   await nextTask();
   assert.deepEqual(writes, ['dark'], 'A must be the first write');
 
-  // Retry succeeds — hook calls saveQueue.enqueue(B)
-  const bPromise = queue.enqueue(preferences({ theme: 'light' }));
+  const disk = preferences({ theme: 'light', cardSize: 'large' });
+  const merged = mergeDegradedShellPreferences(
+    preferences(),
+    preferences({ theme: 'dark' }),
+    disk,
+  );
+  const mergedPromise = queue.enqueue(merged);
   await nextTask();
-  // B is queued but A is still in-flight — no new write yet
-  assert.deepEqual(writes, ['dark'], 'B must wait for A to finish');
+  assert.deepEqual(writes, ['dark'], 'merged preferences must wait for A to finish');
 
-  // Complete A → B should then start
+  // Complete A → merged snapshot should then start
   pendingWrites[0]!(ok);
   await aPromise;
   await nextTask();
-  assert.deepEqual(writes, ['dark', 'light'], 'B must start after A completes');
+  assert.deepEqual(writes, ['dark', 'dark'], 'merged snapshot must preserve the user theme');
 
-  // Complete B
+  // Complete merged snapshot
   pendingWrites[1]!(ok);
-  await bPromise;
+  await mergedPromise;
 
-  assert.deepEqual(writes, ['dark', 'light'],
-    'final writes must be [A, B] with B last');
+  assert.deepEqual(writes, ['dark', 'dark']);
+  assert.equal(merged.cardSize, 'large', 'untouched disk fields must survive the rebase');
   assert.equal(queue.latestError, null);
 });
 
-test('preferences write order: degraded A, retry B, user C ensures C is last', async () => {
+test('preferences write order: degraded A, retry-merged M, user C ensures C is last', async () => {
   // Scenario:
   //   1. Load times out → defaults (degraded).
   //   2. User changes to A — enqueue A (in-flight).
-  //   3. Retry succeeds with B — hook enqueues B after A.
-  //   4. User changes to C — hook effect enqueues C after B.
-  //   Assertion: final writes are [A, B, C] with C last.
+  //   3. Retry disk state is rebased with A into M; enqueue M after A.
+  //   4. User changes to C — hook effect enqueues C after M.
+  //   Assertion: final writes are [A, M, C] with C last.
   const writes: string[] = [];
   const pendingWrites: Array<(result: typeof ok) => void> = [];
 
@@ -564,34 +724,34 @@ test('preferences write order: degraded A, retry B, user C ensures C is last', a
   await nextTask();
   assert.deepEqual(writes, ['dark']);
 
-  // Retry loads B → enqueued by hook
-  const bPromise = queue.enqueue(preferences({ theme: 'light' }));
+  // Retry merge M preserves A's theme and adopts an untouched disk field.
+  const mergedPromise = queue.enqueue(preferences({ theme: 'dark', cardSize: 'large' }));
   await nextTask();
   // Only A is in-flight
   assert.deepEqual(writes, ['dark']);
 
-  // User changes to C → enqueued by hook effect
+  // User changes to C → enqueued by hook effect.
   const cPromise = queue.enqueue(preferences({ theme: 'system' }));
   await nextTask();
   assert.deepEqual(writes, ['dark']);
 
-  // Complete A → B starts
+  // Complete A → M starts
   pendingWrites[0]!(ok);
   await aPromise;
   await nextTask();
-  assert.deepEqual(writes, ['dark', 'light']);
+  assert.deepEqual(writes, ['dark', 'dark']);
 
-  // Complete B → C starts
+  // Complete M → C starts
   pendingWrites[1]!(ok);
-  await bPromise;
+  await mergedPromise;
   await nextTask();
-  assert.deepEqual(writes, ['dark', 'light', 'system']);
+  assert.deepEqual(writes, ['dark', 'dark', 'system']);
 
   // Complete C
   pendingWrites[2]!(ok);
   await cPromise;
 
-  assert.deepEqual(writes, ['dark', 'light', 'system'],
-    'final writes must be [A, B, C] with C last');
+  assert.deepEqual(writes, ['dark', 'dark', 'system'],
+    'final writes must be [A, M, C] with C last');
   assert.equal(queue.latestError, null);
 });

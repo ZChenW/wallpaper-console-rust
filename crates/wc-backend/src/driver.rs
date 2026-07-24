@@ -252,7 +252,7 @@ pub(crate) fn launch_mpvpaper(
         )));
     }
     runtime
-        .wait_for_mpvpaper_ready(previous_pids)
+        .wait_for_mpvpaper_ready(previous_pids, output, path)
         .map_err(MpvpaperApplyError::Ready)
 }
 
