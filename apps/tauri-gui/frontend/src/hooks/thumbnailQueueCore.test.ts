@@ -309,6 +309,42 @@ test('thumbnail queue keeps queuedPaths in sync when re-enqueueing forgotten in-
   await new Promise((resolve) => setTimeout(resolve, 30));
 });
 
+test('stale completion after reset cannot clear the replacement in-flight request', async () => {
+  let releaseOld: (() => void) | undefined;
+  let releaseFresh: (() => void) | undefined;
+  const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
+  const freshBlocked = new Promise<void>((resolve) => { releaseFresh = resolve; });
+  let callCount = 0;
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => {
+      callCount += 1;
+      if (callCount === 1) await oldBlocked;
+      if (callCount === 2) await freshBlocked;
+      return { path, cacheHit: false, thumbnail: `thumb:${path}:${callCount}` };
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['x']);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  queue.reset();
+  queue.enqueue(['x']);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(queue.stats().active, 1);
+
+  releaseOld?.();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(queue.stats().active, 1);
+
+  releaseFresh?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(queue.stats().active, 0);
+  assert.deepEqual(h.thumbnails, { x: 'thumb:x:2' });
+});
+
 test('thumbnail queue still emits when completions land in separate frames', async () => {
   const h = makeHandlers();
   let releaseFirst: (() => void) | undefined;

@@ -133,7 +133,7 @@ test('Flow rapid native scrolling settles the final large-screen center promptly
   const settled = page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]');
   await expect(settled).toBeVisible();
 
-  const elapsedMs = await page.locator('.flow-preview-stream').evaluate(async (stream) => {
+  const audit = await page.locator('.flow-preview-stream').evaluate(async (stream) => {
     const initialActiveId = stream.getAttribute('aria-activedescendant');
     if (!initialActiveId) throw new Error('Flow has no initial active descendant');
     const startedAt = performance.now();
@@ -144,7 +144,34 @@ test('Flow rapid native scrolling settles the final large-screen center promptly
     );
     stream.dispatchEvent(new Event('scroll'));
 
-    return new Promise<number>((resolve, reject) => {
+    await new Promise<void>((resolve) => requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve());
+    }));
+    const streamBounds = stream.getBoundingClientRect();
+    const streamCenter = streamBounds.top + streamBounds.height / 2;
+    const geometricItem = Array.from(
+      stream.querySelectorAll<HTMLElement>('.flow-preview-item'),
+    ).sort((left, right) => {
+      const leftBounds = left.getBoundingClientRect();
+      const rightBounds = right.getBoundingClientRect();
+      return Math.abs(leftBounds.top + leftBounds.height / 2 - streamCenter)
+        - Math.abs(rightBounds.top + rightBounds.height / 2 - streamCenter);
+    })[0];
+    const geometricOrdinal = geometricItem
+      ? Number(geometricItem.dataset.index) + 1
+      : null;
+    const railOrdinalText = document.querySelector<HTMLElement>(
+      '.flow-index-rail__item[data-centered] .flow-index-rail__ordinal',
+    )?.textContent;
+    const moving = {
+      geometricOrdinal,
+      railOrdinal: railOrdinalText === undefined ? null : Number(railOrdinalText),
+      visibleOrdinals: Array.from(
+        document.querySelectorAll<HTMLElement>('.flow-index-rail__ordinal'),
+      ).map((ordinal) => Number(ordinal.textContent)),
+    };
+
+    const elapsedMs = await new Promise<number>((resolve, reject) => {
       const sample = () => {
         const activeId = stream.getAttribute('aria-activedescendant');
         const activeItem = activeId ? document.getElementById(activeId) : null;
@@ -164,9 +191,13 @@ test('Flow rapid native scrolling settles the final large-screen center promptly
       };
       window.requestAnimationFrame(sample);
     });
+    return { elapsedMs, moving };
   });
 
-  expect(elapsedMs).toBeLessThanOrEqual(350);
+  expect(audit.moving.geometricOrdinal).not.toBeNull();
+  expect(audit.moving.railOrdinal).toBe(audit.moving.geometricOrdinal);
+  expect(audit.moving.visibleOrdinals).toContain(audit.moving.geometricOrdinal);
+  expect(audit.elapsedMs).toBeLessThanOrEqual(350);
 });
 
 test('Flow short touchpad flick delays selection and eases the final centering correction', async ({
@@ -492,9 +523,27 @@ test('Flow rapid arrows keep the index rail and preview synchronized', async ({
 
     const initialIndex = readState().centeredIndex;
     const rapidPresses = 8;
+    const movingRailSamples: Array<{
+      expectedOrdinal: number;
+      centeredOrdinal: number | null;
+      visibleOrdinals: number[];
+    }> = [];
     for (let index = 0; index < rapidPresses; index += 1) {
       pressArrowDown();
       await new Promise((resolve) => window.setTimeout(resolve, 12));
+      const visibleOrdinals = Array.from(
+        document.querySelectorAll<HTMLElement>('.flow-index-rail__ordinal'),
+      ).map((ordinal) => Number(ordinal.textContent));
+      const centeredOrdinalText = document.querySelector<HTMLElement>(
+        '.flow-index-rail__item[data-centered] .flow-index-rail__ordinal',
+      )?.textContent;
+      movingRailSamples.push({
+        expectedOrdinal: initialIndex + index + 2,
+        centeredOrdinal: centeredOrdinalText === undefined
+          ? null
+          : Number(centeredOrdinalText),
+        visibleOrdinals,
+      });
     }
     const rapid = await waitForState(
       (state) => state.settled && state.centeredIndex !== initialIndex,
@@ -503,6 +552,7 @@ test('Flow rapid arrows keep the index rail and preview synchronized', async ({
 
     return {
       expectedRapidIndex: initialIndex + rapidPresses,
+      movingRailSamples,
       rapid: rapid.state,
       rapidElapsedMs: rapid.elapsedMs,
     };
@@ -513,6 +563,10 @@ test('Flow rapid arrows keep the index rail and preview synchronized', async ({
   expect.soft(audit.rapid.geometricIndex).toBe(audit.rapid.centeredIndex);
   expect.soft(audit.rapid.geometricWallpaperId).toBe(audit.rapid.centeredWallpaperId);
   expect.soft(audit.rapidElapsedMs).toBeLessThanOrEqual(600);
+  for (const sample of audit.movingRailSamples) {
+    expect.soft(sample.centeredOrdinal).toBe(sample.expectedOrdinal);
+    expect.soft(sample.visibleOrdinals).toContain(sample.expectedOrdinal);
+  }
 });
 
 test('Flow large-screen short wheel keeps moving and settle phases paced', async ({

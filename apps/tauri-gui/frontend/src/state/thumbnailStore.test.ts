@@ -105,6 +105,33 @@ test('reset clears cache and notifies listeners without removing subscriptions',
   assert.equal(store.get('same'), 'thumb:same');
 });
 
+test('refresh keeps subscribed thumbnails visible until replacements arrive', async () => {
+  let callCount = 0;
+  let releaseRefresh: (() => void) | undefined;
+  const refreshBlocked = new Promise<void>((resolve) => { releaseRefresh = resolve; });
+  const store = new ThumbnailStore(1, async (path) => {
+    callCount += 1;
+    if (callCount === 2) await refreshBlocked;
+    return { path, cacheHit: false, thumbnail: `thumb:${path}:${callCount}` };
+  });
+  let notified = 0;
+  store.subscribe('same', () => { notified += 1; });
+
+  store.enqueueVisible(['same']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('same'), 'thumb:same:1');
+
+  store.refreshSubscribed();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(store.get('same'), 'thumb:same:1');
+  assert.equal(store.stats().active, 1);
+
+  releaseRefresh?.();
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(store.get('same'), 'thumb:same:2');
+  assert.ok(notified >= 2);
+});
+
 test('thumbnail store removes a path after its last listener unsubscribes', () => {
   const store = new ThumbnailStore(1, async (path) => ({
     path,

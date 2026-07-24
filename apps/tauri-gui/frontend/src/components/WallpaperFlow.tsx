@@ -127,6 +127,7 @@ function WallpaperFlowReady({
   );
   const initialIndex = initialAnchor?.index ?? 0;
   const [centeredIndex, setCenteredIndex] = useState(initialIndex);
+  const [indexRailIndex, setIndexRailIndex] = useState(initialIndex);
   const centeredIndexRef = useRef(initialIndex);
   const pendingCenterIndexRef = useRef(initialIndex);
   const centeredIdRef = useRef(model.entries[initialIndex]?.wallpaperId ?? null);
@@ -148,6 +149,7 @@ function WallpaperFlowReady({
   const [contextMenu, setContextMenu] = useState<FlowContextMenuState | null>(null);
   const scrollIdleTimerRef = useRef<number | null>(null);
   const settleTimerRef = useRef<number | null>(null);
+  const scrollCenterFrameRef = useRef<number | null>(null);
   const initialCenterFrameRef = useRef<number | null>(null);
   const scrollingRef = useRef(false);
   const programmaticScrollRef = useRef(false);
@@ -267,6 +269,7 @@ function WallpaperFlowReady({
     centeredIndexRef.current = index;
     pendingCenterIndexRef.current = index;
     setCenteredIndex(index);
+    setIndexRailIndex(index);
     onAnchorChange?.(entry.wallpaperId);
   }, [model.entries, onAnchorChange]);
 
@@ -337,6 +340,7 @@ function WallpaperFlowReady({
     programmaticScrollRef.current = true;
     programmaticTargetIndexRef.current = index;
     pendingCenterIndexRef.current = index;
+    setIndexRailIndex(index);
     scrollingRef.current = true;
     setSettled(false);
     setRevealPaused(true);
@@ -411,8 +415,19 @@ function WallpaperFlowReady({
       nearestIndex = index;
       nearestDelta = delta;
     }
-    if (nearestIndex !== null) pendingCenterIndexRef.current = nearestIndex;
+    if (nearestIndex !== null) {
+      pendingCenterIndexRef.current = nearestIndex;
+      setIndexRailIndex((current) => current === nearestIndex ? current : nearestIndex);
+    }
   }, [model.entries.length]);
+
+  const scheduleMovingCenterUpdate = useCallback(() => {
+    if (scrollCenterFrameRef.current !== null) return;
+    scrollCenterFrameRef.current = window.requestAnimationFrame(() => {
+      scrollCenterFrameRef.current = null;
+      computeCentered();
+    });
+  }, [computeCentered]);
 
   const scheduleIdleSnap = useCallback(() => {
     if (scrollIdleTimerRef.current !== null) window.clearTimeout(scrollIdleTimerRef.current);
@@ -476,11 +491,13 @@ function WallpaperFlowReady({
     scrollingRef.current = true;
     setSettled(false);
     setRevealPaused(true);
+    scheduleMovingCenterUpdate();
     scheduleIdleSnap();
     setShowReturnToTop(stream.scrollTop > stream.clientHeight);
   }, [
     cancelInitialCenterFrame,
     markUserInteraction,
+    scheduleMovingCenterUpdate,
     scheduleIdleSnap,
     setRevealPaused,
   ]);
@@ -768,6 +785,10 @@ function WallpaperFlowReady({
     cancelResizeReanchor();
     cancelProgrammaticReleaseFrame();
     cancelInitialCenterFrame();
+    if (scrollCenterFrameRef.current !== null) {
+      window.cancelAnimationFrame(scrollCenterFrameRef.current);
+      scrollCenterFrameRef.current = null;
+    }
     clearMotionTimers();
     programmaticTargetIndexRef.current = null;
     setRevealPaused(false);
@@ -780,7 +801,8 @@ function WallpaperFlowReady({
   ]);
 
   const centeredEntry = model.entries[centeredIndex] ?? null;
-  const localRange = localFlowIndexWindow(centeredIndex, model.entries.length);
+  const indexRailEntry = model.entries[indexRailIndex] ?? centeredEntry;
+  const localRange = localFlowIndexWindow(indexRailIndex, model.entries.length);
   const localEntries = useMemo<FlowIndexRailEntry[]>(() => {
     if (!localRange) return [];
     return model.entries
@@ -904,7 +926,7 @@ function WallpaperFlowReady({
       ref={flowRef}
     >
       <FlowIndexRail
-        centeredWallpaperId={centeredEntry?.wallpaperId ?? null}
+        centeredWallpaperId={indexRailEntry?.wallpaperId ?? null}
         entries={localEntries}
         loadedCount={model.entries.length}
         onActivate={selectEntry}

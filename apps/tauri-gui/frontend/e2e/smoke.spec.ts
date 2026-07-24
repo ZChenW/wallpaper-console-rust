@@ -1461,12 +1461,90 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
 });
 
 test('card heart adds and removes a favorite without applying the wallpaper', async ({ page }) => {
+  let bridgePatched = false;
+  await page.route('**/src/api/mockBridge.ts*', async (route) => {
+    const response = await route.fetch();
+    let body = await response.text();
+    const needle = 'thumbnailFor: async (path) => {';
+    if (body.includes(needle)) {
+      body = body.replace(
+        needle,
+        `${needle}
+          const label = path.split('/').at(-1) ?? path;
+          const hue = Array.from(path).reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180">'
+            + '<rect width="320" height="180" fill="hsl(' + hue + ' 55% 32%)"/>'
+            + '<text x="16" y="96" fill="white" font-size="20">' + label + '</text></svg>';
+          return { path, thumbnail: 'data:image/svg+xml,' + encodeURIComponent(svg), cacheHit: false };`,
+      );
+      bridgePatched = true;
+    }
+    await route.fulfill({ response, body });
+  });
   await openApp(page);
+  expect(bridgePatched).toBe(true);
   await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await page.locator('.wallpaper-grid').evaluate((grid) => {
+    grid.scrollTop = Math.min(
+      grid.scrollHeight - grid.clientHeight,
+      grid.clientHeight * 1.5,
+    );
+    grid.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(250);
 
-  const card = page.locator('[data-wallpaper-path="/mock/path/wallpaper-002.jpg"]');
-  await expect(card).toBeVisible();
+  const visibleReadyPreviewCount = () => page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const grid = document.querySelector<HTMLElement>('.wallpaper-grid');
+    const gridBounds = grid?.getBoundingClientRect();
+    if (!gridBounds) return 0;
+    return cards.filter((card) => {
+      const cardBounds = card.getBoundingClientRect();
+      if (cardBounds.bottom <= gridBounds.top || cardBounds.top >= gridBounds.bottom) return false;
+      return Array.from(card.querySelectorAll('img, video')).some((media) => {
+        const style = getComputedStyle(media);
+        const loaded = media instanceof HTMLImageElement
+          ? media.naturalWidth > 0
+          : media instanceof HTMLVideoElement
+            && media.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+        return loaded
+          && style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity) > 0.01;
+      });
+    }).length;
+  });
+  const visiblePreviewSources = () => page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const grid = document.querySelector<HTMLElement>('.wallpaper-grid');
+    const gridBounds = grid?.getBoundingClientRect();
+    if (!gridBounds) return [];
+    return cards.flatMap((card) => {
+      const cardBounds = card.getBoundingClientRect();
+      if (cardBounds.bottom <= gridBounds.top || cardBounds.top >= gridBounds.bottom) return [];
+      const image = card.querySelector<HTMLImageElement>('img');
+      const path = card.getAttribute('data-wallpaper-path');
+      return path && image?.naturalWidth ? [{ path, src: image.src }] : [];
+    });
+  });
+  await expect.poll(visibleReadyPreviewCount).toBeGreaterThan(2);
+  const sourcesBeforeFavorite = await visiblePreviewSources();
+
+  const favoritePath = await page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const gridBounds = document.querySelector<HTMLElement>('.wallpaper-grid')
+      ?.getBoundingClientRect();
+    if (!gridBounds) return null;
+    const card = cards.find((candidate) => {
+      const bounds = candidate.getBoundingClientRect();
+      return bounds.bottom > gridBounds.top
+        && bounds.top < gridBounds.bottom
+        && candidate.querySelector('[aria-label="Add favorite"]');
+    });
+    return card?.getAttribute('data-wallpaper-path') ?? null;
+  });
+  expect(favoritePath).not.toBeNull();
+  const card = page.locator(`[data-wallpaper-path="${favoritePath}"]`);
   const addFavorite = card.getByRole('button', { name: 'Add favorite' });
+  await expect(card).toBeVisible();
+  await page.mouse.move(1, 1);
   await expect(addFavorite).toHaveCSS('opacity', '0');
 
   await card.hover();
@@ -1477,7 +1555,27 @@ test('card heart adds and removes a favorite without applying the wallpaper', as
 
   const removeFavorite = card.getByRole('button', { name: 'Remove favorite' });
   await expect(removeFavorite).toBeVisible();
+  await expect(removeFavorite).toBeEnabled();
   await expect(removeFavorite).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('wallpaper-console:library-revision-changed'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => {
+    requestAnimationFrame(() => resolve());
+  })));
+  const previewsAfterFavorite = await visibleReadyPreviewCount();
+  const sourcesAfterFavorite = await visiblePreviewSources();
+  const sourcesBeforeByPath = new Map(
+    sourcesBeforeFavorite.map(({ path, src }) => [path, src]),
+  );
+  const retainedSources = sourcesAfterFavorite.filter(
+    ({ path }) => sourcesBeforeByPath.has(path),
+  );
+  expect(previewsAfterFavorite).toBeGreaterThan(2);
+  expect(retainedSources.length).toBeGreaterThan(2);
+  for (const { path, src } of retainedSources) {
+    expect(src).toBe(sourcesBeforeByPath.get(path));
+  }
   expect(await lastApplyRequest(page)).toEqual(applyBeforeFavorite);
 
   await removeFavorite.click();
