@@ -12,6 +12,7 @@ interface ThumbnailStoreValue {
   enqueueVisible: (paths: string[], options?: EnqueueOptions) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
+  refreshSubscribed: () => void;
   snapshot: () => { pending: string[]; active: number; cached: number };
   stats: () => { pending: number; active: number; cached: number; failures: number };
   setRevealPaused: (paused: boolean) => void;
@@ -37,6 +38,7 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
     enqueueVisible: (paths: string[], options?: EnqueueOptions) => store.enqueueVisible(paths, options),
     forget: (paths: string[]) => store.forget(paths),
     reset: () => store.reset(),
+    refreshSubscribed: () => store.refreshSubscribed(),
     snapshot: () => store.snapshot(),
     stats: () => store.stats(),
     setRevealPaused: (paused: boolean) => store.setRevealPaused(paused),

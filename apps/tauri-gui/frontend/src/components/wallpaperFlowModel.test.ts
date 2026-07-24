@@ -4,8 +4,8 @@ import test from 'node:test';
 import * as flow from './wallpaperFlowModel.ts';
 
 test('flow timing constants keep scroll settling and snap animation independent', () => {
-  assert.equal(flow.FLOW_SCROLL_IDLE_MS, 250);
-  assert.equal(flow.FLOW_SNAP_DURATION_MS, 300);
+  assert.equal(flow.FLOW_SCROLL_IDLE_MS, 100);
+  assert.equal(flow.FLOW_SNAP_DURATION_MS, 200);
 });
 
 test('clamped flow navigation is finite and never wraps at either end', () => {

@@ -1,5 +1,5 @@
-export const FLOW_SCROLL_IDLE_MS = 250;
-export const FLOW_SNAP_DURATION_MS = 300;
+export const FLOW_SCROLL_IDLE_MS = 100;
+export const FLOW_SNAP_DURATION_MS = 200;
 
 export interface FlowKeyInput {
   readonly key: string;

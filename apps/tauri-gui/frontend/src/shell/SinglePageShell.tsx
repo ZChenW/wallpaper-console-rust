@@ -165,7 +165,7 @@ export default function SinglePageShell() {
   const libraryViewportAnchorRef = useRef<number | null>(null);
   const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
   const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
-  const { reset: resetThumbnails } = useThumbnailStore();
+  const { refreshSubscribed: refreshThumbnails } = useThumbnailStore();
 
   // ── startup controllers (stable across renders) ─────────────────────────
   const libraryWatchdog = useRef(createLibraryWatchdog()).current;
@@ -299,11 +299,11 @@ export default function SinglePageShell() {
 
   useEffect(() => {
     const handler = () => {
-      resetThumbnails();
+      refreshThumbnails();
     };
     window.addEventListener(LIBRARY_REFRESH_EVENT, handler);
     return () => window.removeEventListener(LIBRARY_REFRESH_EVENT, handler);
-  }, [resetThumbnails]);
+  }, [refreshThumbnails]);
 
   const browser = useLibraryBrowser({
     sourceFilter: effectiveSrcFilter,

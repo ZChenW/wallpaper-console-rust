@@ -103,6 +103,15 @@ export class ThumbnailStore {
     }
   }
 
+  refreshSubscribed(): void {
+    const listenerPaths = Array.from(this.listeners.keys());
+    this.queue.reset();
+    this.failures.clear();
+    if (listenerPaths.length > 0) {
+      this.queue.enqueue(listenerPaths, { priority: 'front' });
+    }
+  }
+
   snapshot() {
     return this.queue.snapshot();
   }

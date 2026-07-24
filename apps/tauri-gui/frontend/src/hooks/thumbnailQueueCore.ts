@@ -150,7 +150,12 @@ export class ThumbnailRequestQueue {
           }
         })
         .finally(() => {
-          this.inFlight.delete(item.path);
+          if (
+            item.generation === this.generation
+            && this.inFlight.get(item.path) === item.pathVersion
+          ) {
+            this.inFlight.delete(item.path);
+          }
           if (!this.disposed) this.pump();
         });
     }

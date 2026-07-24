@@ -231,6 +231,10 @@ test('Editorial Flow keeps native scrolling free of decorative transition work',
 test('Editorial Flow keeps state, controls, and dialogs in the same visual language', async () => {
   const css = await readCss();
   const switchGroup = ruleBody(css, ':root[data-theme="editorial"] .library-view-switch');
+  const filterSwitch = ruleBody(
+    css,
+    ':root[data-theme="editorial"] .single-page-filters > .library-view-switch',
+  );
   const pressed = ruleBody(
     css,
     ':root[data-theme="editorial"] .library-view-switch__button[aria-pressed="true"]',
@@ -240,6 +244,7 @@ test('Editorial Flow keeps state, controls, and dialogs in the same visual langu
 
   assert.match(switchGroup, /border:\s*1px solid var\(--text\)/);
   assert.match(switchGroup, /border-radius:\s*0/);
+  assert.match(filterSwitch, /border-inline-start:\s*1px solid var\(--border-subtle\)/);
   assert.match(pressed, /background:\s*var\(--text\)/);
   assert.match(pressed, /color:\s*var\(--bg\)/);
   assert.match(actions, /border-radius:\s*0/);
@@ -254,4 +259,7 @@ test('Editorial source close control is a visible square target', async () => {
 
   assert.match(close, /border:\s*1px solid/);
   assert.match(close, /border-radius:\s*0\s*!important/);
+  assert.match(close, /display:\s*grid/);
+  assert.match(close, /place-items:\s*center/);
+  assert.match(close, /line-height:\s*1/);
 });

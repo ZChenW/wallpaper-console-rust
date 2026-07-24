@@ -251,12 +251,12 @@ test('Flow completes its direct-start anchor when runtime Current arrives after 
   ))).toContain('libraryViewMode');
   await page.reload();
   await expect(page.locator('.single-page-shell')).toBeVisible();
-  await waitForFlow(page);
-
-  await expect(page.locator('.flow-preview-item[data-centered="true"]'))
-    .toHaveAttribute('data-index', '0');
+  await expect(page.locator('.library-viewport[data-library-view="flow"]')).toBeVisible();
+  await expect(page.locator('.flow-preview-item')).toHaveCount(0);
+  await expect(page.getByRole('status')).toHaveText('Preparing Flow preview…');
   await page.evaluate(() => window.__mockControl?.releaseRuntimeWallpaperObservations());
 
+  await waitForFlow(page);
   await expect(page.locator('.single-page-statusbar__current'))
     .toHaveText('Current: wallpaper-001.jpg');
   await expect(page.locator('.flow-preview-item[data-centered="true"]'))
@@ -1326,6 +1326,46 @@ test.describe('Flow compact touch layout', () => {
     }
   });
 
+  test('Flow preserves the centered wallpaper when the viewport crosses compact breakpoints', async ({ page }) => {
+    await openApp(page);
+    await waitForGrid(page);
+    await page.getByRole('button', { name: 'Flow' }).click();
+    await waitForFlow(page);
+
+    const stream = page.getByRole('listbox', { name: 'Wallpaper Flow' });
+    await stream.evaluate((element) => {
+      element.scrollTop = Math.min(
+        element.scrollHeight - element.clientHeight,
+        Math.max(3_000, element.clientHeight * 4),
+      );
+      element.dispatchEvent(new Event('scroll'));
+    });
+    await expect.poll(async () => Number(
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-index'),
+    ), { timeout: 2_500 }).toBeGreaterThan(10);
+
+    const centeredBefore = page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]');
+    const wallpaperId = await centeredBefore.getAttribute('data-wallpaper-id');
+    const indexBefore = await centeredBefore.getAttribute('data-index');
+    expect(wallpaperId).not.toBeNull();
+    expect(indexBefore).not.toBeNull();
+
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect.poll(async () => (
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-wallpaper-id')
+    ), { timeout: 2_500 }).toBe(wallpaperId);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect.poll(async () => (
+      await page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]')
+        .getAttribute('data-wallpaper-id')
+    ), { timeout: 800 }).toBe(wallpaperId);
+    await expect(page.locator('.flow-preview-item[data-centered="true"][data-settled="true"]'))
+      .toHaveAttribute('data-index', indexBefore!);
+  });
+
   test('a long touch before scrolling does not snap back to the previous wallpaper', async ({ page }) => {
     await openApp(page);
     await waitForGrid(page);
@@ -1421,12 +1461,90 @@ test('search, source, type, favorites, and sort compose in the unified grid', as
 });
 
 test('card heart adds and removes a favorite without applying the wallpaper', async ({ page }) => {
+  let bridgePatched = false;
+  await page.route('**/src/api/mockBridge.ts*', async (route) => {
+    const response = await route.fetch();
+    let body = await response.text();
+    const needle = 'thumbnailFor: async (path) => {';
+    if (body.includes(needle)) {
+      body = body.replace(
+        needle,
+        `${needle}
+          const label = path.split('/').at(-1) ?? path;
+          const hue = Array.from(path).reduce((sum, char) => sum + char.charCodeAt(0), 0) % 360;
+          const svg = '<svg xmlns="http://www.w3.org/2000/svg" width="320" height="180">'
+            + '<rect width="320" height="180" fill="hsl(' + hue + ' 55% 32%)"/>'
+            + '<text x="16" y="96" fill="white" font-size="20">' + label + '</text></svg>';
+          return { path, thumbnail: 'data:image/svg+xml,' + encodeURIComponent(svg), cacheHit: false };`,
+      );
+      bridgePatched = true;
+    }
+    await route.fulfill({ response, body });
+  });
   await openApp(page);
+  expect(bridgePatched).toBe(true);
   await chooseSelect(page, 'Wallpaper type filter', 'Images');
+  await page.locator('.wallpaper-grid').evaluate((grid) => {
+    grid.scrollTop = Math.min(
+      grid.scrollHeight - grid.clientHeight,
+      grid.clientHeight * 1.5,
+    );
+    grid.dispatchEvent(new Event('scroll'));
+  });
+  await page.waitForTimeout(250);
 
-  const card = page.locator('[data-wallpaper-path="/mock/path/wallpaper-002.jpg"]');
-  await expect(card).toBeVisible();
+  const visibleReadyPreviewCount = () => page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const grid = document.querySelector<HTMLElement>('.wallpaper-grid');
+    const gridBounds = grid?.getBoundingClientRect();
+    if (!gridBounds) return 0;
+    return cards.filter((card) => {
+      const cardBounds = card.getBoundingClientRect();
+      if (cardBounds.bottom <= gridBounds.top || cardBounds.top >= gridBounds.bottom) return false;
+      return Array.from(card.querySelectorAll('img, video')).some((media) => {
+        const style = getComputedStyle(media);
+        const loaded = media instanceof HTMLImageElement
+          ? media.naturalWidth > 0
+          : media instanceof HTMLVideoElement
+            && media.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA;
+        return loaded
+          && style.display !== 'none'
+          && style.visibility !== 'hidden'
+          && Number(style.opacity) > 0.01;
+      });
+    }).length;
+  });
+  const visiblePreviewSources = () => page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const grid = document.querySelector<HTMLElement>('.wallpaper-grid');
+    const gridBounds = grid?.getBoundingClientRect();
+    if (!gridBounds) return [];
+    return cards.flatMap((card) => {
+      const cardBounds = card.getBoundingClientRect();
+      if (cardBounds.bottom <= gridBounds.top || cardBounds.top >= gridBounds.bottom) return [];
+      const image = card.querySelector<HTMLImageElement>('img');
+      const path = card.getAttribute('data-wallpaper-path');
+      return path && image?.naturalWidth ? [{ path, src: image.src }] : [];
+    });
+  });
+  await expect.poll(visibleReadyPreviewCount).toBeGreaterThan(2);
+  const sourcesBeforeFavorite = await visiblePreviewSources();
+
+  const favoritePath = await page.locator('.wallpaper-card').evaluateAll((cards) => {
+    const gridBounds = document.querySelector<HTMLElement>('.wallpaper-grid')
+      ?.getBoundingClientRect();
+    if (!gridBounds) return null;
+    const card = cards.find((candidate) => {
+      const bounds = candidate.getBoundingClientRect();
+      return bounds.bottom > gridBounds.top
+        && bounds.top < gridBounds.bottom
+        && candidate.querySelector('[aria-label="Add favorite"]');
+    });
+    return card?.getAttribute('data-wallpaper-path') ?? null;
+  });
+  expect(favoritePath).not.toBeNull();
+  const card = page.locator(`[data-wallpaper-path="${favoritePath}"]`);
   const addFavorite = card.getByRole('button', { name: 'Add favorite' });
+  await expect(card).toBeVisible();
+  await page.mouse.move(1, 1);
   await expect(addFavorite).toHaveCSS('opacity', '0');
 
   await card.hover();
@@ -1437,7 +1555,27 @@ test('card heart adds and removes a favorite without applying the wallpaper', as
 
   const removeFavorite = card.getByRole('button', { name: 'Remove favorite' });
   await expect(removeFavorite).toBeVisible();
+  await expect(removeFavorite).toBeEnabled();
   await expect(removeFavorite).toHaveCSS('background-color', 'rgba(0, 0, 0, 0)');
+  await page.evaluate(() => {
+    window.dispatchEvent(new Event('wallpaper-console:library-revision-changed'));
+  });
+  await page.evaluate(() => new Promise<void>((resolve) => requestAnimationFrame(() => {
+    requestAnimationFrame(() => resolve());
+  })));
+  const previewsAfterFavorite = await visibleReadyPreviewCount();
+  const sourcesAfterFavorite = await visiblePreviewSources();
+  const sourcesBeforeByPath = new Map(
+    sourcesBeforeFavorite.map(({ path, src }) => [path, src]),
+  );
+  const retainedSources = sourcesAfterFavorite.filter(
+    ({ path }) => sourcesBeforeByPath.has(path),
+  );
+  expect(previewsAfterFavorite).toBeGreaterThan(2);
+  expect(retainedSources.length).toBeGreaterThan(2);
+  for (const { path, src } of retainedSources) {
+    expect(src).toBe(sourcesBeforeByPath.get(path));
+  }
   expect(await lastApplyRequest(page)).toEqual(applyBeforeFavorite);
 
   await removeFavorite.click();
@@ -1493,6 +1631,53 @@ test('single/double-click setting and display target govern apply requests', asy
     path: secondPath!,
     target: 'HDMI-A-1',
   });
+});
+
+test('settings select hover is limited to the select trigger', async ({ page }) => {
+  await openApp(page);
+  await openSettings(page);
+  await chooseSelect(page, 'Theme', 'Editorial');
+
+  const themeTrigger = page.locator('.settings-panel .select-field-trigger[aria-label="Theme"]');
+  const themeLabel = themeTrigger.locator('xpath=../span[1]');
+
+  await themeLabel.hover();
+  expect(await themeTrigger.evaluate((element) => element.matches(':hover'))).toBe(false);
+
+  await themeTrigger.hover();
+  expect(await themeTrigger.evaluate((element) => element.matches(':hover'))).toBe(true);
+  const editorialTextColor = await page.evaluate(() => {
+    const colorProbe = document.createElement('span');
+    colorProbe.style.color = 'var(--text)';
+    document.body.append(colorProbe);
+    const color = getComputedStyle(colorProbe).color;
+    colorProbe.remove();
+    return color;
+  });
+  await expect.poll(() => themeTrigger.evaluate(
+    (element) => getComputedStyle(element).backgroundColor,
+  )).toBe(editorialTextColor);
+});
+
+test('settings select is not activated by clicking its row text', async ({ page }) => {
+  await openApp(page);
+  await openSettings(page);
+
+  const themeTrigger = page.locator('.settings-panel .select-field-trigger[aria-label="Theme"]');
+  const themeLabel = themeTrigger.locator('xpath=../span[1]');
+  await themeTrigger.evaluate((element) => {
+    element.setAttribute('data-test-click-count', '0');
+    element.addEventListener('click', () => {
+      const count = Number(element.getAttribute('data-test-click-count') ?? 0);
+      element.setAttribute('data-test-click-count', String(count + 1));
+    });
+  });
+
+  await themeLabel.click();
+
+  await expect(themeTrigger).toHaveAttribute('data-test-click-count', '0');
+  await expect(themeTrigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(page.getByRole('option')).toHaveCount(0);
 });
 
 test('compact settings contains exactly the three user-facing groups', async ({ page }) => {
@@ -1820,6 +2005,24 @@ test('Editorial theme is high-contrast, square, persistent, and independently sc
   await expect(sourceClose).toHaveCSS('border-top-style', 'solid');
   await expect(sourceClose).toHaveCSS('border-top-width', '1px');
   await expect(sourceClose).toHaveCSS('border-top-left-radius', '0px');
+  const sourceCloseAlignment = await sourceClose.evaluate((button) => {
+    const glyph = button.querySelector('span');
+    if (!glyph) throw new Error('Wallpaper sources close glyph is unavailable');
+    const buttonBounds = button.getBoundingClientRect();
+    const glyphBounds = glyph.getBoundingClientRect();
+    return {
+      x: Math.abs(
+        glyphBounds.left + glyphBounds.width / 2
+        - (buttonBounds.left + buttonBounds.width / 2),
+      ),
+      y: Math.abs(
+        glyphBounds.top + glyphBounds.height / 2
+        - (buttonBounds.top + buttonBounds.height / 2),
+      ),
+    };
+  });
+  expect(sourceCloseAlignment.x).toBeLessThanOrEqual(1);
+  expect(sourceCloseAlignment.y).toBeLessThanOrEqual(1);
   const sourcePanelBounds = await sourceDialog.boundingBox();
   expect(sourcePanelBounds).not.toBeNull();
   expect(sourcePanelBounds!.x).toBeGreaterThanOrEqual(-1);
