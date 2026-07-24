@@ -40,6 +40,9 @@ const WRITABLE_CONFIG_KEYS: &[&str] = &[
     "gui_terminal_file_manager_custom",
     "gui_shell_preferences",
     "restore_on_login",
+    "post_apply_enabled",
+    "post_apply_command",
+    "post_apply_timeout_secs",
 ];
 
 fn config_key_writable_from_gui(key: &str) -> bool {
@@ -399,6 +402,13 @@ mod tests {
     fn config_set_allows_known_gui_keys() {
         assert!(validate_writable_config_set("gui_theme", "light").is_ok());
         assert!(validate_writable_config_set("restore_on_login", "on").is_ok());
+        assert!(validate_writable_config_set("post_apply_enabled", "on").is_ok());
+        assert!(validate_writable_config_set(
+            "post_apply_command",
+            "matugen image \"$still\""
+        )
+        .is_ok());
+        assert!(validate_writable_config_set("post_apply_timeout_secs", "30").is_ok());
         assert!(validate_writable_config_set("linux_wallpaperengine_path", "auto").is_ok());
     }
 
