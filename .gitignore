@@ -42,6 +42,7 @@ AGENTS.md
 # Planning / agent docs
 doc/
 docs/
+CONTEXT.md
 
 # Development-only scripts and fixtures
 scripts/
