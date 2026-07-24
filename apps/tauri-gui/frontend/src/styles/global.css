@@ -227,7 +227,8 @@ select:focus, input:focus { border-color: #555; }
 .empty-state { color: #666; padding: 60px 40px; text-align: center; font-size: 14px; }
 
 /* ── Light Theme ───────────────────────────────────────────────────── */
-:root,
+/* Do not attach light tokens to bare :root — that painted a default-light
+   shell under bootstrapped/editorial themes and during startup. */
 :root[data-theme="light"],
 :root[data-theme="current"] {
   color-scheme: light;

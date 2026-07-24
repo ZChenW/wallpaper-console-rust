@@ -170,5 +170,6 @@ export const api = {
   browseDirectory: (): Promise<string> => invoke<string>('browse_directory'),
 
   libraryReady: (): Promise<void> => invoke<void>('library_ready'),
+  revealMainWindow: (): Promise<void> => invoke<void>('reveal_main_window'),
   exportDiagnostics: (): Promise<CommandResult> => invoke<CommandResult>('export_diagnostics'),
 } satisfies WallpaperConsoleApi;

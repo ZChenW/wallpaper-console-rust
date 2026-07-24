@@ -180,6 +180,7 @@ pub fn run() {
             commands::library_wallpaper_exists,
             commands::rescan,
             commands::library_ready,
+            commands::reveal_main_window,
             commands::migrate_to_sqlite,
             commands::import_legacy_flat_files,
             commands::sqlite_verify,

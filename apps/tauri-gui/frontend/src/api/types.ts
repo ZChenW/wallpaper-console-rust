@@ -359,5 +359,6 @@ export interface WallpaperConsoleApi {
   revealInFileManager(path: string): Promise<CommandResult>;
   browseDirectory(): Promise<string>;
   libraryReady(): Promise<void>;
+  revealMainWindow(): Promise<void>;
   exportDiagnostics(): Promise<CommandResult>;
 }

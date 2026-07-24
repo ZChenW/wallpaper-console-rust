@@ -25,6 +25,23 @@ pub fn library_ready(state: tauri::State<'_, crate::library_service::LibraryServ
     state.mark_frontend_ready();
 }
 
+/// Map the main window once the shell has a document theme.
+/// Uses the same Rust `show` path as the single-instance focus callback so the
+/// first cold start does not depend on JS window ACLs.
+#[tauri::command]
+pub fn reveal_main_window(app: tauri::AppHandle) -> Result<(), String> {
+    use tauri::Manager;
+
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window is missing".to_string())?;
+    window.show().map_err(|error| error.to_string())?;
+    window.unminimize().map_err(|error| error.to_string())?;
+    // Focus is best-effort: some compositors reject it during early map.
+    let _ = window.set_focus();
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use crate::library_service::LibraryService;

@@ -18,6 +18,13 @@ export function isShellTheme(value: unknown): value is ShellTheme {
   return typeof value === 'string' && SHELL_THEME_VALUES.has(value);
 }
 
+export function resolveShellTheme(
+  theme: ShellTheme,
+  prefersDark: boolean,
+): ResolvedShellTheme {
+  return theme === 'system' ? (prefersDark ? 'dark' : 'light') : theme;
+}
+
 export function nativeWindowTheme(theme: ShellTheme): NativeShellTheme | null {
   if (theme === 'system') return null;
   if (theme === 'glass') return 'dark';
