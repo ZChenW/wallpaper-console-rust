@@ -1,48 +1,60 @@
-import { createContext, ReactNode, useContext, useMemo, useRef } from 'react';
+import {
+  createContext,
+  ReactNode,
+  useCallback,
+  useContext,
+  useMemo,
+  useRef,
+  useSyncExternalStore,
+} from 'react';
 import { api } from '../api/bridge';
 import { recordMetric } from '../perf/metrics';
-import { ThumbnailStore } from './thumbnailStore';
+import { ThumbnailSession } from './thumbnailStore';
 import type { EnqueueOptions } from '../hooks/thumbnailQueueCore';
 
-interface ThumbnailStoreValue {
+interface ThumbnailSessionValue {
   get: (path: string) => string | undefined;
   getFailure: (path: string) => string | undefined;
   failureCount: () => number;
   subscribe: (path: string, cb: () => void) => () => void;
-  enqueueVisible: (paths: string[], options?: EnqueueOptions) => void;
+  observeVisible: (paths: string[], options?: EnqueueOptions) => void;
+  setScrolling: (scrolling: boolean) => void;
+  setInteracting: (interacting: boolean) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
   refreshSubscribed: () => void;
   snapshot: () => { pending: string[]; active: number; cached: number };
   stats: () => { pending: number; active: number; cached: number; failures: number };
-  setRevealPaused: (paused: boolean) => void;
 }
 
-const ThumbnailStoreContext = createContext<ThumbnailStoreValue | null>(null);
+const ThumbnailStoreContext = createContext<ThumbnailSessionValue | null>(null);
 
 export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
-  const storeRef = useRef<ThumbnailStore | null>(null);
+  const storeRef = useRef<ThumbnailSession | null>(null);
   if (!storeRef.current) {
-    storeRef.current = new ThumbnailStore(2, async (path) => {
+    storeRef.current = new ThumbnailSession(2, async (path) => {
       const r = await api.thumbnailFor(path);
       recordMetric(r.cacheHit ? 'thumbnail.cache.hit' : 'thumbnail.cache.miss', 1);
       return r;
     });
   }
-  const store = storeRef.current;
-  const value = useMemo<ThumbnailStoreValue>(() => ({
-    get: (path: string) => store.get(path),
-    getFailure: (path: string) => store.getFailure(path),
-    failureCount: () => store.failureCount(),
-    subscribe: (path: string, cb: () => void) => store.subscribe(path, cb),
-    enqueueVisible: (paths: string[], options?: EnqueueOptions) => store.enqueueVisible(paths, options),
-    forget: (paths: string[]) => store.forget(paths),
-    reset: () => store.reset(),
-    refreshSubscribed: () => store.refreshSubscribed(),
-    snapshot: () => store.snapshot(),
-    stats: () => store.stats(),
-    setRevealPaused: (paused: boolean) => store.setRevealPaused(paused),
-  }), [store]);
+  const session = storeRef.current;
+  const value = useMemo<ThumbnailSessionValue>(() => ({
+    get: (path: string) => session.get(path),
+    getFailure: (path: string) => session.getFailure(path),
+    failureCount: () => session.failureCount(),
+    subscribe: (path: string, cb: () => void) => session.subscribe(path, cb),
+    observeVisible: (paths: string[], options?: EnqueueOptions) => {
+      session.observeVisible(paths, options);
+    },
+    setScrolling: (scrolling: boolean) => session.setScrolling(scrolling),
+    setInteracting: (interacting: boolean) => session.setInteracting(interacting),
+    forget: (paths: string[]) => session.forget(paths),
+    reset: () => session.reset(),
+    refreshSubscribed: () => session.refreshSubscribed(),
+    snapshot: () => session.snapshot(),
+    stats: () => session.stats(),
+  }), [session]);
   return (
     <ThumbnailStoreContext.Provider value={value}>
       {children}
@@ -50,8 +62,25 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
   );
 }
 
-export function useThumbnailStore(): ThumbnailStoreValue {
+export function useThumbnailStore(): ThumbnailSessionValue {
   const value = useContext(ThumbnailStoreContext);
   if (!value) throw new Error('useThumbnailStore must be used inside ThumbnailStoreProvider');
   return value;
+}
+
+/** Read one path through the ThumbnailSession seam (subscribe + get). */
+export function useThumbnail(path: string): {
+  thumbnail: string | undefined;
+  failure: string | undefined;
+} {
+  const session = useThumbnailStore();
+  const subscribe = useCallback(
+    (cb: () => void) => session.subscribe(path, cb),
+    [path, session],
+  );
+  const getThumbnail = useCallback(() => session.get(path), [path, session]);
+  const getFailure = useCallback(() => session.getFailure(path), [path, session]);
+  const thumbnail = useSyncExternalStore(subscribe, getThumbnail, getThumbnail);
+  const failure = useSyncExternalStore(subscribe, getFailure, getFailure);
+  return { thumbnail, failure };
 }

@@ -132,9 +132,13 @@ export interface LibraryViewModel {
   readonly queryReplacementPending: boolean;
   readonly totalKnown: boolean;
   readonly total: number | null;
-  readonly hasMore: boolean;
+  /** Explicit append may run (cursor remains; pause does not block). */
+  readonly canAppend: boolean;
+  /** Near-end auto-append may run. */
+  readonly canAutoAppend: boolean;
   readonly loadingMore: boolean;
-  readonly automaticAppendPaused: boolean;
+  /** True when auto-append paused but explicit retry is still possible. */
+  readonly appendNeedsRetry: boolean;
   readonly loadErrorDetail: string | null;
   readonly canApplyToDisplay: boolean;
   /** When non-null, display targeting blocks apply for every entry. */
@@ -148,7 +152,10 @@ export interface LibraryViewModel {
     returnFocus?: HTMLElement | null,
   ) => void;
   readonly buildContextActions: (entry: LibraryBrowserItemDTO) => ContextAction[];
-  readonly onLoadMore: () => void | Promise<void>;
+  /** Geometry-driven: no-op unless canAutoAppend. */
+  readonly onRequestMoreIfNeeded: () => void | Promise<void>;
+  /** Explicit Load more / End key: clears pause. */
+  readonly onAppendMore: () => void | Promise<void>;
 }
 
 /** Shared Grid/Flow apply eligibility: display target must allow apply and entry must be applicable. */

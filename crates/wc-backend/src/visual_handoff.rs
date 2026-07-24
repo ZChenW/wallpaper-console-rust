@@ -1,7 +1,9 @@
 //! Visual handoff planning for *(previous, target)* transitions.
 //!
 //! Handoff is a pairwise policy (prefer no stale frame; short black is OK).
-//! It stays outside [`crate::driver::BackendDriver`] — see `driver.rs` for
+//! Callers should go through [`crate::apply_transition`], which applies scope
+//! degradation and executes adornments around the display_plan Stop/Apply skeleton.
+//! This module stays outside [`crate::driver::BackendDriver`] — see `driver.rs` for
 //! per-backend stop/apply primitives.
 
 use crate::lifecycle::RunningBackend;

@@ -1,3 +1,8 @@
+/**
+ * RuntimeWallpaper React adapter: Current wallpaper + apply queue + observation.
+ * Deep implementation lives in session / observation / apply queue; Shell only
+ * consumes `{ current, apply }`.
+ */
 import {
   useCallback,
   useEffect,

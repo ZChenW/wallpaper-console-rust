@@ -89,6 +89,21 @@ export function shouldPauseAutomaticAppend(outcome: AutomaticAppendOutcome): boo
   return outcome.itemCount === 0;
 }
 
+/** Cursor exists and an explicit append may run (clears pause). */
+export function canAppendPage(input: {
+  readonly hasMore: boolean;
+}): boolean {
+  return input.hasMore;
+}
+
+/** Auto-append near end of viewport may run. */
+export function canAutoAppendPage(input: {
+  readonly hasMore: boolean;
+  readonly automaticAppendPaused: boolean;
+}): boolean {
+  return input.hasMore && !input.automaticAppendPaused;
+}
+
 export function shouldQuietlyRecoverRevisionChanged(
   append: boolean,
   error: unknown,
@@ -261,6 +276,17 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     return load(true, nextCursor);
   }, [load, nextCursor]);
 
+  const hasMore = nextCursor !== null;
+  const canAppend = canAppendPage({ hasMore });
+  const canAutoAppend = canAutoAppendPage({ hasMore, automaticAppendPaused });
+  const requestMoreIfNeeded = useCallback(() => {
+    if (!canAutoAppendPage({ hasMore: nextCursor !== null, automaticAppendPaused })) {
+      return Promise.resolve();
+    }
+    return loadMore();
+  }, [automaticAppendPaused, loadMore, nextCursor]);
+  const appendMore = loadMore;
+
   useEffect(() => {
     void reload();
   }, [reload]);
@@ -305,7 +331,9 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     total,
     revision,
     nextCursor,
-    hasMore: nextCursor !== null,
+    hasMore,
+    canAppend,
+    canAutoAppend,
     loading,
     initialLoading,
     refreshing,
@@ -320,6 +348,8 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     load,
     reload,
     loadMore,
+    requestMoreIfNeeded,
+    appendMore,
     entryByPath,
   };
 }

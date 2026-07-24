@@ -9,6 +9,7 @@ use wc_core::types::Backend;
 use wc_storage::StorageApi;
 
 pub mod apply_stage;
+pub mod apply_transition;
 pub mod capability;
 pub mod display_executor;
 pub mod lifecycle;
@@ -29,6 +30,10 @@ mod debug_log;
 mod mpvpaper;
 mod restore;
 
+pub use apply_transition::{
+    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure, ApplyTransitionPlan,
+    ApplyTransitionReport, ApplyTransitionRequest,
+};
 pub use display_executor::{
     execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
     DisplayExecReport,
@@ -109,7 +114,13 @@ fn write_success_state(s: &StorageApi, state_path: &str, backend: Backend) -> Re
     s.runtime_state_write_pair(state_path, backend.as_str())
 }
 
-/// Apply a wallpaper via the appropriate backend process.
+/// Apply a wallpaper with the legacy fullscreen orchestrator.
+///
+/// Prefer display-aware apply via `wc_app` (`apply_to_display` /
+/// `execute_apply_request`), which runs [`crate::apply_transition`] around the
+/// display_plan Stop/Apply skeleton. Kept for backend unit tests and
+/// [`restore::restore_clean`].
+///
 /// State is written ONLY after successful backend execution.
 pub fn apply_wallpaper(
     s: &StorageApi,
@@ -1542,7 +1553,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        assert!(rt.ensure_awww_daemon_running().is_ok());
+        assert!(crate::driver::ensure_awww_daemon_running(&mut rt).is_ok());
         assert_eq!(
             rt.command_status_count, 0,
             "fast path must not spawn daemon"
@@ -1559,7 +1570,7 @@ mod tests {
             ]),
             ..Default::default()
         };
-        let err = rt.ensure_awww_daemon_running().unwrap_err();
+        let err = crate::driver::ensure_awww_daemon_running(&mut rt).unwrap_err();
         let msg = err.to_string();
         assert!(
             msg.contains("failed to start") || msg.contains("socket is not ready"),
@@ -1600,7 +1611,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        assert!(rt.ensure_awww_daemon_running().is_ok());
+        assert!(crate::driver::ensure_awww_daemon_running(&mut rt).is_ok());
         assert_eq!(
             rt.command_status_count, 1,
             "should spawn daemon when socket missing and no process"
@@ -1699,8 +1710,9 @@ mod tests {
     #[test]
     fn apply_with_runtime_awww_target_uses_command_output() {
         // Awww TargetImageInstant fallback runs apply_awww_instant_with_runtime
-        // which uses runtime.command_output. FakeRuntime.ensure_awww_daemon_running
-        // returns Ok(()) so the path doesn't depend on a real compositor daemon.
+        // which uses runtime.command_output. driver::ensure_awww_daemon_running
+        // returns Ok(()) via FakeRuntime socket Ready so the path doesn't depend
+        // on a real compositor daemon.
         let (tmp, s) = temp_storage();
         s.last_backend_write("").unwrap();
 

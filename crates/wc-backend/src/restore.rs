@@ -6,6 +6,10 @@ use crate::apply_stage;
 use crate::lifecycle;
 use crate::runtime;
 
+/// Legacy single-wallpaper restore via [`apply_wallpaper`].
+///
+/// Prefer [`wc_app::AppService::restore_displays`] so Restore goes through
+/// display_plan + ApplyTransition. GUI/CLI restore already use that path.
 pub fn restore_clean(s: &StorageApi) -> Result<(), WcError> {
     let mut runtime = runtime::SystemBackendRuntime;
     restore_clean_with_runtime(s, &mut runtime)

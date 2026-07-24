@@ -88,22 +88,8 @@ impl AppService {
     }
 
     pub fn apply(&self, path: &str) -> Result<ApplyTarget, AppError> {
-        let result = self.execute_apply_request(ApplyRequest {
-            kind: ApplyRequestKind::Apply,
-            path: path.to_string(),
-            request_id: None,
-        })?;
-
-        // Legacy apply(path) is the explicit All Displays default: replace
-        // per-display rows with a single All Displays mapping after success.
-        self.commit_legacy_apply_display_state(&result.applied_path, result.backend)?;
-
-        Ok(ApplyTarget {
-            input_path: path.to_string(),
-            resolved_path: result.applied_path,
-            file_type: result.file_type,
-            backend: result.backend,
-        })
+        let known_outputs = discover_connected_outputs()?;
+        self.apply_to_display(path, DisplayTarget::AllDisplays, &known_outputs)
     }
 
     /// Finalize a successful compatibility apply as one All Displays mapping.
@@ -146,85 +132,36 @@ impl AppService {
         request: ApplyRequest,
         mut options: ApplyExecutionOptions,
     ) -> Result<ApplyExecutionResult, AppError> {
-        let request_id = request.request_id.as_deref();
+        let known_outputs = match options.known_outputs.take() {
+            Some(outputs) => outputs,
+            None => discover_connected_outputs()?,
+        };
+        let mut runtime = wc_backend::runtime::SystemBackendRuntime;
         let mut noop = wc_backend::apply_stage::NoopReporter;
         let reporter: &mut dyn wc_backend::apply_stage::ApplyStageReporter =
             match options.stage_reporter.as_mut() {
                 Some(r) => r.as_mut(),
                 None => &mut noop,
             };
-
-        wc_backend::apply_stage::report_stage(
+        let result = self.execute_apply_request_to_display_with_runtime(
+            request,
+            DisplayTarget::AllDisplays,
+            &known_outputs,
+            &mut runtime,
             reporter,
-            wc_backend::apply_stage::ApplyStage::ResolveTarget,
-            request_id,
-        );
-        let target = self.resolve_apply_request_target(&request)?;
-        if let Some(on_resolved) = options.on_target_resolved.as_mut() {
-            on_resolved(ApplyStageContext {
-                preview: target.preview,
-                backend: target.backend,
-            });
-        }
-
-        let result = wc_backend::apply_wallpaper_with_reporter(
-            &self.storage,
-            &target.resolved_path,
-            target.backend,
-            target.fallback_path.as_deref(),
-            reporter,
-            request_id,
-        );
-        match result {
-            Ok(()) => {
-                if target.file_type == FileType::WeScene {
-                    let _ = wc_storage::we_compat::clear_failure(&target.state_path);
-                }
-                post_apply::run_post_apply_hook(
-                    &self.storage,
-                    &post_apply::PostApplyContext {
-                        wallpaper_path: target.resolved_path.clone(),
-                        backend: target.backend,
-                        file_type: target.file_type,
-                        outputs: "*".to_string(),
-                    },
-                );
-                Ok(ApplyExecutionResult {
-                    request_id: request.request_id,
-                    applied_path: target.resolved_path,
-                    state_path: target.state_path,
-                    backend: target.backend,
-                    file_type: target.file_type,
-                    preview: target.preview,
-                })
-            }
-            Err(WcError::LinuxWallpaperEngine { kind, detail }) => {
-                if target.file_type == FileType::WeScene {
-                    let backend_status =
-                        if kind == wc_core::error::BackendErrorKind::RendererLimitation {
-                            "renderer_limitation"
-                        } else {
-                            "failed"
-                        };
-                    let app_err = AppError::from_wc_error(WcError::LinuxWallpaperEngine {
-                        kind: kind.clone(),
-                        detail: detail.clone(),
-                    });
-                    let _ = wc_storage::we_compat::record_failure(
-                        &target.state_path,
-                        backend_status,
-                        &app_err.code,
-                        &app_err.message,
-                        Some(detail.clone()),
-                    );
-                }
-                Err(AppError::from_wc_error(WcError::LinuxWallpaperEngine {
-                    kind,
-                    detail,
-                }))
-            }
-            Err(e) => Err(AppError::from_wc_error(e)),
-        }
+            display_apply::DisplayApplyRuntimeOpts {
+                on_target_resolved: options.on_target_resolved.take(),
+                ..Default::default()
+            },
+        )?;
+        Ok(ApplyExecutionResult {
+            request_id: result.request_id,
+            applied_path: result.applied_path,
+            state_path: result.state_path,
+            backend: result.backend,
+            file_type: result.file_type,
+            preview: result.preview,
+        })
     }
 
     pub fn inspect_path(&self, path: &str) -> Result<InspectResult, AppError> {

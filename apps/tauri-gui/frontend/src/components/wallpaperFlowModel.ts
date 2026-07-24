@@ -95,10 +95,10 @@ export interface VisibleMeasuredFlowThumbnailRangeInput<
 export interface FlowNextPageRequestInput {
   readonly itemCount: number;
   readonly visibleEndIndex: number | null | undefined;
-  readonly hasMore: boolean;
+  /** Paging module already decided auto-append is allowed. */
+  readonly canAutoAppend: boolean;
   readonly loadingMore: boolean;
   readonly refreshing?: boolean;
-  readonly automaticAppendPaused?: boolean;
   readonly threshold?: number;
 }
 
@@ -431,10 +431,9 @@ export function shouldRequestFlowNextPage(input: FlowNextPageRequestInput): bool
   const itemCount = normalizeItemCount(input.itemCount);
   if (
     itemCount === 0
-    || !input.hasMore
+    || !input.canAutoAppend
     || input.loadingMore
     || input.refreshing
-    || input.automaticAppendPaused
     || input.visibleEndIndex == null
     || !Number.isFinite(input.visibleEndIndex)
   ) {

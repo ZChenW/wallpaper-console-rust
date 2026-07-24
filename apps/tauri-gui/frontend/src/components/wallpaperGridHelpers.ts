@@ -1,4 +1,5 @@
 import type { WallpaperDTO } from '../api/bridge';
+import { staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
 export interface GridRange {
   startIndex: number;
@@ -16,7 +17,8 @@ export interface GridLayoutChange {
 export interface NextPageRequestState {
   readonly rowCount: number;
   readonly visibleEndRow: number | null | undefined;
-  readonly hasMore: boolean;
+  /** Paging module already decided auto-append is allowed. */
+  readonly canAutoAppend: boolean;
   readonly loadingMore: boolean;
 }
 
@@ -117,7 +119,7 @@ export function wallpaperApplyFlags(
 }
 
 export function previewAssetPath(entry: WallpaperDTO): string {
-  return entry.previewPath || entry.path;
+  return staticPreviewAssetPath(entry);
 }
 
 export function animatedPreviewPath(
@@ -134,10 +136,10 @@ export function animatedPreviewPath(
 export function shouldRequestNextPage({
   rowCount,
   visibleEndRow,
-  hasMore,
+  canAutoAppend,
   loadingMore,
 }: NextPageRequestState): boolean {
-  if (!hasMore || loadingMore || rowCount <= 0 || visibleEndRow == null) return false;
+  if (!canAutoAppend || loadingMore || rowCount <= 0 || visibleEndRow == null) return false;
   return visibleEndRow >= rowCount - 1 - NEXT_PAGE_PREFETCH_ROWS;
 }
 

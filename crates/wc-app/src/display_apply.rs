@@ -6,9 +6,12 @@
 //! state is reconciled so it does not claim stopped renderers still run.
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
+use wc_backend::apply_transition::{
+    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure,
+    ApplyTransitionRequest,
+};
 use wc_backend::display_executor::{
-    execute_display_actions, CompletedEvent, DisplayExecAction, DisplayExecContext,
-    DisplayExecFailure, DisplayExecReport,
+    CompletedEvent, DisplayExecAction, DisplayExecContext, DisplayExecFailure, DisplayExecReport,
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
@@ -222,9 +225,24 @@ impl AppService {
             })
             .collect::<Result<Vec<_>, _>>()?;
 
-        let exec_result = execute_display_actions(
+        let previous_backend_raw = self
+            .storage
+            .last_backend_read()
+            .map_err(AppError::from_wc_error)?
+            .unwrap_or_default();
+        let transition_scope = transition_scope_for_target(&target, known_outputs)?;
+        let transition_plan = plan_apply_transition(&ApplyTransitionRequest {
+            scope: transition_scope,
+            target: apply_target.backend,
+            previous_backend_raw: &previous_backend_raw,
+            fallback_path: apply_target.fallback_path.as_deref(),
+            core_actions: &actions,
+        })
+        .map_err(AppError::from_wc_error)?;
+
+        let exec_result = execute_apply_transition(
             &self.storage,
-            &actions,
+            &transition_plan,
             &DisplayExecContext { known_outputs },
             runtime,
             reporter,
@@ -232,7 +250,8 @@ impl AppService {
         );
 
         match exec_result {
-            Ok(report) => {
+            Ok(transition_report) => {
+                let report = transition_report.exec;
                 let intended = intended_display_state(
                     &previous_rows,
                     known_outputs,
@@ -279,6 +298,7 @@ impl AppService {
                 })
             }
             Err(failure) => {
+                let failure = display_exec_failure_from_transition(failure);
                 let compat_error = compat_failure_error(&apply_target, &failure.error);
                 let error = self.handle_exec_failure(
                     failure,
@@ -563,6 +583,28 @@ pub(crate) fn to_exec_action(
                 use_instant,
             })
         }
+    }
+}
+
+pub(crate) fn transition_scope_for_target(
+    target: &DisplayTarget,
+    _known_outputs: &[String],
+) -> Result<ExecutionScope, AppError> {
+    match target {
+        DisplayTarget::AllDisplays => Ok(ExecutionScope::AllDisplays),
+        DisplayTarget::Output(output) => {
+            ExecutionScope::named(vec![output.clone()]).map_err(AppError::from_wc_error)
+        }
+    }
+}
+
+pub(crate) fn display_exec_failure_from_transition(
+    failure: ApplyTransitionFailure,
+) -> DisplayExecFailure {
+    DisplayExecFailure {
+        report: failure.exec,
+        error: failure.error,
+        uncertain_stop: failure.uncertain_stop,
     }
 }
 
@@ -964,7 +1006,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use wc_backend::apply_stage::{ApplyStage, ApplyStageEvent, NoopReporter};
-    use wc_backend::runtime::AwwwReadiness;
+    use wc_backend::runtime::{AwwwReadiness, ProcessIo};
     use wc_core::config::ConfigDir;
     use wc_core::error::WcError;
 
@@ -984,9 +1026,12 @@ mod tests {
         awww_readiness_sequence: RefCell<Vec<AwwwReadiness>>,
         lwe_apply_calls: usize,
         lwe_apply_error: Option<String>,
+        awww_stop_verify_pending: bool,
+        stop_awww_error: Option<String>,
+        mpvpaper_pids_error: Option<String>,
     }
 
-    impl BackendRuntime for FakeRuntime {
+    impl ProcessIo for FakeRuntime {
         fn command_output(
             &mut self,
             command: &mut Command,
@@ -1033,6 +1078,9 @@ mod tests {
         }
 
         fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
+            if let Some(message) = &self.mpvpaper_pids_error {
+                return Err(WcError::Other(message.clone()));
+            }
             Ok(self.running_mpvpaper_pids.clone())
         }
 
@@ -1060,19 +1108,38 @@ mod tests {
             Ok(())
         }
 
+        fn awww_socket_ready(&mut self) -> AwwwReadiness {
+            if self.awww_stop_verify_pending {
+                self.awww_stop_verify_pending = false;
+                return if self.stop_awww_error.is_some() {
+                    AwwwReadiness::Ready
+                } else {
+                    AwwwReadiness::SocketMissing
+                };
+            }
+            let mut seq = self.awww_readiness_sequence.borrow_mut();
+            if seq.len() > 1 {
+                seq.remove(0)
+            } else if !seq.is_empty() {
+                seq[0].clone()
+            } else {
+                AwwwReadiness::Ready
+            }
+        }
+    }
+
+    impl BackendRuntime for FakeRuntime {
         fn stop_awww(&mut self) {
             self.stop_awww_count += 1;
+            self.awww_stop_verify_pending = true;
         }
 
         fn stop_mpvpaper(&mut self) {
             self.stop_mpvpaper_count += 1;
-        }
-
-        fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
-            self.stop_mpvpaper();
-            match &self.stop_mpvpaper_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(()),
+            if let Some(message) = &self.stop_mpvpaper_error {
+                self.mpvpaper_pids_error = Some(message.clone());
+            } else {
+                self.running_mpvpaper_pids.clear();
             }
         }
 
@@ -1092,27 +1159,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn awww_socket_ready(&mut self) -> AwwwReadiness {
-            let mut seq = self.awww_readiness_sequence.borrow_mut();
-            if seq.len() > 1 {
-                seq.remove(0)
-            } else if !seq.is_empty() {
-                seq[0].clone()
-            } else {
-                AwwwReadiness::Ready
-            }
-        }
-
-        fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
-                Ok(())
-            } else {
-                Err(WcError::Other("awww socket not ready".into()))
-            }
-        }
-
-        fn clear_awww_state_hint(&mut self) {}
     }
 
     struct CapturingReporter {
