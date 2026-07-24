@@ -444,7 +444,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use wc_backend::apply_stage::NoopReporter;
-    use wc_backend::runtime::AwwwReadiness;
+    use wc_backend::runtime::{AwwwReadiness, ProcessIo};
     use wc_core::config::ConfigDir;
     use wc_core::error::WcError;
 
@@ -465,9 +465,11 @@ mod tests {
         awww_readiness_sequence: RefCell<Vec<AwwwReadiness>>,
         lwe_apply_calls: usize,
         lwe_apply_error: Option<String>,
+        awww_stop_verify_pending: bool,
+        mpvpaper_pids_error: Option<String>,
     }
 
-    impl BackendRuntime for FakeRuntime {
+    impl ProcessIo for FakeRuntime {
         fn command_output(
             &mut self,
             command: &mut Command,
@@ -514,6 +516,9 @@ mod tests {
         }
 
         fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
+            if let Some(message) = &self.mpvpaper_pids_error {
+                return Err(WcError::Other(message.clone()));
+            }
             Ok(self.running_mpvpaper_pids.clone())
         }
 
@@ -541,27 +546,38 @@ mod tests {
             Ok(())
         }
 
+        fn awww_socket_ready(&mut self) -> AwwwReadiness {
+            if self.awww_stop_verify_pending {
+                self.awww_stop_verify_pending = false;
+                return if self.stop_awww_error.is_some() {
+                    AwwwReadiness::Ready
+                } else {
+                    AwwwReadiness::SocketMissing
+                };
+            }
+            let mut seq = self.awww_readiness_sequence.borrow_mut();
+            if seq.len() > 1 {
+                seq.remove(0)
+            } else if !seq.is_empty() {
+                seq[0].clone()
+            } else {
+                AwwwReadiness::Ready
+            }
+        }
+    }
+
+    impl BackendRuntime for FakeRuntime {
         fn stop_awww(&mut self) {
             self.stop_awww_count += 1;
-        }
-
-        fn stop_awww_checked(&mut self) -> Result<(), WcError> {
-            self.stop_awww();
-            match &self.stop_awww_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(()),
-            }
+            self.awww_stop_verify_pending = true;
         }
 
         fn stop_mpvpaper(&mut self) {
             self.stop_mpvpaper_count += 1;
-        }
-
-        fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
-            self.stop_mpvpaper();
-            match &self.stop_mpvpaper_error {
-                Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(()),
+            if let Some(message) = &self.stop_mpvpaper_error {
+                self.mpvpaper_pids_error = Some(message.clone());
+            } else {
+                self.running_mpvpaper_pids.clear();
             }
         }
 
@@ -581,27 +597,6 @@ mod tests {
             }
             Ok(())
         }
-
-        fn awww_socket_ready(&mut self) -> AwwwReadiness {
-            let mut seq = self.awww_readiness_sequence.borrow_mut();
-            if seq.len() > 1 {
-                seq.remove(0)
-            } else if !seq.is_empty() {
-                seq[0].clone()
-            } else {
-                AwwwReadiness::Ready
-            }
-        }
-
-        fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-            if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
-                Ok(())
-            } else {
-                Err(WcError::Other("awww socket not ready".into()))
-            }
-        }
-
-        fn clear_awww_state_hint(&mut self) {}
     }
 
     fn temp_service() -> (tempfile::TempDir, AppService) {

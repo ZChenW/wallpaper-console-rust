@@ -28,7 +28,10 @@ use crate::capability::{
     MultiInstanceSupport, OutputTargetMode, SameTargetReplacement, StopScope,
 };
 use crate::mpvpaper::normalize_mpvpaper_options;
-use crate::runtime::BackendRuntime;
+use crate::runtime::{
+    build_awww_daemon_command, wait_for_awww_socket_ready, wait_for_mpvpaper_stopped_with,
+    AwwwReadiness, BackendRuntime, ProcessIo,
+};
 use crate::target_commands::{
     build_awww_img_command_for_scope, build_awww_instant_command_for_scope,
     build_mpvpaper_launch_command_for_output, ExecutionScope,
@@ -128,17 +131,17 @@ pub(crate) fn apply_awww(
             apply_stage::ApplyStage::EnsureAwwwDaemon,
             req.request_id,
         );
-        runtime.ensure_awww_daemon_running()?;
+        ensure_awww_daemon_running(runtime)?;
         apply_stage::report_stage(
             reporter,
             apply_stage::ApplyStage::AwwwSocketReady,
             req.request_id,
         );
     } else {
-        runtime.ensure_awww_daemon_running()?;
+        ensure_awww_daemon_running(runtime)?;
     }
     if req.clear_state_hint {
-        runtime.clear_awww_state_hint();
+        clear_awww_state_hint(runtime);
     }
 
     let fps_raw = s.config_get("wallpaper_transition_fps", "60");
@@ -190,14 +193,14 @@ pub(crate) fn apply_awww_instant(
             apply_stage::ApplyStage::EnsureAwwwDaemon,
             request_id,
         );
-        runtime.ensure_awww_daemon_running()?;
+        ensure_awww_daemon_running(runtime)?;
         apply_stage::report_stage(
             reporter,
             apply_stage::ApplyStage::AwwwSocketReady,
             request_id,
         );
     } else {
-        runtime.ensure_awww_daemon_running()?;
+        ensure_awww_daemon_running(runtime)?;
     }
     let resize_raw = s.config_get("awww_resize", "crop");
     let resize = normalize_awww_resize(&resize_raw);
@@ -211,6 +214,51 @@ pub(crate) fn apply_awww_instant(
         return Err(awww_instant_status_error(&output));
     }
     Ok(())
+}
+
+/// Ensure awww-daemon is running (ProcessIo: socket probe + optional spawn).
+pub(crate) fn ensure_awww_daemon_running(runtime: &mut dyn ProcessIo) -> Result<(), WcError> {
+    if matches!(runtime.awww_socket_ready(), AwwwReadiness::Ready) {
+        return Ok(());
+    }
+    let user = crate::current_process_user();
+    let was_running = crate::awww::is_awww_daemon_running(&user);
+    if !was_running {
+        let mut cmd = build_awww_daemon_command();
+        let status = runtime.command_status(&mut cmd).map_err(|_| {
+            WcError::Other(
+                "setsid not available — cannot launch awww-daemon. \
+                 setsid is part of util-linux; install it with your package manager."
+                    .into(),
+            )
+        })?;
+        if !status.success() {
+            return Err(WcError::Other(
+                "awww-daemon not found. Install awww (pip install awww or AUR).".into(),
+            ));
+        }
+    }
+    wait_for_awww_socket_ready(runtime, &user)
+}
+
+/// Best-effort `awww clear` after cross-backend handoff (ProcessIo).
+pub(crate) fn clear_awww_state_hint(runtime: &mut dyn ProcessIo) {
+    let mut cmd = Command::new("awww");
+    cmd.arg("clear")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let _ = runtime.command_status(&mut cmd);
+}
+
+/// Display-path LWE apply — fakes intercept via [`BackendRuntime::apply_lwe_to_outputs`].
+pub(crate) fn apply_lwe_to_outputs(
+    s: &StorageApi,
+    project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+    outputs: &[String],
+    runtime: &mut dyn BackendRuntime,
+) -> Result<(), WcError> {
+    runtime.apply_lwe_to_outputs(s, project, outputs)
 }
 
 /// Error from [`launch_mpvpaper`]: distinguishes launcher vs readiness failure so
@@ -308,7 +356,14 @@ impl BackendDriver for AwwwDriver {
         runtime: &mut dyn BackendRuntime,
         _storage: Option<&StorageApi>,
     ) -> Result<(), WcError> {
-        runtime.stop_awww_checked()
+        self.stop(runtime, None);
+        // Verify via ProcessIo socket probe (not live pgrep) so fakes stay hermetic.
+        if matches!(runtime.awww_socket_ready(), AwwwReadiness::Ready) {
+            return Err(WcError::Other(
+                "awww socket still answers query after stop".into(),
+            ));
+        }
+        Ok(())
     }
 }
 
@@ -352,7 +407,8 @@ impl BackendDriver for MpvpaperDriver {
         runtime: &mut dyn BackendRuntime,
         _storage: Option<&StorageApi>,
     ) -> Result<(), WcError> {
-        runtime.stop_mpvpaper_checked()
+        self.stop(runtime, None);
+        wait_for_mpvpaper_stopped_with(|| runtime.mpvpaper_pids(), std::thread::sleep)
     }
 }
 
@@ -402,7 +458,18 @@ impl BackendDriver for LweDriver {
         runtime: &mut dyn BackendRuntime,
         storage: Option<&StorageApi>,
     ) -> Result<(), WcError> {
-        runtime.stop_lwe_checked(storage)
+        self.stop(runtime, storage);
+        // Storage pid tracking is the hermetic post-condition for fakes; live
+        // process probes stay in SystemBackendRuntime stop for production paths.
+        if let Some(storage) = storage {
+            let pid = storage.config_get("linux_wallpaperengine_pid", "");
+            if !pid.trim().is_empty() {
+                return Err(WcError::Other(format!(
+                    "linux-wallpaperengine pid tracking not cleared after stop: {pid}"
+                )));
+            }
+        }
+        Ok(())
     }
 }
 

@@ -31,3 +31,7 @@ _Avoid_: Separate Current/Apply coordinators as product concepts, duplicating Ap
 **LibraryPaging**:
 Paged library list loading that owns append policy (`canAppend` / `canAutoAppend` / `requestMoreIfNeeded` / `appendMore`); Grid/Flow only report geometry near the tail.
 _Avoid_: Views remapping automaticAppendPaused, hasMore-as-policy
+
+**ProcessIo**:
+The narrow BackendRuntime seam for spawn/probe (command output/status, mpvpaper PIDs, awww socket); stop/apply/daemon policy belongs on BackendDriver.
+_Avoid_: Fat BackendRuntime kitchen-sink as the intended long-term interface

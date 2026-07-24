@@ -124,6 +124,7 @@ pub fn plan_apply_transition(
     })
 }
 
+#[allow(clippy::result_large_err)]
 pub fn execute_apply_transition(
     storage: &StorageApi,
     plan: &ApplyTransitionPlan,
@@ -255,18 +256,24 @@ fn rollback_visual_fallback(
                     )),
                 }
             } else {
-                runtime.stop_awww();
+                if let Some(driver) = driver::driver_for(Backend::Awww) {
+                    driver.stop(runtime, Some(s));
+                }
                 Some(format!(
                     "rollback: previous awww path {} not found, stopped fallback",
                     old_path
                 ))
             }
         } else {
-            runtime.stop_awww();
+            if let Some(driver) = driver::driver_for(Backend::Awww) {
+                driver.stop(runtime, Some(s));
+            }
             Some("rollback: no previous awww state, stopped fallback".into())
         }
     } else {
-        runtime.stop_awww();
+        if let Some(driver) = driver::driver_for(Backend::Awww) {
+            driver.stop(runtime, Some(s));
+        }
         Some("rollback: stopped fallback after non-awww target failure".into())
     }
 }

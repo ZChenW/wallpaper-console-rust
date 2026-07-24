@@ -1,4 +1,4 @@
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, Output};
 
 use wc_core::error::WcError;
 use wc_storage::StorageApi;
@@ -22,16 +22,11 @@ pub fn awww_socket_path() -> Result<std::path::PathBuf, WcError> {
     Ok(std::path::PathBuf::from(xdg).join(format!("{wayland}-awww-daemon.sock")))
 }
 
-pub trait BackendRuntime {
-    /// Preflight external renderer availability before any destructive handoff.
-    /// Test runtimes default to available; the system runtime probes PATH.
-    fn ensure_backend_available(
-        &mut self,
-        _backend: wc_core::types::Backend,
-        _storage: &StorageApi,
-    ) -> Result<(), WcError> {
-        Ok(())
-    }
+/// Process I/O seam: spawn commands and probe renderer readiness.
+///
+/// Prefer this surface for new orchestration. Stop / apply policy belongs on
+/// [`crate::driver::BackendDriver`]; see domain term **ProcessIo**.
+pub trait ProcessIo {
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError>;
     fn command_status(
         &mut self,
@@ -53,24 +48,25 @@ pub trait BackendRuntime {
         output: &str,
         path: &str,
     ) -> Result<(), WcError>;
+    fn awww_socket_ready(&mut self) -> AwwwReadiness;
+}
+
+/// Testable backend seam: [`ProcessIo`] plus stop/apply hooks for fakes and legacy.
+///
+/// Checked stops and awww daemon/clear policy live on drivers, not this trait.
+pub trait BackendRuntime: ProcessIo {
+    /// Preflight external renderer availability before any destructive handoff.
+    /// Test runtimes default to available; the system runtime probes PATH.
+    fn ensure_backend_available(
+        &mut self,
+        _backend: wc_core::types::Backend,
+        _storage: &StorageApi,
+    ) -> Result<(), WcError> {
+        Ok(())
+    }
     fn stop_awww(&mut self);
     fn stop_mpvpaper(&mut self);
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
-    /// Stop awww and verify the daemon is gone. Display executor uses this.
-    fn stop_awww_checked(&mut self) -> Result<(), WcError> {
-        self.stop_awww();
-        Ok(())
-    }
-    /// Stop mpvpaper and verify no processes remain. Display executor uses this.
-    fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
-        self.stop_mpvpaper();
-        Ok(())
-    }
-    /// Stop LWE and verify termination. Display executor uses this.
-    fn stop_lwe_checked(&mut self, s: Option<&StorageApi>) -> Result<(), WcError> {
-        self.stop_lwe(s);
-        Ok(())
-    }
     /// Apply LWE to explicit outputs (readiness + handoff included).
     ///
     /// System runtime delegates to the real implementation. Fakes must not
@@ -81,9 +77,6 @@ pub trait BackendRuntime {
         project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
         outputs: &[String],
     ) -> Result<(), WcError>;
-    fn awww_socket_ready(&mut self) -> AwwwReadiness;
-    fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError>;
-    fn clear_awww_state_hint(&mut self);
 }
 
 pub struct SystemBackendRuntime;
@@ -91,14 +84,14 @@ pub struct SystemBackendRuntime;
 pub(crate) fn build_awww_daemon_command() -> Command {
     let mut cmd = Command::new("setsid");
     cmd.args(["-f", "awww-daemon", "--no-cache"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
     cmd
 }
 
 pub(crate) fn wait_for_awww_socket_ready(
-    runtime: &mut dyn BackendRuntime,
+    runtime: &mut dyn ProcessIo,
     user: &crate::ProcessUserScope,
 ) -> Result<(), WcError> {
     let mut last_stderr = String::new();
@@ -207,18 +200,7 @@ where
     ))
 }
 
-impl BackendRuntime for SystemBackendRuntime {
-    fn ensure_backend_available(
-        &mut self,
-        backend: wc_core::types::Backend,
-        storage: &StorageApi,
-    ) -> Result<(), WcError> {
-        match crate::driver::driver_for(backend) {
-            Some(driver) => driver.ensure_available(storage),
-            None => Ok(()),
-        }
-    }
-
+impl ProcessIo for SystemBackendRuntime {
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
         crate::deadline_command::output(command, APPLY_COMMAND_TIMEOUT)
     }
@@ -263,67 +245,6 @@ impl BackendRuntime for SystemBackendRuntime {
         crate::mpvpaper::stop_pids_started_after(previous_pids, output, path)
     }
 
-    fn stop_awww(&mut self) {
-        crate::awww::stop_awww();
-    }
-
-    fn stop_mpvpaper(&mut self) {
-        crate::mpvpaper::stop_mpvpaper();
-    }
-
-    fn stop_lwe(&mut self, s: Option<&StorageApi>) {
-        crate::linux_wallpaperengine::stop(s);
-    }
-
-    fn stop_awww_checked(&mut self) -> Result<(), WcError> {
-        self.stop_awww();
-        let user = crate::current_process_user();
-        if crate::awww::is_awww_daemon_running(&user) {
-            return Err(WcError::Other(
-                "awww-daemon still running after stop".into(),
-            ));
-        }
-        // Socket may linger briefly; treat Ready as evidence the daemon survived.
-        if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
-            return Err(WcError::Other(
-                "awww socket still answers query after stop".into(),
-            ));
-        }
-        Ok(())
-    }
-
-    fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
-        self.stop_mpvpaper();
-        wait_for_mpvpaper_stopped_with(|| self.mpvpaper_pids(), std::thread::sleep)
-    }
-
-    fn stop_lwe_checked(&mut self, s: Option<&StorageApi>) -> Result<(), WcError> {
-        self.stop_lwe(s);
-        if crate::linux_wallpaperengine::is_running_for_current_user() {
-            return Err(WcError::Other(
-                "linux-wallpaperengine still running after stop".into(),
-            ));
-        }
-        if let Some(storage) = s {
-            let pid = storage.config_get("linux_wallpaperengine_pid", "");
-            if !pid.trim().is_empty() {
-                return Err(WcError::Other(format!(
-                    "linux-wallpaperengine pid tracking not cleared after stop: {pid}"
-                )));
-            }
-        }
-        Ok(())
-    }
-
-    fn apply_lwe_to_outputs(
-        &mut self,
-        s: &StorageApi,
-        project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
-        outputs: &[String],
-    ) -> Result<(), WcError> {
-        crate::linux_wallpaperengine::apply_to_outputs(s, project.clone(), outputs)
-    }
-
     fn awww_socket_ready(&mut self) -> AwwwReadiness {
         let path = match awww_socket_path() {
             Ok(p) => p,
@@ -345,38 +266,39 @@ impl BackendRuntime for SystemBackendRuntime {
             },
         }
     }
+}
 
-    fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-        if matches!(self.awww_socket_ready(), AwwwReadiness::Ready) {
-            return Ok(());
+impl BackendRuntime for SystemBackendRuntime {
+    fn ensure_backend_available(
+        &mut self,
+        backend: wc_core::types::Backend,
+        storage: &StorageApi,
+    ) -> Result<(), WcError> {
+        match crate::driver::driver_for(backend) {
+            Some(driver) => driver.ensure_available(storage),
+            None => Ok(()),
         }
-        let user = crate::current_process_user();
-        let was_running = crate::awww::is_awww_daemon_running(&user);
-        if !was_running {
-            let mut cmd = build_awww_daemon_command();
-            let status = self.command_status(&mut cmd).map_err(|_| {
-                WcError::Other(
-                    "setsid not available — cannot launch awww-daemon. \
-                     setsid is part of util-linux; install it with your package manager."
-                        .into(),
-                )
-            })?;
-            if !status.success() {
-                return Err(WcError::Other(
-                    "awww-daemon not found. Install awww (pip install awww or AUR).".into(),
-                ));
-            }
-        }
-        wait_for_awww_socket_ready(self, &user)
     }
 
-    fn clear_awww_state_hint(&mut self) {
-        let mut cmd = Command::new("awww");
-        cmd.arg("clear")
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null());
-        let _ = self.command_status(&mut cmd);
+    fn stop_awww(&mut self) {
+        crate::awww::stop_awww();
+    }
+
+    fn stop_mpvpaper(&mut self) {
+        crate::mpvpaper::stop_mpvpaper();
+    }
+
+    fn stop_lwe(&mut self, s: Option<&StorageApi>) {
+        crate::linux_wallpaperengine::stop(s);
+    }
+
+    fn apply_lwe_to_outputs(
+        &mut self,
+        s: &StorageApi,
+        project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+        outputs: &[String],
+    ) -> Result<(), WcError> {
+        crate::linux_wallpaperengine::apply_to_outputs(s, project.clone(), outputs)
     }
 }
 

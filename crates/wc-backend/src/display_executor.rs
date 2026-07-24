@@ -321,8 +321,7 @@ fn apply_backend(
             apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, req.request_id);
             let project = crate::linux_wallpaperengine::project_from_path(req.path)
                 .map_err(ApplyBackendFailure::from)?;
-            runtime
-                .apply_lwe_to_outputs(s, &project, outputs)
+            driver::apply_lwe_to_outputs(s, &project, outputs, runtime)
                 .map_err(ApplyBackendFailure::from)?;
             apply_stage::report_stage(
                 reporter,
@@ -405,7 +404,10 @@ fn mpvpaper_cleanup_failure(
     runtime: &mut dyn BackendRuntime,
     original_error: WcError,
 ) -> ApplyBackendFailure {
-    match runtime.stop_mpvpaper_checked() {
+    match crate::driver::driver_for(Backend::Mpvpaper)
+        .expect("mpvpaper driver")
+        .stop_checked(runtime, None)
+    {
         Ok(()) => ApplyBackendFailure {
             error: original_error,
             completed_stops: vec![CompletedStop {
@@ -433,7 +435,7 @@ fn mpvpaper_cleanup_failure(
 mod tests {
     use super::*;
     use crate::apply_stage::NoopReporter;
-    use crate::runtime::AwwwReadiness;
+    use crate::runtime::{AwwwReadiness, ProcessIo};
     use crate::test_support::FakeRuntime;
     use std::process::Command;
     use wc_core::config::ConfigDir;
@@ -790,7 +792,7 @@ mod tests {
             inner: FakeRuntime,
             status_calls: usize,
         }
-        impl BackendRuntime for SeqRuntime {
+        impl ProcessIo for SeqRuntime {
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -826,6 +828,11 @@ mod tests {
                 self.inner
                     .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
+            fn awww_socket_ready(&mut self) -> AwwwReadiness {
+                self.inner.awww_socket_ready()
+            }
+        }
+        impl BackendRuntime for SeqRuntime {
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
             }
@@ -842,15 +849,6 @@ mod tests {
                 outputs: &[String],
             ) -> Result<(), WcError> {
                 self.inner.apply_lwe_to_outputs(s, project, outputs)
-            }
-            fn awww_socket_ready(&mut self) -> AwwwReadiness {
-                self.inner.awww_socket_ready()
-            }
-            fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-                self.inner.ensure_awww_daemon_running()
-            }
-            fn clear_awww_state_hint(&mut self) {
-                self.inner.clear_awww_state_hint();
             }
         }
 
@@ -904,7 +902,7 @@ mod tests {
             inner: FakeRuntime,
             status_calls: usize,
         }
-        impl BackendRuntime for SeqRuntime {
+        impl ProcessIo for SeqRuntime {
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -942,6 +940,11 @@ mod tests {
                 self.inner
                     .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
+            fn awww_socket_ready(&mut self) -> AwwwReadiness {
+                self.inner.awww_socket_ready()
+            }
+        }
+        impl BackendRuntime for SeqRuntime {
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
             }
@@ -958,15 +961,6 @@ mod tests {
                 outputs: &[String],
             ) -> Result<(), WcError> {
                 self.inner.apply_lwe_to_outputs(s, project, outputs)
-            }
-            fn awww_socket_ready(&mut self) -> AwwwReadiness {
-                self.inner.awww_socket_ready()
-            }
-            fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-                self.inner.ensure_awww_daemon_running()
-            }
-            fn clear_awww_state_hint(&mut self) {
-                self.inner.clear_awww_state_hint();
             }
         }
 
@@ -1028,7 +1022,7 @@ mod tests {
             inner: FakeRuntime,
             stop_checked_calls: usize,
         }
-        impl BackendRuntime for FailStopRuntime {
+        impl ProcessIo for FailStopRuntime {
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -1062,15 +1056,19 @@ mod tests {
                 self.inner
                     .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
+            fn awww_socket_ready(&mut self) -> AwwwReadiness {
+                self.inner.awww_socket_ready()
+            }
+        }
+        impl BackendRuntime for FailStopRuntime {
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
             }
             fn stop_mpvpaper(&mut self) {
-                self.inner.stop_mpvpaper();
-            }
-            fn stop_mpvpaper_checked(&mut self) -> Result<(), WcError> {
                 self.stop_checked_calls += 1;
-                Err(WcError::Other("mpvpaper still running after stop".into()))
+                // Force driver stop_checked's pid probe to fail immediately.
+                self.inner.mpvpaper_pids_error =
+                    Some("mpvpaper still running after stop".into());
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -1082,15 +1080,6 @@ mod tests {
                 outputs: &[String],
             ) -> Result<(), WcError> {
                 self.inner.apply_lwe_to_outputs(s, project, outputs)
-            }
-            fn awww_socket_ready(&mut self) -> AwwwReadiness {
-                self.inner.awww_socket_ready()
-            }
-            fn ensure_awww_daemon_running(&mut self) -> Result<(), WcError> {
-                self.inner.ensure_awww_daemon_running()
-            }
-            fn clear_awww_state_hint(&mut self) {
-                self.inner.clear_awww_state_hint();
             }
         }
 
