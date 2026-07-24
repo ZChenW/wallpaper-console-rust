@@ -113,25 +113,6 @@ spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore-at-logi
 Replace `USER` with your Linux username. Compositor startup commands do not
 always expand `~`, so use an absolute path.
 
-## Development verification
-
-Run the complete correctness gate before submitting a change:
-
-```bash
-cargo run -p xtask -- verify all
-```
-
-Run the separate Library timing budgets when changing paging, rendering,
-thumbnails, scanning, or storage queries:
-
-```bash
-cargo run -p xtask -- verify perf
-```
-
-The browser smoke tests use the mock bridge; they do not exercise the packaged
-Tauri WebView, compositor, or external wallpaper renderers. Changes to native
-apply and runtime behavior still need a local interactive GUI check.
-
 ## License
 
 [MIT](LICENSE)

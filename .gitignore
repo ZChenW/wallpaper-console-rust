@@ -1,3 +1,7 @@
+# This repository tracks an install-oriented source tree:
+#   git clone … && ./install.sh
+# Keep tests, e2e, mocks, scripts, and planning docs local-only.
+
 # Rust build artifacts
 target/
 
@@ -7,23 +11,38 @@ apps/tauri-gui/frontend/dist/
 apps/tauri-gui/frontend/dist-mock/
 apps/tauri-gui/frontend/tsconfig.tsbuildinfo
 apps/tauri-gui/frontend/test-results/
-apps/tauri-gui/frontend/e2e/screenshots/
 apps/tauri-gui/src-tauri/gen/
 
-# AI / editor local config (not needed for clone + install)
+# Frontend tests, e2e, and mock harness (local-only)
+apps/tauri-gui/frontend/e2e/
+apps/tauri-gui/frontend/**/*.test.ts
+apps/tauri-gui/frontend/**/*.spec.ts
+apps/tauri-gui/frontend/**/*.typecheck.ts
+apps/tauri-gui/frontend/tsconfig.tests.json
+apps/tauri-gui/frontend/vite.mock.config.ts
+apps/tauri-gui/frontend/src/api/mockBridge.ts
+apps/tauri-gui/frontend/e2e/screenshots/
+
+# Rust tests (not required for cargo build --release)
+**/tests/
+**/*_tests.rs
+**/test_support.rs
+crates/wc-core/src/tests.rs
+xtask/tests/
+
+# AI / editor local config
 .agents/
 .claude/
 .codex/
+.jj/
+.superpowers/
+.worktrees/
 AGENTS.md
 
-# Transient planning docs
+# Planning / agent docs
+doc/
 docs/
 
-# Development-only project files (not needed for clone + ./install.sh)
-doc/
-scripts/*
-!scripts/check_runtime_config_drift.sh
-!scripts/test_install_contract.sh
-!scripts/test_tauri_before_commands.sh
-!scripts/test_tauri_before_commands_unit.sh
+# Development-only scripts and fixtures
+scripts/
 /tests/
