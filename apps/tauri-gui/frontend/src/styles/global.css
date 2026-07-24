@@ -1539,6 +1539,18 @@ input:focus {
   padding: 0.9rem 1rem 0;
 }
 
+.single-page-discovery-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  padding: 0.5rem 1rem;
+  border-block-end: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border));
+  background: color-mix(in srgb, var(--danger) 10%, var(--surface));
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
 .single-page-library .wallpaper-grid {
   padding-bottom: 1rem;
 }
@@ -1595,6 +1607,7 @@ input:focus {
 }
 
 .library-viewport {
+  position: relative;
   display: flex;
   width: 100%;
   min-width: 0;
@@ -1603,6 +1616,22 @@ input:focus {
   overflow: hidden;
   container-name: library-viewport;
   container-type: inline-size;
+}
+
+.library-viewport__updating {
+  position: absolute;
+  z-index: 4;
+  inset-block-start: 0.55rem;
+  inset-inline-start: 50%;
+  translate: -50% 0;
+  padding: 0.35rem 0.65rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--panel) 92%, transparent);
+  box-shadow: 0 0.35rem 1rem color-mix(in srgb, var(--bg) 55%, transparent);
+  color: var(--text);
+  font-size: 0.75rem;
+  pointer-events: none;
 }
 
 .library-viewport > * {

@@ -69,6 +69,7 @@ test('slow runtime probes stay single-flight and schedule from completion', asyn
     onObservations: (value) => observed.push([...value]),
     scheduler,
     pollMs: 5_000,
+    requestTimeoutMs: 0,
   });
 
   controller.start();
@@ -99,6 +100,7 @@ test('apply invalidation drops an older in-flight observation and repolls immedi
     connectedOutputs: ['eDP-1'],
     onObservations: (value) => observed.push([...value]),
     scheduler,
+    requestTimeoutMs: 0,
   });
 
   controller.start();
@@ -121,6 +123,7 @@ test('probe failure clears stale current evidence for every connected output', a
     connectedOutputs: ['eDP-1', 'HDMI-A-1'],
     onObservations: (value) => observed.push([...value]),
     scheduler,
+    requestTimeoutMs: 0,
   });
 
   controller.start();
@@ -141,6 +144,7 @@ test('stop ignores a late observation and leaves no scheduled poll', async () =>
     connectedOutputs: ['eDP-1'],
     onObservations: (value) => observed.push([...value]),
     scheduler,
+    requestTimeoutMs: 0,
   });
 
   controller.start();
@@ -150,4 +154,50 @@ test('stop ignores a late observation and leaves no scheduled poll', async () =>
 
   assert.deepEqual(observed, []);
   assert.equal(scheduler.nextDelay(), null);
+});
+
+test('a hung runtime probe reaches its deadline, publishes unknown, and keeps polling', async () => {
+  const scheduler = new ManualScheduler();
+  const observed: RuntimeWallpaperObservationDTO[][] = [];
+  const controller = new RuntimeObservationController({
+    api: { runtimeWallpaperObservations: () => new Promise(() => {}) },
+    connectedOutputs: ['eDP-1'],
+    onObservations: (value) => observed.push([...value]),
+    scheduler,
+    pollMs: 5_000,
+    requestTimeoutMs: 75,
+  });
+
+  controller.start();
+  assert.equal(scheduler.nextDelay(), 75);
+  scheduler.runNext();
+  await settle();
+
+  assert.deepEqual(observed, [[
+    { output: 'eDP-1', wallpaperPath: null, status: 'unknown' },
+  ]]);
+  assert.equal(scheduler.nextDelay(), 5_000);
+});
+
+test('visibility-style stop and start detaches a stale probe and refreshes immediately', () => {
+  const scheduler = new ManualScheduler();
+  let reads = 0;
+  const controller = new RuntimeObservationController({
+    api: {
+      runtimeWallpaperObservations: () => {
+        reads += 1;
+        return new Promise(() => {});
+      },
+    },
+    connectedOutputs: ['eDP-1'],
+    onObservations: () => undefined,
+    scheduler,
+    requestTimeoutMs: 0,
+  });
+
+  controller.start();
+  assert.equal(reads, 1);
+  controller.stop();
+  controller.start();
+  assert.equal(reads, 2);
 });

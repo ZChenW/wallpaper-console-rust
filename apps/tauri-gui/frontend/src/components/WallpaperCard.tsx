@@ -28,6 +28,7 @@ interface CardProps {
   entry: LibraryBrowserItemDTO;
   ordinal?: string;
   posInSet?: number;
+  setSize?: number;
   applying: boolean;
   onApply: (entry: LibraryBrowserItemDTO) => void;
   onSelect?: (entry: LibraryBrowserItemDTO) => void;
@@ -51,6 +52,7 @@ function WallpaperCardImpl({
   entry,
   ordinal,
   posInSet,
+  setSize,
   applying,
   onApply,
   onSelect,
@@ -168,6 +170,7 @@ function WallpaperCardImpl({
       data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
       aria-posinset={posInSet}
+      aria-setsize={setSize}
       role="listitem"
     >
       <button

@@ -3,6 +3,7 @@ import type { ThumbnailDTO } from '../api/bridge';
 export type EnqueueOptions = { priority?: 'front' | 'back' };
 
 type QueueItem = { path: string; generation: number; pathVersion: number };
+type ActiveItem = QueueItem & { token: number };
 
 interface QueueOptions {
   concurrency: number;
@@ -19,7 +20,8 @@ export class ThumbnailRequestQueue {
   private cache = new Map<string, string>();
   private queue: QueueItem[] = [];
   private queuedPaths = new Set<string>();
-  private inFlight = new Map<string, number>();
+  private inFlight = new Map<string, ActiveItem>();
+  private nextActiveToken = 0;
   private disposed = false;
   private generation = 0;
   private pathVersions = new Map<string, number>();
@@ -36,9 +38,10 @@ export class ThumbnailRequestQueue {
       if (!path || this.cache.has(path) || this.queuedPaths.has(path)) {
         return false;
       }
-      const inFlightVersion = this.inFlight.get(path);
-      if (inFlightVersion === undefined) return true;
-      return this.versionFor(path) > inFlightVersion;
+      const inFlight = this.inFlight.get(path);
+      if (inFlight === undefined) return true;
+      return inFlight.generation !== this.generation
+        || this.versionFor(path) > inFlight.pathVersion;
     });
     const items = unique.map((path) => ({
       path,
@@ -70,6 +73,7 @@ export class ThumbnailRequestQueue {
       this.pathVersions.set(path, this.versionFor(path) + 1);
     }
     this.queue = this.queue.filter((item) => !set.has(item.path));
+    for (const path of set) this.cleanupPathVersion(path);
   }
 
   reset(): void {
@@ -77,7 +81,9 @@ export class ThumbnailRequestQueue {
     this.cache.clear();
     this.queue = [];
     this.queuedPaths.clear();
-    this.inFlight.clear();
+    // Generation invalidation is sufficient for old physical requests; no
+    // per-path version metadata is needed after the logical cache reset.
+    this.pathVersions.clear();
   }
 
   dispose(): void {
@@ -97,6 +103,7 @@ export class ThumbnailRequestQueue {
       pending: this.queue.map((item) => item.path),
       active: this.inFlight.size,
       cached: this.cache.size,
+      versioned: this.pathVersions.size,
     };
   }
 
@@ -115,7 +122,14 @@ export class ThumbnailRequestQueue {
   private pump(): void {
     if (this.disposed) return;
     while (this.inFlight.size < this.concurrency && this.queue.length > 0) {
-      const item = this.queue.shift();
+      // A reset can queue a fresh generation for a path whose stale physical
+      // request is still running. Skip that path until its real slot is free,
+      // while allowing other paths to use any remaining capacity.
+      const startableIndex = this.queue.findIndex((candidate) => (
+        !this.inFlight.has(candidate.path)
+      ));
+      if (startableIndex < 0) break;
+      const [item] = this.queue.splice(startableIndex, 1);
       if (!item) continue;
 
       if (this.cache.has(item.path)) {
@@ -123,13 +137,12 @@ export class ThumbnailRequestQueue {
         continue;
       }
 
-      if (this.inFlight.has(item.path)) {
-        this.queue.unshift(item);
-        break;
-      }
-
       this.queuedPaths.delete(item.path);
-      this.inFlight.set(item.path, item.pathVersion);
+      const active: ActiveItem = {
+        ...item,
+        token: ++this.nextActiveToken,
+      };
+      this.inFlight.set(item.path, active);
       void this.load(item.path)
         .then((thumb) => {
           if (
@@ -150,14 +163,17 @@ export class ThumbnailRequestQueue {
           }
         })
         .finally(() => {
-          if (
-            item.generation === this.generation
-            && this.inFlight.get(item.path) === item.pathVersion
-          ) {
+          if (this.inFlight.get(item.path)?.token === active.token) {
             this.inFlight.delete(item.path);
           }
+          this.cleanupPathVersion(item.path);
           if (!this.disposed) this.pump();
         });
     }
+  }
+
+  private cleanupPathVersion(path: string): void {
+    if (this.cache.has(path) || this.queuedPaths.has(path) || this.inFlight.has(path)) return;
+    this.pathVersions.delete(path);
   }
 }

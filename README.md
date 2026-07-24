@@ -1,112 +1,137 @@
-# Wallpaper Console Rust
+# Wallpaper Console
 
-Rust/Tauri wallpaper manager for Linux Wayland desktops, with niri in mind.
+A wallpaper manager for Linux Wayland desktops.
 
-It provides a GUI for browsing wallpaper folders, scanning Wallpaper Engine
-Workshop content, applying wallpapers, and managing sources, favorites,
-thumbnails, and backend settings.
+Browse local wallpapers and supported Wallpaper Engine projects, organize
+favorites, and apply different wallpapers to connected displays.
 
-## Features
+## Highlights
 
-- Images and GIFs via `awww`
-- Videos via `mpvpaper`
-- Compatible Wallpaper Engine scenes via `linux-wallpaperengine`
-- Wallpaper Engine Web projects are indexed for browsing only; live apply is not
-  supported
-- SQLite storage for the library, favorites, sources, and thumbnails
+- Grid and Flow browsing
+- Images, GIFs, videos, and compatible Wallpaper Engine scenes
+- Multiple wallpaper folders and favorites
+- Per-display wallpaper selection
+- Optional wallpaper restore after login
 
-## Requirements
+Wallpaper Engine Web projects can be browsed, but live Web wallpapers are not
+currently supported. Scene rendering may differ from Wallpaper Engine.
 
-Install these before running the installer:
+## Install on Arch Linux
 
-- Rust 1.77+
-- Node.js 22.6+ and npm (see `apps/tauri-gui/frontend/package.json` `engines`)
-- `cargo-tauri`
-- Tauri 2 Linux system dependencies, including `webkit2gtk-4.1`
+Install the build requirements:
 
-Optional runtime helpers:
+```bash
+sudo pacman -Syu
+sudo pacman -S --needed \
+  webkit2gtk-4.1 base-devel curl wget file openssl \
+  appmenu-gtk-module libappindicator-gtk3 librsvg xdotool zenity \
+  rust nodejs npm git
+```
 
-- `awww` for images/GIFs
-- `mpvpaper` for videos
-- `linux-wallpaperengine` for Wallpaper Engine scenes
-- `ffmpeg`, `imagemagick`, or `ffmpegthumbnailer` for better thumbnails
+Building requires Rust 1.88 or newer and Node.js 22.6 or newer. `zenity` provides
+the folder picker; `kdialog` or `yad` can be used instead.
 
-## Install
+Download and install Wallpaper Console:
 
 ```bash
 git clone https://github.com/ZChenW/wallpaper-console-rust.git
 cd wallpaper-console-rust
 ./install.sh
+```
+
+Open **Wallpaper Console** from the application menu, or run:
+
+```bash
 wallpaper-console-gui-rust
 ```
 
-## Niri Example
+The installer uses `~/.local` by default and does not require root access.
+It publishes complete files atomically and records their hashes in an ownership
+manifest. If files from an older untracked installation conflict, review or
+move them first, or explicitly replace and adopt them with:
 
-Login restore is opt-in. Enable it once, then point the compositor startup hook
-at the guarded command:
+```bash
+./install.sh --force
+```
+
+On another Linux distribution, install the
+[Tauri 2 system requirements](https://v2.tauri.app/start/prerequisites/) for
+your distribution and one of `zenity`, `kdialog`, or `yad`, then use the same
+download and install commands.
+
+## Wallpaper support
+
+Wallpaper Console uses an external renderer when applying a wallpaper:
+
+- `awww` for images and GIFs
+- `mpvpaper` for videos
+- `linux-wallpaperengine` for compatible Wallpaper Engine scenes
+
+You only need the renderers for the wallpaper types you use.
+
+If the GUI opens to a blank window on a system with WebKitGTK rendering issues,
+start it once with:
+
+```bash
+WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 wallpaper-console-gui-rust
+```
+
+## Update
+
+```bash
+cd wallpaper-console-rust
+git pull --ff-only
+./install.sh
+```
+
+## Uninstall
+
+From the cloned project directory:
+
+```bash
+./install.sh --uninstall
+```
+
+Your wallpaper library and settings are kept in place.
+Uninstall removes only files still matching the ownership manifest. Locally
+modified installed files are preserved with a warning.
+
+## Restore after login
+
+Enable login restoration:
 
 ```bash
 wallpaper-console-rust config-set restore_on_login on
 ```
 
+Then add this command to your compositor's startup configuration:
+
 ```kdl
 spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore-at-login"
 ```
 
-Set `restore_on_login` back to `off` to disable login restoration without
-editing the compositor configuration. Manual `restore` and `restore-displays`
-commands remain unconditional.
+Replace `USER` with your Linux username. Compositor startup commands do not
+always expand `~`, so use an absolute path.
 
-Launch the GUI:
+## Development verification
 
-```kdl
-Mod+Shift+0 hotkey-overlay-title="Open Wallpaper Console" {
-    spawn "/home/USER/.local/bin/wallpaper-console-gui-rust"
-}
-```
-
-Open the GUI as floating:
-
-```kdl
-window-rule {
-    match app-id="wallpaper-console-gui-rust"
-    open-floating true
-}
-```
-
-## Verification
-
-Correctness gate (Rust fmt/check/clippy/test, frontend typecheck including tests,
-unit tests, production build, mock-browser smoke, and drift checks):
+Run the complete correctness gate before submitting a change:
 
 ```bash
-export TMPDIR="${TMPDIR:-$HOME/tmp/rust-tmp}"
-mkdir -p "$TMPDIR"
 cargo run -p xtask -- verify all
 ```
 
-Library wall-clock performance budgets are intentionally separate:
+Run the separate Library timing budgets when changing paging, rendering,
+thumbnails, scanning, or storage queries:
 
 ```bash
 cargo run -p xtask -- verify perf
 ```
 
-### Real Tauri WebView E2E (not automated)
-
-Automated smoke currently uses mock Vite + Playwright Chromium
-(`npm run smoke`). A minimal real Tauri WebView smoke is **not** wired yet
-because:
-
-1. Headless runners lack a reliable Wayland/X11 + `webkit2gtk-4.1` WebView path for
-   Tauri 2 without a dedicated display server and GPU/software GL setup.
-2. Apply/backend lifecycle (`awww` / `mpvpaper` / `linux-wallpaperengine`) needs
-   compositor access that typical CI hosts do not provide.
-3. There is no checked-in WebDriver/sidecar harness for the packaged GUI binary.
-
-Until those blockers are removed, treat mock-browser smoke + Rust unit/integration
-tests (`cargo run -p xtask -- verify all`) as the automated gate, and use a local
-interactive GUI run for native apply/runtime acceptance.
+The browser smoke tests use the mock bridge; they do not exercise the packaged
+Tauri WebView, compositor, or external wallpaper renderers. Changes to native
+apply and runtime behavior still need a local interactive GUI check.
 
 ## License
 
-MIT
+[MIT](LICENSE)

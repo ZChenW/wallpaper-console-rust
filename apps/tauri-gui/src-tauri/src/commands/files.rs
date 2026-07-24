@@ -253,10 +253,11 @@ pub async fn open_project_location(path: String, mode: Option<String>) -> Comman
             Ok(s) => s,
             Err(e) => return fail(e),
         };
-        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
-            return fail(e);
-        }
-        let target = match open_location_target(&path) {
+        let canonical = match path_guard::ensure_command_wallpaper_path(&path, s) {
+            Ok(path) => path,
+            Err(error) => return fail(error),
+        };
+        let target = match open_location_target(canonical.to_string_lossy().as_ref()) {
             Ok(t) => t,
             Err(e) => return fail(e),
         };
@@ -294,10 +295,11 @@ pub async fn open_path(path: String) -> CommandResult {
             Ok(s) => s,
             Err(e) => return fail(e),
         };
-        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
-            return fail(e);
-        }
-        let p = std::path::Path::new(&path);
+        let canonical = match path_guard::ensure_command_wallpaper_path(&path, s) {
+            Ok(path) => path,
+            Err(error) => return fail(error),
+        };
+        let p = canonical.as_path();
         // If it's a directory, open it directly; otherwise reveal parent.
         let target = if p.is_dir() {
             p.to_path_buf()
@@ -323,10 +325,11 @@ pub async fn reveal_in_file_manager(path: String) -> CommandResult {
             Ok(s) => s,
             Err(e) => return fail(e),
         };
-        if let Err(e) = path_guard::ensure_command_wallpaper_path(&path, s) {
-            return fail(e);
-        }
-        let p = std::path::Path::new(&path);
+        let canonical = match path_guard::ensure_command_wallpaper_path(&path, s) {
+            Ok(path) => path,
+            Err(error) => return fail(error),
+        };
+        let p = canonical.as_path();
         let target = if p.is_dir() {
             p.to_path_buf()
         } else {

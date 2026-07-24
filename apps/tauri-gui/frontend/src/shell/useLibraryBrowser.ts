@@ -19,6 +19,8 @@ import type {
   SourceFilter,
 } from './shellPreferences.ts';
 
+export const LIBRARY_REFRESH_EVENT = 'wallpaper-console:library-revision-changed';
+
 export interface LibraryBrowserCriteria {
   readonly sourceFilter: SourceFilter;
   readonly typeFilter: LibraryTypeFilter;
@@ -101,8 +103,13 @@ export function isCurrentQueryEmpty(
 export function isLibraryCriteriaPending(
   resolvedCriteriaKey: string | null,
   currentCriteriaKey: string,
+  rawSearch?: string,
+  debouncedSearch?: string,
 ): boolean {
-  return resolvedCriteriaKey !== currentCriteriaKey;
+  const searchPending = rawSearch !== undefined
+    && debouncedSearch !== undefined
+    && normalizedSearch(rawSearch) !== normalizedSearch(debouncedSearch);
+  return searchPending || resolvedCriteriaKey !== currentCriteriaKey;
 }
 
 export function isRandomRequestCurrent(
@@ -138,7 +145,7 @@ export function useLibraryBrowser({
   search,
   pageSize = DEFAULT_LIBRARY_PAGE_SIZE,
   searchDebounceMs = 180,
-  refreshEvent,
+  refreshEvent = LIBRARY_REFRESH_EVENT,
   browserApi = defaultApi satisfies WallpaperConsoleApi,
 }: UseLibraryBrowserOptions) {
   const debouncedSearch = useDebouncedValue(search, searchDebounceMs);
@@ -271,6 +278,8 @@ export function useLibraryBrowser({
     criteriaReplacementPending: isLibraryCriteriaPending(
       resolvedCriteriaKey,
       criteriaKey,
+      search,
+      debouncedSearch,
     ),
     debouncedSearch,
     searchSettled: debouncedSearch === search,

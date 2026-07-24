@@ -22,6 +22,9 @@ export type RuntimeWallpaperSessionAction =
     readonly connectedOutputs: readonly string[];
   }
   | {
+    readonly type: 'runtimeInvalidated';
+  }
+  | {
     readonly type: 'runtimeReconciled';
     readonly observations: readonly RuntimeDisplayWallpaper[];
   }
@@ -112,6 +115,12 @@ export function reduceRuntimeWallpaperSession(
       connectedOutputs,
       confirmations: confirmationsInOutputOrder(connectedOutputs, state.confirmations),
     };
+  }
+
+  if (action.type === 'runtimeInvalidated') {
+    return state.confirmations.length === 0
+      ? state
+      : { ...state, confirmations: [] };
   }
 
   if (action.type === 'runtimeReconciled') {

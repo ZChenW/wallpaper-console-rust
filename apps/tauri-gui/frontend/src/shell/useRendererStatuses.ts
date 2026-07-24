@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api as defaultApi } from '../api/bridge.ts';
 import type { RendererStatusesDTO } from '../api/types.ts';
+import { withRequestDeadline } from './requestDeadline.ts';
 
 export interface RendererStatusesApi {
   rendererStatuses(): Promise<RendererStatusesDTO>;
@@ -37,8 +38,13 @@ export function createRendererStatusRequestSequence(): RendererStatusRequestSequ
 
 export async function loadRendererStatuses(
   statusApi: RendererStatusesApi,
+  timeoutMs = 3_000,
 ): Promise<RendererStatusesDTO> {
-  return statusApi.rendererStatuses();
+  return withRequestDeadline(
+    statusApi.rendererStatuses(),
+    timeoutMs,
+    'Renderer detection',
+  );
 }
 
 export function useRendererStatuses(
@@ -78,7 +84,7 @@ export function useRendererStatuses(
 
   return {
     statuses,
-    loading,
+    loading: enabled && (loading || (statuses === null && error === null)),
     error,
     reload,
   };

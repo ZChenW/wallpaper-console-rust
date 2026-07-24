@@ -11,6 +11,7 @@ import {
   reconcileSelectedEntryByStableId,
   reconcileSourceFilter,
   shouldOfferFirstRun,
+  shouldShowFirstRun,
   targetArgument,
 } from './singlePageShellModel.ts';
 
@@ -64,9 +65,30 @@ test('bottom status distinguishes confirmed, mixed, and unknown runtime evidence
 });
 
 test('source read failures never masquerade as a first run', () => {
-  assert.equal(shouldOfferFirstRun([], undefined), true);
-  assert.equal(shouldOfferFirstRun([], 'database unavailable'), false);
-  assert.equal(shouldOfferFirstRun([source(1)], undefined), false);
+  assert.equal(shouldOfferFirstRun([], undefined, false), false);
+  assert.equal(shouldOfferFirstRun([], undefined, true), true);
+  assert.equal(shouldOfferFirstRun([], 'database unavailable', true), false);
+  assert.equal(shouldOfferFirstRun([source(1)], undefined, true), false);
+});
+
+test('first-run onboarding never covers entries, library failures, loading, or indexing', () => {
+  const eligible = {
+    sources: [],
+    sourceError: undefined,
+    sourcesReady: true,
+    initialLoading: false,
+    emptyConfirmed: true,
+    entryCount: 0,
+    libraryError: false,
+    scanRunning: false,
+  };
+  assert.equal(shouldShowFirstRun(eligible), true);
+  assert.equal(shouldShowFirstRun({ ...eligible, sourcesReady: false }), false);
+  assert.equal(shouldShowFirstRun({ ...eligible, entryCount: 1 }), false);
+  assert.equal(shouldShowFirstRun({ ...eligible, libraryError: true }), false);
+  assert.equal(shouldShowFirstRun({ ...eligible, initialLoading: true }), false);
+  assert.equal(shouldShowFirstRun({ ...eligible, emptyConfirmed: false }), false);
+  assert.equal(shouldShowFirstRun({ ...eligible, scanRunning: true }), false);
 });
 
 test('random waits for the debounced search and an applicable display', () => {
@@ -124,11 +146,11 @@ test('source failure disables filtering but Library still loads with all-sources
 
 test('source error is distinct from empty source list for first-run detection', () => {
   // An error is an error state, not evidence of fresh install
-  assert.equal(shouldOfferFirstRun([], 'source database unavailable'), false);
+  assert.equal(shouldOfferFirstRun([], 'source database unavailable', true), false);
   // But an empty list without error IS a first-run
-  assert.equal(shouldOfferFirstRun([], undefined), true);
+  assert.equal(shouldOfferFirstRun([], undefined, true), true);
   // A populated list is never a first-run
-  assert.equal(shouldOfferFirstRun([source(1)], undefined), false);
+  assert.equal(shouldOfferFirstRun([source(1)], undefined, true), false);
 });
 
 // ── effectiveSourceFilter ──────────────────────────────────────────────

@@ -7,6 +7,10 @@ use wc_core::config::ConfigDir;
 
 const DEBOUNCE_MILLIS: u64 = 1_500;
 const RATE_LIMIT_MILLIS: u64 = 10_000;
+// Background source refreshes are I/O-heavy child processes and share one
+// user-visible progress/cancellation channel. Running them serially preserves
+// foreground responsiveness and keeps that channel truthful.
+const MAX_CONCURRENT_BACKGROUND_SCANS: usize = 1;
 const WATCH_RETRY_DELAYS_MILLIS: [u64; 4] = [2_000, 5_000, 15_000, 60_000];
 const RECOVERY_PERSIST_DELAYS_MILLIS: [u64; 4] = WATCH_RETRY_DELAYS_MILLIS;
 
@@ -28,6 +32,7 @@ pub struct LibraryScheduler<C> {
     clock: C,
     sources: BTreeMap<i64, SourceSchedule>,
     round_running: BTreeSet<i64>,
+    round_waiting: BTreeSet<i64>,
     round_reload_emitted: bool,
 }
 
@@ -40,6 +45,7 @@ impl<C: SchedulerClock> LibraryScheduler<C> {
                 .map(|id| (id, SourceSchedule::default()))
                 .collect(),
             round_running: BTreeSet::new(),
+            round_waiting: BTreeSet::new(),
             round_reload_emitted: false,
         }
     }
@@ -75,36 +81,65 @@ impl<C: SchedulerClock> LibraryScheduler<C> {
     pub fn manual_requested(&mut self, source_id: i64) {
         let state = self.sources.entry(source_id).or_default();
         state.pending_since = None;
+        self.round_waiting.remove(&source_id);
         if state.running {
             state.dirty_again = true;
         }
     }
 
+    #[cfg(test)]
     pub fn take_due_scans(&mut self) -> Vec<i64> {
+        self.take_due_scans_bounded(usize::MAX)
+    }
+
+    fn take_due_scans_bounded(&mut self, max_concurrent: usize) -> Vec<i64> {
         let now = self.clock.now_millis();
-        let mut due = Vec::new();
-        for (&id, state) in &mut self.sources {
+        let due = self
+            .sources
+            .iter()
+            .filter_map(|(&id, state)| {
+                if state.running {
+                    return None;
+                }
+                let pending_since = state.pending_since?;
+                let debounce_due = pending_since.saturating_add(DEBOUNCE_MILLIS);
+                let rate_due = state
+                    .last_started
+                    .map_or(0, |last| last.saturating_add(RATE_LIMIT_MILLIS));
+                (now >= debounce_due.max(rate_due)).then_some(id)
+            })
+            .collect::<Vec<_>>();
+        if !due.is_empty() {
+            self.round_reload_emitted = false;
+            self.round_waiting.extend(due);
+        }
+
+        let available = max_concurrent.saturating_sub(self.round_running.len());
+        let starting = self
+            .round_waiting
+            .iter()
+            .take(available)
+            .copied()
+            .collect::<Vec<_>>();
+        for id in &starting {
+            let Some(state) = self.sources.get_mut(id) else {
+                self.round_waiting.remove(id);
+                continue;
+            };
             if state.running {
                 continue;
             }
-            let Some(pending_since) = state.pending_since else {
-                continue;
-            };
-            let debounce_due = pending_since.saturating_add(DEBOUNCE_MILLIS);
-            let rate_due = state
-                .last_started
-                .map_or(0, |last| last.saturating_add(RATE_LIMIT_MILLIS));
-            if now < debounce_due.max(rate_due) {
+            if state.pending_since.is_none() {
+                self.round_waiting.remove(id);
                 continue;
             }
             state.pending_since = None;
             state.last_started = Some(now);
             state.running = true;
-            self.round_running.insert(id);
-            self.round_reload_emitted = false;
-            due.push(id);
+            self.round_waiting.remove(id);
+            self.round_running.insert(*id);
         }
-        due
+        starting
     }
 
     /// Returns true once when a normal background round has fully completed.
@@ -122,7 +157,10 @@ impl<C: SchedulerClock> LibraryScheduler<C> {
             state.dirty_again = false;
             state.pending_since = Some(now);
         }
-        if self.round_running.is_empty() && !self.round_reload_emitted {
+        if self.round_running.is_empty()
+            && self.round_waiting.is_empty()
+            && !self.round_reload_emitted
+        {
             self.round_reload_emitted = true;
             true
         } else {
@@ -581,7 +619,7 @@ pub fn start_library_scheduler(
                 scheduler
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .take_due_scans()
+                    .take_due_scans_bounded(MAX_CONCURRENT_BACKGROUND_SCANS)
             };
             for source_id in due {
                 let scheduler = scheduler.clone();
@@ -597,22 +635,51 @@ pub fn start_library_scheduler(
                         return;
                     };
                     let generation = service.maintenance_generation();
-                    if let Ok(storage) = wc_storage::StorageApi::try_new(ConfigDir {
+                    let storage = wc_storage::StorageApi::try_new(ConfigDir {
                         path: cd.path.clone(),
-                    }) {
-                        let _ = wc_app::library_rescan::establish_library_dirty_marker(&storage);
-                        let mut presentation = crate::commands::scan::begin_background_scan();
-                        let result = wc_app::library_refresh::refresh_library_source_background(
-                            &storage,
-                            source_id,
-                            |source, event| presentation.observe(source, event),
-                        );
-                        presentation.finish(&result, &storage);
-                    }
-                    let reload = scheduler
-                        .lock()
-                        .unwrap_or_else(|p| p.into_inner())
-                        .scan_finished(source_id);
+                    });
+                    let scan_started = match storage {
+                        Ok(storage) => {
+                            match wc_app::library_rescan::establish_library_dirty_marker(&storage) {
+                                Ok(()) => {
+                                    let mut presentation =
+                                        crate::commands::scan::begin_background_scan();
+                                    let result =
+                                        wc_app::library_refresh::refresh_library_source_background(
+                                            &storage,
+                                            source_id,
+                                            |source, event| presentation.observe(source, event),
+                                        );
+                                    presentation.finish(&result, &storage);
+                                    true
+                                }
+                                Err(error) => {
+                                    log::warn!(
+                                        "Library background scan for source id {source_id} could \
+                                         not establish its recovery marker: {error}"
+                                    );
+                                    false
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            log::warn!(
+                                "Library background scan for source id {source_id} could not open \
+                                 storage: {error}"
+                            );
+                            false
+                        }
+                    };
+                    let reload = {
+                        let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
+                        let reload = scheduler.scan_finished(source_id);
+                        if !scan_started {
+                            scheduler.source_changed(source_id);
+                            false
+                        } else {
+                            reload
+                        }
+                    };
                     if reload
                         && !service.maintenance_paused()
                         && service.maintenance_generation() == generation
@@ -1006,6 +1073,41 @@ mod tests {
         assert!(!scheduler.scan_finished(7));
         assert!(scheduler.scan_finished(8));
         assert!(!scheduler.scan_finished(8));
+    }
+
+    #[test]
+    fn bounded_round_runs_one_source_at_a_time_and_reloads_once() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7, 8, 9]);
+        scheduler.source_changed(7);
+        scheduler.source_changed(8);
+        scheduler.source_changed(9);
+        clock.advance(1_500);
+
+        assert_eq!(scheduler.take_due_scans_bounded(1), vec![7]);
+        assert!(scheduler.take_due_scans_bounded(1).is_empty());
+        assert!(!scheduler.scan_finished(7));
+
+        assert_eq!(scheduler.take_due_scans_bounded(1), vec![8]);
+        assert!(!scheduler.scan_finished(8));
+
+        assert_eq!(scheduler.take_due_scans_bounded(1), vec![9]);
+        assert!(scheduler.scan_finished(9));
+        assert!(!scheduler.scan_finished(9));
+    }
+
+    #[test]
+    fn manual_request_removes_a_waiting_background_source() {
+        let clock = ManualClock::default();
+        let mut scheduler = LibraryScheduler::new(clock.clone(), [7, 8]);
+        scheduler.source_changed(7);
+        scheduler.source_changed(8);
+        clock.advance(1_500);
+
+        assert_eq!(scheduler.take_due_scans_bounded(1), vec![7]);
+        scheduler.manual_requested(8);
+        assert!(scheduler.scan_finished(7));
+        assert!(scheduler.take_due_scans_bounded(1).is_empty());
     }
 
     #[test]

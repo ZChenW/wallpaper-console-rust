@@ -363,7 +363,16 @@ fn apply_mpvpaper(
     let pid = match driver::launch_mpvpaper(s, path, output, &previous_pids, runtime) {
         Ok(pid) => pid,
         Err(driver::MpvpaperApplyError::Start(error)) => {
-            return Err(ApplyBackendFailure::from(error));
+            // The launcher may have forked mpvpaper before returning an error
+            // or exceeding its deadline. Always verify cleanup so a detached,
+            // untracked renderer cannot survive a reported failed apply.
+            return Err(mpvpaper_failed_launch_cleanup(
+                runtime,
+                &previous_pids,
+                output,
+                path,
+                error,
+            ));
         }
         Err(driver::MpvpaperApplyError::Ready(error)) => {
             return Err(mpvpaper_cleanup_failure(runtime, error));
@@ -376,6 +385,21 @@ fn apply_mpvpaper(
             WcError::Other("mpvpaper renderer exited before startup settled".into()),
         )),
         Err(error) => Err(mpvpaper_cleanup_failure(runtime, error)),
+    }
+}
+
+fn mpvpaper_failed_launch_cleanup(
+    runtime: &mut dyn BackendRuntime,
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
+    original_error: WcError,
+) -> ApplyBackendFailure {
+    match runtime.cleanup_failed_mpvpaper_launch(previous_pids, output, path) {
+        Ok(()) => ApplyBackendFailure::from(original_error),
+        Err(cleanup_error) => ApplyBackendFailure::from(WcError::Other(format!(
+            "{original_error}; failed-launch mpvpaper cleanup could not be verified: {cleanup_error}"
+        ))),
     }
 }
 
@@ -783,11 +807,26 @@ mod tests {
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
             }
-            fn wait_for_mpvpaper_ready(&mut self, p: &[u32]) -> Result<u32, WcError> {
-                self.inner.wait_for_mpvpaper_ready(p)
+            fn wait_for_mpvpaper_ready(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<u32, WcError> {
+                self.inner
+                    .wait_for_mpvpaper_ready(previous_pids, output, path)
             }
             fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
                 self.inner.mpvpaper_pid_running(pid)
+            }
+            fn cleanup_failed_mpvpaper_launch(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<(), WcError> {
+                self.inner
+                    .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
@@ -881,14 +920,29 @@ mod tests {
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
             }
-            fn wait_for_mpvpaper_ready(&mut self, p: &[u32]) -> Result<u32, WcError> {
+            fn wait_for_mpvpaper_ready(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<u32, WcError> {
                 if self.status_calls >= 2 {
                     return Err(WcError::Other("second instance not ready".into()));
                 }
-                self.inner.wait_for_mpvpaper_ready(p)
+                self.inner
+                    .wait_for_mpvpaper_ready(previous_pids, output, path)
             }
             fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
                 self.inner.mpvpaper_pid_running(pid)
+            }
+            fn cleanup_failed_mpvpaper_launch(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<(), WcError> {
+                self.inner
+                    .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
@@ -989,11 +1043,26 @@ mod tests {
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
             }
-            fn wait_for_mpvpaper_ready(&mut self, p: &[u32]) -> Result<u32, WcError> {
-                self.inner.wait_for_mpvpaper_ready(p)
+            fn wait_for_mpvpaper_ready(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<u32, WcError> {
+                self.inner
+                    .wait_for_mpvpaper_ready(previous_pids, output, path)
             }
             fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
                 self.inner.mpvpaper_pid_running(pid)
+            }
+            fn cleanup_failed_mpvpaper_launch(
+                &mut self,
+                previous_pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<(), WcError> {
+                self.inner
+                    .cleanup_failed_mpvpaper_launch(previous_pids, output, path)
             }
             fn stop_awww(&mut self) {
                 self.inner.stop_awww();
@@ -1091,6 +1160,47 @@ mod tests {
         .unwrap_err();
         assert!(err.error.to_string().contains("not ready"));
         assert_eq!(rt.stop_mpvpaper_count, 1);
+    }
+
+    #[test]
+    fn mpvpaper_launcher_failure_also_cleans_up_a_possible_detached_renderer() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("v.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        let known = vec!["eDP-1".into()];
+        let mut runtime = FakeRuntime {
+            command_status_success: false,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let failure = execute_display_actions(
+            &storage,
+            &[DisplayExecAction::Apply {
+                backend: Backend::Mpvpaper,
+                path: video.to_string_lossy().into_owned(),
+                scope: ExecutionScope::named(known.clone()).unwrap(),
+                use_instant: false,
+            }],
+            &ctx(&known),
+            &mut runtime,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(failure.error.to_string().contains("mpvpaper"));
+        assert_eq!(runtime.failed_mpvpaper_launch_cleanup_count, 1);
+        assert_eq!(
+            runtime.failed_mpvpaper_launch_cleanup_calls,
+            vec![(
+                Vec::new(),
+                "eDP-1".to_string(),
+                video.to_string_lossy().into_owned()
+            )]
+        );
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert!(failure.report.completed_stops.is_empty());
     }
 
     #[test]

@@ -1,12 +1,12 @@
 [package]
 name = "wallpaper-console-tauri"
-version = "0.1.0"
+version.workspace = true
 description = "Rust-native Wallpaper Console GUI"
 authors = ["wallpaper-console"]
-license = "MIT"
+license.workspace = true
 repository = ""
-edition = "2021"
-rust-version = "1.77.2"
+edition.workspace = true
+rust-version.workspace = true
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 

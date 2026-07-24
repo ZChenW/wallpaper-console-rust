@@ -309,7 +309,7 @@ test('thumbnail queue keeps queuedPaths in sync when re-enqueueing forgotten in-
   await new Promise((resolve) => setTimeout(resolve, 30));
 });
 
-test('stale completion after reset cannot clear the replacement in-flight request', async () => {
+test('reset keeps the physical request slot occupied until stale work settles', async () => {
   let releaseOld: (() => void) | undefined;
   let releaseFresh: (() => void) | undefined;
   const oldBlocked = new Promise<void>((resolve) => { releaseOld = resolve; });
@@ -334,15 +334,86 @@ test('stale completion after reset cannot clear the replacement in-flight reques
   queue.enqueue(['x']);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.equal(queue.stats().active, 1);
+  assert.equal(callCount, 1, 'replacement must wait for the real physical slot');
 
   releaseOld?.();
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(queue.stats().active, 1);
+  assert.equal(callCount, 2);
 
   releaseFresh?.();
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(queue.stats().active, 0);
   assert.deepEqual(h.thumbnails, { x: 'thumb:x:2' });
+});
+
+test('repeated resets never exceed configured underlying loader concurrency', async () => {
+  const releases: Array<() => void> = [];
+  let running = 0;
+  let peakRunning = 0;
+  let calls = 0;
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 2,
+    load: async (path) => {
+      calls += 1;
+      running += 1;
+      peakRunning = Math.max(peakRunning, running);
+      await new Promise<void>((resolve) => {
+        releases.push(() => {
+          running -= 1;
+          resolve();
+        });
+      });
+      return { path, cacheHit: false, thumbnail: `thumb:${path}:${calls}` };
+    },
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['a', 'b']);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  for (let generation = 0; generation < 4; generation += 1) {
+    queue.reset();
+    queue.enqueue(['a', 'b']);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  assert.equal(calls, 2);
+  assert.equal(peakRunning, 2);
+  releases.splice(0).forEach((release) => release());
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(calls, 4, 'only the latest replacement generation should start');
+  assert.equal(peakRunning, 2);
+
+  releases.splice(0).forEach((release) => release());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(queue.stats().active, 0);
+});
+
+test('forgotten and reset paths release unused version metadata', async () => {
+  const h = makeHandlers();
+  const queue = new ThumbnailRequestQueue({
+    concurrency: 1,
+    load: async (path) => ({
+      path,
+      cacheHit: false,
+      thumbnail: `thumb:${path}`,
+    }),
+    onThumbnail: h.onThumbnail,
+    onFailure: h.onFailure,
+  });
+
+  queue.enqueue(['a']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  queue.forget(['a']);
+  assert.equal(queue.snapshot().versioned, 0);
+
+  queue.enqueue(['b']);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  queue.forget(['b']);
+  queue.reset();
+  assert.equal(queue.snapshot().versioned, 0);
 });
 
 test('thumbnail queue still emits when completions land in separate frames', async () => {

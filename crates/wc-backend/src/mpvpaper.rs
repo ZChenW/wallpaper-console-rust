@@ -60,7 +60,10 @@ where
 
 pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
     let user = crate::current_process_user();
-    running_pids_for_scope_with(&user, |cmd| cmd.output())
+    running_pids_for_scope_with(&user, |cmd| {
+        crate::deadline_command::output(cmd, std::time::Duration::from_secs(2))
+            .map_err(|error| std::io::Error::other(error.to_string()))
+    })
 }
 
 pub(crate) fn stop_mpvpaper() {
@@ -76,6 +79,94 @@ pub(crate) fn stop_mpvpaper() {
             log::warn!("failed to query mpvpaper PIDs for stop: {err}");
         }
     }
+}
+
+fn cmdline_matches_target(tokens: &[String], output: &str, path: &str) -> bool {
+    let Some(argv0) = tokens.first() else {
+        return false;
+    };
+    if !crate::process_control::token_is_mpvpaper_program(argv0) {
+        return false;
+    }
+    (3..tokens.len()).any(|separator| {
+        tokens[separator] == "--"
+            && tokens.get(separator - 3).is_some_and(|token| token == "-o")
+            && tokens
+                .get(separator - 1)
+                .is_some_and(|token| token == output)
+            && tokens.get(separator + 1).is_some_and(|token| token == path)
+            && separator + 2 == tokens.len()
+    })
+}
+
+fn pids_started_after_matching_target_with<F>(
+    current_pids: &[u32],
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
+    mut read_cmdline: F,
+) -> Vec<u32>
+where
+    F: FnMut(u32) -> Option<Vec<String>>,
+{
+    current_pids
+        .iter()
+        .copied()
+        .filter(|pid| !previous_pids.contains(pid))
+        .filter(|pid| {
+            read_cmdline(*pid).is_some_and(|tokens| cmdline_matches_target(&tokens, output, path))
+        })
+        .collect()
+}
+
+fn read_mpvpaper_cmdline(pid: u32) -> Option<Vec<String>> {
+    let pid = i32::try_from(pid).ok()?;
+    crate::process_control::read_proc_cmdline_tokens(pid)
+}
+
+pub(crate) fn pid_matches_target(pid: u32, output: &str, path: &str) -> bool {
+    read_mpvpaper_cmdline(pid).is_some_and(|tokens| cmdline_matches_target(&tokens, output, path))
+}
+
+pub(crate) fn stop_pids_started_after(
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
+) -> Result<(), WcError> {
+    let target_pids = pids_started_after_matching_target_with(
+        &running_pids()?,
+        previous_pids,
+        output,
+        path,
+        read_mpvpaper_cmdline,
+    );
+    for pid in &target_pids {
+        if !pid_matches_target(*pid, output, path) {
+            return Err(WcError::Other(format!(
+                "refusing to stop PID {pid} after failed mpvpaper launch because its target \
+                 identity changed"
+            )));
+        }
+        crate::process_control::kill_pid_gracefully(*pid);
+    }
+
+    for poll in 0..=40 {
+        let still_running = running_pids()?
+            .into_iter()
+            .filter(|pid| target_pids.contains(pid))
+            .filter(|pid| pid_matches_target(*pid, output, path))
+            .collect::<Vec<_>>();
+        if still_running.is_empty() {
+            return Ok(());
+        }
+        if poll == 40 {
+            return Err(WcError::Other(format!(
+                "new mpvpaper processes survived failed-launch cleanup: pids={still_running:?}"
+            )));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    unreachable!("bounded cleanup loop always returns")
 }
 
 pub(crate) fn normalize_mpvpaper_options(raw: &str) -> &str {
@@ -123,6 +214,46 @@ mod tests {
         let error = parse_running_pids(Some(2), b"").unwrap_err();
 
         assert!(error.to_string().contains("status 2"));
+    }
+
+    #[test]
+    fn failed_launch_cleanup_targets_only_new_renderer_for_exact_output_and_path() {
+        let target = vec![
+            "/usr/bin/mpvpaper".to_string(),
+            "--fork".to_string(),
+            "-o".to_string(),
+            "--loop-file=inf --panscan=1.0".to_string(),
+            "eDP-1".to_string(),
+            "--".to_string(),
+            "/walls/target.mp4".to_string(),
+        ];
+        let other_output = {
+            let mut tokens = target.clone();
+            tokens[4] = "HDMI-A-1".to_string();
+            tokens
+        };
+        let other_path = {
+            let mut tokens = target.clone();
+            tokens[6] = "/walls/other.mp4".to_string();
+            tokens
+        };
+
+        assert_eq!(
+            pids_started_after_matching_target_with(
+                &[10, 20, 30, 40],
+                &[10],
+                "eDP-1",
+                "/walls/target.mp4",
+                |pid| match pid {
+                    20 => Some(target.clone()),
+                    30 => Some(other_output.clone()),
+                    40 => Some(other_path.clone()),
+                    _ => None,
+                },
+            ),
+            vec![20],
+            "new renderers for another output or path must not be selected"
+        );
     }
 
     #[test]

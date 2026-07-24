@@ -37,10 +37,13 @@ pub(crate) struct FakeRuntime {
     pub mpvpaper_readiness_error: Option<String>,
     pub mpvpaper_wait_count: usize,
     pub mpvpaper_wait_previous_pids: Vec<Vec<u32>>,
+    pub mpvpaper_wait_targets: Vec<(String, String)>,
     pub mpvpaper_ready_pid: Option<u32>,
     pub dead_mpvpaper_pids: Vec<u32>,
     pub mpvpaper_pid_running_error: Option<String>,
     pub mpvpaper_pid_running_checks: Vec<u32>,
+    pub failed_mpvpaper_launch_cleanup_count: usize,
+    pub failed_mpvpaper_launch_cleanup_calls: Vec<(Vec<u32>, String, String)>,
     pub lwe_apply_calls: Vec<(String, Vec<String>)>,
     pub lwe_apply_error: Option<String>,
 }
@@ -69,10 +72,13 @@ impl Default for FakeRuntime {
             mpvpaper_readiness_error: None,
             mpvpaper_wait_count: 0,
             mpvpaper_wait_previous_pids: Vec::new(),
+            mpvpaper_wait_targets: Vec::new(),
             mpvpaper_ready_pid: None,
             dead_mpvpaper_pids: Vec::new(),
             mpvpaper_pid_running_error: None,
             mpvpaper_pid_running_checks: Vec::new(),
+            failed_mpvpaper_launch_cleanup_count: 0,
+            failed_mpvpaper_launch_cleanup_calls: Vec::new(),
             lwe_apply_calls: Vec::new(),
             lwe_apply_error: None,
         }
@@ -143,10 +149,17 @@ impl BackendRuntime for FakeRuntime {
         }
     }
 
-    fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
+    fn wait_for_mpvpaper_ready(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<u32, WcError> {
         self.mpvpaper_wait_count += 1;
         self.mpvpaper_wait_previous_pids
             .push(previous_pids.to_vec());
+        self.mpvpaper_wait_targets
+            .push((output.to_string(), path.to_string()));
         match &self.mpvpaper_readiness_error {
             Some(message) => Err(WcError::Other(message.clone())),
             None => Ok(self.mpvpaper_ready_pid.unwrap_or(1)),
@@ -159,6 +172,23 @@ impl BackendRuntime for FakeRuntime {
             Some(message) => Err(WcError::Other(message.clone())),
             None => Ok(!self.dead_mpvpaper_pids.contains(&pid)),
         }
+    }
+
+    fn cleanup_failed_mpvpaper_launch(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<(), WcError> {
+        self.failed_mpvpaper_launch_cleanup_count += 1;
+        self.failed_mpvpaper_launch_cleanup_calls.push((
+            previous_pids.to_vec(),
+            output.to_string(),
+            path.to_string(),
+        ));
+        self.running_mpvpaper_pids
+            .retain(|pid| previous_pids.contains(pid));
+        Ok(())
     }
 
     fn stop_awww(&mut self) {

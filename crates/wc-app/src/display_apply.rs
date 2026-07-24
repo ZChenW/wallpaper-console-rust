@@ -1027,12 +1027,28 @@ mod tests {
             Ok(self.running_mpvpaper_pids.clone())
         }
 
-        fn wait_for_mpvpaper_ready(&mut self, _previous_pids: &[u32]) -> Result<u32, WcError> {
+        fn wait_for_mpvpaper_ready(
+            &mut self,
+            _previous_pids: &[u32],
+            _output: &str,
+            _path: &str,
+        ) -> Result<u32, WcError> {
             Ok(self.mpvpaper_ready_pid.unwrap_or(7))
         }
 
         fn mpvpaper_pid_running(&mut self, _pid: u32) -> Result<bool, WcError> {
             Ok(true)
+        }
+
+        fn cleanup_failed_mpvpaper_launch(
+            &mut self,
+            previous_pids: &[u32],
+            _output: &str,
+            _path: &str,
+        ) -> Result<(), WcError> {
+            self.running_mpvpaper_pids
+                .retain(|pid| previous_pids.contains(pid));
+            Ok(())
         }
 
         fn stop_awww(&mut self) {

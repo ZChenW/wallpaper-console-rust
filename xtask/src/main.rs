@@ -19,6 +19,12 @@ struct VerifyArgs {
     dry_run: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum XtaskCommand {
+    Help,
+    Verify(VerifyArgs),
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Step {
     name: &'static str,
@@ -96,12 +102,31 @@ const FRONTEND_STEPS: &[Step] = &[
 
 /// Wall-clock Library performance budgets. Kept out of `verify all` so correctness
 /// gates stay reproducible on slower or contended machines.
-const PERF_STEPS: &[Step] = &[Step {
-    name: "Frontend Library performance gate",
-    cwd: StepCwd::Frontend,
-    program: "npm",
-    args: &["run", "perf:library"],
-}];
+const PERF_STEPS: &[Step] = &[
+    Step {
+        name: "Rust 10k Library performance gate",
+        cwd: StepCwd::RepoRoot,
+        program: "cargo",
+        args: &[
+            "test",
+            "--locked",
+            "-p",
+            "wc-storage",
+            "--test",
+            "library_browser_perf",
+            "ten_thousand_wallpaper_browser_cold_p95_is_at_most_500ms",
+            "--",
+            "--ignored",
+            "--exact",
+        ],
+    },
+    Step {
+        name: "Frontend Library performance gate",
+        cwd: StepCwd::Frontend,
+        program: "npm",
+        args: &["run", "perf:library"],
+    },
+];
 
 const DRIFT_STEPS: &[Step] = &[
     Step {
@@ -115,6 +140,12 @@ const DRIFT_STEPS: &[Step] = &[
         cwd: StepCwd::RepoRoot,
         program: "bash",
         args: &["scripts/test_tauri_before_commands_unit.sh"],
+    },
+    Step {
+        name: "Install/uninstall contract",
+        cwd: StepCwd::RepoRoot,
+        program: "bash",
+        args: &["scripts/test_install_contract.sh"],
     },
 ];
 
@@ -130,7 +161,13 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let raw_args: Vec<String> = env::args().skip(1).collect();
-    let args = parse_verify_args(&raw_args)?;
+    let args = match parse_xtask_command(&raw_args)? {
+        XtaskCommand::Help => {
+            println!("{}", usage());
+            return Ok(());
+        }
+        XtaskCommand::Verify(args) => args,
+    };
     let repo_root = repo_root();
 
     for step in steps_for(args.suite) {
@@ -155,8 +192,15 @@ fn steps_for(suite: VerifySuite) -> Vec<Step> {
     }
 }
 
+fn parse_xtask_command(args: &[String]) -> Result<XtaskCommand, String> {
+    match args.first().map(String::as_str) {
+        Some("--help" | "-h") => Ok(XtaskCommand::Help),
+        _ => parse_verify_args(args).map(XtaskCommand::Verify),
+    }
+}
+
 fn parse_verify_args(args: &[String]) -> Result<VerifyArgs, String> {
-    if args.is_empty() || args[0] == "--help" || args[0] == "-h" {
+    if args.is_empty() {
         return Err(usage());
     }
     if args[0] != "verify" {
@@ -263,6 +307,16 @@ mod tests {
     }
 
     #[test]
+    fn top_level_help_flags_are_successful_commands() {
+        for flag in ["--help", "-h"] {
+            assert_eq!(
+                parse_xtask_command(&args(&[flag])).unwrap(),
+                XtaskCommand::Help
+            );
+        }
+    }
+
+    #[test]
     fn parses_frontend() {
         assert_eq!(
             parse_verify_args(&args(&["verify", "frontend"])).unwrap(),
@@ -315,7 +369,7 @@ mod tests {
             RUST_STEPS.len() + FRONTEND_STEPS.len() + DRIFT_STEPS.len()
         );
         assert_eq!(names.first(), Some(&"Rust format"));
-        assert_eq!(names.last(), Some(&"Tauri before-command exit capture"));
+        assert_eq!(names.last(), Some(&"Install/uninstall contract"));
     }
 
     #[test]
@@ -337,6 +391,18 @@ mod tests {
         let steps = steps_for(VerifySuite::Drift);
         assert_eq!(steps.len(), DRIFT_STEPS.len());
         assert_eq!(steps.first().map(|s| s.name), Some("Runtime/config drift"));
+        assert_eq!(
+            steps.last().map(|s| s.name),
+            Some("Install/uninstall contract")
+        );
+        assert_eq!(
+            steps
+                .iter()
+                .filter(|step| step.args.contains(&"scripts/test_install_contract.sh"))
+                .count(),
+            1,
+            "drift verification must run the install contract exactly once"
+        );
     }
 
     #[test]
@@ -438,10 +504,12 @@ mod tests {
     }
 
     #[test]
-    fn rust_verify_matrix_keeps_library_perf_out_of_default_frontend_gate() {
+    fn correctness_matrix_keeps_wall_clock_perf_in_the_perf_suite() {
         assert!(
-            !RUST_STEPS.iter().any(|step| step.name.contains("10k")),
-            "RUST_STEPS must not duplicate the library 10k perf gate covered by cargo test --workspace"
+            !RUST_STEPS
+                .iter()
+                .any(|step| step.name.contains("performance")),
+            "Rust correctness steps must not directly run a wall-clock performance gate"
         );
         assert_eq!(
             FRONTEND_STEPS
@@ -458,6 +526,30 @@ mod tests {
                 .count(),
             1,
             "perf suite must expose perf:library exactly once"
+        );
+        assert_eq!(
+            PERF_STEPS
+                .iter()
+                .filter(|step| step.args.contains(&"library_browser_perf"))
+                .count(),
+            1,
+            "perf suite must expose the Rust 10k Library gate exactly once"
+        );
+        assert_eq!(
+            PERF_STEPS.first().map(|step| step.name),
+            Some("Rust 10k Library performance gate"),
+            "the deterministic Rust data-layer gate should run before browser timing"
+        );
+
+        let rust_perf_source = std::fs::read_to_string(
+            repo_root().join("crates/wc-storage/tests/library_browser_perf.rs"),
+        )
+        .expect("Rust Library performance test must be readable");
+        assert!(
+            rust_perf_source.contains(
+                "#[ignore = \"wall-clock performance gate; run with `cargo run -p xtask -- verify perf`\"]"
+            ),
+            "the Rust wall-clock test must remain ignored by cargo test --workspace"
         );
     }
 
@@ -478,7 +570,7 @@ mod tests {
         assert!(
             !steps
                 .iter()
-                .any(|step| step.args.get(1) == Some(&"perf:library")),
+                .any(|step| PERF_STEPS.iter().any(|perf| perf.name == step.name)),
             "verify all must not run the Library performance gate"
         );
     }
@@ -616,12 +708,19 @@ export const ALL_SETTINGS = [
     }
 
     const REQUIRED_VERIFICATION_ASSETS: &[&str] = &[
+        "LICENSE",
+        "install.sh",
         "xtask/Cargo.toml",
         "xtask/src/main.rs",
+        "xtask/tests/help.rs",
         "scripts/check_runtime_config_drift.sh",
+        "scripts/test_install_contract.sh",
+        "crates/wc-storage/tests/library_browser_perf.rs",
         "apps/tauri-gui/frontend/package-lock.json",
         "apps/tauri-gui/frontend/tsconfig.tests.json",
         "apps/tauri-gui/frontend/vite.mock.config.ts",
+        "apps/tauri-gui/frontend/e2e/library-perf.spec.ts",
+        "apps/tauri-gui/frontend/e2e/perf-report.mjs",
         "apps/tauri-gui/frontend/e2e/playwright.config.ts",
         "apps/tauri-gui/frontend/e2e/smoke.spec.ts",
     ];

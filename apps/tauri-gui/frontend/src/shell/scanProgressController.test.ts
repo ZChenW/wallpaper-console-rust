@@ -75,6 +75,7 @@ function createController(input: {
   clock: ManualClock;
   read: () => Promise<ScanProgressDTO>;
   cancel?: () => Promise<CommandResult>;
+  cancelTimeoutMs?: number;
 }) {
   return new ScanProgressController({
     api: {
@@ -85,6 +86,8 @@ function createController(input: {
     scheduler: input.clock,
     activePollMs: 100,
     idlePollMs: 1_000,
+    requestTimeoutMs: 0,
+    cancelTimeoutMs: input.cancelTimeoutMs,
   });
 }
 
@@ -281,6 +284,45 @@ test('a failed cancel request restores the cancel action and polling can recover
   assert.equal(cancelCalls, 2);
 });
 
+test('a hung cancel request times out, restores retry, and ignores its late result', async () => {
+  const clock = new ManualClock();
+  let resolveFirstCancel: ((result: CommandResult) => void) | undefined;
+  let cancelCalls = 0;
+  const controller = createController({
+    clock,
+    read: async () => progress({ running: true, stage: 'indexing' }),
+    cancelTimeoutMs: 75,
+    cancel: () => {
+      cancelCalls += 1;
+      if (cancelCalls === 1) {
+        return new Promise<CommandResult>((resolve) => { resolveFirstCancel = resolve; });
+      }
+      return Promise.resolve(ok);
+    },
+  });
+  controller.start();
+  await settle();
+
+  const first = controller.requestCancel();
+  assert.equal(clock.nextDelay(), 75);
+  clock.advanceBy(75);
+  await first;
+  assert.match(controller.getSnapshot().transportError ?? '', /timed out after 75ms/);
+  const afterTimeout = controller.getSnapshot().scanState;
+  assert.equal(
+    afterTimeout.kind === 'running' ? afterTimeout.cancelRequestedAtMs : null,
+    null,
+  );
+
+  assert.equal(await controller.requestCancel(), ok);
+  assert.equal(cancelCalls, 2);
+  resolveFirstCancel?.(ok);
+  await settle();
+
+  assert.equal(cancelCalls, 2);
+  assert.equal(controller.getSnapshot().scanState.kind, 'running');
+});
+
 test('stopping ignores a late progress response and leaves no timer behind', async () => {
   const clock = new ManualClock();
   let resolveRead: ((value: ScanProgressDTO) => void) | undefined;
@@ -295,4 +337,53 @@ test('stopping ignores a late progress response and leaves no timer behind', asy
   assert.equal(controller.getSnapshot().scanState.kind, 'idle');
   assert.equal(controller.getSnapshot().pollingMode, 'stopped');
   assert.equal(clock.nextDelay(), null);
+});
+
+test('a hung progress read times out and leaves the controller recoverable', async () => {
+  const clock = new ManualClock();
+  const controller = new ScanProgressController({
+    api: {
+      scanProgress: () => new Promise(() => {}),
+      scanCancel: async () => ok,
+    },
+    now: clock.now,
+    scheduler: clock,
+    activePollMs: 100,
+    idlePollMs: 1_000,
+    requestTimeoutMs: 75,
+  });
+
+  controller.start();
+  assert.equal(clock.nextDelay(), 75);
+  clock.advanceBy(75);
+  await settle();
+
+  assert.match(controller.getSnapshot().transportError ?? '', /timed out after 75ms/);
+  assert.equal(controller.getSnapshot().pollingMode, 'idle');
+  assert.equal(clock.nextDelay(), 1_000);
+});
+
+test('stopped polling restarts with an immediate fresh read', async () => {
+  const clock = new ManualClock();
+  let resolveSecond: ((value: ScanProgressDTO) => void) | undefined;
+  let reads = 0;
+  const controller = createController({
+    clock,
+    read: () => {
+      reads += 1;
+      if (reads === 1) return new Promise(() => {});
+      return new Promise((resolve) => { resolveSecond = resolve; });
+    },
+  });
+
+  controller.start();
+  assert.equal(reads, 1);
+  controller.stop();
+  assert.equal(clock.nextDelay(), null);
+
+  controller.start();
+  assert.equal(reads, 2);
+  resolveSecond?.(progress());
+  await settle();
+  assert.equal(controller.getSnapshot().pollingMode, 'idle');
 });

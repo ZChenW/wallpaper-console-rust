@@ -10,7 +10,7 @@ use std::path::Path;
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
 use wc_backend::display_executor::{
-    execute_display_actions, DisplayExecAction, DisplayExecContext,
+    execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecReport,
 };
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
@@ -19,7 +19,9 @@ use wc_config::ConfigDirExt;
 use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
-use crate::display_apply::{rejection_to_app_error, to_exec_action};
+use crate::display_apply::{
+    reconcile_display_state_from_report, rejection_to_app_error, to_exec_action,
+};
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
 };
@@ -58,6 +60,26 @@ impl AppService {
         runtime: &mut dyn BackendRuntime,
         reporter: &mut dyn ApplyStageReporter,
         opts: DisplayRestoreRuntimeOpts,
+    ) -> Result<(), AppError> {
+        self.restore_displays_with_runtime_and_commit_seam(
+            known_outputs,
+            runtime,
+            reporter,
+            opts,
+            None,
+        )
+    }
+
+    /// Same as [`Self::restore_displays_with_runtime`] with a transaction-level
+    /// state-commit seam for failure-injection tests.
+    #[doc(hidden)]
+    pub fn restore_displays_with_runtime_and_commit_seam(
+        &self,
+        known_outputs: &[String],
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+        opts: DisplayRestoreRuntimeOpts,
+        mut before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
     ) -> Result<(), AppError> {
         let request_id = opts.request_id.as_deref();
         apply_stage::report_stage(reporter, apply_stage::ApplyStage::ResolveTarget, request_id);
@@ -123,31 +145,85 @@ impl AppService {
             all_actions.extend(actions);
         }
 
-        let exec_result = execute_display_actions(
+        let report = match execute_display_actions(
             &self.storage,
             &all_actions,
             &DisplayExecContext { known_outputs },
             runtime,
             reporter,
             request_id,
-        );
-        if let Err(failure) = exec_result {
-            return Err(self.handle_exec_failure(failure, &previous_rows, known_outputs, None)?);
+        ) {
+            Ok(report) => report,
+            Err(failure) => {
+                return Err(self.handle_exec_failure(
+                    failure,
+                    &previous_rows,
+                    known_outputs,
+                    None,
+                )?);
+            }
+        };
+
+        let commit_result = match before_state_commit.as_deref_mut() {
+            Some(seam) => self
+                .storage
+                .display_state_replace_all_seam(&restored_state, seam),
+            None => self.storage.display_state_replace_all(&restored_state),
+        };
+        if let Err(commit_error) = commit_result {
+            return Err(self.reconcile_restore_commit_failure(
+                commit_error,
+                &previous_rows,
+                &report,
+                known_outputs,
+                before_state_commit,
+            ));
         }
-        self.storage
-            .display_state_replace_all(&restored_state)
-            .map_err(|error| AppError {
+        Ok(())
+    }
+
+    fn reconcile_restore_commit_failure(
+        &self,
+        commit_error: wc_core::error::WcError,
+        previous_rows: &[DisplayStateRow],
+        report: &DisplayExecReport,
+        known_outputs: &[String],
+        before_reconcile: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
+    ) -> AppError {
+        let reconciled = reconcile_display_state_from_report(previous_rows, report, known_outputs);
+        let reconciliation_result = self
+            .storage
+            .display_state_replace_all_and_clear_legacy(&reconciled, before_reconcile);
+
+        match reconciliation_result {
+            Ok(()) => AppError {
                 code: "display_restore_state_commit_failed".into(),
-                message: "Wallpapers were restored, but their display state could not be updated."
+                message: "Wallpapers were restored. The intended state commit failed, but the \
+                          actual live display state was reconciled."
                     .into(),
-                detail: Some(error.to_string()),
+                detail: Some(format!(
+                    "commit_error={commit_error}; reconciliation=ok; legacy_state_clear=ok"
+                )),
                 recoverable: true,
                 suggestion: Some(
-                    "Refresh display status, then retry restore before applying another wallpaper."
+                    "Review display status and retry restore if the intended assignments differ."
                         .into(),
                 ),
-            })?;
-        Ok(())
+            },
+            Err(error) => AppError {
+                code: "display_state_uncertain".into(),
+                message: "Wallpapers were restored, but persisted display state is uncertain."
+                    .into(),
+                detail: Some(format!(
+                    "commit_error={commit_error}; reconciliation_transaction_error={error}"
+                )),
+                recoverable: true,
+                suggestion: Some(
+                    "Refresh renderer status before applying or restoring another wallpaper."
+                        .into(),
+                ),
+            },
+        }
     }
 }
 
@@ -373,12 +449,28 @@ mod tests {
             Ok(self.running_mpvpaper_pids.clone())
         }
 
-        fn wait_for_mpvpaper_ready(&mut self, _previous_pids: &[u32]) -> Result<u32, WcError> {
+        fn wait_for_mpvpaper_ready(
+            &mut self,
+            _previous_pids: &[u32],
+            _output: &str,
+            _path: &str,
+        ) -> Result<u32, WcError> {
             Ok(self.mpvpaper_ready_pid.unwrap_or(7))
         }
 
         fn mpvpaper_pid_running(&mut self, _pid: u32) -> Result<bool, WcError> {
             Ok(true)
+        }
+
+        fn cleanup_failed_mpvpaper_launch(
+            &mut self,
+            previous_pids: &[u32],
+            _output: &str,
+            _path: &str,
+        ) -> Result<(), WcError> {
+            self.running_mpvpaper_pids
+                .retain(|pid| previous_pids.contains(pid));
+            Ok(())
         }
 
         fn stop_awww(&mut self) {
@@ -464,6 +556,29 @@ mod tests {
         let path = root.join(name);
         std::fs::write(&path, b"vid").unwrap();
         path
+    }
+
+    fn restore_service_with_changed_backend() -> (tempfile::TempDir, AppService, std::path::PathBuf)
+    {
+        let (tmp, service) = temp_service();
+        let image = write_image(tmp.path(), "changed-backend.jpg");
+        service
+            .storage_for_tests()
+            .config_set("image_backend", "mpvpaper")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &image.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        service
+            .storage_for_tests()
+            .runtime_state_write_pair(&image.to_string_lossy(), "awww")
+            .unwrap();
+        (tmp, service, image)
     }
 
     #[test]
@@ -927,5 +1042,131 @@ mod tests {
             "disconnected preference preserved: {rows:?}"
         );
         assert!(rt.stop_awww_count >= 1);
+    }
+
+    #[test]
+    fn successful_restore_reconciles_live_report_after_primary_state_commit_failure() {
+        let (_tmp, service, image) = restore_service_with_changed_backend();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            mpvpaper_ready_pid: Some(9),
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let mut commit_attempts = 0;
+        let mut fail_primary_commit = || {
+            commit_attempts += 1;
+            if commit_attempts == 1 {
+                Err(WcError::Other("injected primary commit failure".into()))
+            } else {
+                Ok(())
+            }
+        };
+
+        let error = service
+            .restore_displays_with_runtime_and_commit_seam(
+                &["eDP-1".into()],
+                &mut runtime,
+                &mut reporter,
+                DisplayRestoreRuntimeOpts::default(),
+                Some(&mut fail_primary_commit),
+            )
+            .unwrap_err();
+
+        assert_eq!(commit_attempts, 2);
+        assert_eq!(error.code, "display_restore_state_commit_failed");
+        let detail = error.detail.as_deref().unwrap_or_default();
+        assert!(
+            detail.contains("injected primary commit failure"),
+            "{detail}"
+        );
+        assert!(detail.contains("reconciliation=ok"), "{detail}");
+
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].target,
+            DisplayStateTarget::Output("eDP-1".into()),
+            "reconciliation must persist the executor's per-output live scope"
+        );
+        assert_eq!(rows[0].wallpaper_path, image.to_string_lossy());
+        assert_eq!(
+            rows[0].backend, "mpvpaper",
+            "reconciliation must persist the backend that actually started"
+        );
+        assert_eq!(service.storage_for_tests().current_read().unwrap(), None);
+        assert_eq!(
+            service.storage_for_tests().last_backend_read().unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn successful_restore_reports_both_errors_when_reconciliation_commit_also_fails() {
+        let (_tmp, service, image) = restore_service_with_changed_backend();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            mpvpaper_ready_pid: Some(9),
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let mut commit_attempts = 0;
+        let mut fail_both_commits = || {
+            commit_attempts += 1;
+            let message = if commit_attempts == 1 {
+                "injected primary commit failure"
+            } else {
+                "injected reconciliation commit failure"
+            };
+            Err(WcError::Other(message.into()))
+        };
+
+        let error = service
+            .restore_displays_with_runtime_and_commit_seam(
+                &["eDP-1".into()],
+                &mut runtime,
+                &mut reporter,
+                DisplayRestoreRuntimeOpts::default(),
+                Some(&mut fail_both_commits),
+            )
+            .unwrap_err();
+
+        assert_eq!(commit_attempts, 2);
+        assert_eq!(error.code, "display_state_uncertain");
+        let detail = error.detail.as_deref().unwrap_or_default();
+        assert!(detail.contains("commit_error=injected primary commit failure"));
+        assert!(
+            detail.contains(
+                "reconciliation_transaction_error=injected reconciliation commit failure"
+            ),
+            "{detail}"
+        );
+
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].backend, "awww",
+            "both injected transactions must roll back without partial persistence"
+        );
+        assert_eq!(
+            service
+                .storage_for_tests()
+                .current_read()
+                .unwrap()
+                .as_deref(),
+            Some(image.to_string_lossy().as_ref()),
+            "failed reconciliation transaction must preserve legacy state"
+        );
+        assert_eq!(
+            service
+                .storage_for_tests()
+                .last_backend_read()
+                .unwrap()
+                .as_deref(),
+            Some("awww"),
+            "failed reconciliation transaction must preserve the legacy backend"
+        );
     }
 }

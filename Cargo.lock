@@ -4604,6 +4604,7 @@ dependencies = [
  "anyhow",
  "filetime",
  "image",
+ "libc",
  "tempfile",
  "wc-config",
  "wc-core",

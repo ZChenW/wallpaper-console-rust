@@ -3,6 +3,7 @@ use super::common::{
     LibraryBrowserPageDto, LibraryBrowserQueryDto, LibraryBrowserSourceDto, LibraryBrowserTotalDto,
     LibraryCountDto, LibraryPageDto, LibraryQueryErrorDto, LibrarySourceStatusDto,
 };
+use super::path_guard;
 
 #[tauri::command]
 pub async fn library_count() -> Result<LibraryCountDto, String> {
@@ -331,7 +332,7 @@ pub async fn favorite_add(
     let service = state.inner().clone();
     Ok(
         tauri::async_runtime::spawn_blocking(move || match storage() {
-            Ok(s) => match s.favorites_add(&path) {
+            Ok(s) => match favorite_add_for_storage(s, &path) {
                 Ok(changed) => {
                     if changed {
                         service.invalidate_local_write();
@@ -345,6 +346,13 @@ pub async fn favorite_add(
         .await
         .unwrap_or_else(|e| fail(e.to_string())),
     )
+}
+
+fn favorite_add_for_storage(storage: &wc_storage::StorageApi, path: &str) -> Result<bool, String> {
+    let canonical = path_guard::ensure_command_wallpaper_path(path, storage)?;
+    storage
+        .favorites_add(canonical.to_string_lossy().as_ref())
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -783,6 +791,92 @@ mod tests {
             .unwrap();
         let favs = wc_storage::sqlite::favorites_page_sqlite(&cd, 0, 10).unwrap();
         assert_eq!(favs.total, 1);
+    }
+
+    #[test]
+    fn favorite_add_authorizes_source_path_and_persists_canonical_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        let wallpaper = source.join("wall.jpg");
+        std::fs::write(&wallpaper, b"jpg").unwrap();
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+
+        assert!(super::favorite_add_for_storage(
+            &storage,
+            source.join(".").join("wall.jpg").to_string_lossy().as_ref()
+        )
+        .unwrap());
+        assert_eq!(
+            storage.favorites_list().unwrap(),
+            vec![wallpaper
+                .canonicalize()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()]
+        );
+    }
+
+    #[test]
+    fn favorite_add_allows_indexed_orphan_and_current_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir(&outside).unwrap();
+        let orphan = outside.join("orphan.jpg");
+        let current = outside.join("current.jpg");
+        std::fs::write(&orphan, b"jpg").unwrap();
+        std::fs::write(&current, b"jpg").unwrap();
+        let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES (?1, 'image', 'jpg', 'awww')",
+            [orphan.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        drop(conn);
+        storage
+            .current_write(current.to_string_lossy().as_ref())
+            .unwrap();
+
+        assert!(super::favorite_add_for_storage(&storage, &orphan.to_string_lossy()).unwrap());
+        assert!(super::favorite_add_for_storage(&storage, &current.to_string_lossy()).unwrap());
+        assert!(super::path_guard::ensure_command_wallpaper_path(
+            &orphan.to_string_lossy(),
+            &storage
+        )
+        .is_ok());
+        assert!(super::path_guard::ensure_command_wallpaper_path(
+            &current.to_string_lossy(),
+            &storage
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn favorite_add_rejects_outside_self_authorization_but_remove_can_clean_bad_row() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let outside = tmp.path().join("outside.jpg");
+        std::fs::write(&outside, b"jpg").unwrap();
+        storage
+            .favorites_add(outside.to_string_lossy().as_ref())
+            .unwrap();
+
+        assert!(super::favorite_add_for_storage(&storage, &outside.to_string_lossy()).is_err());
+        storage
+            .favorites_remove(outside.to_string_lossy().as_ref())
+            .unwrap();
+        assert!(storage.favorites_list().unwrap().is_empty());
     }
 
     #[test]

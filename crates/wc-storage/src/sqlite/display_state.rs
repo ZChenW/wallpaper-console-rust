@@ -412,6 +412,29 @@ pub fn display_state_replace_all(
 pub fn display_state_replace_all_with_seam(
     conn: &Connection,
     rows: &[(DisplayStateTarget, String, String)],
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    display_state_replace_all_and_maybe_clear_legacy(conn, rows, false, before_commit)
+}
+
+/// Atomically replace every display assignment and clear the legacy
+/// `current` / `last_backend` pair.
+///
+/// Restore reconciliation uses this after renderer side effects: publishing
+/// the observed display truth and retiring the incompatible legacy
+/// single-wallpaper view must be one durable state transition.
+pub fn display_state_replace_all_and_clear_legacy(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    display_state_replace_all_and_maybe_clear_legacy(conn, rows, true, before_commit)
+}
+
+fn display_state_replace_all_and_maybe_clear_legacy(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    clear_legacy: bool,
     mut before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
 ) -> Result<(), WcError> {
     let mut seen = HashSet::new();
@@ -443,6 +466,13 @@ pub fn display_state_replace_all_with_seam(
             stmt.execute(params![target.storage_key(), path, backend])
                 .map_err(sqlite_err)?;
         }
+    }
+    if clear_legacy {
+        tx.execute(
+            "DELETE FROM state WHERE key IN ('current', 'last_backend')",
+            [],
+        )
+        .map_err(sqlite_err)?;
     }
     if let Some(seam) = before_commit.as_mut() {
         seam()?;
@@ -596,6 +626,16 @@ pub fn display_state_replace_all_cd_with_seam(
 ) -> Result<(), WcError> {
     let conn = open_runtime_connection(cd)?;
     display_state_replace_all_with_seam(&conn, rows, Some(before_commit))
+}
+
+pub fn display_state_replace_all_and_clear_legacy_cd(
+    cd: &ConfigDir,
+    rows: &[(DisplayStateTarget, String, String)],
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    let conn = open_display_state_connection(cd)?;
+    ensure_display_state(&conn)?;
+    display_state_replace_all_and_clear_legacy(&conn, rows, before_commit)
 }
 
 pub fn display_state_commit_all_displays_with_legacy_cd(
@@ -775,6 +815,69 @@ mod tests {
         let row = display_state_get(&conn, &hdmi).unwrap().unwrap();
         assert_eq!(row.wallpaper_path, "/walls/hdmi.jpg");
         assert_eq!(row.backend, "mpvpaper");
+    }
+
+    #[test]
+    fn reconcile_replace_and_legacy_clear_commit_together() {
+        let conn = open_db();
+        set_state(&conn, "current", "/walls/legacy.jpg");
+        set_state(&conn, "last_backend", "awww");
+
+        display_state_replace_all_and_clear_legacy(
+            &conn,
+            &[(
+                DisplayStateTarget::Output("eDP-1".into()),
+                "/walls/live.mp4".into(),
+                "mpvpaper".into(),
+            )],
+            None,
+        )
+        .unwrap();
+
+        let rows = display_state_list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].wallpaper_path, "/walls/live.mp4");
+        assert_eq!(state_value(&conn, "current"), None);
+        assert_eq!(state_value(&conn, "last_backend"), None);
+    }
+
+    #[test]
+    fn reconcile_replace_and_legacy_clear_roll_back_together() {
+        let conn = open_db();
+        display_state_upsert(
+            &conn,
+            &DisplayStateTarget::AllDisplays,
+            "/walls/old.jpg",
+            "awww",
+        )
+        .unwrap();
+        set_state(&conn, "current", "/walls/legacy.jpg");
+        set_state(&conn, "last_backend", "awww");
+        let mut fail = || Err(WcError::Other("injected reconciliation failure".into()));
+
+        let error = display_state_replace_all_and_clear_legacy(
+            &conn,
+            &[(
+                DisplayStateTarget::Output("eDP-1".into()),
+                "/walls/live.mp4".into(),
+                "mpvpaper".into(),
+            )],
+            Some(&mut fail),
+        )
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected reconciliation failure"));
+
+        let rows = display_state_list(&conn).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
+        assert_eq!(rows[0].wallpaper_path, "/walls/old.jpg");
+        assert_eq!(
+            state_value(&conn, "current").as_deref(),
+            Some("/walls/legacy.jpg")
+        );
+        assert_eq!(state_value(&conn, "last_backend").as_deref(), Some("awww"));
     }
 
     #[test]

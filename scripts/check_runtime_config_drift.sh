@@ -13,6 +13,57 @@ SCHEMA="${DRIFT_CONFIG_SCHEMA:-$ROOT/apps/tauri-gui/frontend/src/settings/config
 
 bad=0
 
+workspace_version="$(
+  awk '
+    /^\[workspace\.package\]$/ { in_workspace_package = 1; next }
+    /^\[/ { in_workspace_package = 0 }
+    in_workspace_package && /^version[[:space:]]*=/ {
+      gsub(/"/, "", $3)
+      print $3
+      exit
+    }
+  ' "$ROOT/Cargo.toml"
+)"
+tauri_version="$(
+  sed -nE '/^[[:space:]]*"version"[[:space:]]*:/ {
+    s/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/
+    p
+    q
+  }' "$ROOT/apps/tauri-gui/src-tauri/tauri.conf.json"
+)"
+frontend_version="$(
+  sed -nE '/^[[:space:]]*"version"[[:space:]]*:/ {
+    s/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/
+    p
+    q
+  }' "$ROOT/apps/tauri-gui/frontend/package.json"
+)"
+frontend_lock_version="$(
+  sed -nE '/^[[:space:]]*"version"[[:space:]]*:/ {
+    s/^[[:space:]]*"version"[[:space:]]*:[[:space:]]*"([^"]+)".*/\1/
+    p
+    q
+  }' "$ROOT/apps/tauri-gui/frontend/package-lock.json"
+)"
+
+for version_entry in \
+  "Tauri config:$tauri_version" \
+  "frontend package:$frontend_version" \
+  "frontend lockfile:$frontend_lock_version"; do
+  label="${version_entry%%:*}"
+  version="${version_entry#*:}"
+  if [[ -z "$workspace_version" || "$version" != "$workspace_version" ]]; then
+    echo "DRIFT: $label version '$version' does not match workspace '$workspace_version'"
+    bad=1
+  fi
+done
+
+if ! rg -q '#\[command\(name = "wallpaper-console-rust", version\)\]' \
+  "$ROOT/crates/wc-cli/src/main.rs"; then
+  echo "DRIFT: CLI version is not sourced from Cargo package metadata"
+  bad=1
+fi
+
 check_absent() {
   local pattern="$1"
   local label="$2"

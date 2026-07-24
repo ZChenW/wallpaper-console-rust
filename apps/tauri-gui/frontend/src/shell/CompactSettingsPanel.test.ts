@@ -140,6 +140,9 @@ function viewProps() {
         message: 'linux-wallpaperengine is installed.',
       },
     },
+    rendererStatusesLoading: false,
+    rendererStatusesError: null,
+    onReloadRendererStatuses: () => undefined,
     onOpenSources: () => undefined,
     onClose: () => undefined,
   };
@@ -416,7 +419,7 @@ test('renderer diagnostics are hidden while confirmed-missing backend cards stay
   assert.doesNotMatch(markup, /installation status|Installed|Unavailable/i);
 });
 
-test('unknown backend availability does not disable configuration choices', async () => {
+test('unknown backend availability disables choices until detection completes', async () => {
   const { CompactSettingsPanelView } = await importTsxModule();
   const tree = CompactSettingsPanelView({
     ...viewProps(),
@@ -426,8 +429,35 @@ test('unknown backend availability does not disable configuration choices', asyn
   const options = findElements(image, (element) => typeof element.props['data-renderer'] === 'string');
   const markup = renderToStaticMarkup(tree);
 
-  assert.equal(options.every((option) => option.props.disabled !== true), true);
-  assert.doesNotMatch(markup, /installation status|Unknown|probe unavailable/i);
+  assert.equal(options.every((option) => option.props.disabled === true), true);
+  assert.doesNotMatch(markup, /Unknown|probe unavailable/i);
+});
+
+test('renderer detection exposes checking and recoverable failure states', async () => {
+  const { CompactSettingsPanelView } = await importTsxModule();
+  const checking = renderToStaticMarkup(CompactSettingsPanelView({
+    ...viewProps(),
+    rendererStatuses: null,
+    rendererStatusesLoading: true,
+  }));
+  assert.match(checking, /Checking renderer availability/);
+
+  let retries = 0;
+  const failedTree = CompactSettingsPanelView({
+    ...viewProps(),
+    rendererStatuses: null,
+    rendererStatusesError: 'renderer probe timed out',
+    onReloadRendererStatuses: () => { retries += 1; },
+  });
+  const failed = renderToStaticMarkup(failedTree);
+  assert.match(failed, /Renderer detection failed/);
+  assert.match(failed, /renderer probe timed out/);
+  const [retry] = findElements(
+    failedTree,
+    (element) => element.type === 'button' && element.props.children === 'Retry',
+  );
+  (retry.props.onClick as () => void)();
+  assert.equal(retries, 1);
 });
 
 test('awww-specific controls are shown only while awww handles images or GIFs', async () => {

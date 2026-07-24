@@ -75,11 +75,52 @@ pub fn sqlite_state_write(cd: &ConfigDir, key: &str, value: &str) -> Result<(), 
     Ok(())
 }
 
+/// Atomically publish the legacy runtime state pair.
+pub fn sqlite_runtime_state_write_pair(
+    cd: &ConfigDir,
+    current: &str,
+    last_backend: &str,
+) -> Result<(), WcError> {
+    try_ensure_sqlite_db(cd)?;
+    let mut conn = open_runtime_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO state (key, value) VALUES ('current', ?1)",
+        params![current],
+    )
+    .map_err(sqlite_err)?;
+    tx.execute(
+        "INSERT OR REPLACE INTO state (key, value) VALUES ('last_backend', ?1)",
+        params![last_backend],
+    )
+    .map_err(sqlite_err)?;
+    tx.commit().map_err(sqlite_err)?;
+    Ok(())
+}
+
 pub fn sqlite_state_delete(cd: &ConfigDir, key: &str) -> Result<(), WcError> {
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
     conn.execute("DELETE FROM state WHERE key = ?1", params![key])
         .map_err(sqlite_err)?;
+    Ok(())
+}
+
+/// Atomically clear the legacy runtime state pair.
+pub fn sqlite_runtime_state_clear(cd: &ConfigDir) -> Result<(), WcError> {
+    try_ensure_sqlite_db(cd)?;
+    let mut conn = open_runtime_connection(cd)?;
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    tx.execute(
+        "DELETE FROM state WHERE key IN ('current', 'last_backend')",
+        [],
+    )
+    .map_err(sqlite_err)?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -200,5 +241,84 @@ mod tests {
         assert_eq!(sentinel_state, "state-value");
         assert_eq!(sentinel_favorite, 1);
         assert_eq!(unexpected_rows, 0);
+    }
+
+    #[test]
+    fn runtime_state_pair_write_rolls_back_when_the_second_key_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+        sqlite_runtime_state_write_pair(&cd, "/walls/old.jpg", "awww").unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_last_backend_update
+             BEFORE INSERT ON state
+             WHEN NEW.key = 'last_backend'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected last_backend failure');
+             END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = sqlite_runtime_state_write_pair(&cd, "/walls/new.jpg", "mpvpaper").unwrap_err();
+        assert!(error.to_string().contains("injected last_backend failure"));
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let current: String = conn
+            .query_row("SELECT value FROM state WHERE key = 'current'", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let backend: String = conn
+            .query_row(
+                "SELECT value FROM state WHERE key = 'last_backend'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current, "/walls/old.jpg");
+        assert_eq!(backend, "awww");
+    }
+
+    #[test]
+    fn runtime_state_clear_rolls_back_when_delete_fails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        crate::sqlite::try_ensure_sqlite_db(&cd).unwrap();
+        sqlite_runtime_state_write_pair(&cd, "/walls/old.jpg", "awww").unwrap();
+        let conn = Connection::open(cd.db_path()).unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER reject_last_backend_delete
+             BEFORE DELETE ON state
+             WHEN OLD.key = 'last_backend'
+             BEGIN
+                 SELECT RAISE(ABORT, 'injected last_backend delete failure');
+             END;",
+        )
+        .unwrap();
+        drop(conn);
+
+        let error = sqlite_runtime_state_clear(&cd).unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected last_backend delete failure"));
+
+        let conn = Connection::open(cd.db_path()).unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM state
+                 WHERE key IN ('current', 'last_backend')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 2);
     }
 }

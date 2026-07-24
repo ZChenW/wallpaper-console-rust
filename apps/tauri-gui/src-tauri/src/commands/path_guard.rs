@@ -27,6 +27,40 @@ fn canonicalize_existing(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("cannot resolve path {}: {}", path.display(), error))
 }
 
+fn ensure_recorded_path_has_stable_components(path: &Path, canonical: &Path) -> Result<(), String> {
+    if !path.is_absolute() {
+        return Err("recorded wallpaper paths must be absolute".into());
+    }
+    let mut current = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::RootDir | Component::Prefix(_) | Component::Normal(_) => {
+                current.push(component.as_os_str());
+            }
+            Component::CurDir | Component::ParentDir => {
+                return Err(
+                    "recorded wallpaper paths must not contain relative path components".into(),
+                );
+            }
+        }
+        if current.as_os_str().is_empty() || current == Path::new("/") {
+            continue;
+        }
+        let metadata = std::fs::symlink_metadata(&current)
+            .map_err(|error| format!("cannot inspect path {}: {error}", current.display()))?;
+        if metadata.file_type().is_symlink() {
+            return Err(format!(
+                "recorded wallpaper path contains a symbolic link: {}",
+                current.display()
+            ));
+        }
+    }
+    if current != canonical {
+        return Err("recorded wallpaper path is not a stable canonical path".into());
+    }
+    Ok(())
+}
+
 /// Validate `path` lies under one of the configured wallpaper source roots.
 pub fn ensure_path_in_sources(
     path: &Path,
@@ -142,6 +176,10 @@ fn path_exists_in_table(
 }
 
 /// Check whether `path` is recorded in library / current / history / display state.
+///
+/// Favorites are intentionally not a trust source. The favorite mutation command
+/// accepts a filesystem path from IPC, so treating that table as authorization
+/// would let an untrusted path bootstrap its own access.
 pub fn path_is_recorded_wallpaper_path(
     storage: &StorageApi,
     path: &Path,
@@ -177,28 +215,7 @@ pub fn path_is_recorded_wallpaper_path(
     }
     if path_exists_in_table(
         &conn,
-        "SELECT EXISTS(SELECT 1 FROM favorites WHERE path IN (?1, ?2))",
-        path,
-        canonical,
-    )? {
-        return Ok(true);
-    }
-    if path_exists_in_table(
-        &conn,
         "SELECT EXISTS(SELECT 1 FROM wallpapers WHERE path IN (?1, ?2))",
-        path,
-        canonical,
-    )? {
-        return Ok(true);
-    }
-    if path_exists_in_table(
-        &conn,
-        "SELECT EXISTS(
-            SELECT 1 FROM wallpapers
-            WHERE preview_path IN (?1, ?2)
-              AND preview_path IS NOT NULL
-              AND preview_path != ''
-        )",
         path,
         canonical,
     )? {
@@ -221,6 +238,7 @@ pub fn ensure_command_wallpaper_path(path: &str, storage: &StorageApi) -> Result
     }
 
     let canonical = canonicalize_existing(path)?;
+    ensure_recorded_path_has_stable_components(path, &canonical)?;
     if path_is_recorded_wallpaper_path(storage, path, &canonical)? {
         Ok(canonical)
     } else {
@@ -416,6 +434,68 @@ mod tests {
         let storage = wc_storage::StorageApi::new(cd);
         storage
             .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+
+        let error = ensure_command_wallpaper_path(&secret.to_string_lossy(), &storage).unwrap_err();
+        assert!(
+            error.contains("outside configured wallpaper sources"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn recorded_orphan_symlink_cannot_be_retargeted_into_an_access_capability() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let first = outside.join("first.jpg");
+        let secret = outside.join("secret.jpg");
+        let recorded_link = outside.join("recorded.jpg");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&secret, b"secret").unwrap();
+        symlink(&first, &recorded_link).unwrap();
+
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+        let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+        conn.execute(
+            "INSERT INTO wallpapers (path, type, ext, backend)
+             VALUES (?1, 'image', 'jpg', 'awww')",
+            [recorded_link.to_string_lossy().as_ref()],
+        )
+        .unwrap();
+        std::fs::remove_file(&recorded_link).unwrap();
+        symlink(&secret, &recorded_link).unwrap();
+
+        let error =
+            ensure_command_wallpaper_path(&recorded_link.to_string_lossy(), &storage).unwrap_err();
+        assert!(error.contains("symbolic link"), "{error}");
+    }
+
+    #[test]
+    fn favorite_row_cannot_bootstrap_an_outside_path_into_the_allowlist() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source");
+        let outside = tmp.path().join("outside");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        let secret = outside.join("secret.jpg");
+        std::fs::write(&secret, b"secret").unwrap();
+
+        let storage = wc_storage::StorageApi::new(wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        storage
+            .sources_add(source.to_string_lossy().as_ref())
+            .unwrap();
+        storage
+            .favorites_add(secret.to_string_lossy().as_ref())
             .unwrap();
 
         let error = ensure_command_wallpaper_path(&secret.to_string_lossy(), &storage).unwrap_err();

@@ -60,8 +60,34 @@ export function effectiveSourceFilter(
 export function shouldOfferFirstRun(
   sources: readonly SourceDTO[],
   sourceError: string | undefined,
+  sourcesReady: boolean,
 ): boolean {
-  return sources.length === 0 && sourceError === undefined;
+  return sourcesReady && sources.length === 0 && sourceError === undefined;
+}
+
+export interface FirstRunVisibility {
+  readonly sources: readonly SourceDTO[];
+  readonly sourceError: string | undefined;
+  readonly sourcesReady: boolean;
+  readonly initialLoading: boolean;
+  readonly emptyConfirmed: boolean;
+  readonly entryCount: number;
+  readonly libraryError: boolean;
+  readonly scanRunning: boolean;
+}
+
+/** Existing entries, load failures, and active indexing always outrank onboarding. */
+export function shouldShowFirstRun(input: FirstRunVisibility): boolean {
+  return shouldOfferFirstRun(
+    input.sources,
+    input.sourceError,
+    input.sourcesReady,
+  )
+    && !input.initialLoading
+    && input.emptyConfirmed
+    && input.entryCount === 0
+    && !input.libraryError
+    && !input.scanRunning;
 }
 
 export interface RandomWallpaperAvailability {

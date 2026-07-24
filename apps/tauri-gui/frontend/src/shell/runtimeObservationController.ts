@@ -1,5 +1,6 @@
 import type { RuntimeWallpaperObservationDTO } from '../api/types.ts';
 import { normalizeDisplayOutputs } from './displayTargets.ts';
+import { withRequestDeadline } from './requestDeadline.ts';
 
 export interface RuntimeObservationApi {
   runtimeWallpaperObservations(): Promise<RuntimeWallpaperObservationDTO[]>;
@@ -16,9 +17,16 @@ export interface RuntimeObservationControllerOptions {
   readonly onObservations: (observations: readonly RuntimeWallpaperObservationDTO[]) => void;
   readonly scheduler?: RuntimeObservationScheduler;
   readonly pollMs?: number;
+  readonly requestTimeoutMs?: number;
+}
+
+interface RuntimePoll {
+  readonly token: object;
+  readonly promise: Promise<void>;
 }
 
 const DEFAULT_POLL_MS = 5_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = 4_000;
 
 const DEFAULT_SCHEDULER: RuntimeObservationScheduler = {
   setTimer: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
@@ -31,6 +39,13 @@ function pollInterval(value: number | undefined): number {
     : DEFAULT_POLL_MS;
 }
 
+function requestTimeout(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_REQUEST_TIMEOUT_MS;
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
 /**
  * Reconciles actual renderer ownership without overlapping probes. Apply
  * completion invalidates any older response before an immediate fresh read.
@@ -41,11 +56,12 @@ export class RuntimeObservationController {
   private readonly onObservations: RuntimeObservationControllerOptions['onObservations'];
   private readonly scheduler: RuntimeObservationScheduler;
   private readonly pollMs: number;
+  private readonly requestTimeoutMs: number;
 
   private started = false;
   private generation = 0;
   private timer: unknown | null = null;
-  private currentPoll: Promise<void> | null = null;
+  private currentPoll: RuntimePoll | null = null;
   private repollRequested = false;
 
   constructor(options: RuntimeObservationControllerOptions) {
@@ -54,6 +70,7 @@ export class RuntimeObservationController {
     this.onObservations = options.onObservations;
     this.scheduler = options.scheduler ?? DEFAULT_SCHEDULER;
     this.pollMs = pollInterval(options.pollMs);
+    this.requestTimeoutMs = requestTimeout(options.requestTimeoutMs);
   }
 
   readonly start = (): void => {
@@ -69,6 +86,9 @@ export class RuntimeObservationController {
     this.generation += 1;
     this.repollRequested = false;
     this.clearScheduledPoll();
+    // Detach the stale bridge request so a visibility resume can issue a fresh
+    // observation immediately. Its late result is generation-checked.
+    this.currentPoll = null;
   };
 
   readonly refresh = (): Promise<void> => {
@@ -76,12 +96,13 @@ export class RuntimeObservationController {
     this.clearScheduledPoll();
     if (this.currentPoll) {
       this.repollRequested = true;
-      return this.currentPoll;
+      return this.currentPoll.promise;
     }
 
     const generation = this.generation;
-    const operation = this.readObservations(generation);
-    this.currentPoll = operation;
+    const token = {};
+    const operation = this.readObservations(generation, token);
+    this.currentPoll = { token, promise: operation };
     return operation;
   };
 
@@ -92,14 +113,19 @@ export class RuntimeObservationController {
     this.clearScheduledPoll();
     if (this.currentPoll) {
       this.repollRequested = true;
-      return this.currentPoll;
+      return this.currentPoll.promise;
     }
     return this.refresh();
   };
 
-  private async readObservations(generation: number): Promise<void> {
+  private async readObservations(generation: number, token: object): Promise<void> {
     try {
-      const observations = await this.api.runtimeWallpaperObservations();
+      const observations = await withRequestDeadline(
+        this.api.runtimeWallpaperObservations(),
+        this.requestTimeoutMs,
+        'Runtime wallpaper observation',
+        this.scheduler,
+      );
       if (this.isCurrent(generation)) this.publish(observations);
     } catch {
       if (this.isCurrent(generation)) {
@@ -110,6 +136,7 @@ export class RuntimeObservationController {
         })));
       }
     } finally {
+      if (this.currentPoll?.token !== token) return;
       this.currentPoll = null;
       if (!this.started) return;
       if (generation !== this.generation || this.repollRequested) {

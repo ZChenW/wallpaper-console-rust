@@ -3,6 +3,10 @@ use std::process::{Command, Output, Stdio};
 use wc_core::error::WcError;
 use wc_storage::StorageApi;
 
+const APPLY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
+const LAUNCH_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const AWWW_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AwwwReadiness {
     Ready,
@@ -34,8 +38,21 @@ pub trait BackendRuntime {
         command: &mut Command,
     ) -> Result<std::process::ExitStatus, WcError>;
     fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError>;
-    fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError>;
+    fn wait_for_mpvpaper_ready(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<u32, WcError>;
     fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError>;
+    /// Remove only renderer processes that appeared after a failed launch and
+    /// whose process arguments exactly match this launch's output and path.
+    fn cleanup_failed_mpvpaper_launch(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<(), WcError>;
     fn stop_awww(&mut self);
     fn stop_mpvpaper(&mut self);
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
@@ -114,25 +131,44 @@ pub(crate) fn wait_for_awww_socket_ready(
     }
 }
 
-pub(crate) fn new_mpvpaper_pid(current_pids: &[u32], previous_pids: &[u32]) -> Option<u32> {
+pub(crate) fn new_mpvpaper_pid_for_target<M>(
+    current_pids: &[u32],
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
+    matches_target: &mut M,
+) -> Option<u32>
+where
+    M: FnMut(u32, &str, &str) -> bool,
+{
     current_pids
         .iter()
         .copied()
-        .find(|pid| !previous_pids.contains(pid))
+        .find(|pid| !previous_pids.contains(pid) && matches_target(*pid, output, path))
 }
 
-pub(crate) fn wait_for_mpvpaper_ready_with<P, S>(
+pub(crate) fn wait_for_mpvpaper_ready_with<P, M, S>(
     previous_pids: &[u32],
+    output: &str,
+    path: &str,
     mut probe: P,
+    mut matches_target: M,
     mut sleep: S,
 ) -> Result<u32, WcError>
 where
     P: FnMut() -> Result<Vec<u32>, WcError>,
+    M: FnMut(u32, &str, &str) -> bool,
     S: FnMut(std::time::Duration),
 {
     for poll in 0..=40 {
         let current_pids = probe()?;
-        if let Some(pid) = new_mpvpaper_pid(&current_pids, previous_pids) {
+        if let Some(pid) = new_mpvpaper_pid_for_target(
+            &current_pids,
+            previous_pids,
+            output,
+            path,
+            &mut matches_target,
+        ) {
             return Ok(pid);
         }
         if poll < 40 {
@@ -140,7 +176,9 @@ where
         }
     }
     Err(WcError::Other(
-        "mpvpaper failed to become ready: no new mpvpaper process appeared within 2 seconds".into(),
+        "mpvpaper failed to become ready: no new process for the requested output and wallpaper \
+         appeared within 2 seconds"
+            .into(),
     ))
 }
 
@@ -182,30 +220,47 @@ impl BackendRuntime for SystemBackendRuntime {
     }
 
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
-        command
-            .output()
-            .map_err(|e| WcError::Other(format!("command failed: {}", e)))
+        crate::deadline_command::output(command, APPLY_COMMAND_TIMEOUT)
     }
 
     fn command_status(
         &mut self,
         command: &mut Command,
     ) -> Result<std::process::ExitStatus, WcError> {
-        command
-            .status()
-            .map_err(|e| WcError::Other(format!("command failed: {}", e)))
+        crate::deadline_command::status(command, LAUNCH_COMMAND_TIMEOUT)
     }
 
     fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
         crate::mpvpaper::running_pids()
     }
 
-    fn wait_for_mpvpaper_ready(&mut self, previous_pids: &[u32]) -> Result<u32, WcError> {
-        wait_for_mpvpaper_ready_with(previous_pids, || self.mpvpaper_pids(), std::thread::sleep)
+    fn wait_for_mpvpaper_ready(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<u32, WcError> {
+        wait_for_mpvpaper_ready_with(
+            previous_pids,
+            output,
+            path,
+            || self.mpvpaper_pids(),
+            crate::mpvpaper::pid_matches_target,
+            std::thread::sleep,
+        )
     }
 
     fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, WcError> {
         Ok(self.mpvpaper_pids()?.contains(&pid))
+    }
+
+    fn cleanup_failed_mpvpaper_launch(
+        &mut self,
+        previous_pids: &[u32],
+        output: &str,
+        path: &str,
+    ) -> Result<(), WcError> {
+        crate::mpvpaper::stop_pids_started_after(previous_pids, output, path)
     }
 
     fn stop_awww(&mut self) {
@@ -277,18 +332,16 @@ impl BackendRuntime for SystemBackendRuntime {
         if !path.exists() {
             return AwwwReadiness::SocketMissing;
         }
-        let output = Command::new("awww")
-            .arg("query")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+        let mut command = Command::new("awww");
+        command.arg("query");
+        let output = crate::deadline_command::output(&mut command, AWWW_QUERY_TIMEOUT);
         match output {
             Ok(o) if o.status.success() => AwwwReadiness::Ready,
             Ok(o) => AwwwReadiness::SocketPresentQueryFailed {
                 stderr: String::from_utf8_lossy(&o.stderr).trim().to_string(),
             },
             Err(e) => AwwwReadiness::SocketPresentQueryFailed {
-                stderr: format!("awww query failed to execute: {}", e),
+                stderr: e.to_string(),
             },
         }
     }
@@ -334,7 +387,9 @@ mod tests {
 
     use wc_core::error::WcError;
 
-    use super::{new_mpvpaper_pid, wait_for_mpvpaper_ready_with, wait_for_mpvpaper_stopped_with};
+    use super::{
+        new_mpvpaper_pid_for_target, wait_for_mpvpaper_ready_with, wait_for_mpvpaper_stopped_with,
+    };
 
     #[test]
     fn mpvpaper_stop_waits_for_a_process_to_exit() {
@@ -381,7 +436,10 @@ mod tests {
 
         let pid = wait_for_mpvpaper_ready_with(
             &[41],
+            "eDP-1",
+            "/walls/target.mp4",
             || probes.pop_front().expect("unexpected extra PID probe"),
+            |pid, output, path| pid == 52 && output == "eDP-1" && path == "/walls/target.mp4",
             |duration| sleeps.push(duration),
         )
         .unwrap();
@@ -397,10 +455,13 @@ mod tests {
 
         let error = wait_for_mpvpaper_ready_with(
             &[41],
+            "eDP-1",
+            "/walls/target.mp4",
             || {
                 probe_count += 1;
                 Ok(vec![41])
             },
+            |_pid, _output, _path| true,
             |duration| sleeps.push(duration),
         )
         .unwrap_err();
@@ -417,10 +478,13 @@ mod tests {
 
         let error = wait_for_mpvpaper_ready_with(
             &[41],
+            "eDP-1",
+            "/walls/target.mp4",
             || {
                 probe_count += 1;
                 Err(WcError::Other("mpvpaper PID probe failed".into()))
             },
+            |_pid, _output, _path| true,
             |duration| sleeps.push(duration),
         )
         .unwrap_err();
@@ -431,12 +495,64 @@ mod tests {
     }
 
     #[test]
-    fn new_mpvpaper_pid_selects_only_a_pid_absent_from_previous_snapshot() {
-        assert_eq!(new_mpvpaper_pid(&[41, 52, 63], &[41, 63]), Some(52));
+    fn mpvpaper_wait_does_not_accept_new_pids_for_another_output_or_path() {
+        let mut probe_count = 0;
+
+        let error = wait_for_mpvpaper_ready_with(
+            &[41],
+            "eDP-1",
+            "/walls/target.mp4",
+            || {
+                probe_count += 1;
+                Ok(vec![41, 52, 63])
+            },
+            |pid, output, path| {
+                let observed = match pid {
+                    52 => Some(("HDMI-A-1", "/walls/target.mp4")),
+                    63 => Some(("eDP-1", "/walls/other.mp4")),
+                    _ => None,
+                };
+                observed.is_some_and(|(observed_output, observed_path)| {
+                    observed_output == output && observed_path == path
+                })
+            },
+            |_| {},
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("requested output and wallpaper"));
+        assert_eq!(probe_count, 41);
     }
 
     #[test]
-    fn new_mpvpaper_pid_returns_none_without_a_new_pid() {
-        assert_eq!(new_mpvpaper_pid(&[41, 63], &[41, 63]), None);
+    fn new_mpvpaper_pid_selects_only_a_matching_pid_absent_from_previous_snapshot() {
+        let mut matches_target = |pid, output: &str, path: &str| {
+            pid == 52 && output == "eDP-1" && path == "/walls/target.mp4"
+        };
+        assert_eq!(
+            new_mpvpaper_pid_for_target(
+                &[41, 52, 63],
+                &[41, 63],
+                "eDP-1",
+                "/walls/target.mp4",
+                &mut matches_target,
+            ),
+            Some(52)
+        );
+    }
+
+    #[test]
+    fn new_mpvpaper_pid_returns_none_without_a_new_matching_pid() {
+        let mut matches_target = |_pid, _output: &str, _path: &str| true;
+        assert_eq!(
+            new_mpvpaper_pid_for_target(
+                &[41, 63],
+                &[41, 63],
+                "eDP-1",
+                "/walls/target.mp4",
+                &mut matches_target,
+            ),
+            None
+        );
     }
 }

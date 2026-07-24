@@ -43,19 +43,14 @@ pub fn init_config_dir(config_dir: &Path) -> Result<(), WcError> {
 
     // Ensure runtime files exist
     for f in RUNTIME_FILES {
-        let path = config_dir.join(f);
-        if !path.exists() {
-            fs::write(&path, "").map_err(WcError::Io)?;
-        }
+        create_empty_file_if_missing(&config_dir.join(f))?;
     }
 
     // Ensure library.tsv exists
-    let lib_path = config_dir.join("library.tsv");
-    if !lib_path.exists() {
-        fs::write(&lib_path, "").map_err(WcError::Io)?;
-    }
+    create_empty_file_if_missing(&config_dir.join("library.tsv"))?;
 
     // Populate defaults for missing config keys
+    let _lock = acquire_config_lock(config_dir)?;
     let config_path = config_dir.join("config");
     let existing = parse_config_file(&config_path)?;
     let mut to_add = Vec::new();
@@ -65,15 +60,26 @@ pub fn init_config_dir(config_dir: &Path) -> Result<(), WcError> {
         }
     }
     if !to_add.is_empty() {
-        let mut content = fs::read_to_string(&config_path).unwrap_or_default();
+        let mut content = fs::read_to_string(&config_path).map_err(WcError::Io)?;
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
         for line in &to_add {
             content.push_str(line);
             content.push('\n');
         }
-        fs::write(&config_path, content).map_err(WcError::Io)?;
+        atomic_write_config(&config_path, content.as_bytes())?;
     }
 
     Ok(())
+}
+
+fn create_empty_file_if_missing(path: &Path) -> Result<(), WcError> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(_) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(error) => Err(WcError::Io(error)),
+    }
 }
 
 /// Parse a flat `key=value` config file into a HashMap.
@@ -130,6 +136,26 @@ fn acquire_config_lock(config_dir: &Path) -> Result<File, WcError> {
     Ok(lock)
 }
 
+fn atomic_write_config(config_path: &Path, content: &[u8]) -> Result<(), WcError> {
+    let tmp = atomic_config_temp_path(config_path);
+    let write_result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&tmp)
+            .map_err(WcError::Io)?;
+        file.write_all(content).map_err(WcError::Io)?;
+        file.sync_all().map_err(WcError::Io)?;
+        drop(file);
+        fs::rename(&tmp, config_path).map_err(WcError::Io)
+    })();
+    if let Err(error) = write_result {
+        let _ = fs::remove_file(&tmp);
+        return Err(error);
+    }
+    Ok(())
+}
+
 /// Set a config value in the flat config file (atomic write).
 pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
     if value.contains('\n') || value.contains('\r') {
@@ -152,25 +178,7 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
     map.insert(key.to_string(), value.to_string());
 
     let content = serialize_config_map(&map);
-    // Atomic: write to temp, fsync, then rename
-    let tmp = atomic_config_temp_path(&config_path);
-    let write_result = (|| {
-        let mut file = OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(&tmp)
-            .map_err(WcError::Io)?;
-        file.write_all(content.as_bytes()).map_err(WcError::Io)?;
-        file.sync_all().map_err(WcError::Io)?;
-        drop(file);
-        fs::rename(&tmp, &config_path).map_err(WcError::Io)
-    })();
-    if let Err(error) = write_result {
-        let _ = fs::remove_file(&tmp);
-        return Err(error);
-    }
-    Ok(())
+    atomic_write_config(&config_path, content.as_bytes())
 }
 
 fn serialize_config_map(map: &HashMap<String, String>) -> String {
@@ -299,6 +307,52 @@ mod tests {
                 "video_backend=mpvpaper"
             ]
         );
+    }
+
+    #[test]
+    fn init_config_dir_separates_defaults_from_an_unterminated_existing_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(tmp.path()).unwrap();
+        fs::write(tmp.path().join("config"), "custom_key=kept").unwrap();
+
+        init_config_dir(tmp.path()).unwrap();
+
+        let content = fs::read_to_string(tmp.path().join("config")).unwrap();
+        assert!(content.starts_with("custom_key=kept\ngif_backend=awww\n"));
+        assert_eq!(
+            read_config_value(tmp.path(), "custom_key", "missing"),
+            "kept"
+        );
+    }
+
+    #[test]
+    fn concurrent_init_and_writes_do_not_lose_config_values() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+        let root = std::sync::Arc::new(tmp.path().to_path_buf());
+        let writers = (0..8)
+            .map(|index| {
+                let root = root.clone();
+                std::thread::spawn(move || {
+                    init_config_dir(&root).unwrap();
+                    write_config_value(&root, &format!("custom_{index}"), "kept").unwrap();
+                })
+            })
+            .collect::<Vec<_>>();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let config = parse_config_file(&root.join("config")).unwrap();
+        for index in 0..8 {
+            assert_eq!(
+                config.get(&format!("custom_{index}")).map(String::as_str),
+                Some("kept")
+            );
+        }
+        for key in default_config_keys() {
+            assert!(config.contains_key(key), "missing default key {key}");
+        }
     }
 
     #[test]

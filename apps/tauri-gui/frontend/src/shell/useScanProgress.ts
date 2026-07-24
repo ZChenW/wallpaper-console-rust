@@ -32,6 +32,7 @@ export function toScanProgressView(snapshot: ScanProgressSnapshot): ScanProgress
 export interface UseScanProgressOptions {
   readonly activePollMs?: number;
   readonly idlePollMs?: number;
+  readonly requestTimeoutMs?: number;
   readonly now?: () => number;
   readonly scheduler?: ScanProgressScheduler;
 }
@@ -48,12 +49,14 @@ export function useScanProgress(
     api,
     activePollMs: options.activePollMs,
     idlePollMs: options.idlePollMs,
+    requestTimeoutMs: options.requestTimeoutMs,
     now: options.now,
     scheduler: options.scheduler,
   }), [
     api,
     options.activePollMs,
     options.idlePollMs,
+    options.requestTimeoutMs,
     options.now,
     options.scheduler,
   ]);
@@ -64,8 +67,17 @@ export function useScanProgress(
   );
 
   useEffect(() => {
-    controller.start();
-    return controller.stop;
+    const visible = () => document.visibilityState !== 'hidden';
+    const updatePolling = () => {
+      if (visible()) controller.start();
+      else controller.stop();
+    };
+    updatePolling();
+    document.addEventListener('visibilitychange', updatePolling);
+    return () => {
+      document.removeEventListener('visibilitychange', updatePolling);
+      controller.stop();
+    };
   }, [controller]);
 
   return {

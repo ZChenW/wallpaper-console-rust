@@ -103,6 +103,134 @@ export function resolveShellPreferencesUpdate(
   return normalizeShellPreferences(next);
 }
 
+export const SHELL_PREFERENCE_KEYS = [
+  'sourceFilter',
+  'typeFilter',
+  'favoritesOnly',
+  'sort',
+  'cardSize',
+  'displayTarget',
+  'applyGesture',
+  'theme',
+  'libraryViewMode',
+] as const satisfies readonly (keyof ShellPreferences)[];
+
+function preferenceValueEquals(
+  left: ShellPreferences[keyof ShellPreferences],
+  right: ShellPreferences[keyof ShellPreferences],
+): boolean {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+/**
+ * Rebase edits made while the config service was loading or degraded onto the
+ * eventual persisted snapshot. Untouched fields come from disk; fields changed
+ * by the user keep the user's current value.
+ */
+export function mergeDegradedShellPreferences(
+  fallback: ShellPreferences,
+  current: ShellPreferences,
+  persisted: ShellPreferences,
+  touchedKeys?: ReadonlySet<keyof ShellPreferences>,
+): ShellPreferences {
+  const normalizedFallback = normalizeShellPreferences(fallback);
+  const normalizedCurrent = normalizeShellPreferences(current);
+  const normalizedPersisted = normalizeShellPreferences(persisted);
+  const merged = { ...normalizedPersisted } as ShellPreferences;
+
+  for (const key of SHELL_PREFERENCE_KEYS) {
+    const userOwnsField = touchedKeys === undefined
+      ? !preferenceValueEquals(normalizedCurrent[key], normalizedFallback[key])
+      : touchedKeys.has(key);
+    if (userOwnsField) {
+      Object.assign(merged, { [key]: normalizedCurrent[key] });
+    }
+  }
+  return normalizeShellPreferences(merged);
+}
+
+export interface AcceptedShellPreferences {
+  readonly preferences: ShellPreferences;
+  readonly recoveredFromDegraded: boolean;
+}
+
+/**
+ * Synchronous preference session used by the hook's async loader callbacks.
+ * Keeping merge ownership here makes same-tick user updates deterministic even
+ * before React commits a render.
+ */
+export class ShellPreferencesSessionController {
+  private currentPreferences: ShellPreferences;
+  private mergeBaseline: ShellPreferences | null;
+  private degraded = false;
+  private readonly touchedKeys = new Set<keyof ShellPreferences>();
+
+  constructor(initial: ShellPreferences = defaultShellPreferences()) {
+    this.currentPreferences = normalizeShellPreferences(initial);
+    this.mergeBaseline = this.currentPreferences;
+  }
+
+  current(): ShellPreferences {
+    return this.currentPreferences;
+  }
+
+  reset(): void {
+    this.mergeBaseline = null;
+    this.degraded = false;
+    this.touchedKeys.clear();
+  }
+
+  beginLoading(): void {
+    this.mergeBaseline = this.currentPreferences;
+    this.degraded = false;
+    this.touchedKeys.clear();
+  }
+
+  enterDegraded(fallback: ShellPreferences): ShellPreferences {
+    const normalizedFallback = normalizeShellPreferences(fallback);
+    const next = mergeDegradedShellPreferences(
+      normalizedFallback,
+      this.currentPreferences,
+      normalizedFallback,
+      this.touchedKeys,
+    );
+    this.currentPreferences = next;
+    this.mergeBaseline = normalizedFallback;
+    this.degraded = true;
+    return next;
+  }
+
+  update(update: ShellPreferencesUpdate): ShellPreferences {
+    const current = this.currentPreferences;
+    const next = resolveShellPreferencesUpdate(current, update);
+    if (this.mergeBaseline !== null) {
+      for (const key of SHELL_PREFERENCE_KEYS) {
+        if (!preferenceValueEquals(current[key], next[key])) {
+          this.touchedKeys.add(key);
+        }
+      }
+    }
+    this.currentPreferences = next;
+    return next;
+  }
+
+  acceptLoaded(loaded: ShellPreferences): AcceptedShellPreferences {
+    const baseline = this.mergeBaseline;
+    const recoveredFromDegraded = this.degraded;
+    const next = baseline === null
+      ? normalizeShellPreferences(loaded)
+      : mergeDegradedShellPreferences(
+        baseline,
+        this.currentPreferences,
+        loaded,
+        this.touchedKeys,
+      );
+    this.currentPreferences = next;
+    this.reset();
+    return { preferences: next, recoveredFromDegraded };
+  }
+}
+
 export function createShellPreferencesSaveQueue(
   client: ShellPreferencesClient,
   onLatestError?: (error: Error | null) => void,
@@ -267,20 +395,15 @@ export function useShellPreferences(
   const [saveError, setSaveError] = useState<Error | null>(null);
   const persistedSnapshotRef = useRef<string | null>(null);
   const loaderRef = useRef(createShellPreferencesLoader());
+  const sessionRef = useRef(new ShellPreferencesSessionController(preferences));
   const saveQueue = useMemo(
     () => createShellPreferencesSaveQueue(client, setSaveError),
     [client],
   );
 
-  // Tracks whether the current load cycle fell back to defaults (degraded).
-  // When a retry-after-degraded succeeds, the loaded preferences must be
-  // written back to storage so they are not overwritten by an in-flight
-  // user save that started while defaults were shown.
-  const wasDegradedRef = useRef(false);
-
   useEffect(() => {
     persistedSnapshotRef.current = null;
-    wasDegradedRef.current = false;
+    sessionRef.current.beginLoading();
     setReady(false);
     setLoadError(null);
     setSaveError(null);
@@ -292,26 +415,21 @@ export function useShellPreferences(
         const fallback = defaultShellPreferences();
         // Ensure defaults are the render baseline but never auto-persisted.
         persistedSnapshotRef.current = serializeShellPreferences(fallback);
-        wasDegradedRef.current = true;
-        setPreferences(fallback);
+        setPreferences(sessionRef.current.enterDegraded(fallback));
         setLoadError(err);
         setReady(true);
       },
       onSuccess: (loaded) => {
+        const accepted = sessionRef.current.acceptLoaded(loaded);
+        const next = accepted.preferences;
+        // The transport only confirmed `loaded`. If loading/degraded edits were
+        // rebased into `next`, leave the disk snapshot as the comparison
+        // baseline so the normal effect queues the merged state after any
+        // earlier user write.
         persistedSnapshotRef.current = serializeShellPreferences(loaded);
-        setPreferences(loaded);
+        setPreferences(next);
         setLoadError(null);
         setReady(true);
-
-        // Retry-after-degraded: the UI is showing defaults and the user may
-        // have already enqueued a save (A).  Enqueue the loaded snapshot (B)
-        // so the save queue order is [A, B] and B finishes last.  Normal
-        // initial loads (wasDegraded == false) must NOT write — the snapshot
-        // already matches and the write effect is a no-op.
-        if (wasDegradedRef.current) {
-          wasDegradedRef.current = false;
-          void saveQueue.enqueue(loaded).catch(() => {});
-        }
       },
     });
 
@@ -331,9 +449,7 @@ export function useShellPreferences(
   }, [preferences, ready, saveQueue]);
 
   const updatePreferences = useCallback((update: ShellPreferencesUpdate) => {
-    // Keep this updater free of I/O: React may evaluate state updaters more
-    // than once in development StrictMode. The effect above owns persistence.
-    setPreferences((current) => resolveShellPreferencesUpdate(current, update));
+    setPreferences(sessionRef.current.update(update));
   }, []);
 
   return {

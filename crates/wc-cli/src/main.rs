@@ -9,7 +9,7 @@ mod sqlite;
 mod wallpaper;
 
 #[derive(Parser)]
-#[command(name = "wallpaper-console-rust", version = "0.1.0")]
+#[command(name = "wallpaper-console-rust", version)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
