@@ -113,6 +113,35 @@ spawn-at-startup "/home/USER/.local/bin/wallpaper-console-rust" "restore-at-logi
 Replace `USER` with your Linux username. Compositor startup commands do not
 always expand `~`, so use an absolute path.
 
+## Post-apply theme hook
+
+After a successful wallpaper apply, Wallpaper Console can run an external
+command to sync Material You colors (similar to waypaper's
+`post_command = matugen image $wallpaper`). Videos are handled by extracting a
+still frame with `ffmpeg` first; Wallpaper Engine scenes are skipped.
+
+Enable:
+
+```bash
+wallpaper-console-rust config-set post_apply_enabled on
+```
+
+Defaults:
+
+| Key | Default |
+|-----|---------|
+| `post_apply_enabled` | `off` |
+| `post_apply_command` | `matugen image "$still"` |
+| `post_apply_timeout_secs` | `30` |
+
+Placeholders in `post_apply_command`: `$wallpaper` / `$path`, `$still`,
+`$backend`, `$outputs`. The same values are exported as `WCR_WALLPAPER`,
+`WCR_STILL`, `WCR_BACKEND`, and `WCR_OUTPUTS`.
+
+You need a matugen config (see [`examples/matugen/`](examples/matugen/)), or
+point at an existing template set. For optional kitty/waybar reloads, use
+[`scripts/post-apply-theme.sh`](scripts/post-apply-theme.sh).
+
 ## License
 
 [MIT](LICENSE)

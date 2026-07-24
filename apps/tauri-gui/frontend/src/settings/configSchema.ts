@@ -72,6 +72,21 @@ export const ALL_SETTINGS: SettingEntry[] = [
     placeholder: '*', category: 'wallpaper', advanced: true,
     description: 'mpvpaper output selector. Keep "*" unless you need a specific monitor.',
   },
+  {
+    key: 'post_apply_enabled', label: 'Post-apply theme hook', type: 'select',
+    options: ['off', 'on'], category: 'wallpaper', advanced: true,
+    description: 'After a successful apply, run an external command (for example matugen) to sync colors from the wallpaper.',
+  },
+  {
+    key: 'post_apply_command', label: 'Post-apply command', type: 'text',
+    placeholder: 'matugen image "$still"', category: 'wallpaper', advanced: true,
+    description: 'Shell command run after apply. Placeholders: $wallpaper, $path, $still, $backend, $outputs.',
+  },
+  {
+    key: 'post_apply_timeout_secs', label: 'Post-apply timeout (s)', type: 'number',
+    placeholder: '30', category: 'wallpaper', advanced: true,
+    description: 'Kill the post-apply command if it runs longer than this many seconds.',
+  },
 
   // ── Wallpaper Engine Scene ──
   {

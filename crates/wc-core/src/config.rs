@@ -32,6 +32,9 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_file_manager_custom", ""),
     ("gui_terminal_file_manager", "yazi"),
     ("gui_terminal_file_manager_custom", ""),
+    ("post_apply_enabled", "off"),
+    ("post_apply_command", "matugen image \"$still\""),
+    ("post_apply_timeout_secs", "30"),
 ];
 
 /// Default config key-value pairs (populated on first run).
@@ -109,6 +112,10 @@ impl ConfigDir {
     pub fn gui_thumbnail_cache_dir(&self) -> PathBuf {
         self.path.join("cache").join("gui-thumbnails")
     }
+
+    pub fn theme_stills_cache_dir(&self) -> PathBuf {
+        self.path.join("cache").join("theme-stills")
+    }
 }
 
 #[cfg(test)]
@@ -139,10 +146,7 @@ mod tests {
         let unique = keys.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(keys.len(), unique.len());
         assert_eq!(keys.first().copied(), Some("gif_backend"));
-        assert_eq!(
-            keys.last().copied(),
-            Some("gui_terminal_file_manager_custom")
-        );
+        assert_eq!(keys.last().copied(), Some("post_apply_timeout_secs"));
     }
 
     #[test]
@@ -159,6 +163,27 @@ mod tests {
         assert_eq!(
             cd.gui_thumbnail_cache_dir(),
             PathBuf::from("/tmp/wc-test/cache/gui-thumbnails")
+        );
+        assert_eq!(
+            cd.theme_stills_cache_dir(),
+            PathBuf::from("/tmp/wc-test/cache/theme-stills")
+        );
+    }
+
+    #[test]
+    fn default_config_includes_post_apply_keys() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults.get("post_apply_enabled").map(String::as_str),
+            Some("off")
+        );
+        assert_eq!(
+            defaults.get("post_apply_command").map(String::as_str),
+            Some("matugen image \"$still\"")
+        );
+        assert_eq!(
+            defaults.get("post_apply_timeout_secs").map(String::as_str),
+            Some("30")
         );
     }
 }

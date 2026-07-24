@@ -29,6 +29,12 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'wallpaper_transition_fps') {
     return clampIntString(value, 1, 240, 60);
   }
+  if (key === 'post_apply_enabled') {
+    return value === 'on' ? 'on' : 'off';
+  }
+  if (key === 'post_apply_timeout_secs') {
+    return clampIntString(value, 1, 600, 30);
+  }
   if (key === 'awww_transition_duration') {
     const trimmed = value.trim();
     const parsed = Number.parseFloat(trimmed);

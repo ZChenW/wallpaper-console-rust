@@ -67,6 +67,10 @@ pub fn normalize_config_value(key: &str, value: &str) -> String {
 
         "restore_on_login" => on_off(value, "off"),
 
+        "post_apply_enabled" => on_off(value, "off"),
+
+        "post_apply_timeout_secs" => clamp_i32_string(value, 1, 600, 30),
+
         "linux_wallpaperengine_scaling" => normalize_lwe_scaling(value).to_string(),
 
         "linux_wallpaperengine_target_mode" => normalize_lwe_target_mode(value).to_string(),
@@ -313,6 +317,26 @@ mod tests {
         assert_eq!(normalize_config_value("restore_on_login", "off"), "off");
         assert_eq!(normalize_config_value("restore_on_login", "true"), "off");
         assert_eq!(normalize_config_value("restore_on_login", "bad"), "off");
+
+        assert_eq!(normalize_config_value("post_apply_enabled", "on"), "on");
+        assert_eq!(normalize_config_value("post_apply_enabled", "off"), "off");
+        assert_eq!(normalize_config_value("post_apply_enabled", "yes"), "off");
+        assert_eq!(
+            normalize_config_value("post_apply_timeout_secs", "30"),
+            "30"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_timeout_secs", "0"),
+            "1"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_timeout_secs", "999"),
+            "600"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_timeout_secs", "bad"),
+            "30"
+        );
     }
 
     #[test]

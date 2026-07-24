@@ -258,6 +258,15 @@ impl AppService {
                 {
                     let _ = wc_storage::we_compat::clear_failure(path);
                 }
+                crate::post_apply::run_post_apply_hook(
+                    &self.storage,
+                    &crate::post_apply::PostApplyContext {
+                        wallpaper_path: apply_target.resolved_path.clone(),
+                        backend: apply_target.backend,
+                        file_type: apply_target.file_type,
+                        outputs: applied_outputs.join(","),
+                    },
+                );
                 Ok(DisplayApplyExecutionResult {
                     request_id: request.request_id,
                     input_path: apply_target.input_path,

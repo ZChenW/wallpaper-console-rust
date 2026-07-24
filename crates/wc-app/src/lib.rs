@@ -9,6 +9,7 @@ pub mod display_restore;
 pub mod display_target;
 pub mod library_refresh;
 pub mod library_rescan;
+pub mod post_apply;
 pub mod scan_worker;
 pub mod scan_worker_snapshot;
 pub mod sources_maintenance;
@@ -179,6 +180,15 @@ impl AppService {
                 if target.file_type == FileType::WeScene {
                     let _ = wc_storage::we_compat::clear_failure(&target.state_path);
                 }
+                post_apply::run_post_apply_hook(
+                    &self.storage,
+                    &post_apply::PostApplyContext {
+                        wallpaper_path: target.resolved_path.clone(),
+                        backend: target.backend,
+                        file_type: target.file_type,
+                        outputs: "*".to_string(),
+                    },
+                );
                 Ok(ApplyExecutionResult {
                     request_id: request.request_id,
                     applied_path: target.resolved_path,

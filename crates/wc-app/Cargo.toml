@@ -15,6 +15,7 @@ wc-storage.workspace = true
 wc-backend.workspace = true
 libc.workspace = true
 fs2.workspace = true
+log = { workspace = true }
 
 [dev-dependencies]
 camino.workspace = true
