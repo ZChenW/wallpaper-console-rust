@@ -439,7 +439,7 @@ export default function SinglePageShell() {
 
   const openLocation = useCallback(async (entry: LibraryBrowserItemDTO) => {
     try {
-      const result = await api.openProjectLocation(entry.path, 'file_manager');
+      const result = await api.openProjectLocation(entry.path);
       if (!result.success) setCommandFeedback(commandErrorFeedback('Open location', result), 'system');
     } catch (error) {
       setCommandFeedback(commandErrorFeedback('Open location', error), 'system');

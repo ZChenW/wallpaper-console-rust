@@ -38,22 +38,23 @@ function progressLabel(
 
 function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) | void {
   if (list === null) return;
-  const rail = list.closest<HTMLElement>('.flow-index-rail');
-  if (rail === null) return;
+  // Align within the list viewport only — never the header that shows Index / loaded.
+  const viewport = list.parentElement;
+  if (viewport === null) return;
   let alignmentFrame: number | null = null;
 
   const align = () => {
     alignmentFrame = null;
     const centeredItem = list.querySelector<HTMLElement>('[data-centered]');
-    if (centeredItem === null || !list.isConnected) return;
-    const railBounds = rail.getBoundingClientRect();
+    if (centeredItem === null || !list.isConnected || !viewport.isConnected) return;
+    const viewportBounds = viewport.getBoundingClientRect();
     const itemBounds = centeredItem.getBoundingClientRect();
     const currentOffset = Number.parseFloat(
       list.style.getPropertyValue('--flow-index-alignment'),
     );
     const offset = nextFlowIndexAlignmentOffset(currentOffset, {
-      railStart: railBounds.top,
-      railSize: railBounds.height,
+      railStart: viewportBounds.top,
+      railSize: viewportBounds.height,
       itemStart: itemBounds.top,
       itemSize: itemBounds.height,
     });
@@ -69,7 +70,7 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
   const resizeObserver = typeof ResizeObserver === 'undefined'
     ? null
     : new ResizeObserver(scheduleAlign);
-  resizeObserver?.observe(rail);
+  resizeObserver?.observe(viewport);
   resizeObserver?.observe(list);
   const mutationObserver = typeof MutationObserver === 'undefined'
     ? null
@@ -126,41 +127,43 @@ export function FlowIndexRailView({
         </span>
       </header>
 
-      <ol className="flow-index-rail__list" ref={observeFlowIndexAlignment}>
-        {entries.map(({ entry, index, selected, current, favorite }) => {
-          const centered = entry.wallpaperId === centeredWallpaperId;
-          return (
-            <li
-              className="flow-index-rail__item"
-              data-centered={centered || undefined}
-              data-current={current || undefined}
-              data-favorite={favorite || undefined}
-              data-selected={selected || undefined}
-              data-wallpaper-id={entry.wallpaperId}
-              key={entry.wallpaperId}
-            >
-              <button
-                aria-current={current ? 'true' : undefined}
-                className="flow-index-rail__entry"
+      <div className="flow-index-rail__viewport">
+        <ol className="flow-index-rail__list" ref={observeFlowIndexAlignment}>
+          {entries.map(({ entry, index, selected, current, favorite }) => {
+            const centered = entry.wallpaperId === centeredWallpaperId;
+            return (
+              <li
+                className="flow-index-rail__item"
+                data-centered={centered || undefined}
+                data-current={current || undefined}
+                data-favorite={favorite || undefined}
+                data-selected={selected || undefined}
                 data-wallpaper-id={entry.wallpaperId}
-                data-wallpaper-path={entry.path}
-                onClick={() => onActivate(entry)}
-                onMouseEnter={() => onHover(entry.wallpaperId)}
-                onMouseLeave={() => onHover(null)}
-                type="button"
+                key={entry.wallpaperId}
               >
-                <span aria-hidden="true" className="flow-index-rail__ordinal">
-                  {String(index + 1).padStart(2, '0')}
-                </span>
-                <span className="flow-index-rail__name">{displayName(entry)}</span>
-                <span className="flow-index-rail__states">
-                  {flowStateLabels({ selected, current, favorite }).join(' · ')}
-                </span>
-              </button>
-            </li>
-          );
-        })}
-      </ol>
+                <button
+                  aria-current={current ? 'true' : undefined}
+                  className="flow-index-rail__entry"
+                  data-wallpaper-id={entry.wallpaperId}
+                  data-wallpaper-path={entry.path}
+                  onClick={() => onActivate(entry)}
+                  onMouseEnter={() => onHover(entry.wallpaperId)}
+                  onMouseLeave={() => onHover(null)}
+                  type="button"
+                >
+                  <span aria-hidden="true" className="flow-index-rail__ordinal">
+                    {String(index + 1).padStart(2, '0')}
+                  </span>
+                  <span className="flow-index-rail__name">{displayName(entry)}</span>
+                  <span className="flow-index-rail__states">
+                    {flowStateLabels({ selected, current, favorite }).join(' · ')}
+                  </span>
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
     </nav>
   );
 }

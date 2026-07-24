@@ -18,6 +18,7 @@ export const WALLPAPER_BEHAVIOR_CONFIG_KEYS = Object.freeze([
   'linux_wallpaperengine_muted',
   'linux_wallpaperengine_volume',
   'restore_on_login',
+  'open_project_location_mode',
 ] as const);
 
 export const AWWW_TRANSITION_TYPES = Object.freeze([
@@ -48,6 +49,7 @@ export type VideoRenderer = 'mpvpaper';
 export type WallpaperFillMode = 'crop' | 'fit' | 'stretch';
 export type AwwwTransitionType = (typeof AWWW_TRANSITION_TYPES)[number];
 export type LweScalingMode = (typeof LWE_SCALING_MODES)[number];
+export type OpenProjectLocationMode = 'file_manager' | 'terminal';
 
 export interface WallpaperBehaviorSettings {
   readonly imageBackend: ImageRenderer;
@@ -62,6 +64,7 @@ export interface WallpaperBehaviorSettings {
   readonly lweMuted: boolean;
   readonly lweVolume: number;
   readonly restoreOnLogin: boolean;
+  readonly openProjectLocationMode: OpenProjectLocationMode;
 }
 
 export const DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS: Readonly<WallpaperBehaviorSettings> =
@@ -78,6 +81,7 @@ export const DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS: Readonly<WallpaperBehaviorSett
     lweMuted: false,
     lweVolume: 100,
     restoreOnLogin: false,
+    openProjectLocationMode: 'file_manager',
   });
 
 export interface WallpaperBehaviorCommandResult {
@@ -179,6 +183,10 @@ function enabled(value: unknown): boolean {
   return value === true || value === 'on';
 }
 
+function openProjectLocationMode(value: unknown): OpenProjectLocationMode {
+  return value === 'terminal' ? 'terminal' : 'file_manager';
+}
+
 function defaultSettings(): WallpaperBehaviorSettings {
   return { ...DEFAULT_WALLPAPER_BEHAVIOR_SETTINGS };
 }
@@ -202,6 +210,7 @@ export function normalizeWallpaperBehaviorConfig(
     lweMuted: enabled(values.linux_wallpaperengine_muted),
     lweVolume: boundedInteger(values.linux_wallpaperengine_volume, 0, 100, 100),
     restoreOnLogin: enabled(values.restore_on_login),
+    openProjectLocationMode: openProjectLocationMode(values.open_project_location_mode),
   };
 }
 
@@ -221,6 +230,7 @@ export function normalizeWallpaperBehaviorSettings(value: unknown): WallpaperBeh
     lweMuted: enabled(record.lweMuted),
     lweVolume: boundedInteger(record.lweVolume, 0, 100, 100),
     restoreOnLogin: enabled(record.restoreOnLogin),
+    openProjectLocationMode: openProjectLocationMode(record.openProjectLocationMode),
   };
 }
 
@@ -241,6 +251,7 @@ function configEntries(
     ['linux_wallpaperengine_muted', normalized.lweMuted ? 'on' : 'off'],
     ['linux_wallpaperengine_volume', String(normalized.lweVolume)],
     ['restore_on_login', normalized.restoreOnLogin ? 'on' : 'off'],
+    ['open_project_location_mode', normalized.openProjectLocationMode],
   ];
 }
 

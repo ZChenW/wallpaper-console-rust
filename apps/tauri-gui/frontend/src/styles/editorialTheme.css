@@ -1127,7 +1127,7 @@
   font-size: clamp(2rem, 5vw, 5rem) !important;
   font-weight: 760 !important;
   letter-spacing: -0.055em;
-  line-height: 0.88;
+  line-height: 1.08;
 }
 
 :root[data-theme="editorial"] .wallpaper-details button,

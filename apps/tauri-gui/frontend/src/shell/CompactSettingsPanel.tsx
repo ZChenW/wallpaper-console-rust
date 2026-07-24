@@ -16,6 +16,7 @@ import {
   GifRenderer,
   ImageRenderer,
   type LweScalingMode,
+  type OpenProjectLocationMode,
   WallpaperBehaviorSettings,
   WallpaperBehaviorSettingsUpdate,
   WallpaperFillMode,
@@ -135,6 +136,10 @@ export function CompactSettingsPanelView({
   const updateRestoreOnLogin = (event: ChangeEvent<HTMLInputElement>) => {
     const restoreOnLogin = event.currentTarget.checked;
     updateBehaviorSettings((current) => ({ ...current, restoreOnLogin }));
+  };
+  const updateOpenProjectLocationMode = (value: string) => {
+    const openProjectLocationMode = value as OpenProjectLocationMode;
+    updateBehaviorSettings((current) => ({ ...current, openProjectLocationMode }));
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key !== 'Escape') return;
@@ -491,6 +496,33 @@ export function CompactSettingsPanelView({
                   type="checkbox"
                 />
               </label>
+            </div>
+          </div>
+
+          <h4 className="settings-behavior-category">Open location</h4>
+          <div
+            aria-labelledby="settings-open-location-heading"
+            className="settings-behavior-card"
+            data-behavior-card="open-location"
+            role="group"
+          >
+            <h5 id="settings-open-location-heading">Folders</h5>
+            <div className="settings-behavior-card__rows">
+              <div className="settings-behavior-row">
+                <span>Open project folders with</span>
+                <SelectField
+                  aria-label="Open project folders with"
+                  dataBehaviorControl={true}
+                  disabled={!behaviorReady}
+                  onValueChange={updateOpenProjectLocationMode}
+                  options={[
+                    { value: 'file_manager', label: 'File manager' },
+                    { value: 'terminal', label: 'Terminal' },
+                  ]}
+                  value={behaviorSettings.openProjectLocationMode}
+                  variant="settings"
+                />
+              </div>
             </div>
           </div>
         </section>

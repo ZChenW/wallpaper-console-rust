@@ -75,6 +75,11 @@ pub fn normalize_config_value(key: &str, value: &str) -> String {
 
         "linux_wallpaperengine_target_mode" => normalize_lwe_target_mode(value).to_string(),
 
+        "open_project_location_mode" => match value {
+            "terminal" => "terminal".to_string(),
+            _ => "file_manager".to_string(),
+        },
+
         _ => value.to_string(),
     }
 }
@@ -359,9 +364,29 @@ mod tests {
             normalize_config_value("gui_terminal_file_manager", "custom"),
             "custom"
         );
+    }
+
+    #[test]
+    fn normalizes_open_project_location_mode() {
         assert_eq!(
             normalize_config_value("open_project_location_mode", "terminal"),
             "terminal"
+        );
+        assert_eq!(
+            normalize_config_value("open_project_location_mode", "file_manager"),
+            "file_manager"
+        );
+        assert_eq!(
+            normalize_config_value("open_project_location_mode", "ask"),
+            "file_manager"
+        );
+        assert_eq!(
+            normalize_config_value("open_project_location_mode", "files"),
+            "file_manager"
+        );
+        assert_eq!(
+            normalize_config_value("open_project_location_mode", "garbage"),
+            "file_manager"
         );
     }
 }

@@ -156,7 +156,6 @@ export const ALL_SETTINGS: SettingEntry[] = [
   {
     key: 'open_project_location_mode', label: 'Open project folders with', type: 'select',
     options: ['file_manager', 'terminal'], category: 'advanced',
-    description: 'Choose your default after first use. The first time you will be asked to pick.',
   },
   {
     key: 'gui_file_manager', label: 'File Manager', type: 'select',

@@ -1698,10 +1698,15 @@ input:focus {
 }
 
 .flow-index-rail__header {
+  position: relative;
+  z-index: 1;
   display: flex;
+  flex-shrink: 0;
   align-items: baseline;
   justify-content: space-between;
   gap: 0.65rem;
+  /* Stay visually identical to the rail; the viewport below clips translated rows. */
+  background: transparent;
 }
 
 .flow-index-rail__open {
@@ -1749,6 +1754,15 @@ input:focus {
   white-space: nowrap;
 }
 
+.flow-index-rail__viewport {
+  position: relative;
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+}
+
 .flow-index-rail__list {
   display: flex;
   min-height: 0;
@@ -1756,7 +1770,7 @@ input:focus {
   flex-direction: column;
   justify-content: center;
   gap: 0.1rem;
-  overflow: hidden;
+  overflow: visible;
   list-style: none;
   transform: translateY(var(--flow-index-alignment, 0));
   transition: transform 160ms ease;

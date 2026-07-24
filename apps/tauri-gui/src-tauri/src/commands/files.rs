@@ -261,13 +261,11 @@ pub async fn open_project_location(path: String, mode: Option<String>) -> Comman
             Ok(t) => t,
             Err(e) => return fail(e),
         };
-        let mode = mode.unwrap_or_else(|| s.config_get("open_project_location_mode", "ask"));
-        if mode == "ask" {
-            return fail(
-                "Open location mode is ask-on-first-use. \
-                 Choose File Manager or Terminal File Manager in Settings first.",
-            );
-        }
+        let mode = {
+            let raw =
+                mode.unwrap_or_else(|| s.config_get("open_project_location_mode", "file_manager"));
+            wc_core::config_normalizer::normalize_config_value("open_project_location_mode", &raw)
+        };
         if mode == "terminal" {
             let tui_mgr = s.config_get("gui_terminal_file_manager", "yazi");
             let custom = s.config_get("gui_terminal_file_manager_custom", "");

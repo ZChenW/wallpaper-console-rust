@@ -27,7 +27,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_debug_logs", "off"),
     ("gui_theme", "light"),
     ("storage_backend", "sqlite"),
-    ("open_project_location_mode", "ask"),
+    ("open_project_location_mode", "file_manager"),
     ("gui_file_manager", "auto"),
     ("gui_file_manager_custom", ""),
     ("gui_terminal_file_manager", "yazi"),
@@ -184,6 +184,17 @@ mod tests {
         assert_eq!(
             defaults.get("post_apply_timeout_secs").map(String::as_str),
             Some("30")
+        );
+    }
+
+    #[test]
+    fn open_project_location_mode_defaults_to_file_manager() {
+        let defaults = default_config();
+        assert_eq!(
+            defaults
+                .get("open_project_location_mode")
+                .map(String::as_str),
+            Some("file_manager")
         );
     }
 }
