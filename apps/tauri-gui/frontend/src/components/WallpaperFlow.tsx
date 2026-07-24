@@ -118,7 +118,7 @@ function WallpaperFlowReady({
 }: WallpaperFlowProps) {
   const flowRef = useRef<HTMLElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
-  const { enqueueVisible, setRevealPaused } = useThumbnailStore();
+  const { observeVisible, setScrolling, setInteracting } = useThumbnailStore();
   const reducedMotion = useReducedMotion();
   const initialAnchor = resolveLibraryFlowStartupAnchor(
     model.entries,
@@ -288,8 +288,9 @@ function WallpaperFlowReady({
     pendingResizeAnchorIdRef.current = null;
     resizeReanchoringRef.current = false;
     setSettled(true);
-    setRevealPaused(!interactionActiveRef.current);
-  }, [cancelProgrammaticReleaseFrame, markCentered, setRevealPaused]);
+    setScrolling(false);
+    setInteracting(interactionActiveRef.current);
+  }, [cancelProgrammaticReleaseFrame, markCentered, setScrolling, setInteracting]);
 
   const scheduleProgrammaticSettle = useCallback((
     targetIndex: number,
@@ -343,7 +344,7 @@ function WallpaperFlowReady({
     setIndexRailIndex(index);
     scrollingRef.current = true;
     setSettled(false);
-    setRevealPaused(true);
+    setScrolling(true);
     const targetRendered = virtualizer.getVirtualItems().some((item) => item.index === index);
     const immediate = direct || reducedMotion || !targetRendered;
     virtualizer.scrollToIndex(index, {
@@ -359,7 +360,7 @@ function WallpaperFlowReady({
     model.entries,
     reducedMotion,
     scheduleProgrammaticSettle,
-    setRevealPaused,
+    setScrolling,
     virtualizer,
   ]);
 
@@ -373,7 +374,7 @@ function WallpaperFlowReady({
     programmaticTargetIndexRef.current = index;
     scrollingRef.current = true;
     setSettled(false);
-    setRevealPaused(true);
+    setScrolling(true);
 
     const alignToTarget = () => {
       virtualizer.measure();
@@ -394,7 +395,7 @@ function WallpaperFlowReady({
     clearMotionTimers,
     finishProgrammaticScroll,
     model.entries,
-    setRevealPaused,
+    setScrolling,
     virtualizer,
   ]);
 
@@ -457,14 +458,14 @@ function WallpaperFlowReady({
     pendingCenterIndexRef.current = centeredIndexRef.current;
     scrollingRef.current = true;
     setSettled(false);
-    setRevealPaused(true);
+    setScrolling(true);
   }, [
     cancelInitialCenterFrame,
     cancelProgrammaticScroll,
     cancelResizeReanchor,
     clearMotionTimers,
     markUserInteraction,
-    setRevealPaused,
+    setScrolling,
   ]);
 
   const handleScroll = useCallback(() => {
@@ -490,7 +491,7 @@ function WallpaperFlowReady({
     }
     scrollingRef.current = true;
     setSettled(false);
-    setRevealPaused(true);
+    setScrolling(true);
     scheduleMovingCenterUpdate();
     scheduleIdleSnap();
     setShowReturnToTop(stream.scrollTop > stream.clientHeight);
@@ -499,7 +500,7 @@ function WallpaperFlowReady({
     markUserInteraction,
     scheduleMovingCenterUpdate,
     scheduleIdleSnap,
-    setRevealPaused,
+    setScrolling,
   ]);
 
   const handleWheel = useCallback(() => {
@@ -617,8 +618,9 @@ function WallpaperFlowReady({
   }, [finishPointerInteraction]);
 
   useEffect(() => {
-    setRevealPaused(!interactionActive || scrollingRef.current);
-  }, [interactionActive, setRevealPaused]);
+    setInteracting(interactionActive);
+    setScrolling(scrollingRef.current);
+  }, [interactionActive, setInteracting, setScrolling]);
 
   useEffect(() => {
     const resetChanged = previousResetKeyRef.current !== model.resetKey;
@@ -724,8 +726,8 @@ function WallpaperFlowReady({
     const key = `${range.startIndex}:${range.endIndex}:${paths.join('\0')}`;
     if (key === lastThumbnailKeyRef.current) return;
     lastThumbnailKeyRef.current = key;
-    enqueueVisible(paths, { priority: 'front' });
-  }, [centeredIndex, enqueueVisible, model.entries, virtualizer, virtualizer.range]);
+    observeVisible(paths, { priority: 'front' });
+  }, [centeredIndex, observeVisible, model.entries, virtualizer, virtualizer.range]);
 
   useEffect(() => {
     const range = virtualizer.range;
@@ -791,13 +793,15 @@ function WallpaperFlowReady({
     }
     clearMotionTimers();
     programmaticTargetIndexRef.current = null;
-    setRevealPaused(false);
+    setScrolling(false);
+    setInteracting(true);
   }, [
     cancelInitialCenterFrame,
     cancelProgrammaticReleaseFrame,
     cancelResizeReanchor,
     clearMotionTimers,
-    setRevealPaused,
+    setScrolling,
+    setInteracting,
   ]);
 
   const centeredEntry = model.entries[centeredIndex] ?? null;

@@ -1,4 +1,5 @@
 import type { WallpaperDTO } from '../api/bridge';
+import { staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
 export interface GridRange {
   startIndex: number;
@@ -117,7 +118,7 @@ export function wallpaperApplyFlags(
 }
 
 export function previewAssetPath(entry: WallpaperDTO): string {
-  return entry.previewPath || entry.path;
+  return staticPreviewAssetPath(entry);
 }
 
 export function animatedPreviewPath(

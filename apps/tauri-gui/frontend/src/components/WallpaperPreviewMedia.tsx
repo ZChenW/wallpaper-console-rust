@@ -4,10 +4,9 @@ import {
   useMemo,
   useRef,
   useState,
-  useSyncExternalStore,
 } from 'react';
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
-import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
+import { useThumbnail } from '../state/ThumbnailStoreContext.tsx';
 import { typeIcon } from './wallpaperCardHelpers.ts';
 import {
   attachVideoDecoder,
@@ -53,23 +52,8 @@ export default function WallpaperPreviewMedia({
   staticFallback = false,
   onEnhancedError,
 }: WallpaperPreviewMediaProps) {
-  const store = useThumbnailStore();
   const assetPath = staticPreviewAssetPath(entry);
-  const subscribeThumbnail = useCallback(
-    (callback: () => void) => store.subscribe(assetPath, callback),
-    [assetPath, store],
-  );
-  const getThumbnail = useCallback(() => store.get(assetPath), [assetPath, store]);
-  const getThumbnailFailure = useCallback(
-    () => store.getFailure(assetPath),
-    [assetPath, store],
-  );
-  const thumbnail = useSyncExternalStore(subscribeThumbnail, getThumbnail, getThumbnail);
-  const thumbnailFailure = useSyncExternalStore(
-    subscribeThumbnail,
-    getThumbnailFailure,
-    getThumbnailFailure,
-  );
+  const { thumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
   const [staticFallbackLoadFailed, setStaticFallbackLoadFailed] = useState(false);
   const fallbackAssetPath = staticFallbackAssetPath(entry, staticFallback);
   const authorizedStaticFallback = useAuthorizedPreviewAsset(

@@ -19,3 +19,7 @@ _Avoid_: Set wallpaper, change background
 **Restore**:
 Re-applying stored per-display (or all-displays) wallpaper mappings after login or an explicit restore.
 _Avoid_: Resume, recover (unless meaning library integrity repair)
+
+**ThumbnailSession**:
+The Library thumbnail load + URL cache + reveal batching for visible cards; views report visible paths and scrolling/interaction, and read through one subscribe/get seam.
+_Avoid_: Thumbnail store (as the deep module name), dual queue/store caches

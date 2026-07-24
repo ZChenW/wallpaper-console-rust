@@ -9,7 +9,6 @@ import {
   captureStableViewportAnchor,
   restoreStableViewportAnchor,
   shouldApplyFocusToken,
-  shouldPauseThumbnailReveal,
   shouldRequestNextPage,
   shouldResetScroll,
   visibleThumbnailPaths,
@@ -113,7 +112,7 @@ function WallpaperGridImpl({
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
   const containerRef = useRef<HTMLDivElement>(null);
-  const { enqueueVisible, setRevealPaused } = useThumbnailStore();
+  const { observeVisible, setScrolling, setInteracting } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
   const cardMetrics = wallpaperCardMetrics(cardSize);
@@ -194,7 +193,7 @@ function WallpaperGridImpl({
   const beginScrolling = useCallback(() => {
     if (!isScrollingRef.current) {
       isScrollingRef.current = true;
-      setRevealPaused(shouldPauseThumbnailReveal(activeRef.current, true));
+      setScrolling(true);
     }
     if (scrollIdleTimerRef.current !== null) {
       window.clearTimeout(scrollIdleTimerRef.current);
@@ -202,13 +201,13 @@ function WallpaperGridImpl({
     scrollIdleTimerRef.current = window.setTimeout(() => {
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
-      setRevealPaused(shouldPauseThumbnailReveal(activeRef.current, false));
+      setScrolling(false);
     }, SCROLL_IDLE_MS);
-  }, [setRevealPaused]);
+  }, [setScrolling]);
 
   useEffect(() => {
-    setRevealPaused(shouldPauseThumbnailReveal(active, isScrollingRef.current));
-  }, [active, setRevealPaused]);
+    setInteracting(active);
+  }, [active, setInteracting]);
 
   const remeasure = useCallback(() => {
     const el = containerRef.current;
@@ -393,8 +392,8 @@ function WallpaperGridImpl({
     if (lastEnqueueKeyRef.current === key) return;
     lastEnqueueKeyRef.current = key;
 
-    enqueueVisible(paths, { priority: 'front' });
-  }, [entries, colCount, virtualizer.range, enqueueVisible, active]);
+    observeVisible(paths, { priority: 'front' });
+  }, [entries, colCount, virtualizer.range, observeVisible, active]);
 
   useEffect(() => {
     if (!active || !onLoadMore) return;
@@ -411,8 +410,9 @@ function WallpaperGridImpl({
     if (scrollIdleTimerRef.current !== null) {
       window.clearTimeout(scrollIdleTimerRef.current);
     }
-    setRevealPaused(false);
-  }, [setRevealPaused]);
+    setScrolling(false);
+    setInteracting(true);
+  }, [setScrolling, setInteracting]);
 
   const handleScroll = useCallback(() => {
     if (suppressScrollPauseRef.current) return;

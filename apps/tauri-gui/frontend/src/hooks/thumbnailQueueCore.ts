@@ -1,6 +1,6 @@
 import type { ThumbnailDTO } from '../api/bridge';
 
-export type EnqueueOptions = { priority?: 'front' | 'back' };
+export type EnqueueOptions = { priority?: 'front' | 'back'; force?: boolean };
 
 type QueueItem = { path: string; generation: number; pathVersion: number };
 type ActiveItem = QueueItem & { token: number };
@@ -10,6 +10,8 @@ interface QueueOptions {
   load: (path: string) => Promise<ThumbnailDTO>;
   onThumbnail: (path: string, thumbnail: string) => void;
   onFailure: (path: string, reason?: string) => void;
+  /** Session-owned URL cache — queue must not keep a second Map. */
+  isCached?: (path: string) => boolean;
 }
 
 export class ThumbnailRequestQueue {
@@ -17,7 +19,7 @@ export class ThumbnailRequestQueue {
   private readonly load: (path: string) => Promise<ThumbnailDTO>;
   private readonly onThumbnail: (path: string, thumbnail: string) => void;
   private readonly onFailure: (path: string, reason?: string) => void;
-  private cache = new Map<string, string>();
+  private readonly isCached: (path: string) => boolean;
   private queue: QueueItem[] = [];
   private queuedPaths = new Set<string>();
   private inFlight = new Map<string, ActiveItem>();
@@ -31,11 +33,16 @@ export class ThumbnailRequestQueue {
     this.load = options.load;
     this.onThumbnail = options.onThumbnail;
     this.onFailure = options.onFailure;
+    this.isCached = options.isCached ?? (() => false);
   }
 
   enqueue(paths: string[], options: EnqueueOptions = {}): void {
+    const force = options.force === true;
     const unique = Array.from(new Set(paths)).filter((path) => {
-      if (!path || this.cache.has(path) || this.queuedPaths.has(path)) {
+      if (!path || this.queuedPaths.has(path)) {
+        return false;
+      }
+      if (!force && this.isCached(path)) {
         return false;
       }
       const inFlight = this.inFlight.get(path);
@@ -68,7 +75,6 @@ export class ThumbnailRequestQueue {
   forget(paths: string[]): void {
     const set = new Set(paths);
     for (const path of set) {
-      this.cache.delete(path);
       this.queuedPaths.delete(path);
       this.pathVersions.set(path, this.versionFor(path) + 1);
     }
@@ -78,7 +84,6 @@ export class ThumbnailRequestQueue {
 
   reset(): void {
     this.generation += 1;
-    this.cache.clear();
     this.queue = [];
     this.queuedPaths.clear();
     // Generation invalidation is sufficient for old physical requests; no
@@ -94,24 +99,18 @@ export class ThumbnailRequestQueue {
     this.inFlight.clear();
   }
 
-  get(path: string): string | undefined {
-    return this.cache.get(path);
-  }
-
   snapshot() {
     return {
       pending: this.queue.map((item) => item.path),
       active: this.inFlight.size,
-      cached: this.cache.size,
       versioned: this.pathVersions.size,
     };
   }
 
-  stats(): { pending: number; active: number; cached: number } {
+  stats(): { pending: number; active: number } {
     return {
       pending: this.queue.length,
       active: this.inFlight.size,
-      cached: this.cache.size,
     };
   }
 
@@ -132,11 +131,6 @@ export class ThumbnailRequestQueue {
       const [item] = this.queue.splice(startableIndex, 1);
       if (!item) continue;
 
-      if (this.cache.has(item.path)) {
-        this.queuedPaths.delete(item.path);
-        continue;
-      }
-
       this.queuedPaths.delete(item.path);
       const active: ActiveItem = {
         ...item,
@@ -151,7 +145,6 @@ export class ThumbnailRequestQueue {
             item.pathVersion === this.versionFor(item.path) &&
             thumb.thumbnail
           ) {
-            this.cache.set(item.path, thumb.thumbnail);
             this.onThumbnail(item.path, thumb.thumbnail);
           } else if (!this.disposed && item.generation === this.generation && item.pathVersion === this.versionFor(item.path)) {
             this.onFailure(item.path, thumb.failureReason);
@@ -173,7 +166,7 @@ export class ThumbnailRequestQueue {
   }
 
   private cleanupPathVersion(path: string): void {
-    if (this.cache.has(path) || this.queuedPaths.has(path) || this.inFlight.has(path)) return;
+    if (this.queuedPaths.has(path) || this.inFlight.has(path)) return;
     this.pathVersions.delete(path);
   }
 }

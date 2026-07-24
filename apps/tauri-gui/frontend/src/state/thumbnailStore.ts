@@ -5,7 +5,11 @@ import { recordMetric } from '../perf/metrics.ts';
 export const MAX_REVEAL_PER_FRAME = 12;
 export const DEFAULT_THUMBNAIL_CACHE_LIMIT = 256;
 
-export class ThumbnailStore {
+/**
+ * ThumbnailSession — single deep module for load + URL cache + reveal batching.
+ * Queue owns concurrency/generation only (no second cache Map).
+ */
+export class ThumbnailSession {
   private readonly cacheLimit: number;
   private cache = new Map<string, string>();
   private failures = new Map<string, string>();
@@ -18,6 +22,8 @@ export class ThumbnailStore {
   private pausedNotifyPaths = new Set<string>();
   private notifyScheduled = false;
   private revealPaused = false;
+  private scrolling = false;
+  private interacting = true;
 
   constructor(
     concurrency: number,
@@ -30,6 +36,7 @@ export class ThumbnailStore {
     this.queue = new ThumbnailRequestQueue({
       concurrency,
       load,
+      isCached: (path) => this.cache.has(path),
       onThumbnail: (path, thumbnail) => {
         // Refresh insertion order so reads and replacements implement a small
         // LRU instead of retaining base64/file URLs for the entire session.
@@ -89,7 +96,8 @@ export class ThumbnailStore {
     };
   }
 
-  enqueueVisible(paths: string[], options?: EnqueueOptions): void {
+  /** Report the currently visible preview asset paths (rAF-coalesced). */
+  observeVisible(paths: string[], options?: EnqueueOptions): void {
     this.pendingPaths = paths.slice();
     this.pendingOptions = options;
     if (this.enqueueScheduled) return;
@@ -104,6 +112,20 @@ export class ThumbnailStore {
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
     else Promise.resolve().then(flush);
+  }
+
+  /** Viewport is scrolling — Session pauses reveal until idle. */
+  setScrolling(scrolling: boolean): void {
+    if (this.scrolling === scrolling) return;
+    this.scrolling = scrolling;
+    this.syncRevealPaused();
+  }
+
+  /** Viewport / card interaction is active (Grid active, Flow interacting). */
+  setInteracting(interacting: boolean): void {
+    if (this.interacting === interacting) return;
+    this.interacting = interacting;
+    this.syncRevealPaused();
   }
 
   forget(paths: string[]): void {
@@ -136,12 +158,13 @@ export class ThumbnailStore {
     }
     this.failures.clear();
     if (listenerPaths.length > 0) {
-      this.queue.enqueue(listenerPaths, { priority: 'front' });
+      this.queue.enqueue(listenerPaths, { priority: 'front', force: true });
     }
   }
 
   snapshot() {
-    return this.queue.snapshot();
+    const base = this.queue.snapshot();
+    return { ...base, cached: this.cache.size };
   }
 
   stats(): { pending: number; active: number; cached: number; failures: number } {
@@ -149,7 +172,8 @@ export class ThumbnailStore {
     return { ...base, cached: this.cache.size, failures: this.failures.size };
   }
 
-  setRevealPaused(paused: boolean): void {
+  private syncRevealPaused(): void {
+    const paused = !this.interacting || this.scrolling;
     if (this.revealPaused === paused) return;
     this.revealPaused = paused;
     recordMetric('thumbnail.reveal.paused', paused ? 1 : 0);
@@ -246,3 +270,6 @@ export class ThumbnailStore {
     else Promise.resolve().then(flush);
   }
 }
+
+/** @deprecated Prefer ThumbnailSession — alias for gradual imports. */
+export const ThumbnailStore = ThumbnailSession;
