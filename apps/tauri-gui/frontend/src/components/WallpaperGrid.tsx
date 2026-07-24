@@ -400,7 +400,7 @@ function WallpaperGridImpl({
     if (!shouldRequestNextPage({
       rowCount,
       visibleEndRow: virtualizer.range?.endIndex,
-      hasMore,
+      canAutoAppend: hasMore,
       loadingMore,
     })) return;
     void onLoadMore();

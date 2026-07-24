@@ -50,7 +50,7 @@ function LibraryViewportImpl({
         setSize={model.totalKnown && model.total !== null ? model.total : undefined}
         favoritePendingPaths={model.favoritePendingPaths}
         focusToken={focusToken}
-        hasMore={model.hasMore && !model.automaticAppendPaused && !model.refreshing}
+        hasMore={model.canAutoAppend && !model.refreshing}
         initialAnchorWallpaperId={initialAnchorWallpaperId}
         isEntryApplicable={model.isEntryApplicable}
         canApplyToDisplay={model.canApplyToDisplay}
@@ -58,7 +58,7 @@ function LibraryViewportImpl({
         loadingMore={model.loadingMore}
         onAnchorChange={onAnchorChange}
         onApply={model.onApply}
-        onLoadMore={model.onLoadMore}
+        onLoadMore={model.onRequestMoreIfNeeded}
         onSelect={model.onSelect}
         onToggleFavorite={model.onToggleFavorite}
         pendingPath={model.pendingPath}

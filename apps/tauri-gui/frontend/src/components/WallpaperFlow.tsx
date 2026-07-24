@@ -731,29 +731,27 @@ function WallpaperFlowReady({
 
   useEffect(() => {
     const range = virtualizer.range;
-    if (!range || model.automaticAppendPaused) return;
+    if (!range) return;
     if (!shouldRequestFlowNextPage({
       itemCount: model.entries.length,
       visibleEndIndex: range.endIndex,
-      hasMore: model.hasMore,
+      canAutoAppend: model.canAutoAppend,
       loadingMore: model.loadingMore,
       refreshing: model.refreshing,
-      automaticAppendPaused: model.automaticAppendPaused,
     })) return;
-    void model.onLoadMore();
+    void model.onRequestMoreIfNeeded();
   }, [
-    model.automaticAppendPaused,
+    model.canAutoAppend,
     model.entries.length,
-    model.hasMore,
     model.loadingMore,
-    model.onLoadMore,
+    model.onRequestMoreIfNeeded,
     model.refreshing,
     virtualizer.range?.endIndex,
   ]);
 
   useEffect(() => {
     endLoadRequestedRef.current = false;
-  }, [model.entries.length, model.hasMore]);
+  }, [model.entries.length, model.canAppend]);
 
   useEffect(() => {
     const hoveredWallpaperId = hoveredWallpaperIdRef.current;
@@ -867,7 +865,7 @@ function WallpaperFlowReady({
       ctrlKey: event.ctrlKey,
       metaKey: event.metaKey,
       shiftKey: event.shiftKey,
-      hasMore: model.hasMore && !model.refreshing,
+      hasMore: model.canAppend && !model.refreshing,
       loadingMore: model.loadingMore,
       endLoadRequestAllowed: !endLoadRequestedRef.current,
     });
@@ -881,7 +879,7 @@ function WallpaperFlowReady({
       centerAtIndex(intent.index);
       if (intent.requestLoadMore && !endLoadRequestedRef.current) {
         endLoadRequestedRef.current = true;
-        void model.onLoadMore();
+        void model.onAppendMore();
       }
       return;
     }
@@ -1049,7 +1047,7 @@ function WallpaperFlowReady({
 
       <FlowMetadataRail
         activeQueueName={activeQueueName}
-        allViewed={!model.hasMore && !model.loadingMore}
+        allViewed={!model.canAppend && !model.loadingMore}
         applyAvailable={centeredApplicable}
         applyDisabledReason={centeredEntry
           ? libraryEntryApplyDisabledReason(

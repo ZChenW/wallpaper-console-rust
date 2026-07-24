@@ -23,3 +23,11 @@ _Avoid_: Resume, recover (unless meaning library integrity repair)
 **ThumbnailSession**:
 The Library thumbnail load + URL cache + reveal batching for visible cards; views report visible paths and scrolling/interaction, and read through one subscribe/get seam.
 _Avoid_: Thumbnail store (as the deep module name), dual queue/store caches
+
+**RuntimeWallpaper**:
+Current wallpaper observation plus apply-queue feedback as one shell surface `{ current, apply }`; ApplyResult evidence is shared so queue parse and session confirm stay aligned.
+_Avoid_: Separate Current/Apply coordinators as product concepts, duplicating ApplyResult parsers
+
+**LibraryPaging**:
+Paged library list loading that owns append policy (`canAppend` / `canAutoAppend` / `requestMoreIfNeeded` / `appendMore`); Grid/Flow only report geometry near the tail.
+_Avoid_: Views remapping automaticAppendPaused, hasMore-as-policy

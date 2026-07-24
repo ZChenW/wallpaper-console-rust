@@ -569,9 +569,10 @@ export default function SinglePageShell() {
     queryReplacementPending: browser.criteriaReplacementPending,
     totalKnown: browser.totalKnown,
     total: browser.total,
-    hasMore: browser.hasMore,
+    canAppend: browser.canAppend,
+    canAutoAppend: browser.canAutoAppend,
     loadingMore: browser.appending,
-    automaticAppendPaused: browser.automaticAppendPaused,
+    appendNeedsRetry: browser.canAppend && !browser.canAutoAppend,
     loadErrorDetail: browser.loadErrorDetail,
     canApplyToDisplay: displayModel.canApply && !browser.criteriaReplacementPending,
     displayApplyDisabledReason: browser.criteriaReplacementPending
@@ -585,18 +586,20 @@ export default function SinglePageShell() {
     onToggleFavorite: toggleFavorite,
     onDetails: openLibraryDetails,
     buildContextActions,
-    onLoadMore: browser.loadMore,
+    onRequestMoreIfNeeded: browser.requestMoreIfNeeded,
+    onAppendMore: browser.appendMore,
   }), [
     applyEntry,
     browser.appending,
-    browser.automaticAppendPaused,
+    browser.appendMore,
+    browser.canAppend,
+    browser.canAutoAppend,
     browser.entries,
-    browser.hasMore,
     browser.loadErrorDetail,
-    browser.loadMore,
     browser.criteriaReplacementPending,
     browser.refreshing,
     browser.replaceCount,
+    browser.requestMoreIfNeeded,
     browser.total,
     browser.totalKnown,
     buildContextActions,
@@ -703,21 +706,21 @@ export default function SinglePageShell() {
             onAnchorChange={rememberLibraryAnchor}
           />
           {!browser.refreshing
-            && browser.hasMore
-            && (preferences.libraryViewMode === 'grid' || browser.automaticAppendPaused) ? (
+            && browser.canAppend
+            && (preferences.libraryViewMode === 'grid' || !browser.canAutoAppend) ? (
             <div className="single-page-load-more">
               <button
                 className="btn"
                 disabled={browser.appending}
                 type="button"
-                onClick={() => void browser.loadMore()}
-                title={browser.automaticAppendPaused && browser.loadErrorDetail
+                onClick={() => void browser.appendMore()}
+                title={!browser.canAutoAppend && browser.loadErrorDetail
                   ? browser.loadErrorDetail
                   : undefined}
               >
                 {browser.appending
                   ? 'Loading more…'
-                  : browser.automaticAppendPaused
+                  : !browser.canAutoAppend
                     ? 'Retry loading more'
                     : browser.totalKnown
                       ? `Load more · ${Math.max(0, browser.total - browser.entries.length)} remaining`
