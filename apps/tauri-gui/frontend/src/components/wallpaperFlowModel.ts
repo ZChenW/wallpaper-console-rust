@@ -450,6 +450,18 @@ export function flowScrollBehavior(
   return reducedMotion || immediate ? 'auto' : 'smooth';
 }
 
+export function nextFlowScrollOffset(
+  currentOffset: number,
+  targetOffset: number,
+  maximumStep = 40,
+): number {
+  if (!Number.isFinite(currentOffset) || !Number.isFinite(targetOffset)) return currentOffset;
+  const step = Number.isFinite(maximumStep) && maximumStep > 0 ? maximumStep : 40;
+  const remaining = targetOffset - currentOffset;
+  if (Math.abs(remaining) <= step) return targetOffset;
+  return currentOffset + Math.sign(remaining) * step;
+}
+
 export function isEnhancedFlowMediaEligible(
   input: EnhancedFlowMediaEligibility,
 ): boolean {

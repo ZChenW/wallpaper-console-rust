@@ -38,23 +38,25 @@ function progressLabel(
 
 function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) | void {
   if (list === null) return;
-  // Align within the list viewport only — never the header that shows Index / loaded.
   const viewport = list.parentElement;
   if (viewport === null) return;
+  const preview = list
+    .closest<HTMLElement>('.wallpaper-flow')
+    ?.querySelector<HTMLElement>('.flow-preview-stream') ?? viewport;
   let alignmentFrame: number | null = null;
 
   const align = () => {
     alignmentFrame = null;
     const centeredItem = list.querySelector<HTMLElement>('[data-centered]');
-    if (centeredItem === null || !list.isConnected || !viewport.isConnected) return;
-    const viewportBounds = viewport.getBoundingClientRect();
+    if (centeredItem === null || !list.isConnected || !preview.isConnected) return;
+    const previewBounds = preview.getBoundingClientRect();
     const itemBounds = centeredItem.getBoundingClientRect();
     const currentOffset = Number.parseFloat(
       list.style.getPropertyValue('--flow-index-alignment'),
     );
     const offset = nextFlowIndexAlignmentOffset(currentOffset, {
-      railStart: viewportBounds.top,
-      railSize: viewportBounds.height,
+      railStart: previewBounds.top,
+      railSize: previewBounds.height,
       itemStart: itemBounds.top,
       itemSize: itemBounds.height,
     });
@@ -70,7 +72,7 @@ function observeFlowIndexAlignment(list: HTMLOListElement | null): (() => void) 
   const resizeObserver = typeof ResizeObserver === 'undefined'
     ? null
     : new ResizeObserver(scheduleAlign);
-  resizeObserver?.observe(viewport);
+  resizeObserver?.observe(preview);
   resizeObserver?.observe(list);
   const mutationObserver = typeof MutationObserver === 'undefined'
     ? null
