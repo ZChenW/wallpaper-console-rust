@@ -29,8 +29,8 @@ chmod +x scripts/post-apply-theme.sh
 wallpaper-console-rust config-set post_apply_command "$PWD/scripts/post-apply-theme.sh"
 ```
 
-If you already have iNiR (or another) matugen tree, point `~/.config/matugen`
-at that instead of copying these examples.
+If you already have another matugen tree, point `~/.config/matugen` at that
+instead of copying these examples.
 
 ## Targets
 
