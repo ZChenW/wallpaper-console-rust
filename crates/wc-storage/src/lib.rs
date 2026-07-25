@@ -224,6 +224,17 @@ impl StorageApi {
         sqlite::source_create(&self.cd, path).map(|(source, _)| source)
     }
 
+    pub fn source_create_with_status(
+        &self,
+        path: &str,
+    ) -> Result<(sqlite::SourceRecord, bool), WcError> {
+        sqlite::source_create(&self.cd, path)
+    }
+
+    pub fn source_get(&self, id: i64) -> Result<sqlite::SourceRecord, WcError> {
+        sqlite::source_get(&self.cd, id)
+    }
+
     pub fn source_rename(
         &self,
         id: i64,

@@ -229,59 +229,67 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         // ── Sources ──────────────────────────────────────────────────
         Commands::Add { dir } => {
-            let canonical = std::fs::canonicalize(&dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or(dir);
-            s.sources_add(&canonical)?;
-            println!("Added source: {}", canonical);
+            let outcome = wc_app::source_management::add_source(s, &dir, |_, _| {
+                wc_scan::ScanControl::Continue
+            })
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if let wc_app::library_refresh_round::LegacyProjectionStatus::Degraded { message } =
+                &outcome.round.projection
+            {
+                eprintln!("Warning: legacy library.tsv projection is stale: {message}");
+            }
+            println!("Added source: {}", outcome.source.path);
         }
 
         Commands::Sources => {
-            let srcs = s.sources_list()?;
+            let srcs = wc_app::source_management::list_sources(s)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
             if srcs.is_empty() {
                 println!("(no source directories configured)");
             } else {
                 for src in &srcs {
-                    println!("{}", src);
+                    println!("{}", src.path);
                 }
             }
         }
 
         Commands::Remove => {
-            let paths = s.sources_list()?;
+            let paths = wc_app::source_management::list_sources(s)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?
+                .into_iter()
+                .map(|source| source.path)
+                .collect::<Vec<_>>();
             if paths.is_empty() {
                 anyhow::bail!("no sources configured");
             }
             let selection = fzf_select(&paths, "remove source> ")?;
             if let Some(path) = selection {
-                s.sources_remove(&path)?;
+                let outcome = wc_app::source_management::remove_source_by_path(s, &path)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+                if let Some(wc_app::library_refresh_round::LegacyProjectionStatus::Degraded {
+                    message,
+                }) = outcome.projection
+                {
+                    eprintln!("Warning: legacy library.tsv projection is stale: {message}");
+                }
                 println!("Removed source: {}", path);
             }
         }
 
         Commands::RemoveSource { dir } => {
-            // Try exact match first (works even when dir no longer exists).
-            let removed = s.sources_remove(&dir)?;
-            if removed {
-                println!("Removed source: {}", dir);
-                return Ok(());
+            let outcome = wc_app::source_management::remove_source_by_path(s, &dir)
+                .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            if let Some(wc_app::library_refresh_round::LegacyProjectionStatus::Degraded {
+                message,
+            }) = &outcome.projection
+            {
+                eprintln!("Warning: legacy library.tsv projection is stale: {message}");
             }
-            // Canonicalise and scan stored sources for a match.
-            let canonical = std::fs::canonicalize(&dir)
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|_| dir.clone());
-            let sources = s.sources_list()?;
-            for stored in &sources {
-                let stored_canon = std::fs::canonicalize(stored)
-                    .map(|p| p.to_string_lossy().to_string())
-                    .unwrap_or_else(|_| stored.clone());
-                if stored_canon == canonical {
-                    s.sources_remove(stored)?;
-                    println!("Removed source: {}", stored);
-                    return Ok(());
-                }
+            if let Some(source) = outcome.removed {
+                println!("Removed source: {}", source.path);
+            } else {
+                anyhow::bail!("source not found: {}", dir);
             }
-            anyhow::bail!("source not found: {}", dir);
         }
 
         Commands::SteamWorkshop => {

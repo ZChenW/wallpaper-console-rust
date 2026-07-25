@@ -1,10 +1,11 @@
 use super::common::{fail, ok, storage, CommandResult, SourceDto};
 use super::scan::{
-    finish_scan_error, finish_scan_success, index_source_by_id, mark_scan_started,
-    scan_steam_workshop_and_index, update_scan_stage, with_scan_idle_operation, IndexSourcesResult,
+    finish_scan_error, finish_scan_success, mark_scan_started, scan_steam_workshop_and_index,
+    update_scan_progress, update_scan_stage, with_scan_idle_operation, LiveScanProgress,
 };
 use std::path::Path;
-use wc_storage::{SourceKind, SourceRecord, StorageApi};
+use wc_app::source_management::{SavedSourceChange, SourceManagementError, SourceRefreshOutcome};
+use wc_storage::{SourceKind, StorageApi};
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "kind", rename_all = "camelCase")]
@@ -36,9 +37,8 @@ fn detect_first_run_source_suggestions(home: &Path) -> Vec<FirstRunSourceSuggest
 }
 
 fn source_dtos_with_storage(storage: &StorageApi) -> Result<Vec<SourceDto>, String> {
-    let records = storage
-        .source_records()
-        .map_err(|error| error.to_string())?;
+    let records =
+        wc_app::source_management::list_sources(storage).map_err(|error| error.to_string())?;
     Ok(records
         .into_iter()
         .map(|source| {
@@ -59,84 +59,96 @@ fn source_dtos_with_storage(storage: &StorageApi) -> Result<Vec<SourceDto>, Stri
         .collect())
 }
 
-fn source_record_by_id(storage: &StorageApi, id: i64) -> Result<SourceRecord, String> {
-    storage
-        .source_records()
-        .map_err(|error| error.to_string())?
-        .into_iter()
-        .find(|source| source.id == id)
-        .ok_or_else(|| format!("source id {id} not found"))
-}
-
-fn format_targeted_source_message(source: &SourceRecord, result: &IndexSourcesResult) -> String {
-    if result.offline_sources > 0 {
+fn format_targeted_source_message(outcome: &SourceRefreshOutcome) -> String {
+    if let wc_app::library_refresh_round::LegacyProjectionStatus::Degraded { message } =
+        &outcome.round.projection
+    {
+        log::warn!("Source operation completed with degraded TSV projection: {message}");
+    }
+    let source = &outcome.source;
+    let report = &outcome.round.refresh;
+    if report.offline_sources > 0 {
         return format!(
             "Source '{}' is offline; preserved its previous snapshot. Library contains {} wallpaper(s).",
-            source.display_name, result.library_total
+            source.display_name, outcome.round.library_rows
         );
     }
-    if result.incomplete_sources > 0 {
+    if report.incomplete_sources > 0 {
         return format!(
             "Source '{}' scan was incomplete; preserved its previous snapshot. Library contains {} wallpaper(s).",
-            source.display_name, result.library_total
+            source.display_name, outcome.round.library_rows
         );
     }
     format!(
         "Source '{}' indexed {} wallpaper(s). Library contains {} wallpaper(s).",
-        source.display_name, result.indexed, result.library_total
+        source.display_name, report.indexed, outcome.round.library_rows
     )
 }
 
-fn run_targeted_source_operation<F>(
-    storage: &StorageApi,
-    stage: &str,
-    saved_state: Option<&str>,
-    prepare: F,
-) -> CommandResult
+fn saved_state_copy(change: SavedSourceChange) -> Option<&'static str> {
+    match change {
+        SavedSourceChange::None => None,
+        SavedSourceChange::Added { .. } => Some("Source is saved"),
+        SavedSourceChange::Recursive { .. } => Some("Recursion setting is saved"),
+    }
+}
+
+fn format_source_management_error(error: SourceManagementError) -> String {
+    let saved_state = saved_state_copy(error.saved_change());
+    let cancelled = matches!(
+        &error,
+        SourceManagementError::Refresh { error, .. }
+            if matches!(
+                error.as_ref(),
+                wc_app::library_refresh::LibraryRefreshError::Cancelled { .. }
+            )
+    );
+    match (saved_state, cancelled) {
+        (Some(saved_state), true) => format!(
+            "{saved_state}, but refresh was cancelled; the previous snapshot was preserved."
+        ),
+        (Some(saved_state), false) => format!(
+            "{saved_state}, but refresh failed: {error}; the previous snapshot was preserved."
+        ),
+        (None, _) => error.to_string(),
+    }
+}
+
+fn run_targeted_source_operation<F>(stage: &str, operation: F) -> CommandResult
 where
-    F: FnOnce() -> Result<SourceRecord, String>,
+    F: FnOnce(
+        &mut dyn FnMut(&wc_storage::SourceRecord, &wc_scan::SourceScanEvent) -> wc_scan::ScanControl,
+    ) -> Result<SourceRefreshOutcome, SourceManagementError>,
 {
     if let Err(error) = mark_scan_started(stage) {
         return fail(error);
     }
 
-    let source = match prepare() {
-        Ok(source) => source,
-        Err(error) => {
-            finish_scan_error(&error);
-            return fail(error);
-        }
+    let mut progress = LiveScanProgress::default();
+    let mut observe = |source: &wc_storage::SourceRecord, event: &wc_scan::SourceScanEvent| {
+        update_scan_progress(&mut progress, source, event)
     };
-    match index_source_by_id(storage, source.id) {
-        Ok(indexed) => {
+    match operation(&mut observe) {
+        Ok(outcome) => {
             finish_scan_success();
-            ok(format_targeted_source_message(&source, &indexed))
+            ok(format_targeted_source_message(&outcome))
         }
         Err(error) => {
-            finish_scan_error(&error);
-            match saved_state {
-                Some(saved_state) if error == "scan cancelled" => fail(format!(
-                    "{saved_state}, but refresh was cancelled; the previous snapshot was preserved."
-                )),
-                Some(saved_state) => fail(format!(
-                    "{saved_state}, but refresh failed: {error}; the previous snapshot was preserved."
-                )),
-                None => fail(error),
-            }
+            let message = format_source_management_error(error);
+            finish_scan_error(&message);
+            fail(message)
         }
     }
 }
 
 fn source_add_with_storage(storage: &StorageApi, path: &str) -> CommandResult {
-    run_targeted_source_operation(storage, "adding source", Some("Source is saved"), || {
-        storage
-            .source_create(path)
-            .map_err(|error| error.to_string())
+    run_targeted_source_operation("adding source", |observe| {
+        wc_app::source_management::add_source(storage, path, observe)
     })
 }
 
 fn source_rename_with_storage(storage: &StorageApi, id: i64, display_name: &str) -> CommandResult {
-    match storage.source_rename(id, display_name) {
+    match wc_app::source_management::rename_source(storage, id, display_name) {
         Ok(source) => ok(format!("Source renamed to '{}'.", source.display_name)),
         Err(error) => fail(error.to_string()),
     }
@@ -147,36 +159,53 @@ fn source_set_recursive_with_storage(
     id: i64,
     recursive: bool,
 ) -> CommandResult {
-    run_targeted_source_operation(
-        storage,
-        "updating source",
-        Some("Recursion setting is saved"),
-        || {
-            storage
-                .source_set_recursive(id, recursive)
-                .map_err(|error| error.to_string())
-        },
-    )
+    run_targeted_source_operation("updating source", |observe| {
+        wc_app::source_management::set_source_recursive(storage, id, recursive, observe)
+    })
 }
 
 fn source_refresh_with_storage(storage: &StorageApi, id: i64) -> CommandResult {
-    run_targeted_source_operation(storage, "refreshing source", None, || {
-        source_record_by_id(storage, id)
+    run_targeted_source_operation("refreshing source", |observe| {
+        wc_app::source_management::refresh_source(storage, id, observe)
     })
 }
 
 fn source_remove_by_id_with_storage(storage: &StorageApi, id: i64) -> CommandResult {
-    match with_scan_idle_operation(|| storage.source_remove_by_id(id)) {
-        Ok(Ok(source)) => ok(format!("Source '{}' removed.", source.display_name)),
+    match with_scan_idle_operation(|| wc_app::source_management::remove_source_by_id(storage, id)) {
+        Ok(Ok(outcome)) => {
+            if let Some(wc_app::library_refresh_round::LegacyProjectionStatus::Degraded {
+                message,
+            }) = &outcome.projection
+            {
+                log::warn!("Source removal completed with degraded TSV projection: {message}");
+            }
+            ok(format!(
+                "Source '{}' removed.",
+                outcome
+                    .removed
+                    .expect("remove-by-id always returns its source")
+                    .display_name
+            ))
+        }
         Ok(Err(error)) => fail(error.to_string()),
         Err(error) => fail(error),
     }
 }
 
 fn source_remove_with_storage(storage: &StorageApi, path: &str) -> CommandResult {
-    match with_scan_idle_operation(|| storage.sources_remove(path)) {
-        Ok(Ok(true)) => ok("Source removed."),
-        Ok(Ok(false)) => ok("Source was not configured."),
+    match with_scan_idle_operation(|| {
+        wc_app::source_management::remove_source_by_path(storage, path)
+    }) {
+        Ok(Ok(outcome)) if outcome.removed.is_some() => {
+            if let Some(wc_app::library_refresh_round::LegacyProjectionStatus::Degraded {
+                message,
+            }) = &outcome.projection
+            {
+                log::warn!("Source removal completed with degraded TSV projection: {message}");
+            }
+            ok("Source removed.")
+        }
+        Ok(Ok(_)) => ok("Source was not configured."),
         Ok(Err(error)) => fail(error.to_string()),
         Err(error) => fail(error),
     }

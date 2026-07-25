@@ -3,10 +3,7 @@ use std::sync::{Mutex, OnceLock};
 use wc_config::ConfigDirExt;
 
 use wc_app::library_refresh::{LibraryRefreshError, LibraryRefreshReport};
-use wc_app::library_refresh_round::{
-    run_library_refresh_round, LegacyProjectionStatus, LibraryRefreshRoundReport, RefreshIntent,
-    RefreshSelection,
-};
+use wc_app::library_refresh_round::{LegacyProjectionStatus, LibraryRefreshRoundReport};
 use wc_app::library_rescan::{run_library_rescan, LibraryRescanError, LibraryRescanReport};
 use wc_scan::{ScanControl, ScanStats, SourceScanEvent};
 use wc_storage::SourceRecord;
@@ -211,7 +208,7 @@ pub(crate) fn finish_scan_error(err: &str) {
 }
 
 #[derive(Debug, Default)]
-struct LiveScanProgress {
+pub(crate) struct LiveScanProgress {
     current_source_id: Option<i64>,
     completed: ScanStats,
     current: ScanStats,
@@ -309,7 +306,7 @@ impl LiveScanProgress {
     }
 }
 
-fn update_scan_progress(
+pub(crate) fn update_scan_progress(
     progress: &mut LiveScanProgress,
     source: &SourceRecord,
     event: &SourceScanEvent,
@@ -393,25 +390,6 @@ where
     )
 }
 
-fn index_source_with_event_control<F>(
-    storage: &wc_storage::StorageApi,
-    source_id: i64,
-    mut on_event: F,
-) -> Result<IndexSourcesResult, String>
-where
-    F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
-{
-    finish_round(
-        storage,
-        run_library_refresh_round(
-            storage,
-            RefreshSelection::Sources(vec![source_id]),
-            RefreshIntent::Manual,
-            |source, event| on_event(source, event),
-        ),
-    )
-}
-
 fn finish_rescan(
     storage: &wc_storage::StorageApi,
     rescan: Result<LibraryRescanReport, LibraryRescanError>,
@@ -444,37 +422,6 @@ fn finish_rescan(
     }
 }
 
-fn finish_round(
-    storage: &wc_storage::StorageApi,
-    round: Result<LibraryRefreshRoundReport, LibraryRefreshError>,
-) -> Result<IndexSourcesResult, String> {
-    match round {
-        Ok(round) => {
-            if let LegacyProjectionStatus::Degraded { message } = &round.projection {
-                log::warn!("Library refresh completed with degraded TSV projection: {message}");
-            }
-            apply_refresh_report_to_progress(&round.refresh, round.library_rows);
-            Ok(index_result_from_report(&round.refresh, round.library_rows))
-        }
-        Err(LibraryRefreshError::Cancelled { report, .. }) => {
-            let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
-                .unwrap_or(report.indexed);
-            apply_refresh_report_to_progress(&report, unique_library_count);
-            Err("scan cancelled".to_string())
-        }
-        Err(LibraryRefreshError::Storage { report, error, .. }) => {
-            let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
-                .unwrap_or(report.indexed);
-            apply_refresh_report_to_progress(&report, unique_library_count);
-            Err(error.to_string())
-        }
-        Err(LibraryRefreshError::ScanBusy { source_id, waited }) => Err(format!(
-            "source {source_id} is already being scanned (waited {} ms)",
-            waited.as_millis()
-        )),
-    }
-}
-
 pub(crate) fn index_current_sources(
     s: &wc_storage::StorageApi,
 ) -> Result<IndexSourcesResult, String> {
@@ -484,20 +431,6 @@ pub(crate) fn index_current_sources(
     }
     let mut progress = LiveScanProgress::default();
     index_sources_with_event_control(s, |source, event| {
-        update_scan_progress(&mut progress, source, event)
-    })
-}
-
-pub(crate) fn index_source_by_id(
-    storage: &wc_storage::StorageApi,
-    source_id: i64,
-) -> Result<IndexSourcesResult, String> {
-    update_scan_stage("loading source");
-    if scan_cancelled()? {
-        return Err("scan cancelled".to_string());
-    }
-    let mut progress = LiveScanProgress::default();
-    index_source_with_event_control(storage, source_id, |source, event| {
         update_scan_progress(&mut progress, source, event)
     })
 }

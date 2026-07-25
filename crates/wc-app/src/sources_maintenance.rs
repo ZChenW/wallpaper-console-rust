@@ -58,7 +58,11 @@ impl std::error::Error for SteamWorkshopScanError {
 
 /// List configured sources and classify each with `Path::is_dir` (stricter than `exists`).
 pub fn validate_sources(storage: &StorageApi) -> Result<ValidateSourcesReport, WcError> {
-    let sources = storage.sources_list()?;
+    let sources = crate::source_management::list_sources(storage)
+        .map_err(|error| WcError::Other(error.to_string()))?
+        .into_iter()
+        .map(|source| source.path)
+        .collect::<Vec<_>>();
     let missing = sources
         .iter()
         .filter(|path| !Path::new(path).is_dir())
@@ -69,14 +73,16 @@ pub fn validate_sources(storage: &StorageApi) -> Result<ValidateSourcesReport, W
 
 /// Remove every configured source path that is not a directory.
 pub fn remove_missing_sources(storage: &StorageApi) -> Result<RemoveMissingSourcesReport, WcError> {
-    let sources = storage.sources_list()?;
+    let sources = crate::source_management::list_sources(storage)
+        .map_err(|error| WcError::Other(error.to_string()))?;
     let mut removed = Vec::new();
-    for path in sources {
-        if Path::new(&path).is_dir() {
+    for source in sources {
+        if Path::new(&source.path).is_dir() {
             continue;
         }
-        storage.sources_remove(&path)?;
-        removed.push(path);
+        crate::source_management::remove_source_by_id(storage, source.id)
+            .map_err(|error| WcError::Other(error.to_string()))?;
+        removed.push(source.path);
     }
     Ok(RemoveMissingSourcesReport { removed })
 }
@@ -97,10 +103,9 @@ where
     let mut added_paths = Vec::new();
     for root in &roots {
         let canonical = root.to_string_lossy().to_string();
-        if storage
-            .sources_add(&canonical)
-            .map_err(SteamWorkshopScanError::Storage)?
-        {
+        let (_, created) = crate::source_management::save_source_intent(storage, &canonical)
+            .map_err(|error| SteamWorkshopScanError::Storage(WcError::Other(error.to_string())))?;
+        if created {
             added_paths.push(canonical);
         }
     }
