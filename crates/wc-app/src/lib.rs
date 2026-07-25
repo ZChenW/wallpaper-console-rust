@@ -8,6 +8,7 @@ pub mod display_plan;
 pub mod display_restore;
 pub mod display_target;
 pub mod library_refresh;
+pub mod library_refresh_round;
 pub mod library_rescan;
 pub mod post_apply;
 pub mod scan_worker;

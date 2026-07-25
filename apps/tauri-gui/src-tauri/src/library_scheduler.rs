@@ -7,10 +7,8 @@ use wc_core::config::ConfigDir;
 
 const DEBOUNCE_MILLIS: u64 = 1_500;
 const RATE_LIMIT_MILLIS: u64 = 10_000;
-// Background source refreshes are I/O-heavy child processes and share one
-// user-visible progress/cancellation channel. Running them serially preserves
-// foreground responsiveness and keeps that channel truthful.
-const MAX_CONCURRENT_BACKGROUND_SCANS: usize = 1;
+// One worker owns each due batch and scans its sources serially. This keeps the
+// progress channel truthful and gives the batch one publication result.
 const WATCH_RETRY_DELAYS_MILLIS: [u64; 4] = [2_000, 5_000, 15_000, 60_000];
 const RECOVERY_PERSIST_DELAYS_MILLIS: [u64; 4] = WATCH_RETRY_DELAYS_MILLIS;
 
@@ -619,44 +617,50 @@ pub fn start_library_scheduler(
                 scheduler
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .take_due_scans_bounded(MAX_CONCURRENT_BACKGROUND_SCANS)
+                    .take_due_scans_bounded(usize::MAX)
             };
-            for source_id in due {
+            if !due.is_empty() {
                 let scheduler = scheduler.clone();
                 let service = service.clone();
+                let source_ids = due;
                 let cd = ConfigDir {
                     path: cd.path.clone(),
                 };
                 std::thread::spawn(move || {
                     let Some(_background_work) = service.begin_background_work() else {
                         let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
-                        let _ = scheduler.scan_finished(source_id);
-                        scheduler.source_changed(source_id);
+                        for source_id in source_ids {
+                            let _ = scheduler.scan_finished(source_id);
+                            scheduler.source_changed(source_id);
+                        }
                         return;
                     };
                     let generation = service.maintenance_generation();
                     let storage = wc_storage::StorageApi::try_new(ConfigDir {
                         path: cd.path.clone(),
                     });
-                    let scan_started = match storage {
+                    let published = match storage {
                         Ok(storage) => {
-                            match wc_app::library_rescan::establish_library_dirty_marker(&storage) {
-                                Ok(()) => {
-                                    let mut presentation =
-                                        crate::commands::scan::begin_background_scan();
-                                    let result =
-                                        wc_app::library_refresh::refresh_library_source_background(
-                                            &storage,
-                                            source_id,
-                                            |source, event| presentation.observe(source, event),
-                                        );
-                                    presentation.finish(&result, &storage);
-                                    true
-                                }
+                            let mut presentation = crate::commands::scan::begin_background_scan();
+                            let result = wc_app::library_refresh_round::run_library_refresh_round(
+                                &storage,
+                                wc_app::library_refresh_round::RefreshSelection::Sources(
+                                    source_ids.clone(),
+                                ),
+                                wc_app::library_refresh_round::RefreshIntent::Background,
+                                |source, event| presentation.observe(source, event),
+                            );
+                            presentation.finish(&result);
+                            match result {
+                                Ok(round) => matches!(
+                                    round.projection,
+                                    wc_app::library_refresh_round::LegacyProjectionStatus::Published {
+                                        ..
+                                    }
+                                ),
                                 Err(error) => {
                                     log::warn!(
-                                        "Library background scan for source id {source_id} could \
-                                         not establish its recovery marker: {error}"
+                                        "Library background refresh round failed: {error}"
                                     );
                                     false
                                 }
@@ -664,7 +668,7 @@ pub fn start_library_scheduler(
                         }
                         Err(error) => {
                             log::warn!(
-                                "Library background scan for source id {source_id} could not open \
+                                "Library background refresh round could not open \
                                  storage: {error}"
                             );
                             false
@@ -672,31 +676,20 @@ pub fn start_library_scheduler(
                     };
                     let reload = {
                         let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
-                        let reload = scheduler.scan_finished(source_id);
-                        if !scan_started {
-                            scheduler.source_changed(source_id);
-                            false
-                        } else {
-                            reload
+                        let mut reload = false;
+                        for source_id in &source_ids {
+                            reload = scheduler.scan_finished(*source_id) || reload;
+                            if !published {
+                                scheduler.source_changed(*source_id);
+                            }
                         }
+                        reload && published
                     };
                     if reload
                         && !service.maintenance_paused()
                         && service.maintenance_generation() == generation
                     {
-                        let published = wc_storage::StorageApi::try_new(ConfigDir {
-                            path: cd.path.clone(),
-                        })
-                        .ok()
-                        .is_some_and(|storage| {
-                            wc_app::library_rescan::write_legacy_tsv_snapshot(&storage).is_ok()
-                        });
-                        if published {
-                            service.publish_background_round(&cd);
-                        } else {
-                            let mut scheduler = scheduler.lock().unwrap_or_else(|p| p.into_inner());
-                            scheduler.watcher_overflow();
-                        }
+                        service.publish_background_round(&cd);
                     }
                 });
             }

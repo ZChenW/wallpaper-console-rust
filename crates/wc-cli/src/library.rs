@@ -98,6 +98,13 @@ fn rescan(s: &StorageApi) -> anyhow::Result<()> {
     let report =
         wc_app::library_rescan::run_library_rescan(s, |_, _| wc_scan::ScanControl::Continue)
             .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if let wc_app::library_refresh_round::LegacyProjectionStatus::Degraded { message } =
+        &report.projection
+    {
+        eprintln!(
+            "Warning: SQLite refresh completed, but legacy library.tsv projection is stale: {message}"
+        );
+    }
 
     if report.source_count == 0 {
         println!(
@@ -438,9 +445,7 @@ mod tests {
         std::fs::write(source_path.join("two.jpg"), b"two").unwrap();
         std::fs::create_dir(storage.cd.library_tsv_path().with_extension("tsv.tmp")).unwrap();
 
-        let error = rescan(&storage).unwrap_err();
-
-        assert!(error.to_string().contains("directory"));
+        rescan(&storage).expect("TSV projection failure is degraded refresh success");
         assert!(
             storage.cd.path.join("library.dirty").exists(),
             "a failed TSV publish must leave a durable stale-snapshot signal"

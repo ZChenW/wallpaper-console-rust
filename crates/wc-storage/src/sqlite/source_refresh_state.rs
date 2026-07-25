@@ -144,6 +144,29 @@ pub fn begin_source_refresh_attempt(cd: &ConfigDir, source_id: i64) -> Result<()
     Ok(())
 }
 
+/// Repair an interrupted attempt without treating user cancellation as a
+/// source failure. The source becomes dirty and immediately due; prior failure
+/// history remains diagnostic evidence but does not impose backoff.
+pub fn cancel_source_refresh_attempt(cd: &ConfigDir, source_id: i64) -> Result<(), WcError> {
+    let mut connection = open_runtime_connection(cd)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    read_state(&transaction, source_id)?;
+    transaction
+        .execute(
+            "INSERT INTO source_refresh_state (source_id, dirty, next_retry_at)
+             VALUES (?1, 1, NULL)
+             ON CONFLICT(source_id) DO UPDATE SET
+                 dirty = 1,
+                 next_retry_at = NULL",
+            [source_id],
+        )
+        .map_err(sqlite_err)?;
+    transaction.commit().map_err(sqlite_err)?;
+    Ok(())
+}
+
 pub fn record_source_refresh_success(
     cd: &ConfigDir,
     source_id: i64,
@@ -400,6 +423,25 @@ mod tests {
         assert!(state.dirty);
         assert_eq!(
             source_refresh_eligibility(&cd, source_id, 1_001, RefreshIntent::Background).unwrap(),
+            SourceRefreshEligibility::Due
+        );
+    }
+
+    #[test]
+    fn cancellation_marks_dirty_and_clears_backoff_without_adding_a_failure() {
+        let (_tmp, cd, source_id) = source();
+        let failed = record_source_refresh_failure(&cd, source_id, "offline", 10_000).unwrap();
+        begin_source_refresh_attempt(&cd, source_id).unwrap();
+
+        cancel_source_refresh_attempt(&cd, source_id).unwrap();
+
+        let cancelled = read_source_refresh_state(&cd, source_id).unwrap();
+        assert!(cancelled.dirty);
+        assert_eq!(cancelled.failure_category, failed.failure_category);
+        assert_eq!(cancelled.consecutive_failures, failed.consecutive_failures);
+        assert_eq!(cancelled.next_retry_at, None);
+        assert_eq!(
+            source_refresh_eligibility(&cd, source_id, 10_001, RefreshIntent::Background).unwrap(),
             SourceRefreshEligibility::Due
         );
     }

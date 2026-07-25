@@ -2,7 +2,11 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(test)]
 use wc_config::ConfigDirExt;
 
-use wc_app::library_refresh::{refresh_library_source, LibraryRefreshError, LibraryRefreshReport};
+use wc_app::library_refresh::{LibraryRefreshError, LibraryRefreshReport};
+use wc_app::library_refresh_round::{
+    run_library_refresh_round, LegacyProjectionStatus, LibraryRefreshRoundReport, RefreshIntent,
+    RefreshSelection,
+};
 use wc_app::library_rescan::{run_library_rescan, LibraryRescanError, LibraryRescanReport};
 use wc_scan::{ScanControl, ScanStats, SourceScanEvent};
 use wc_storage::SourceRecord;
@@ -241,20 +245,13 @@ impl BackgroundScanPresentation {
         }
     }
 
-    pub(crate) fn finish(
-        self,
-        result: &Result<LibraryRefreshReport, LibraryRefreshError>,
-        storage: &wc_storage::StorageApi,
-    ) {
+    pub(crate) fn finish(self, result: &Result<LibraryRefreshRoundReport, LibraryRefreshError>) {
         if !self.owned {
             return;
         }
         match result {
-            Ok(report) => {
-                let total = wc_storage::sqlite::source_backed_library_counts_sqlite(&storage.cd)
-                    .map(|counts| counts.total)
-                    .unwrap_or(0);
-                apply_refresh_report_to_progress(report, total);
+            Ok(round) => {
+                apply_refresh_report_to_progress(&round.refresh, round.library_rows);
                 finish_scan_success();
             }
             Err(error) => finish_scan_error(&error.to_string()),
@@ -404,9 +401,14 @@ fn index_source_with_event_control<F>(
 where
     F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
 {
-    finish_refresh(
+    finish_round(
         storage,
-        refresh_library_source(storage, source_id, |source, event| on_event(source, event)),
+        run_library_refresh_round(
+            storage,
+            RefreshSelection::Sources(vec![source_id]),
+            RefreshIntent::Manual,
+            |source, event| on_event(source, event),
+        ),
     )
 }
 
@@ -416,6 +418,9 @@ fn finish_rescan(
 ) -> Result<IndexSourcesResult, String> {
     match rescan {
         Ok(report) => {
+            if let LegacyProjectionStatus::Degraded { message } = &report.projection {
+                log::warn!("Library rescan completed with degraded TSV projection: {message}");
+            }
             let refresh = report.refresh.unwrap_or_default();
             let unique_library_count = report.snapshot_count;
             apply_refresh_report_to_progress(&refresh, unique_library_count);
@@ -439,16 +444,17 @@ fn finish_rescan(
     }
 }
 
-fn finish_refresh(
+fn finish_round(
     storage: &wc_storage::StorageApi,
-    refresh: Result<LibraryRefreshReport, LibraryRefreshError>,
+    round: Result<LibraryRefreshRoundReport, LibraryRefreshError>,
 ) -> Result<IndexSourcesResult, String> {
-    match refresh {
-        Ok(report) => {
-            let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)
-                .map_err(|error| error.to_string())?;
-            apply_refresh_report_to_progress(&report, unique_library_count);
-            Ok(index_result_from_report(&report, unique_library_count))
+    match round {
+        Ok(round) => {
+            if let LegacyProjectionStatus::Degraded { message } = &round.projection {
+                log::warn!("Library refresh completed with degraded TSV projection: {message}");
+            }
+            apply_refresh_report_to_progress(&round.refresh, round.library_rows);
+            Ok(index_result_from_report(&round.refresh, round.library_rows))
         }
         Err(LibraryRefreshError::Cancelled { report, .. }) => {
             let unique_library_count = wc_storage::sqlite::source_backed_library_count(&storage.cd)

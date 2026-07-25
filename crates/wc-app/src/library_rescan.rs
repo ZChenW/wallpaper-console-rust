@@ -16,7 +16,10 @@ use wc_core::types::WallpaperEntry;
 use wc_scan::{ScanControl, SourceScanEvent};
 use wc_storage::{SourceRecord, StorageApi};
 
-use crate::library_refresh::{refresh_library_sources, LibraryRefreshError, LibraryRefreshReport};
+use crate::library_refresh::{LibraryRefreshError, LibraryRefreshReport};
+use crate::library_refresh_round::{
+    run_library_refresh_round, LegacyProjectionStatus, RefreshIntent, RefreshSelection,
+};
 
 /// Result of a full library rescan, including the legacy TSV snapshot size.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,6 +28,7 @@ pub struct LibraryRescanReport {
     /// `None` when there were no configured sources (refresh skipped).
     pub refresh: Option<LibraryRefreshReport>,
     pub snapshot_count: usize,
+    pub projection: LegacyProjectionStatus,
     pub refresh_time: Duration,
     pub snapshot_time: Duration,
 }
@@ -262,37 +266,20 @@ where
     F: FnMut(&SourceRecord, &SourceScanEvent) -> ScanControl,
 {
     let _rescan_guard = acquire_rescan_lock(storage)?;
-    let source_count = with_dirty_library_marker(storage, || {
-        storage
-            .source_records()
-            .map(|sources| sources.len())
-            .map_err(LibraryRescanError::from)
-    })?;
-
-    if source_count == 0 {
-        let snapshot_start = std::time::Instant::now();
-        let snapshot_count = write_legacy_tsv_snapshot(storage)?;
-        return Ok(LibraryRescanReport {
-            source_count: 0,
-            refresh: None,
-            snapshot_count,
-            refresh_time: Duration::ZERO,
-            snapshot_time: snapshot_start.elapsed(),
-        });
-    }
-
-    let refresh_start = std::time::Instant::now();
-    let refresh = refresh_library_sources(storage, |source, event| callback(source, event))?;
-    let refresh_time = refresh_start.elapsed();
-
-    let snapshot_start = std::time::Instant::now();
-    let snapshot_count = write_legacy_tsv_snapshot(storage)?;
+    let round = run_library_refresh_round(
+        storage,
+        RefreshSelection::All,
+        RefreshIntent::Manual,
+        |source, event| callback(source, event),
+    )?;
+    let source_count = round.selected_sources;
     Ok(LibraryRescanReport {
         source_count,
-        refresh: Some(refresh),
-        snapshot_count,
-        refresh_time,
-        snapshot_time: snapshot_start.elapsed(),
+        refresh: (source_count > 0).then_some(round.refresh),
+        snapshot_count: round.library_rows,
+        projection: round.projection,
+        refresh_time: round.refresh_time,
+        snapshot_time: round.projection_time,
     })
 }
 
@@ -328,6 +315,10 @@ mod tests {
         assert_eq!(report.source_count, 0);
         assert!(report.refresh.is_none());
         assert_eq!(report.snapshot_count, 0);
+        assert_eq!(
+            report.projection,
+            LegacyProjectionStatus::Published { rows: 0 }
+        );
         assert_eq!(
             std::fs::read_to_string(storage.cd.library_tsv_path()).unwrap(),
             ""
