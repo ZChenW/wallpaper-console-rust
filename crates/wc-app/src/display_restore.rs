@@ -10,11 +10,10 @@ use std::path::Path;
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
 use wc_backend::apply_transition::{
-    execute_apply_transition, plan_apply_transition, ApplyTransitionRequest,
+    execute_apply_transition, plan_apply_transition, preflight_apply_transition,
+    ApplyTransitionRequest,
 };
-use wc_backend::display_executor::{
-    DisplayExecAction, DisplayExecContext, DisplayExecReport,
-};
+use wc_backend::display_executor::{DisplayExecAction, DisplayExecContext, DisplayExecReport};
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
 #[cfg(test)]
@@ -136,6 +135,34 @@ impl AppService {
             let fallback_path = restore_fallback_path(&step.path);
             update_running_after_step(&mut preflight_running, known_outputs, &step);
             prepared_steps.push((step, actions, fallback_path));
+        }
+
+        let mut preflight_previous_backend = String::new();
+        for (step, actions, fallback_path) in &prepared_steps {
+            let transition_scope = transition_scope_for_target(&step.target, known_outputs)?;
+            let transition_plan = plan_apply_transition(&ApplyTransitionRequest {
+                scope: transition_scope,
+                target: step.backend,
+                previous_backend_raw: &preflight_previous_backend,
+                fallback_path: fallback_path.as_deref(),
+                core_actions: actions,
+            })
+            .map_err(AppError::from_wc_error)?;
+            if let Err(failure) = preflight_apply_transition(
+                &self.storage,
+                &transition_plan,
+                &DisplayExecContext { known_outputs },
+                runtime,
+                request_id,
+            ) {
+                return Err(self.handle_exec_failure(
+                    display_exec_failure_from_transition(failure),
+                    &previous_rows,
+                    known_outputs,
+                    None,
+                )?);
+            }
+            preflight_previous_backend = step.backend.as_str().to_string();
         }
 
         // Stop every backend first so restore starts from a clean renderer set,
@@ -450,6 +477,7 @@ mod tests {
 
     #[derive(Default)]
     struct FakeRuntime {
+        missing_backend: Option<Backend>,
         stop_awww_count: usize,
         stop_mpvpaper_count: usize,
         stop_lwe_count: usize,
@@ -567,6 +595,18 @@ mod tests {
     }
 
     impl BackendRuntime for FakeRuntime {
+        fn ensure_backend_available(
+            &mut self,
+            backend: Backend,
+            _storage: &wc_storage::StorageApi,
+        ) -> Result<(), WcError> {
+            if self.missing_backend == Some(backend) {
+                Err(WcError::BackendNotFound(backend.as_str().into()))
+            } else {
+                Ok(())
+            }
+        }
+
         fn stop_awww(&mut self) {
             self.stop_awww_count += 1;
             self.awww_stop_verify_pending = true;
@@ -933,6 +973,40 @@ mod tests {
         assert_eq!(rt.stop_awww_count, 0);
         let after = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(after, before);
+    }
+
+    #[test]
+    fn unavailable_restore_backend_is_rejected_before_global_stop() {
+        let (tmp, service) = temp_service();
+        let video = write_video(tmp.path(), "motion.mp4");
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &video.to_string_lossy(),
+                "mpvpaper",
+            )
+            .unwrap();
+        let mut runtime = FakeRuntime {
+            missing_backend: Some(Backend::Mpvpaper),
+            command_status_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let error = service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut runtime,
+                &mut reporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap_err();
+
+        assert!(error.message.contains("mpvpaper"));
+        assert_eq!(runtime.stop_awww_count, 0);
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert_eq!(runtime.stop_lwe_count, 0);
     }
 
     #[test]

@@ -47,6 +47,7 @@ export interface ApplyQueueDeps {
     result: ApplyResultDTO | undefined,
     transport: ApplyTransport,
   ) => void;
+  onFailed?: (error: unknown) => void;
   scheduler?: ApplyQueueScheduler;
   slowStatusDelayMs?: number;
 }
@@ -245,6 +246,11 @@ export class ApplyQueueController {
   }
 
   private reportFailure(error: unknown): void {
+    try {
+      this.deps.onFailed?.(error);
+    } catch {
+      // Failure observers must not prevent feedback or queue progress.
+    }
     this.deps.invalidateLibrary();
     this.deps.setFeedback(this.deps.makeErrorFeedback('Apply', error));
   }

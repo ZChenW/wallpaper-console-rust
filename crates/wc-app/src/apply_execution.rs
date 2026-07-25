@@ -473,10 +473,9 @@ mod tests {
             "expected ResolveTarget in {stages:?}"
         );
         assert!(
-            stages.iter().any(|s| matches!(
-                s,
-                ApplyStage::StartLwe | ApplyStage::WaitRendererAlive
-            )),
+            stages
+                .iter()
+                .any(|s| matches!(s, ApplyStage::StartLwe | ApplyStage::WaitRendererAlive)),
             "expected LWE apply stages in {stages:?}"
         );
     }

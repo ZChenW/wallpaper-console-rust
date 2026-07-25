@@ -7,8 +7,7 @@
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
 use wc_backend::apply_transition::{
-    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure,
-    ApplyTransitionRequest,
+    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure, ApplyTransitionRequest,
 };
 use wc_backend::display_executor::{
     CompletedEvent, DisplayExecAction, DisplayExecContext, DisplayExecFailure, DisplayExecReport,
@@ -404,36 +403,40 @@ impl AppService {
         known_outputs: &[String],
         before_reconcile: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
     ) -> Result<AppError, AppError> {
-        if let Some(stop) = failure.uncertain_stop.clone().map(|stop| *stop) {
-            let mut conservative_report = failure.report.clone();
-            conservative_report
-                .events
-                .push(CompletedEvent::Stop(stop.clone()));
-            conservative_report.completed_stops.push(stop);
-            let reconciled = reconcile_display_state_from_report(
-                previous_rows,
-                &conservative_report,
-                known_outputs,
-            );
-            let persist_result = match before_reconcile {
-                Some(seam) => self
-                    .storage
-                    .display_state_replace_all_seam(&reconciled, seam),
-                None => self.storage.display_state_replace_all(&reconciled),
-            };
-            persist_result.map_err(|persist_error| AppError {
-                code: "display_state_uncertain".into(),
-                message: "Renderer stop outcome and persisted display state are uncertain".into(),
-                detail: Some(format!(
-                    "execution_error={}; reconciliation_error={persist_error}",
-                    failure.error
-                )),
-                recoverable: true,
-                suggestion: Some("Refresh renderer status before retrying.".into()),
-            })?;
+        if failure.cleanup_uncertain {
+            let _ = self.storage.runtime_state_clear();
+            if let Some(stop) = failure.uncertain_stop.clone().map(|stop| *stop) {
+                let mut conservative_report = failure.report.clone();
+                conservative_report
+                    .events
+                    .push(CompletedEvent::Stop(stop.clone()));
+                conservative_report.completed_stops.push(stop);
+                let reconciled = reconcile_display_state_from_report(
+                    previous_rows,
+                    &conservative_report,
+                    known_outputs,
+                );
+                let persist_result = match before_reconcile {
+                    Some(seam) => self
+                        .storage
+                        .display_state_replace_all_seam(&reconciled, seam),
+                    None => self.storage.display_state_replace_all(&reconciled),
+                };
+                persist_result.map_err(|persist_error| AppError {
+                    code: "display_state_uncertain".into(),
+                    message: "Renderer stop outcome and persisted display state are uncertain"
+                        .into(),
+                    detail: Some(format!(
+                        "execution_error={}; reconciliation_error={persist_error}",
+                        failure.error
+                    )),
+                    recoverable: true,
+                    suggestion: Some("Refresh renderer status before retrying.".into()),
+                })?;
+            }
             return Ok(AppError {
                 code: "display_state_uncertain".into(),
-                message: "Renderer stop was attempted but termination could not be verified".into(),
+                message: "Renderer cleanup could not be verified".into(),
                 detail: Some(failure.error.to_string()),
                 recoverable: true,
                 suggestion: Some("Refresh renderer status before retrying.".into()),
@@ -605,6 +608,7 @@ pub(crate) fn display_exec_failure_from_transition(
         report: failure.exec,
         error: failure.error,
         uncertain_stop: failure.uncertain_stop,
+        cleanup_uncertain: failure.cleanup_uncertain,
     }
 }
 
@@ -1458,7 +1462,6 @@ mod tests {
                 ),
             ])
             .unwrap();
-
         let mut rt = FakeRuntime {
             command_output_success: true,
             ..Default::default()
@@ -1718,6 +1721,10 @@ mod tests {
                 ),
             ])
             .unwrap();
+        service
+            .storage_for_tests()
+            .current_write("/walls/stale-runtime.mp4")
+            .unwrap();
         let mut runtime = FakeRuntime {
             command_output_success: true,
             stop_mpvpaper_error: Some("verification probe failed".into()),
@@ -1742,6 +1749,33 @@ mod tests {
         assert!(rows.iter().any(|row| {
             row.target == DisplayStateTarget::Output("DP-ghost".into()) && row.backend == "mpvpaper"
         }));
+        assert_eq!(service.storage_for_tests().current_read().unwrap(), None);
+    }
+
+    #[test]
+    fn uncertain_target_cleanup_invalidates_legacy_runtime_evidence() {
+        let (_tmp, service) = temp_service();
+        service
+            .storage_for_tests()
+            .current_write("/walls/stale-runtime.mp4")
+            .unwrap();
+
+        let error = service
+            .handle_exec_failure(
+                DisplayExecFailure {
+                    report: DisplayExecReport::default(),
+                    error: WcError::Other("target cleanup probe failed".into()),
+                    uncertain_stop: None,
+                    cleanup_uncertain: true,
+                },
+                &[],
+                &["eDP-1".into()],
+                None,
+            )
+            .unwrap();
+
+        assert_eq!(error.code, "display_state_uncertain");
+        assert_eq!(service.storage_for_tests().current_read().unwrap(), None);
     }
 
     #[test]

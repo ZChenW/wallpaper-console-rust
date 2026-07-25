@@ -46,6 +46,21 @@ pub(crate) trait BackendDriver: Send + Sync {
     /// Preflight PATH / config checks before destructive handoff or apply.
     fn ensure_available(&self, storage: &StorageApi) -> Result<(), WcError>;
 
+    fn prepare(
+        &self,
+        storage: &StorageApi,
+        request: &PrepareApplyRequest<'_>,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<PreparedApply, WcError>;
+
+    fn execute(
+        &self,
+        storage: &StorageApi,
+        prepared: &mut PreparedApply,
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+    ) -> Result<(), DriverApplyFailure>;
+
     /// Best-effort stop (legacy / lifecycle plans).
     fn stop(&self, runtime: &mut dyn BackendRuntime, storage: Option<&StorageApi>);
 
@@ -55,6 +70,139 @@ pub(crate) trait BackendDriver: Send + Sync {
         runtime: &mut dyn BackendRuntime,
         storage: Option<&StorageApi>,
     ) -> Result<(), WcError>;
+}
+
+pub(crate) struct PrepareApplyRequest<'a> {
+    pub path: &'a str,
+    pub scope: &'a ExecutionScope,
+    pub after_stop: bool,
+    pub clear_state_hint: bool,
+    pub request_id: Option<&'a str>,
+}
+
+/// Fully validated renderer operation. Its variant and command details stay
+/// private so orchestration can only execute it through its registered driver.
+pub(crate) struct PreparedApply {
+    backend: Backend,
+    path: String,
+    scope: ExecutionScope,
+    request_id: Option<String>,
+    operation: PreparedOperation,
+}
+
+enum PreparedOperation {
+    Awww {
+        command: Command,
+        clear_state_hint: bool,
+    },
+    Mpvpaper {
+        command: Command,
+        output: String,
+        previous_pids: Vec<u32>,
+    },
+    LinuxWallpaperEngine {
+        project: crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+        outputs: Vec<String>,
+    },
+    LinuxWallpaperEngineLegacy {
+        project: crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
+    },
+}
+
+impl PreparedApply {
+    pub(crate) fn backend(&self) -> Backend {
+        self.backend
+    }
+
+    pub(crate) fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub(crate) fn scope(&self) -> &ExecutionScope {
+        &self.scope
+    }
+
+    pub(crate) fn execute(
+        &mut self,
+        storage: &StorageApi,
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+    ) -> Result<(), DriverApplyFailure> {
+        driver_for(self.backend)
+            .expect("prepared applies always retain a registered backend")
+            .execute(storage, self, runtime, reporter)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CleanupOutcome {
+    NotRequired,
+    VerifiedGlobalStop(Backend),
+    UncertainGlobalStop(Backend),
+    UncertainTarget,
+}
+
+#[derive(Debug)]
+pub(crate) struct DriverApplyFailure {
+    pub error: WcError,
+    pub cleanup: CleanupOutcome,
+}
+
+impl DriverApplyFailure {
+    fn new(error: WcError) -> Self {
+        Self {
+            error,
+            cleanup: CleanupOutcome::NotRequired,
+        }
+    }
+}
+
+impl From<WcError> for DriverApplyFailure {
+    fn from(error: WcError) -> Self {
+        Self::new(error)
+    }
+}
+
+pub(crate) fn prepare_legacy_apply(
+    storage: &StorageApi,
+    backend: Backend,
+    path: &str,
+    after_stop: bool,
+    clear_state_hint: bool,
+    request_id: Option<&str>,
+    runtime: &mut dyn BackendRuntime,
+) -> Result<PreparedApply, WcError> {
+    let Some(backend_driver) = driver_for(backend) else {
+        return Err(WcError::UnsupportedFileType(path.to_string()));
+    };
+    if backend == Backend::LinuxWallpaperEngine {
+        runtime.ensure_backend_available(backend, storage)?;
+        return Ok(PreparedApply {
+            backend,
+            path: path.to_string(),
+            scope: ExecutionScope::AllDisplays,
+            request_id: request_id.map(str::to_string),
+            operation: PreparedOperation::LinuxWallpaperEngineLegacy {
+                project: crate::linux_wallpaperengine::project_from_path(path)?,
+            },
+        });
+    }
+    let scope = if backend == Backend::Mpvpaper {
+        ExecutionScope::named(vec![storage.config_get("mpvpaper_output", "*")])?
+    } else {
+        ExecutionScope::AllDisplays
+    };
+    backend_driver.prepare(
+        storage,
+        &PrepareApplyRequest {
+            path,
+            scope: &scope,
+            after_stop,
+            clear_state_hint,
+            request_id,
+        },
+        runtime,
+    )
 }
 
 /// Lookup the driver for a supported backend. [`Backend::Unsupported`] → `None`.
@@ -107,75 +255,6 @@ pub(crate) fn awww_instant_status_error(output: &Output) -> WcError {
         output.status,
         command_output_detail(output)
     ))
-}
-
-/// Parameters for [`apply_awww`] (keeps the call surface under clippy's arg limit).
-pub(crate) struct AwwwApplyRequest<'a> {
-    pub path: &'a str,
-    pub scope: &'a ExecutionScope,
-    pub use_instant: bool,
-    pub clear_state_hint: bool,
-    pub request_id: Option<&'a str>,
-}
-
-/// Shared awww apply used by legacy fullscreen and display-scoped paths.
-pub(crate) fn apply_awww(
-    s: &StorageApi,
-    req: &AwwwApplyRequest<'_>,
-    runtime: &mut dyn BackendRuntime,
-    reporter: Option<&mut dyn ApplyStageReporter>,
-) -> Result<(), WcError> {
-    if let Some(reporter) = reporter {
-        apply_stage::report_stage(
-            reporter,
-            apply_stage::ApplyStage::EnsureAwwwDaemon,
-            req.request_id,
-        );
-        ensure_awww_daemon_running(runtime)?;
-        apply_stage::report_stage(
-            reporter,
-            apply_stage::ApplyStage::AwwwSocketReady,
-            req.request_id,
-        );
-    } else {
-        ensure_awww_daemon_running(runtime)?;
-    }
-    if req.clear_state_hint {
-        clear_awww_state_hint(runtime);
-    }
-
-    let fps_raw = s.config_get("wallpaper_transition_fps", "60");
-    let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
-    let resize_raw = s.config_get("awww_resize", "crop");
-    let resize = normalize_awww_resize(&resize_raw);
-
-    let mut cmd = if req.use_instant {
-        build_awww_instant_command_for_scope(req.path, resize, &fps, req.scope)?
-    } else {
-        let transition_raw = s.config_get("awww_transition_type", "fade");
-        let transition_type = normalize_awww_transition_type(&transition_raw);
-        let duration_raw = s.config_get("awww_transition_duration", "1");
-        let duration =
-            wc_core::config_normalizer::normalize_awww_transition_duration(&duration_raw);
-        let mut cmd = build_awww_img_command_for_scope(
-            req.path,
-            resize,
-            transition_type,
-            &duration,
-            &fps,
-            req.scope,
-        )?;
-        cmd.arg("--filter").arg("Lanczos3");
-        cmd
-    };
-
-    let output = runtime
-        .command_output(&mut cmd)
-        .map_err(|e| WcError::Other(format!("awww failed: {}", e)))?;
-    if !output.status.success() {
-        return Err(awww_apply_status_error(&output));
-    }
-    Ok(())
 }
 
 /// Shared awww instant apply (visual fallback / rollback).
@@ -251,57 +330,176 @@ pub(crate) fn clear_awww_state_hint(runtime: &mut dyn ProcessIo) {
     let _ = runtime.command_status(&mut cmd);
 }
 
-/// Display-path LWE apply — fakes intercept via [`BackendRuntime::apply_lwe_to_outputs`].
-pub(crate) fn apply_lwe_to_outputs(
-    s: &StorageApi,
-    project: &crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
-    outputs: &[String],
-    runtime: &mut dyn BackendRuntime,
-) -> Result<(), WcError> {
-    runtime.apply_lwe_to_outputs(s, project, outputs)
-}
-
-/// Error from [`launch_mpvpaper`]: distinguishes launcher vs readiness failure so
-/// callers can decide whether a post-failure mpvpaper stop is warranted.
-#[derive(Debug)]
-pub(crate) enum MpvpaperApplyError {
-    /// `setsid`/`mpvpaper` invocation failed before readiness wait.
-    Start(WcError),
-    /// Process was launched but did not become ready.
-    Ready(WcError),
-}
-
-impl From<MpvpaperApplyError> for WcError {
-    fn from(error: MpvpaperApplyError) -> Self {
-        match error {
-            MpvpaperApplyError::Start(error) | MpvpaperApplyError::Ready(error) => error,
-        }
+fn prepare_awww(
+    storage: &StorageApi,
+    request: &PrepareApplyRequest<'_>,
+) -> Result<PreparedOperation, WcError> {
+    let path = std::path::Path::new(request.path);
+    if !path.is_file() {
+        return Err(WcError::NotRegularFile(path.to_path_buf()));
     }
+    request.scope.validate()?;
+    let fps_raw = storage.config_get("wallpaper_transition_fps", "60");
+    let fps = wc_core::config_normalizer::normalize_awww_transition_fps(&fps_raw);
+    let resize_raw = storage.config_get("awww_resize", "crop");
+    let resize = normalize_awww_resize(&resize_raw);
+    let mut command = if request.after_stop {
+        build_awww_instant_command_for_scope(request.path, resize, &fps, request.scope)?
+    } else {
+        let transition_raw = storage.config_get("awww_transition_type", "fade");
+        let transition_type = normalize_awww_transition_type(&transition_raw);
+        let duration_raw = storage.config_get("awww_transition_duration", "1");
+        let duration =
+            wc_core::config_normalizer::normalize_awww_transition_duration(&duration_raw);
+        build_awww_img_command_for_scope(
+            request.path,
+            resize,
+            transition_type,
+            &duration,
+            &fps,
+            request.scope,
+        )?
+    };
+    if !request.after_stop {
+        command.arg("--filter").arg("Lanczos3");
+    }
+    Ok(PreparedOperation::Awww {
+        command,
+        clear_state_hint: request.clear_state_hint,
+    })
 }
 
-/// Launch mpvpaper and wait until a new PID appears. Caller owns cleanup on failure.
-pub(crate) fn launch_mpvpaper(
-    s: &StorageApi,
-    path: &str,
-    output: &str,
-    previous_pids: &[u32],
+fn prepare_mpvpaper(
+    storage: &StorageApi,
+    request: &PrepareApplyRequest<'_>,
     runtime: &mut dyn BackendRuntime,
-) -> Result<u32, MpvpaperApplyError> {
-    let opts_raw = s.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
-    let opts = normalize_mpvpaper_options(&opts_raw);
-    let mut cmd: Command = build_mpvpaper_launch_command_for_output(opts, output, path)
-        .map_err(MpvpaperApplyError::Start)?;
-    let status = runtime.command_status(&mut cmd).map_err(|e| {
-        MpvpaperApplyError::Start(WcError::Other(format!("mpvpaper failed: {}", e)))
+) -> Result<PreparedOperation, WcError> {
+    let path = std::path::Path::new(request.path);
+    if !path.is_file() {
+        return Err(WcError::NotRegularFile(path.to_path_buf()));
+    }
+    request.scope.validate()?;
+    let outputs = request.scope.named_outputs().ok_or_else(|| {
+        WcError::Other("mpvpaper apply requires a named single-output execution scope".into())
     })?;
-    if !status.success() {
-        return Err(MpvpaperApplyError::Start(WcError::Other(
-            "mpvpaper failed to apply wallpaper".into(),
+    if outputs.len() != 1 {
+        return Err(WcError::Other(format!(
+            "mpvpaper apply expects exactly one output per invocation, got {}",
+            outputs.len()
         )));
     }
-    runtime
-        .wait_for_mpvpaper_ready(previous_pids, output, path)
-        .map_err(MpvpaperApplyError::Ready)
+    let output = outputs[0].clone();
+    let options_raw = storage.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
+    let options = normalize_mpvpaper_options(&options_raw);
+    let command = build_mpvpaper_launch_command_for_output(options, &output, request.path)?;
+    let previous_pids = runtime.mpvpaper_pids()?;
+    Ok(PreparedOperation::Mpvpaper {
+        command,
+        output,
+        previous_pids,
+    })
+}
+
+fn prepare_lwe(request: &PrepareApplyRequest<'_>) -> Result<PreparedOperation, WcError> {
+    request.scope.validate()?;
+    let outputs = match request.scope {
+        ExecutionScope::AllDisplays => {
+            return Err(WcError::Other(
+                "linux-wallpaperengine apply requires explicit named outputs".into(),
+            ));
+        }
+        ExecutionScope::Named(outputs) => outputs.clone(),
+    };
+    let project = crate::linux_wallpaperengine::project_from_path(request.path)?;
+    Ok(PreparedOperation::LinuxWallpaperEngine { project, outputs })
+}
+
+fn execute_mpvpaper(
+    prepared: &mut PreparedApply,
+    runtime: &mut dyn BackendRuntime,
+) -> Result<(), DriverApplyFailure> {
+    let path = prepared.path.clone();
+    let PreparedOperation::Mpvpaper {
+        command,
+        output,
+        previous_pids,
+    } = &mut prepared.operation
+    else {
+        return Err(
+            WcError::Other("mpvpaper driver received another backend's apply".into()).into(),
+        );
+    };
+    let status = match runtime.command_status(command) {
+        Ok(status) if status.success() => status,
+        Ok(_) => {
+            return Err(cleanup_failed_mpvpaper_start(
+                runtime,
+                previous_pids,
+                output,
+                &path,
+                WcError::Other("mpvpaper failed to apply wallpaper".into()),
+            ));
+        }
+        Err(error) => {
+            return Err(cleanup_failed_mpvpaper_start(
+                runtime,
+                previous_pids,
+                output,
+                &path,
+                WcError::Other(format!("mpvpaper failed: {error}")),
+            ));
+        }
+    };
+    let _ = status;
+    let pid = match runtime.wait_for_mpvpaper_ready(previous_pids, output, &path) {
+        Ok(pid) => pid,
+        Err(error) => return Err(cleanup_started_mpvpaper(runtime, error)),
+    };
+    match runtime.mpvpaper_pid_running(pid) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(cleanup_started_mpvpaper(
+            runtime,
+            WcError::Other("mpvpaper renderer exited before startup settled".into()),
+        )),
+        Err(error) => Err(cleanup_started_mpvpaper(runtime, error)),
+    }
+}
+
+fn cleanup_failed_mpvpaper_start(
+    runtime: &mut dyn BackendRuntime,
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
+    original_error: WcError,
+) -> DriverApplyFailure {
+    match runtime.cleanup_failed_mpvpaper_launch(previous_pids, output, path) {
+        Ok(()) => DriverApplyFailure::new(original_error),
+        Err(cleanup_error) => DriverApplyFailure {
+            error: WcError::Other(format!(
+                "{original_error}; failed-launch mpvpaper cleanup could not be verified: \
+                 {cleanup_error}"
+            )),
+            cleanup: CleanupOutcome::UncertainTarget,
+        },
+    }
+}
+
+fn cleanup_started_mpvpaper(
+    runtime: &mut dyn BackendRuntime,
+    original_error: WcError,
+) -> DriverApplyFailure {
+    match MPVPAPER_DRIVER.stop_checked(runtime, None) {
+        Ok(()) => DriverApplyFailure {
+            error: original_error,
+            cleanup: CleanupOutcome::VerifiedGlobalStop(Backend::Mpvpaper),
+        },
+        Err(cleanup_error) => DriverApplyFailure {
+            error: WcError::Other(format!(
+                "{original_error}; mpvpaper cleanup could not be verified: {cleanup_error}"
+            )),
+            cleanup: CleanupOutcome::UncertainGlobalStop(Backend::Mpvpaper),
+        },
+    }
 }
 
 // --- Drivers ----------------------------------------------------------------
@@ -343,6 +541,62 @@ impl BackendDriver for AwwwDriver {
             if which::which(command).is_err() {
                 return Err(WcError::BackendNotFound(command.to_string()));
             }
+        }
+        Ok(())
+    }
+
+    fn prepare(
+        &self,
+        storage: &StorageApi,
+        request: &PrepareApplyRequest<'_>,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<PreparedApply, WcError> {
+        runtime.ensure_backend_available(self.backend(), storage)?;
+        Ok(PreparedApply {
+            backend: self.backend(),
+            path: request.path.to_string(),
+            scope: request.scope.clone(),
+            request_id: request.request_id.map(str::to_string),
+            operation: prepare_awww(storage, request)?,
+        })
+    }
+
+    fn execute(
+        &self,
+        _storage: &StorageApi,
+        prepared: &mut PreparedApply,
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+    ) -> Result<(), DriverApplyFailure> {
+        let request_id = prepared.request_id.as_deref();
+        let PreparedOperation::Awww {
+            command,
+            clear_state_hint,
+        } = &mut prepared.operation
+        else {
+            return Err(
+                WcError::Other("awww driver received another backend's apply".into()).into(),
+            );
+        };
+        apply_stage::report_stage(
+            reporter,
+            apply_stage::ApplyStage::EnsureAwwwDaemon,
+            request_id,
+        );
+        ensure_awww_daemon_running(runtime)?;
+        apply_stage::report_stage(
+            reporter,
+            apply_stage::ApplyStage::AwwwSocketReady,
+            request_id,
+        );
+        if *clear_state_hint {
+            clear_awww_state_hint(runtime);
+        }
+        let output = runtime
+            .command_output(command)
+            .map_err(|error| WcError::Other(format!("awww failed: {error}")))?;
+        if !output.status.success() {
+            return Err(awww_apply_status_error(&output).into());
         }
         Ok(())
     }
@@ -398,6 +652,32 @@ impl BackendDriver for MpvpaperDriver {
         Ok(())
     }
 
+    fn prepare(
+        &self,
+        storage: &StorageApi,
+        request: &PrepareApplyRequest<'_>,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<PreparedApply, WcError> {
+        runtime.ensure_backend_available(self.backend(), storage)?;
+        Ok(PreparedApply {
+            backend: self.backend(),
+            path: request.path.to_string(),
+            scope: request.scope.clone(),
+            request_id: request.request_id.map(str::to_string),
+            operation: prepare_mpvpaper(storage, request, runtime)?,
+        })
+    }
+
+    fn execute(
+        &self,
+        _storage: &StorageApi,
+        prepared: &mut PreparedApply,
+        runtime: &mut dyn BackendRuntime,
+        _reporter: &mut dyn ApplyStageReporter,
+    ) -> Result<(), DriverApplyFailure> {
+        execute_mpvpaper(prepared, runtime)
+    }
+
     fn stop(&self, runtime: &mut dyn BackendRuntime, _storage: Option<&StorageApi>) {
         runtime.stop_mpvpaper();
     }
@@ -447,6 +727,57 @@ impl BackendDriver for LweDriver {
             ));
         }
         crate::linux_wallpaperengine::ensure_binary_available(&config)
+    }
+
+    fn prepare(
+        &self,
+        storage: &StorageApi,
+        request: &PrepareApplyRequest<'_>,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<PreparedApply, WcError> {
+        runtime.ensure_backend_available(self.backend(), storage)?;
+        Ok(PreparedApply {
+            backend: self.backend(),
+            path: request.path.to_string(),
+            scope: request.scope.clone(),
+            request_id: request.request_id.map(str::to_string),
+            operation: prepare_lwe(request)?,
+        })
+    }
+
+    fn execute(
+        &self,
+        storage: &StorageApi,
+        prepared: &mut PreparedApply,
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+    ) -> Result<(), DriverApplyFailure> {
+        let request_id = prepared.request_id.as_deref();
+        apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, request_id);
+        match &prepared.operation {
+            PreparedOperation::LinuxWallpaperEngine { project, outputs } => {
+                runtime.apply_lwe_to_outputs(storage, project, outputs)?;
+                apply_stage::report_stage(
+                    reporter,
+                    apply_stage::ApplyStage::WaitRendererAlive,
+                    request_id,
+                );
+            }
+            PreparedOperation::LinuxWallpaperEngineLegacy { project } => {
+                apply_stage::report_stage(
+                    reporter,
+                    apply_stage::ApplyStage::WaitRendererAlive,
+                    request_id,
+                );
+                crate::linux_wallpaperengine::apply(storage, project.clone())?;
+            }
+            _ => {
+                return Err(
+                    WcError::Other("LWE driver received another backend's apply".into()).into(),
+                );
+            }
+        }
+        Ok(())
     }
 
     fn stop(&self, runtime: &mut dyn BackendRuntime, storage: Option<&StorageApi>) {

@@ -40,6 +40,7 @@ export function useApplyQueue(args: {
     result: ApplyResultDTO | undefined,
     transport: ApplyTransport,
   ) => void;
+  onFailed?: (error: unknown) => void;
 }) {
   const [queueState, setQueueState] = useState<ApplyQueueState>({
     applying: false,
@@ -70,6 +71,7 @@ export function useApplyQueue(args: {
         subscribeApplyStage: createSubscribeApplyStage(),
         onApplied: (request, result, transport) =>
           argsRef.current.onApplied?.(request, result, transport),
+        onFailed: (error) => argsRef.current.onFailed?.(error),
       },
       () => {},
       setQueueState,

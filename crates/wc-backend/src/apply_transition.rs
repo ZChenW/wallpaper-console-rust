@@ -10,8 +10,8 @@ use wc_storage::StorageApi;
 
 use crate::apply_stage::ApplyStageReporter;
 use crate::display_executor::{
-    execute_display_actions, CompletedStop, DisplayExecAction, DisplayExecContext,
-    DisplayExecReport,
+    execute_display_actions, preflight_display_actions, CompletedStop, DisplayExecAction,
+    DisplayExecContext, DisplayExecReport,
 };
 use crate::driver;
 use crate::lifecycle::{self, StopPlan};
@@ -20,7 +20,9 @@ use crate::target_commands::ExecutionScope;
 use crate::visual_handoff::{self, FallbackStage};
 
 pub use lifecycle::AWWW_CROSS_BACKEND_SETTLE_MS;
-pub use visual_handoff::{AWWW_FALLBACK_SETTLE_MS, LWE_STARTUP_SETTLE_MS, MPVPAPER_STARTUP_SETTLE_MS};
+pub use visual_handoff::{
+    AWWW_FALLBACK_SETTLE_MS, LWE_STARTUP_SETTLE_MS, MPVPAPER_STARTUP_SETTLE_MS,
+};
 
 /// Pure planning input. `core_actions` is the Stop/Apply skeleton from display_plan.
 pub struct ApplyTransitionRequest<'a> {
@@ -34,7 +36,9 @@ pub struct ApplyTransitionRequest<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApplyTransitionAdornment {
     /// awww instant (`--transition-type none`). Only planned for AllDisplays.
-    FallbackInstantAwww { path: String },
+    FallbackInstantAwww {
+        path: String,
+    },
     SettleMs(u64),
     LifecycleStop(StopPlan),
 }
@@ -60,6 +64,7 @@ pub struct ApplyTransitionFailure {
     pub exec: DisplayExecReport,
     pub error: WcError,
     pub uncertain_stop: Option<Box<CompletedStop>>,
+    pub cleanup_uncertain: bool,
     pub rollback_note: Option<String>,
 }
 
@@ -85,8 +90,8 @@ pub fn plan_apply_transition(
     );
 
     let allow_global_fallback = matches!(request.scope, ExecutionScope::AllDisplays);
-    let scope_degraded = !allow_global_fallback
-        && full_handoff.fallback_stage == FallbackStage::TargetImageInstant;
+    let scope_degraded =
+        !allow_global_fallback && full_handoff.fallback_stage == FallbackStage::TargetImageInstant;
 
     let mut prefix = Vec::new();
     if allow_global_fallback && full_handoff.fallback_stage == FallbackStage::TargetImageInstant {
@@ -124,6 +129,47 @@ pub fn plan_apply_transition(
     })
 }
 
+/// Complete every fallible, non-destructive renderer validation in a
+/// transition before callers permit any Stop.
+#[allow(clippy::result_large_err)]
+pub fn preflight_apply_transition(
+    storage: &StorageApi,
+    plan: &ApplyTransitionPlan,
+    ctx: &DisplayExecContext<'_>,
+    runtime: &mut dyn BackendRuntime,
+    request_id: Option<&str>,
+) -> Result<(), ApplyTransitionFailure> {
+    for adornment in &plan.prefix {
+        let ApplyTransitionAdornment::FallbackInstantAwww { path } = adornment else {
+            continue;
+        };
+        let fallback_action = [DisplayExecAction::Apply {
+            backend: Backend::Awww,
+            path: path.clone(),
+            scope: ExecutionScope::AllDisplays,
+            use_instant: true,
+        }];
+        preflight_display_actions(storage, &fallback_action, ctx, runtime, request_id).map_err(
+            |failure| ApplyTransitionFailure {
+                exec: failure.report,
+                error: failure.error,
+                uncertain_stop: failure.uncertain_stop,
+                cleanup_uncertain: failure.cleanup_uncertain,
+                rollback_note: None,
+            },
+        )?;
+    }
+    preflight_display_actions(storage, &plan.core_actions, ctx, runtime, request_id).map_err(
+        |failure| ApplyTransitionFailure {
+            exec: failure.report,
+            error: failure.error,
+            uncertain_stop: failure.uncertain_stop,
+            cleanup_uncertain: failure.cleanup_uncertain,
+            rollback_note: None,
+        },
+    )
+}
+
 #[allow(clippy::result_large_err)]
 pub fn execute_apply_transition(
     storage: &StorageApi,
@@ -133,30 +179,41 @@ pub fn execute_apply_transition(
     reporter: &mut dyn ApplyStageReporter,
     request_id: Option<&str>,
 ) -> Result<ApplyTransitionReport, ApplyTransitionFailure> {
+    preflight_apply_transition(storage, plan, ctx, runtime, request_id)?;
     let mut fallback_applied = false;
     for adornment in &plan.prefix {
         match adornment {
             ApplyTransitionAdornment::FallbackInstantAwww { path } => {
-                if let Err(error) = runtime.ensure_backend_available(Backend::Awww, storage) {
-                    return Err(ApplyTransitionFailure {
+                let mut prepared = driver::driver_for(Backend::Awww)
+                    .expect("awww driver")
+                    .prepare(
+                        storage,
+                        &driver::PrepareApplyRequest {
+                            path,
+                            scope: &ExecutionScope::AllDisplays,
+                            after_stop: true,
+                            clear_state_hint: false,
+                            request_id,
+                        },
+                        runtime,
+                    )
+                    .map_err(|error| ApplyTransitionFailure {
                         exec: DisplayExecReport::default(),
                         error,
                         uncertain_stop: None,
+                        cleanup_uncertain: false,
                         rollback_note: None,
-                    });
-                }
-                if let Err(error) = driver::apply_awww_instant(
-                    storage,
-                    path,
-                    &ExecutionScope::AllDisplays,
-                    runtime,
-                    Some(reporter),
-                    request_id,
-                ) {
+                    })?;
+                if let Err(failure) = prepared.execute(storage, runtime, reporter) {
                     return Err(ApplyTransitionFailure {
                         exec: DisplayExecReport::default(),
-                        error,
+                        error: failure.error,
                         uncertain_stop: None,
+                        cleanup_uncertain: matches!(
+                            failure.cleanup,
+                            driver::CleanupOutcome::UncertainGlobalStop(_)
+                                | driver::CleanupOutcome::UncertainTarget
+                        ),
                         rollback_note: None,
                     });
                 }
@@ -195,6 +252,7 @@ pub fn execute_apply_transition(
                                 exec,
                                 error,
                                 uncertain_stop: None,
+                                cleanup_uncertain: false,
                                 rollback_note: None,
                             });
                         }
@@ -208,16 +266,13 @@ pub fn execute_apply_transition(
             })
         }
         Err(failure) => {
-            let rollback_note = rollback_visual_fallback(
-                storage,
-                plan.previous,
-                fallback_applied,
-                runtime,
-            );
+            let rollback_note =
+                rollback_visual_fallback(storage, plan.previous, fallback_applied, runtime);
             Err(ApplyTransitionFailure {
                 exec: failure.report,
                 error: failure.error,
                 uncertain_stop: failure.uncertain_stop,
+                cleanup_uncertain: failure.cleanup_uncertain,
                 rollback_note,
             })
         }

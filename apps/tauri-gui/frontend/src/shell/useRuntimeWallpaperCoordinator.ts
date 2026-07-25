@@ -153,12 +153,18 @@ export function useRuntimeWallpaperCoordinator({
     dispatchRuntimeSession({ type: 'applySucceeded', request, result, transport });
     void runtimeObservationController.current?.invalidateAndRefresh();
   }, []);
+  const onApplyFailed = useCallback(() => {
+    setRuntimeObservationReady(false);
+    dispatchRuntimeSession({ type: 'runtimeInvalidated' });
+    void runtimeObservationController.current?.invalidateAndRefresh();
+  }, []);
   const applyQueue = useApplyQueue({
     api,
     refreshStatus,
     setFeedbackWithAutoDismiss: setApplyFeedback,
     reloadLibrary,
     onApplied,
+    onFailed: onApplyFailed,
   });
 
   const currentWallpaper = useMemo(() => resolveCurrentWallpaperState({

@@ -106,6 +106,8 @@ pub struct DisplayExecFailure {
     pub error: WcError,
     /// A destructive stop was attempted, but its post-stop verification failed.
     pub uncertain_stop: Option<Box<CompletedStop>>,
+    /// Failure cleanup could not prove the requested renderer state is absent.
+    pub cleanup_uncertain: bool,
 }
 
 impl DisplayExecFailure {
@@ -132,29 +134,12 @@ pub fn execute_display_actions(
     reporter: &mut dyn ApplyStageReporter,
     request_id: Option<&str>,
 ) -> Result<DisplayExecReport, DisplayExecFailure> {
+    let mut prepared = prepare_display_actions(s, actions, ctx, runtime, request_id)?;
+
     let mut report = DisplayExecReport::default();
-    for action in actions {
-        if let DisplayExecAction::Apply { backend, .. } = action {
-            if let Err(error) = runtime.ensure_backend_available(*backend, s) {
-                return Err(DisplayExecFailure {
-                    report,
-                    error,
-                    uncertain_stop: None,
-                });
-            }
-        }
-    }
-    let mut saw_stop = false;
-    for action in actions {
+    for (action, prepared) in actions.iter().zip(&mut prepared) {
         match action {
             DisplayExecAction::Stop { backend, scope } => {
-                if let Err(error) = validate_stop_scope(scope, ctx.known_outputs) {
-                    return Err(DisplayExecFailure {
-                        report,
-                        error,
-                        uncertain_stop: None,
-                    });
-                }
                 if let Err(error) = stop_backend(s, *backend, runtime) {
                     return Err(DisplayExecFailure {
                         report,
@@ -164,14 +149,98 @@ pub fn execute_display_actions(
                             scope: scope.clone(),
                             destructive: true,
                         })),
+                        cleanup_uncertain: true,
                     });
                 }
-                saw_stop = true;
                 report.record_stop(CompletedStop {
                     backend: *backend,
                     scope: scope.clone(),
                     destructive: true,
                 });
+            }
+            DisplayExecAction::Apply { .. } => {
+                let operation = prepared
+                    .as_mut()
+                    .expect("apply actions are prepared before execution");
+                if let Err(failure) = operation.execute(s, runtime, reporter) {
+                    let mut uncertain_stop = None;
+                    let mut cleanup_uncertain = false;
+                    match failure.cleanup {
+                        driver::CleanupOutcome::NotRequired => {}
+                        driver::CleanupOutcome::VerifiedGlobalStop(backend) => {
+                            report.record_stop(CompletedStop {
+                                backend,
+                                scope: ExecutionScope::AllDisplays,
+                                destructive: true,
+                            });
+                        }
+                        driver::CleanupOutcome::UncertainGlobalStop(backend) => {
+                            uncertain_stop = Some(Box::new(CompletedStop {
+                                backend,
+                                scope: ExecutionScope::AllDisplays,
+                                destructive: true,
+                            }));
+                            cleanup_uncertain = true;
+                        }
+                        driver::CleanupOutcome::UncertainTarget => {
+                            cleanup_uncertain = true;
+                        }
+                    }
+                    return Err(DisplayExecFailure {
+                        report,
+                        error: failure.error,
+                        uncertain_stop,
+                        cleanup_uncertain,
+                    });
+                }
+                report.record_apply(CompletedApply {
+                    backend: operation.backend(),
+                    scope: operation.scope().clone(),
+                    path: operation.path().to_string(),
+                });
+            }
+        }
+    }
+    apply_stage::report_stage(reporter, apply_stage::ApplyStage::RefreshStatus, request_id);
+    Ok(report)
+}
+
+/// Validate and prepare a full action list without starting or stopping a
+/// renderer. Restore uses this before its global clean-slate Stop.
+#[allow(clippy::result_large_err)]
+pub fn preflight_display_actions(
+    s: &StorageApi,
+    actions: &[DisplayExecAction],
+    ctx: &DisplayExecContext<'_>,
+    runtime: &mut dyn BackendRuntime,
+    request_id: Option<&str>,
+) -> Result<(), DisplayExecFailure> {
+    prepare_display_actions(s, actions, ctx, runtime, request_id).map(|_| ())
+}
+
+#[allow(clippy::result_large_err)]
+fn prepare_display_actions(
+    s: &StorageApi,
+    actions: &[DisplayExecAction],
+    ctx: &DisplayExecContext<'_>,
+    runtime: &mut dyn BackendRuntime,
+    request_id: Option<&str>,
+) -> Result<Vec<Option<driver::PreparedApply>>, DisplayExecFailure> {
+    let mut prepared = Vec::with_capacity(actions.len());
+    let mut preceding_stop = false;
+    for action in actions {
+        match action {
+            DisplayExecAction::Stop { scope, .. } => {
+                if let Err(error) = validate_stop_scope(scope, ctx.known_outputs) {
+                    return Err(DisplayExecFailure {
+                        report: DisplayExecReport::default(),
+                        error,
+                        uncertain_stop: None,
+                        cleanup_uncertain: false,
+                    });
+                }
+                preceding_stop = true;
+                prepared.push(None);
             }
             DisplayExecAction::Apply {
                 backend,
@@ -179,44 +248,40 @@ pub fn execute_display_actions(
                 scope,
                 use_instant,
             } => {
-                if let Err(error) = scope.validate() {
+                let Some(backend_driver) = driver::driver_for(*backend) else {
                     return Err(DisplayExecFailure {
-                        report,
-                        error,
+                        report: DisplayExecReport::default(),
+                        error: WcError::UnsupportedFileType(path.clone()),
                         uncertain_stop: None,
+                        cleanup_uncertain: false,
                     });
-                }
-                if let Err(failure) = apply_backend(
+                };
+                let operation = match backend_driver.prepare(
                     s,
-                    &ApplyBackendRequest {
-                        backend: *backend,
+                    &driver::PrepareApplyRequest {
                         path,
                         scope,
-                        after_stop: *use_instant || saw_stop,
+                        after_stop: *use_instant || preceding_stop,
+                        clear_state_hint: false,
                         request_id,
                     },
                     runtime,
-                    reporter,
                 ) {
-                    for stop in failure.completed_stops {
-                        report.record_stop(stop);
+                    Ok(operation) => operation,
+                    Err(error) => {
+                        return Err(DisplayExecFailure {
+                            report: DisplayExecReport::default(),
+                            error,
+                            uncertain_stop: None,
+                            cleanup_uncertain: false,
+                        });
                     }
-                    return Err(DisplayExecFailure {
-                        report,
-                        error: failure.error,
-                        uncertain_stop: failure.uncertain_stop,
-                    });
-                }
-                report.record_apply(CompletedApply {
-                    backend: *backend,
-                    scope: scope.clone(),
-                    path: path.clone(),
-                });
+                };
+                prepared.push(Some(operation));
             }
         }
     }
-    apply_stage::report_stage(reporter, apply_stage::ApplyStage::RefreshStatus, request_id);
-    Ok(report)
+    Ok(prepared)
 }
 
 /// Named stop is only executable when it covers every known connected output.
@@ -252,182 +317,6 @@ fn stop_backend(
     match crate::driver::driver_for(backend) {
         Some(driver) => driver.stop_checked(runtime, Some(s)),
         None => Ok(()),
-    }
-}
-
-struct ApplyBackendRequest<'a> {
-    backend: Backend,
-    path: &'a str,
-    scope: &'a ExecutionScope,
-    after_stop: bool,
-    request_id: Option<&'a str>,
-}
-
-fn apply_backend(
-    s: &StorageApi,
-    req: &ApplyBackendRequest<'_>,
-    runtime: &mut dyn BackendRuntime,
-    reporter: &mut dyn ApplyStageReporter,
-) -> Result<(), ApplyBackendFailure> {
-    let p = std::path::Path::new(req.path);
-    match req.backend {
-        Backend::Unsupported => Err(WcError::UnsupportedFileType(req.path.to_string()).into()),
-        Backend::Awww => {
-            if !p.is_file() {
-                return Err(WcError::NotRegularFile(p.to_path_buf()).into());
-            }
-            driver::apply_awww(
-                s,
-                &driver::AwwwApplyRequest {
-                    path: req.path,
-                    scope: req.scope,
-                    use_instant: req.after_stop,
-                    clear_state_hint: false,
-                    request_id: req.request_id,
-                },
-                runtime,
-                Some(reporter),
-            )
-            .map_err(Into::into)
-        }
-        Backend::Mpvpaper => {
-            if !p.is_file() {
-                return Err(WcError::NotRegularFile(p.to_path_buf()).into());
-            }
-            let outputs = req.scope.named_outputs().ok_or_else(|| {
-                ApplyBackendFailure::from(WcError::Other(
-                    "mpvpaper apply requires a named single-output execution scope".into(),
-                ))
-            })?;
-            if outputs.len() != 1 {
-                return Err(WcError::Other(format!(
-                    "mpvpaper apply expects exactly one output per invocation, got {}",
-                    outputs.len()
-                ))
-                .into());
-            }
-            apply_mpvpaper(s, req.path, &outputs[0], runtime)
-        }
-        Backend::LinuxWallpaperEngine => {
-            let outputs = match req.scope {
-                ExecutionScope::AllDisplays => {
-                    return Err(WcError::Other(
-                        "linux-wallpaperengine apply requires explicit named outputs".into(),
-                    )
-                    .into());
-                }
-                ExecutionScope::Named(outputs) => outputs.as_slice(),
-            };
-            apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, req.request_id);
-            let project = crate::linux_wallpaperengine::project_from_path(req.path)
-                .map_err(ApplyBackendFailure::from)?;
-            driver::apply_lwe_to_outputs(s, &project, outputs, runtime)
-                .map_err(ApplyBackendFailure::from)?;
-            apply_stage::report_stage(
-                reporter,
-                apply_stage::ApplyStage::WaitRendererAlive,
-                req.request_id,
-            );
-            Ok(())
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ApplyBackendFailure {
-    error: WcError,
-    completed_stops: Vec<CompletedStop>,
-    uncertain_stop: Option<Box<CompletedStop>>,
-}
-
-impl From<WcError> for ApplyBackendFailure {
-    fn from(error: WcError) -> Self {
-        Self {
-            error,
-            completed_stops: Vec::new(),
-            uncertain_stop: None,
-        }
-    }
-}
-
-fn apply_mpvpaper(
-    s: &StorageApi,
-    path: &str,
-    output: &str,
-    runtime: &mut dyn BackendRuntime,
-) -> Result<(), ApplyBackendFailure> {
-    let previous_pids = runtime.mpvpaper_pids().map_err(ApplyBackendFailure::from)?;
-    let pid = match driver::launch_mpvpaper(s, path, output, &previous_pids, runtime) {
-        Ok(pid) => pid,
-        Err(driver::MpvpaperApplyError::Start(error)) => {
-            // The launcher may have forked mpvpaper before returning an error
-            // or exceeding its deadline. Always verify cleanup so a detached,
-            // untracked renderer cannot survive a reported failed apply.
-            return Err(mpvpaper_failed_launch_cleanup(
-                runtime,
-                &previous_pids,
-                output,
-                path,
-                error,
-            ));
-        }
-        Err(driver::MpvpaperApplyError::Ready(error)) => {
-            return Err(mpvpaper_cleanup_failure(runtime, error));
-        }
-    };
-    match runtime.mpvpaper_pid_running(pid) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(mpvpaper_cleanup_failure(
-            runtime,
-            WcError::Other("mpvpaper renderer exited before startup settled".into()),
-        )),
-        Err(error) => Err(mpvpaper_cleanup_failure(runtime, error)),
-    }
-}
-
-fn mpvpaper_failed_launch_cleanup(
-    runtime: &mut dyn BackendRuntime,
-    previous_pids: &[u32],
-    output: &str,
-    path: &str,
-    original_error: WcError,
-) -> ApplyBackendFailure {
-    match runtime.cleanup_failed_mpvpaper_launch(previous_pids, output, path) {
-        Ok(()) => ApplyBackendFailure::from(original_error),
-        Err(cleanup_error) => ApplyBackendFailure::from(WcError::Other(format!(
-            "{original_error}; failed-launch mpvpaper cleanup could not be verified: {cleanup_error}"
-        ))),
-    }
-}
-
-fn mpvpaper_cleanup_failure(
-    runtime: &mut dyn BackendRuntime,
-    original_error: WcError,
-) -> ApplyBackendFailure {
-    match crate::driver::driver_for(Backend::Mpvpaper)
-        .expect("mpvpaper driver")
-        .stop_checked(runtime, None)
-    {
-        Ok(()) => ApplyBackendFailure {
-            error: original_error,
-            completed_stops: vec![CompletedStop {
-                backend: Backend::Mpvpaper,
-                scope: ExecutionScope::AllDisplays,
-                destructive: true,
-            }],
-            uncertain_stop: None,
-        },
-        Err(cleanup_error) => ApplyBackendFailure {
-            error: WcError::Other(format!(
-                "{original_error}; mpvpaper cleanup could not be verified: {cleanup_error}"
-            )),
-            completed_stops: Vec::new(),
-            uncertain_stop: Some(Box::new(CompletedStop {
-                backend: Backend::Mpvpaper,
-                scope: ExecutionScope::AllDisplays,
-                destructive: true,
-            })),
-        },
     }
 }
 
@@ -533,6 +422,44 @@ mod tests {
         assert_eq!(runtime.stop_awww_count, 0);
         assert_eq!(runtime.stop_mpvpaper_count, 0);
         assert_eq!(runtime.stop_lwe_count, 0);
+    }
+
+    #[test]
+    fn later_invalid_apply_is_rejected_before_an_earlier_stop() {
+        let (tmp, storage) = temp_storage();
+        let known = vec!["eDP-1".into()];
+        let actions = vec![
+            DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::AllDisplays,
+            },
+            DisplayExecAction::Apply {
+                backend: Backend::Awww,
+                path: tmp
+                    .path()
+                    .join("missing.jpg")
+                    .to_string_lossy()
+                    .into_owned(),
+                scope: ExecutionScope::named(known.clone()).unwrap(),
+                use_instant: true,
+            },
+        ];
+        let mut runtime = FakeRuntime::default();
+        let mut reporter = NoopReporter;
+
+        let failure = execute_display_actions(
+            &storage,
+            &actions,
+            &ctx(&known),
+            &mut runtime,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(matches!(failure.error, WcError::NotRegularFile(_)));
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert!(failure.report.events.is_empty());
     }
 
     #[test]
@@ -1067,8 +994,7 @@ mod tests {
             fn stop_mpvpaper(&mut self) {
                 self.stop_checked_calls += 1;
                 // Force driver stop_checked's pid probe to fail immediately.
-                self.inner.mpvpaper_pids_error =
-                    Some("mpvpaper still running after stop".into());
+                self.inner.mpvpaper_pids_error = Some("mpvpaper still running after stop".into());
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -1188,6 +1114,39 @@ mod tests {
         );
         assert_eq!(runtime.stop_mpvpaper_count, 0);
         assert!(failure.report.completed_stops.is_empty());
+    }
+
+    #[test]
+    fn unverifiable_targeted_cleanup_is_explicitly_uncertain() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("v.mp4");
+        std::fs::write(&video, b"mp4").unwrap();
+        let known = vec!["eDP-1".into()];
+        let mut runtime = FakeRuntime {
+            command_status_success: false,
+            failed_mpvpaper_launch_cleanup_error: Some("probe failed".into()),
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+
+        let failure = execute_display_actions(
+            &storage,
+            &[DisplayExecAction::Apply {
+                backend: Backend::Mpvpaper,
+                path: video.to_string_lossy().into_owned(),
+                scope: ExecutionScope::named(known.clone()).unwrap(),
+                use_instant: false,
+            }],
+            &ctx(&known),
+            &mut runtime,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+
+        assert!(failure.cleanup_uncertain);
+        assert!(failure.uncertain_stop.is_none());
+        assert!(failure.error.to_string().contains("could not be verified"));
     }
 
     #[test]

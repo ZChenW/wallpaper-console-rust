@@ -31,8 +31,8 @@ mod mpvpaper;
 mod restore;
 
 pub use apply_transition::{
-    execute_apply_transition, plan_apply_transition, ApplyTransitionFailure, ApplyTransitionPlan,
-    ApplyTransitionReport, ApplyTransitionRequest,
+    execute_apply_transition, plan_apply_transition, preflight_apply_transition,
+    ApplyTransitionFailure, ApplyTransitionPlan, ApplyTransitionReport, ApplyTransitionRequest,
 };
 pub use display_executor::{
     execute_display_actions, DisplayExecAction, DisplayExecContext, DisplayExecFailure,
@@ -171,27 +171,47 @@ pub(crate) fn apply_wallpaper_with_runtime(
     reporter: &mut dyn apply_stage::ApplyStageReporter,
     request_id: Option<&str>,
 ) -> Result<(), WcError> {
-    let p = std::path::Path::new(path);
-    if backend == Backend::Unsupported {
-        return Err(WcError::UnsupportedFileType(path.to_string()));
-    }
-    if backend != Backend::LinuxWallpaperEngine && !p.is_file() {
-        return Err(WcError::NotRegularFile(p.to_path_buf()));
-    }
-
-    runtime.ensure_backend_available(backend, s)?;
-
     let previous_backend_raw = s.last_backend_read()?.unwrap_or_default();
     let lifecycle = lifecycle::plan_apply_lifecycle(&previous_backend_raw, backend);
     let visual = visual_handoff::plan_visual_handoff(lifecycle.previous, backend, fallback_path);
-    if visual.fallback_stage != visual_handoff::FallbackStage::None {
-        runtime.ensure_backend_available(Backend::Awww, s)?;
-    }
-    let previous_mpvpaper_pids = if backend == Backend::Mpvpaper {
-        runtime.mpvpaper_pids()?
-    } else {
-        Vec::new()
-    };
+    let use_instant = lifecycle.previous == lifecycle::RunningBackend::None;
+    let clear_state_hint = matches!(
+        lifecycle.previous,
+        lifecycle::RunningBackend::Mpvpaper
+            | lifecycle::RunningBackend::LinuxWallpaperEngine
+            | lifecycle::RunningBackend::Unknown
+    );
+    let mut prepared_target = driver::prepare_legacy_apply(
+        s,
+        backend,
+        path,
+        use_instant,
+        clear_state_hint,
+        request_id,
+        runtime,
+    )?;
+    let mut prepared_fallback =
+        if visual.fallback_stage == visual_handoff::FallbackStage::TargetImageInstant {
+            fallback_path
+                .map(|fallback| {
+                    driver::driver_for(Backend::Awww)
+                        .expect("awww driver")
+                        .prepare(
+                            s,
+                            &driver::PrepareApplyRequest {
+                                path: fallback,
+                                scope: &ExecutionScope::AllDisplays,
+                                after_stop: true,
+                                clear_state_hint: false,
+                                request_id,
+                            },
+                            runtime,
+                        )
+                })
+                .transpose()?
+        } else {
+            None
+        };
 
     let timing_start = std::time::Instant::now();
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
@@ -199,20 +219,23 @@ pub(crate) fn apply_wallpaper_with_runtime(
 
     let fallback_ok = match visual.fallback_stage {
         visual_handoff::FallbackStage::TargetImageInstant => {
-            if let Some(fb) = fallback_path {
-                match apply_awww_instant_with_runtime(s, fb, runtime, Some(reporter), request_id) {
+            if let (Some(fb), Some(prepared)) = (fallback_path, prepared_fallback.as_mut()) {
+                match prepared.execute(s, runtime, reporter) {
                     Ok(()) => {
                         std::thread::sleep(std::time::Duration::from_millis(
                             visual_handoff::AWWW_FALLBACK_SETTLE_MS,
                         ));
                         true
                     }
-                    Err(e) => {
+                    Err(failure) => {
                         let fb_name = std::path::Path::new(fb)
                             .file_name()
                             .map(|n| n.to_string_lossy().to_string())
                             .unwrap_or_else(|| "<unknown>".to_string());
-                        let msg = format!("instant awww fallback {} failed: {}", fb_name, e);
+                        let msg = format!(
+                            "instant awww fallback {} failed: {}",
+                            fb_name, failure.error
+                        );
                         write_debug_handoff_log(
                             s,
                             &lifecycle,
@@ -240,82 +263,20 @@ pub(crate) fn apply_wallpaper_with_runtime(
         }
     }
 
-    let mut mpvpaper_launcher_succeeded = false;
-    let mut launched_mpvpaper_pid = None;
     let target_result = if backend == Backend::Awww && fallback_ok {
         Ok(())
     } else {
-        match backend {
-            Backend::Awww => {
-                let use_instant = lifecycle.previous == lifecycle::RunningBackend::None;
-                let clear_state_hint = matches!(
-                    lifecycle.previous,
-                    lifecycle::RunningBackend::Mpvpaper
-                        | lifecycle::RunningBackend::LinuxWallpaperEngine
-                        | lifecycle::RunningBackend::Unknown
-                );
-                driver::apply_awww(
-                    s,
-                    &driver::AwwwApplyRequest {
-                        path,
-                        scope: &ExecutionScope::AllDisplays,
-                        use_instant,
-                        clear_state_hint,
-                        request_id,
-                    },
-                    runtime,
-                    Some(reporter),
-                )
-            }
-            Backend::Mpvpaper => {
-                let output = s.config_get("mpvpaper_output", "*");
-                match driver::launch_mpvpaper(s, path, &output, &previous_mpvpaper_pids, runtime) {
-                    Ok(pid) => {
-                        mpvpaper_launcher_succeeded = true;
-                        launched_mpvpaper_pid = Some(pid);
-                        Ok(())
-                    }
-                    Err(driver::MpvpaperApplyError::Start(error)) => {
-                        // `setsid`/mpvpaper may have detached a renderer before
-                        // the launcher reports failure. Remove only PIDs that
-                        // appeared after this attempt and still match its exact
-                        // output/path so concurrent launches stay live.
-                        match runtime.cleanup_failed_mpvpaper_launch(
-                            &previous_mpvpaper_pids,
-                            &output,
-                            path,
-                        ) {
-                            Ok(()) => Err(error),
-                            Err(cleanup_error) => Err(WcError::Other(format!(
-                                "{error}; failed-launch mpvpaper cleanup could not be verified: \
-                                 {cleanup_error}"
-                            ))),
-                        }
-                    }
-                    Err(driver::MpvpaperApplyError::Ready(error)) => {
-                        mpvpaper_launcher_succeeded = true;
-                        Err(error)
-                    }
-                }
-            }
-            Backend::LinuxWallpaperEngine => {
-                let project = linux_wallpaperengine::project_from_path(path)?;
-                apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, request_id);
-                apply_stage::report_stage(
-                    reporter,
-                    apply_stage::ApplyStage::WaitRendererAlive,
-                    request_id,
-                );
-                linux_wallpaperengine::apply(s, project)
-            }
-            Backend::Unsupported => Err(WcError::UnsupportedFileType(path.to_string())),
-        }
+        prepared_target.execute(s, runtime, reporter)
     };
     let target_elapsed = timing_start.elapsed();
 
-    if let Err(e) = target_result {
-        if mpvpaper_launcher_succeeded {
-            runtime.stop_mpvpaper();
+    if let Err(failure) = target_result {
+        if matches!(
+            failure.cleanup,
+            driver::CleanupOutcome::UncertainGlobalStop(_)
+                | driver::CleanupOutcome::UncertainTarget
+        ) {
+            let _ = s.runtime_state_clear();
         }
         let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
             s,
@@ -326,7 +287,7 @@ pub(crate) fn apply_wallpaper_with_runtime(
         if let Some(msg) = rollback_msg {
             write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
         }
-        return Err(e);
+        return Err(failure.error);
     }
 
     if visual.target_startup_settle_ms > 0 {
@@ -339,29 +300,6 @@ pub(crate) fn apply_wallpaper_with_runtime(
         std::thread::sleep(std::time::Duration::from_millis(
             lifecycle.post_success_settle_ms,
         ));
-    }
-
-    if let Some(pid) = launched_mpvpaper_pid {
-        let readiness_error = match runtime.mpvpaper_pid_running(pid) {
-            Ok(true) => None,
-            Ok(false) => Some(WcError::Other(
-                "mpvpaper renderer exited before startup settled".into(),
-            )),
-            Err(error) => Some(error),
-        };
-        if let Some(error) = readiness_error {
-            runtime.stop_mpvpaper();
-            let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
-                s,
-                lifecycle.previous,
-                fallback_ok,
-                runtime,
-            );
-            if let Some(msg) = rollback_msg {
-                write_debug_handoff_log(s, &lifecycle, backend, fallback_path, &visual, &msg, path);
-            }
-            return Err(error);
-        }
     }
 
     if fallback_ok && visual.stop_fallback_after_target_settle {
@@ -555,7 +493,6 @@ fn passwd_name_from_proc_status() -> Option<String> {
 mod tests {
     use super::*;
     use crate::awww::{build_awww_img_command, build_awww_instant_command};
-    use crate::runtime::BackendRuntime;
     use crate::test_support::FakeRuntime;
     use wc_core::config::ConfigDir;
 
