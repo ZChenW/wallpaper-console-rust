@@ -314,8 +314,13 @@ mod tests {
     #[test]
     fn expand_wallpaper_before_path_substring() {
         // `$path` must not corrupt `$wallpaper` when both appear.
-        let expanded =
-            expand_post_apply_command("matugen image $wallpaper", "/w/p.png", "/s.jpg", "awww", "*");
+        let expanded = expand_post_apply_command(
+            "matugen image $wallpaper",
+            "/w/p.png",
+            "/s.jpg",
+            "awww",
+            "*",
+        );
         assert_eq!(expanded, "matugen image /w/p.png");
     }
 
@@ -323,9 +328,7 @@ mod tests {
     fn disabled_hook_is_noop() {
         let (_tmp, storage) = temp_storage();
         storage.config_set("post_apply_enabled", "off").unwrap();
-        storage
-            .config_set("post_apply_command", "false")
-            .unwrap();
+        storage.config_set("post_apply_command", "false").unwrap();
         let ctx = PostApplyContext {
             wallpaper_path: "/nope.png".into(),
             backend: Backend::Awww,
@@ -353,9 +356,7 @@ mod tests {
     fn we_scene_is_skipped_even_when_enabled() {
         let (_tmp, storage) = temp_storage();
         storage.config_set("post_apply_enabled", "on").unwrap();
-        storage
-            .config_set("post_apply_command", "false")
-            .unwrap();
+        storage.config_set("post_apply_command", "false").unwrap();
         let ctx = PostApplyContext {
             wallpaper_path: "/proj".into(),
             backend: Backend::LinuxWallpaperEngine,
@@ -386,10 +387,7 @@ mod tests {
 
         storage.config_set("post_apply_enabled", "on").unwrap();
         storage
-            .config_set(
-                "post_apply_command",
-                &format!("\"{}\"", script.display()),
-            )
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
             .unwrap();
 
         let ctx = PostApplyContext {
@@ -452,9 +450,7 @@ mod tests {
         storage
             .config_set("post_apply_command", "sleep 30")
             .unwrap();
-        storage
-            .config_set("post_apply_timeout_secs", "1")
-            .unwrap();
+        storage.config_set("post_apply_timeout_secs", "1").unwrap();
 
         let ctx = PostApplyContext {
             wallpaper_path: still.to_string_lossy().into_owned(),

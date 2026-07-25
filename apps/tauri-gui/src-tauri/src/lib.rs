@@ -158,6 +158,8 @@ pub fn run() {
             commands::config_get,
             commands::config_get_many,
             commands::config_set,
+            commands::behavior_settings_get,
+            commands::behavior_settings_update,
             commands::sources_list,
             commands::first_run_source_suggestions,
             commands::source_add,

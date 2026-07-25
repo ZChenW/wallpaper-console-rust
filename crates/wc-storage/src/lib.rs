@@ -194,6 +194,20 @@ impl StorageApi {
         Ok(())
     }
 
+    pub fn behavior_settings(
+        &self,
+    ) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, WcError> {
+        sqlite::read_behavior_settings(&self.cd)
+    }
+
+    pub fn update_behavior_settings(
+        &self,
+        expected_revision: &str,
+        patch: &wc_core::behavior_setting::BehaviorSettingsPatch,
+    ) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, WcError> {
+        sqlite::update_behavior_settings(&self.cd, expected_revision, patch)
+    }
+
     pub fn sources_add(&self, path: &str) -> Result<bool, WcError> {
         sqlite::sqlite_source_add(&self.cd, path)
     }
@@ -907,6 +921,41 @@ mod tests {
             storage.config_get("linux_wallpaperengine_target_mode", "missing"),
             "auto"
         );
+    }
+
+    #[test]
+    fn behavior_settings_patch_is_atomic_and_revision_bound() {
+        let tmp = tempfile::tempdir().unwrap();
+        let storage = StorageApi::new(ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        });
+        let initial = storage.behavior_settings().unwrap();
+        let updated = storage
+            .update_behavior_settings(
+                &initial.revision,
+                &wc_core::behavior_setting::BehaviorSettingsPatch {
+                    image_backend: Some(wc_core::behavior_setting::ImageRenderer::Mpvpaper),
+                    restore_on_login: Some(true),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        assert_ne!(updated.revision, initial.revision);
+        assert_eq!(storage.config_get("image_backend", ""), "mpvpaper");
+        assert_eq!(storage.config_get("restore_on_login", ""), "on");
+
+        let stale = storage
+            .update_behavior_settings(
+                &initial.revision,
+                &wc_core::behavior_setting::BehaviorSettingsPatch {
+                    restore_on_login: Some(false),
+                    ..Default::default()
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(stale, WcError::ConfigRevisionChanged { .. }));
+        assert_eq!(storage.config_get("restore_on_login", ""), "on");
     }
 
     #[test]

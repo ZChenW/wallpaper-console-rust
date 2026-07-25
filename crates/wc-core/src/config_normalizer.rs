@@ -330,10 +330,7 @@ mod tests {
             normalize_config_value("post_apply_timeout_secs", "30"),
             "30"
         );
-        assert_eq!(
-            normalize_config_value("post_apply_timeout_secs", "0"),
-            "1"
-        );
+        assert_eq!(normalize_config_value("post_apply_timeout_secs", "0"), "1");
         assert_eq!(
             normalize_config_value("post_apply_timeout_secs", "999"),
             "600"

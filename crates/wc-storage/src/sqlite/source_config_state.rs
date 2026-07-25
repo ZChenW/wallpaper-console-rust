@@ -1,7 +1,11 @@
 use crate::sqlite_err;
-use rusqlite::{params, TransactionBehavior};
+use rusqlite::{params, Connection, TransactionBehavior};
+use std::collections::HashMap;
 #[cfg(test)]
 use wc_config::ConfigDirExt;
+use wc_core::behavior_setting::{
+    BehaviorSettings, BehaviorSettingsPatch, BehaviorSettingsSnapshot, BEHAVIOR_SETTING_KEYS,
+};
 use wc_core::config::ConfigDir;
 use wc_core::error::WcError;
 
@@ -27,6 +31,72 @@ pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), W
     )
     .map_err(sqlite_err)?;
     Ok(())
+}
+
+fn behavior_settings_from_connection(connection: &Connection) -> Result<BehaviorSettings, WcError> {
+    let defaults = wc_core::config::default_config();
+    let mut values = HashMap::new();
+    let mut statement = connection
+        .prepare("SELECT value FROM config WHERE key = ?1")
+        .map_err(sqlite_err)?;
+    for key in BEHAVIOR_SETTING_KEYS {
+        let value = statement
+            .query_row([key], |row| row.get::<_, String>(0))
+            .or_else(|error| match error {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    Ok(defaults.get(*key).cloned().unwrap_or_default())
+                }
+                other => Err(other),
+            })
+            .map_err(sqlite_err)?;
+        values.insert((*key).to_string(), value);
+    }
+    Ok(BehaviorSettings::from_config(&values))
+}
+
+pub fn read_behavior_settings(cd: &ConfigDir) -> Result<BehaviorSettingsSnapshot, WcError> {
+    try_ensure_sqlite_db(cd)?;
+    let connection = open_runtime_connection(cd)?;
+    Ok(behavior_settings_from_connection(&connection)?.snapshot())
+}
+
+pub fn update_behavior_settings(
+    cd: &ConfigDir,
+    expected_revision: &str,
+    patch: &BehaviorSettingsPatch,
+) -> Result<BehaviorSettingsSnapshot, WcError> {
+    try_ensure_sqlite_db(cd)?;
+    let mut connection = open_runtime_connection(cd)?;
+    let transaction = connection
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(sqlite_err)?;
+    let current = behavior_settings_from_connection(&transaction)?;
+    let observed = wc_core::behavior_setting::behavior_settings_revision(&current);
+    if observed != expected_revision {
+        return Err(WcError::ConfigRevisionChanged {
+            expected: expected_revision.to_string(),
+            observed,
+        });
+    }
+    let next = current.apply_patch(patch);
+    {
+        let mut statement = transaction
+            .prepare("INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)")
+            .map_err(sqlite_err)?;
+        for (key, value) in next.config_entries() {
+            statement.execute(params![key, value]).map_err(sqlite_err)?;
+        }
+    }
+    transaction.commit().map_err(sqlite_err)?;
+
+    let entries = next.config_entries();
+    if let Err(error) = wc_config::write_config_values(
+        &cd.path,
+        entries.iter().map(|(key, value)| (*key, value.as_str())),
+    ) {
+        log::warn!("behavior settings flat config mirror failed: {error}");
+    }
+    Ok(next.snapshot())
 }
 
 pub fn sqlite_favorite_add(cd: &ConfigDir, path: &str) -> Result<bool, WcError> {

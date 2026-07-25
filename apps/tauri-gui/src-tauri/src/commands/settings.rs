@@ -139,6 +139,32 @@ pub async fn config_set(key: String, value: String) -> CommandResult {
 }
 
 #[tauri::command]
+pub async fn behavior_settings_get(
+) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        storage()?
+            .behavior_settings()
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn behavior_settings_update(
+    expected_revision: String,
+    patch: wc_core::behavior_setting::BehaviorSettingsPatch,
+) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        storage()?
+            .update_behavior_settings(&expected_revision, &patch)
+            .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
 pub async fn export_diagnostics(
     state: tauri::State<'_, crate::library_service::LibraryService>,
 ) -> Result<CommandResult, String> {
@@ -403,11 +429,9 @@ mod tests {
         assert!(validate_writable_config_set("gui_theme", "light").is_ok());
         assert!(validate_writable_config_set("restore_on_login", "on").is_ok());
         assert!(validate_writable_config_set("post_apply_enabled", "on").is_ok());
-        assert!(validate_writable_config_set(
-            "post_apply_command",
-            "matugen image \"$still\""
-        )
-        .is_ok());
+        assert!(
+            validate_writable_config_set("post_apply_command", "matugen image \"$still\"").is_ok()
+        );
         assert!(validate_writable_config_set("post_apply_timeout_secs", "30").is_ok());
         assert!(validate_writable_config_set("linux_wallpaperengine_path", "auto").is_ok());
     }

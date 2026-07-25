@@ -338,6 +338,11 @@ export interface WallpaperConsoleApi {
   configGet(key: string): Promise<string>;
   configGetMany(keys: string[]): Promise<Record<string, string>>;
   configSet(key: string, value: string): Promise<CommandResult>;
+  behaviorSettingsGet(): Promise<BehaviorSettingsSnapshotDTO>;
+  behaviorSettingsUpdate(
+    expectedRevision: string,
+    patch: BehaviorSettingsPatchDTO,
+  ): Promise<BehaviorSettingsSnapshotDTO>;
 
   sqliteVerify(): Promise<CommandResult>;
   sqliteRepair(): Promise<CommandResult>;
@@ -361,4 +366,37 @@ export interface WallpaperConsoleApi {
   libraryReady(): Promise<void>;
   revealMainWindow(): Promise<void>;
   exportDiagnostics(): Promise<CommandResult>;
+}
+
+export type ImageRendererDTO = 'awww' | 'mpvpaper';
+export type GifRendererDTO = 'awww' | 'mpvpaper';
+export type VideoRendererDTO = 'mpvpaper';
+export type WallpaperFillModeDTO = 'crop' | 'fit' | 'stretch';
+export type AwwwTransitionTypeDTO =
+  | 'simple' | 'fade' | 'left' | 'right' | 'top' | 'bottom'
+  | 'wipe' | 'grow' | 'center' | 'outer' | 'random' | 'wave';
+export type LweScalingModeDTO = 'default' | 'fill' | 'fit' | 'stretch';
+export type OpenProjectLocationModeDTO = 'file_manager' | 'terminal';
+
+export interface BehaviorSettingsDTO {
+  readonly imageBackend: ImageRendererDTO;
+  readonly gifBackend: GifRendererDTO;
+  readonly videoBackend: VideoRendererDTO;
+  readonly fillMode: WallpaperFillModeDTO;
+  readonly awwwTransitionType: AwwwTransitionTypeDTO;
+  readonly awwwTransitionDuration: number;
+  readonly awwwTransitionFps: number;
+  readonly lweScaling: LweScalingModeDTO;
+  readonly lweFps: number;
+  readonly lweMuted: boolean;
+  readonly lweVolume: number;
+  readonly restoreOnLogin: boolean;
+  readonly openProjectLocationMode: OpenProjectLocationModeDTO;
+}
+
+export type BehaviorSettingsPatchDTO = Partial<BehaviorSettingsDTO>;
+
+export interface BehaviorSettingsSnapshotDTO {
+  readonly settings: BehaviorSettingsDTO;
+  readonly revision: string;
 }

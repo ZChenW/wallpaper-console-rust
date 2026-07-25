@@ -158,10 +158,21 @@ fn atomic_write_config(config_path: &Path, content: &[u8]) -> Result<(), WcError
 
 /// Set a config value in the flat config file (atomic write).
 pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(), WcError> {
-    if value.contains('\n') || value.contains('\r') {
-        return Err(WcError::Other(format!(
-            "config value for {key:?} must be a single line (found newline characters)"
-        )));
+    write_config_values(config_dir, [(key, value)])
+}
+
+/// Set multiple config values under one lock and one atomic file replacement.
+pub fn write_config_values<'a>(
+    config_dir: &Path,
+    entries: impl IntoIterator<Item = (&'a str, &'a str)>,
+) -> Result<(), WcError> {
+    let entries = entries.into_iter().collect::<Vec<_>>();
+    for (key, value) in &entries {
+        if value.contains('\n') || value.contains('\r') {
+            return Err(WcError::Other(format!(
+                "config value for {key:?} must be a single line (found newline characters)"
+            )));
+        }
     }
     let _lock = acquire_config_lock(config_dir)?;
     let config_path = config_dir.join("config");
@@ -170,12 +181,14 @@ pub fn write_config_value(config_dir: &Path, key: &str, value: &str) -> Result<(
     } else {
         HashMap::new()
     };
-    let value = if key == "storage_backend" {
-        "sqlite"
-    } else {
-        value
-    };
-    map.insert(key.to_string(), value.to_string());
+    for (key, value) in entries {
+        let value = if key == "storage_backend" {
+            "sqlite"
+        } else {
+            value
+        };
+        map.insert(key.to_string(), value.to_string());
+    }
 
     let content = serialize_config_map(&map);
     atomic_write_config(&config_path, content.as_bytes())
@@ -410,6 +423,50 @@ mod tests {
         assert!(
             error.to_string().contains("must be a single line"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn write_config_values_replaces_all_requested_values_together() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+
+        write_config_values(
+            tmp.path(),
+            [("image_backend", "mpvpaper"), ("restore_on_login", "on")],
+        )
+        .unwrap();
+
+        let values = parse_config_file(&tmp.path().join("config")).unwrap();
+        assert_eq!(
+            values.get("image_backend").map(String::as_str),
+            Some("mpvpaper")
+        );
+        assert_eq!(
+            values.get("restore_on_login").map(String::as_str),
+            Some("on")
+        );
+    }
+
+    #[test]
+    fn write_config_values_rejects_batch_before_writing_any_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        init_config_dir(tmp.path()).unwrap();
+        let before = std::fs::read_to_string(tmp.path().join("config")).unwrap();
+
+        let error = write_config_values(
+            tmp.path(),
+            [
+                ("image_backend", "mpvpaper"),
+                ("restore_on_login", "on\nbad"),
+            ],
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("single line"));
+        assert_eq!(
+            std::fs::read_to_string(tmp.path().join("config")).unwrap(),
+            before
         );
     }
 }

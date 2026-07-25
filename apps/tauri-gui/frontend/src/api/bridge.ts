@@ -1,6 +1,8 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   ApplyRequestDTO,
+  BehaviorSettingsPatchDTO,
+  BehaviorSettingsSnapshotDTO,
   CommandResult,
   DisplayListDTO,
   DisplayStateDTO,
@@ -143,6 +145,13 @@ export const api = {
   configGetMany: (keys: string[]): Promise<Record<string, string>> =>
     invoke<Record<string, string>>('config_get_many', { keys }),
   configSet: (key: string, value: string): Promise<CommandResult> => invoke<CommandResult>('config_set', { key, value }),
+  behaviorSettingsGet: (): Promise<BehaviorSettingsSnapshotDTO> =>
+    invoke<BehaviorSettingsSnapshotDTO>('behavior_settings_get'),
+  behaviorSettingsUpdate: (
+    expectedRevision: string,
+    patch: BehaviorSettingsPatchDTO,
+  ): Promise<BehaviorSettingsSnapshotDTO> =>
+    invoke<BehaviorSettingsSnapshotDTO>('behavior_settings_update', { expectedRevision, patch }),
 
   sqliteVerify: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_verify'),
   sqliteRepair: (): Promise<CommandResult> => invoke<CommandResult>('sqlite_repair'),

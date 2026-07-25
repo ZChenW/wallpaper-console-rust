@@ -13,13 +13,13 @@ import {
   AWWW_TRANSITION_TYPES,
   LWE_SCALING_MODES,
   type AwwwTransitionType,
-  GifRenderer,
-  ImageRenderer,
+  type GifRenderer,
+  type ImageRenderer,
   type LweScalingMode,
   type OpenProjectLocationMode,
-  WallpaperBehaviorSettings,
-  WallpaperBehaviorSettingsUpdate,
-  WallpaperFillMode,
+  type WallpaperBehaviorSettings,
+  type WallpaperBehaviorSettingsUpdate,
+  type WallpaperFillMode,
 } from './useWallpaperBehaviorSettings.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
 import { trapDialogFocus } from './dialogFocus.ts';
@@ -30,7 +30,7 @@ export interface CompactSettingsPanelProps {
   readonly obscured?: boolean;
   readonly preferences: ShellPreferences;
   readonly updatePreferences: (update: ShellPreferencesUpdate) => void;
-  readonly behaviorSettings: WallpaperBehaviorSettings;
+  readonly behaviorSettings: WallpaperBehaviorSettings | null;
   readonly updateBehaviorSettings: (update: WallpaperBehaviorSettingsUpdate) => void;
   readonly behaviorReady: boolean;
   readonly loadError: Error | null;
@@ -75,6 +75,46 @@ export function CompactSettingsPanelView({
 }: CompactSettingsPanelProps & { readonly presentationPhase?: 'open' | 'exiting' }) {
   if (!open) return null;
   const unavailableToInteraction = obscured || presentationPhase === 'exiting';
+  if (behaviorSettings === null) {
+    return (
+      <div
+        className="settings-overlay"
+        data-obscured={obscured}
+        data-presentation-phase={presentationPhase}
+        data-settings-overlay={true}
+        onMouseDown={(event) => {
+          if (event.target === event.currentTarget) onClose();
+        }}
+        style={{ zIndex: 1100 }}
+      >
+        <aside
+          aria-label="Settings"
+          aria-hidden={unavailableToInteraction ? true : undefined}
+          aria-modal="true"
+          className="settings-panel"
+          inert={unavailableToInteraction}
+          role="dialog"
+        >
+          <header className="settings-panel__header">
+            <h2>Settings</h2>
+            <button
+              autoFocus
+              aria-label="Close settings"
+              className="settings-panel__close"
+              data-icon-button={true}
+              onClick={onClose}
+              type="button"
+            >
+              <X aria-hidden="true" size={19} />
+            </button>
+          </header>
+          <p role={loadError ? 'alert' : 'status'}>
+            {loadError ? errorMessage(loadError) : 'Loading wallpaper settings…'}
+          </p>
+        </aside>
+      </div>
+    );
+  }
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';

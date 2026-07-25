@@ -107,6 +107,11 @@ pub enum WcError {
     #[error("revision_changed: library revision changed from {expected} to {observed}")]
     RevisionChanged { expected: u64, observed: u64 },
 
+    #[error(
+        "config_revision_changed: behavior settings revision changed from {expected} to {observed}"
+    )]
+    ConfigRevisionChanged { expected: String, observed: String },
+
     /// An opaque Library cursor could not be validated. The reason is a
     /// static category so malformed tokens are never reflected into logs.
     #[error("invalid_cursor: {reason}")]
