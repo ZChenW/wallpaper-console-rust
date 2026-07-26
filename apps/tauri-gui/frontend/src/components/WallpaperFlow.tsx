@@ -1361,6 +1361,7 @@ function WallpaperFlowReady({
                     entry={entry}
                     loading={preloadStaticFallback ? 'eager' : 'lazy'}
                     staticFallback={preloadStaticFallback}
+                    stabilizeEntranceDuringMotion
                   />
                   <span aria-hidden="true" className="flow-preview-item__ordinal">
                     {String(row.index + 1).padStart(2, '0')}

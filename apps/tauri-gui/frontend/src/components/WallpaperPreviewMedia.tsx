@@ -40,6 +40,7 @@ export interface WallpaperPreviewMediaProps {
   readonly transientImagePath?: string | null;
   readonly loading?: 'eager' | 'lazy';
   readonly staticFallback?: boolean;
+  readonly stabilizeEntranceDuringMotion?: boolean;
   readonly onEnhancedError?: (message: string) => void;
 }
 
@@ -51,6 +52,7 @@ export default function WallpaperPreviewMedia({
   transientImagePath = null,
   loading = 'lazy',
   staticFallback = false,
+  stabilizeEntranceDuringMotion = false,
   onEnhancedError,
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticPreviewAssetPath(entry);
@@ -90,7 +92,10 @@ export default function WallpaperPreviewMedia({
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
   const [thumbnailLoadFailed, setThumbnailLoadFailed] = useState(false);
-  const [loadedImagePath, setLoadedImagePath] = useState<string | null>(null);
+  const [loadedImage, setLoadedImage] = useState<{
+    path: string;
+    stableEntry: boolean;
+  } | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -146,7 +151,8 @@ export default function WallpaperPreviewMedia({
     ?? (thumbnailLoadFailed ? undefined : thumbnail);
   const imageLoaded = imagePath !== null
     && imagePath !== undefined
-    && loadedImagePath === imagePath;
+    && loadedImage?.path === imagePath;
+  const imageEntryStable = imageLoaded && loadedImage.stableEntry;
 
   if (activeCandidate?.kind === 'video' && authorizedCandidate.path) {
     return (
@@ -185,12 +191,13 @@ export default function WallpaperPreviewMedia({
           alt={alt}
           className={['wallpaper-preview-image', className].filter(Boolean).join(' ')}
           data-enhanced-preview={authorizedCandidate.path ? 'image' : undefined}
+          data-preview-entry-stable={imageEntryStable || undefined}
           data-preview-loaded={imageLoaded || undefined}
           decoding="async"
           draggable={false}
           loading={loading}
           onError={() => {
-            setLoadedImagePath(null);
+            setLoadedImage(null);
             if (authorizedCandidate.path) {
               handleEnhancedError();
             } else if (authorizedStaticFallback.path) {
@@ -199,7 +206,10 @@ export default function WallpaperPreviewMedia({
               setThumbnailLoadFailed(true);
             }
           }}
-          onLoad={() => setLoadedImagePath(imagePath)}
+          onLoad={() => setLoadedImage({
+            path: imagePath,
+            stableEntry: stabilizeEntranceDuringMotion && !eligibility.settled,
+          })}
           src={safeFileSrc(imagePath)}
         />
         {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}

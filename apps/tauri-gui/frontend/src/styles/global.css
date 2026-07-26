@@ -2465,6 +2465,28 @@ input:focus {
   transition: filter 360ms ease-in-out, opacity 360ms ease-in-out;
 }
 
+.wallpaper-preview-image[data-preview-entry-stable] {
+  animation: none;
+}
+
+.wallpaper-flow
+  .wallpaper-thumb-placeholder--loading
+  .wallpaper-type-icon {
+  animation: flow-wallpaper-placeholder-pulse 1.2s ease-in-out infinite;
+}
+
+.wallpaper-flow[data-scrolling]
+  .wallpaper-thumb-placeholder--loading
+  .wallpaper-type-icon {
+  animation-play-state: paused;
+  will-change: auto;
+}
+
+@keyframes flow-wallpaper-placeholder-pulse {
+  0%, 100% { opacity: 0.72; }
+  50% { opacity: 0.84; }
+}
+
 .flow-preview-item:not([data-centered]) .flow-preview-item__media > img {
   filter: grayscale(0.55) contrast(1.04);
   opacity: 0.9;
