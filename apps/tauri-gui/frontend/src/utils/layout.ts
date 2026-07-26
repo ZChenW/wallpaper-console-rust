@@ -28,6 +28,29 @@ export function wallpaperCardMetrics(size: WallpaperCardSize = 'medium'): Wallpa
   return WALLPAPER_CARD_METRICS[size];
 }
 
+export const WALLPAPER_THUMBNAIL_ASPECT_RATIO = 16 / 9;
+
+export interface WallpaperGridCardGeometry {
+  readonly thumbnailHeight: number;
+  readonly rowHeight: number;
+}
+
+export function wallpaperGridCardGeometry(
+  columnWidth: number,
+  size: WallpaperCardSize = 'medium',
+): WallpaperGridCardGeometry {
+  const metrics = wallpaperCardMetrics(size);
+  const safeColumnWidth = Number.isFinite(columnWidth) && columnWidth > 0
+    ? columnWidth
+    : metrics.minWidth;
+  const thumbnailHeight = safeColumnWidth / WALLPAPER_THUMBNAIL_ASPECT_RATIO;
+  const infoBlockHeight = metrics.rowHeight - metrics.thumbnailHeight;
+  return {
+    thumbnailHeight,
+    rowHeight: thumbnailHeight + infoBlockHeight,
+  };
+}
+
 export const COL_MIN_WIDTH = WALLPAPER_CARD_METRICS.medium.minWidth;
 export const GRID_GAP = 10;
 

@@ -1,4 +1,9 @@
-import { memo } from 'react';
+import {
+  memo,
+  useEffect,
+  useRef,
+  type Ref,
+} from 'react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import {
@@ -24,6 +29,11 @@ export interface FlowIndexRailProps {
   readonly onActivate: (entry: LibraryBrowserItemDTO) => void;
   readonly onHover: (wallpaperId: number | null) => void;
   readonly onOpenIndex: () => void;
+  readonly onViewportHeightChange?: (height: number) => void;
+}
+
+interface FlowIndexRailViewProps extends FlowIndexRailProps {
+  readonly viewportRef?: Ref<HTMLDivElement>;
 }
 
 function progressLabel(
@@ -99,7 +109,8 @@ export function FlowIndexRailView({
   onActivate,
   onHover,
   onOpenIndex,
-}: FlowIndexRailProps) {
+  viewportRef,
+}: FlowIndexRailViewProps) {
   const centeredPosition = entries.find(({ entry }) => (
     entry.wallpaperId === centeredWallpaperId
   ));
@@ -129,7 +140,7 @@ export function FlowIndexRailView({
         </span>
       </header>
 
-      <div className="flow-index-rail__viewport">
+      <div className="flow-index-rail__viewport" ref={viewportRef}>
         <ol className="flow-index-rail__list" ref={observeFlowIndexAlignment}>
           {entries.map(({ entry, index, selected, current, favorite }) => {
             const centered = entry.wallpaperId === centeredWallpaperId;
@@ -170,6 +181,22 @@ export function FlowIndexRailView({
   );
 }
 
-export const FlowIndexRail = memo(FlowIndexRailView);
+function ObservedFlowIndexRail(props: FlowIndexRailProps) {
+  const viewportRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const viewport = viewportRef.current;
+    if (!viewport || !props.onViewportHeightChange) return undefined;
+    const reportHeight = () => props.onViewportHeightChange?.(viewport.clientHeight);
+    reportHeight();
+    if (typeof ResizeObserver === 'undefined') return undefined;
+    const observer = new ResizeObserver(reportHeight);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, [props.onViewportHeightChange]);
+
+  return <FlowIndexRailView {...props} viewportRef={viewportRef} />;
+}
+
+export const FlowIndexRail = memo(ObservedFlowIndexRail);
 
 export default FlowIndexRail;

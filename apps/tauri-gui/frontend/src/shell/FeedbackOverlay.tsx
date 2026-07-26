@@ -23,84 +23,6 @@ const severityLabels: Readonly<Record<FeedbackSeverity, string>> = {
   error: 'Error',
 };
 
-const overlayStyle: CSSProperties = {
-  position: 'fixed',
-  insetInlineEnd: '1rem',
-  bottom: '1rem',
-  zIndex: 1000,
-  display: 'grid',
-  width: 'min(26rem, calc(100vw - 2rem))',
-  gap: '0.625rem',
-  pointerEvents: 'none',
-};
-
-const cardStyle: CSSProperties = {
-  position: 'relative',
-  overflow: 'hidden',
-  pointerEvents: 'auto',
-};
-
-const bodyStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(0, 1fr) auto',
-  gap: '0.5rem 0.75rem',
-  padding: '0.75rem 0.875rem 0.875rem',
-};
-
-const severityStyle: CSSProperties = {
-  display: 'inline-flex',
-  alignItems: 'center',
-  gap: '0.4rem',
-  minWidth: 0,
-  fontSize: '0.75rem',
-  fontWeight: 700,
-  letterSpacing: '0.02em',
-  textTransform: 'uppercase',
-};
-
-const messageStyle: CSSProperties = {
-  gridColumn: '1 / -1',
-  margin: 0,
-  overflowWrap: 'anywhere',
-  fontSize: '0.9rem',
-  lineHeight: 1.45,
-};
-
-const closeStyle: CSSProperties = {
-  width: '1.75rem',
-  height: '1.75rem',
-  padding: 0,
-  border: 0,
-  borderRadius: '0.4rem',
-  background: 'transparent',
-  color: 'inherit',
-  cursor: 'pointer',
-  font: 'inherit',
-  fontSize: '1.15rem',
-  lineHeight: 1,
-};
-
-const detailsStyle: CSSProperties = {
-  gridColumn: '1 / -1',
-  fontSize: '0.78rem',
-  opacity: 0.84,
-};
-
-const detailTextStyle: CSSProperties = {
-  maxHeight: '10rem',
-  margin: '0.5rem 0 0',
-  overflow: 'auto',
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere',
-  font: 'inherit',
-};
-
-const progressTrackStyle: CSSProperties = {
-  height: '0.2rem',
-  overflow: 'hidden',
-  background: 'color-mix(in srgb, currentColor 10%, transparent)',
-};
-
 function FeedbackCard({
   notice,
   nowMs,
@@ -116,9 +38,6 @@ function FeedbackCard({
   const progressPercent = progress === null ? null : Math.round(progress * 100);
   const severityLabel = severityLabels[notice.severity];
   const progressFillStyle = progress === null ? undefined : {
-    width: '100%',
-    height: '100%',
-    animationPlayState: notice.pausedRemainingMs === null ? 'running' : 'paused',
     '--feedback-duration': `${notice.durationMs ?? 0}ms`,
     '--feedback-progress': progress,
   } as CSSProperties;
@@ -126,7 +45,7 @@ function FeedbackCard({
   return (
     <section
       aria-label={`${severityLabel}: ${notice.message}`}
-      className={`feedback-overlay__card feedback-overlay__card--${notice.severity}`}
+      className="feedback-overlay__card"
       data-feedback-card={notice.channel}
       data-feedback-severity={notice.severity}
       onBlur={(event) => {
@@ -141,26 +60,37 @@ function FeedbackCard({
         dispatch({ type: 'resume', channel: notice.channel, nowMs });
       }}
       role={notice.severity === 'error' ? 'alert' : 'status'}
-      style={cardStyle}
     >
-      <div style={bodyStyle}>
-        <span className="feedback-overlay__severity" style={severityStyle}>
+      <div className="feedback-overlay__body">
+        <span className="feedback-overlay__severity">
           <span aria-hidden="true">●</span>
           {severityLabel}
         </span>
         <button
           aria-label={`Dismiss ${notice.channel} notification`}
+          className="feedback-overlay__close"
           onClick={() => dispatch({ type: 'dismiss', channel: notice.channel })}
-          style={closeStyle}
           type="button"
         >
           <span aria-hidden="true">×</span>
         </button>
-        <p style={messageStyle}>{notice.message}</p>
+        <p className="feedback-overlay__message">{notice.message}</p>
+        {notice.action ? (
+          <button
+            className="feedback-overlay__action"
+            onClick={() => {
+              notice.action?.invoke();
+              dispatch({ type: 'dismiss', channel: notice.channel });
+            }}
+            type="button"
+          >
+            {notice.action.label}
+          </button>
+        ) : null}
         {technicalDetails ? (
-          <details style={detailsStyle}>
+          <details className="feedback-overlay__details">
             <summary>Technical details</summary>
-            <pre style={detailTextStyle}>{technicalDetails}</pre>
+            <pre className="feedback-overlay__detail-text">{technicalDetails}</pre>
           </details>
         ) : null}
       </div>
@@ -171,9 +101,9 @@ function FeedbackCard({
           aria-valuemin={0}
           aria-valuenow={progressPercent}
           className="feedback-overlay__progress-track"
+          data-paused={notice.pausedRemainingMs === null ? undefined : true}
           data-feedback-progress={notice.channel}
           role="progressbar"
-          style={progressTrackStyle}
         >
           <span
             aria-hidden="true"
@@ -198,7 +128,6 @@ export function FeedbackOverlay({
     <aside
       aria-label="Notifications"
       className="feedback-overlay"
-      style={overlayStyle}
     >
       {state.notices.map((notice) => (
         <FeedbackCard

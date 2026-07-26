@@ -13,6 +13,7 @@ import {
   ENHANCED_MEDIA_ACTIVATION_DELAY_MS,
   enhancedMediaActivationPlan,
   enhancedMediaCandidates,
+  previewImagePath,
   staticFallbackAssetPath,
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
@@ -89,6 +90,7 @@ export default function WallpaperPreviewMedia({
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
   const [thumbnailLoadFailed, setThumbnailLoadFailed] = useState(false);
+  const [loadedImagePath, setLoadedImagePath] = useState<string | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -132,6 +134,20 @@ export default function WallpaperPreviewMedia({
     handleEnhancedError();
   }, [authorizedCandidate.error, handleEnhancedError]);
 
+  const imagePath = previewImagePath({
+    candidateKind: activeCandidate?.kind ?? null,
+    authorizedCandidatePath: authorizedCandidate.path,
+    authorizedStaticFallbackPath: authorizedStaticFallback.path,
+    staticFallbackLoadFailed,
+    thumbnail,
+    thumbnailLoadFailed,
+  });
+  const videoPosterPath = (staticFallbackLoadFailed ? null : authorizedStaticFallback.path)
+    ?? (thumbnailLoadFailed ? undefined : thumbnail);
+  const imageLoaded = imagePath !== null
+    && imagePath !== undefined
+    && loadedImagePath === imagePath;
+
   if (activeCandidate?.kind === 'video' && authorizedCandidate.path) {
     return (
       <>
@@ -144,6 +160,7 @@ export default function WallpaperPreviewMedia({
           muted
           onError={handleEnhancedError}
           playsInline
+          poster={videoPosterPath ? safeFileSrc(videoPosterPath) : undefined}
           preload="metadata"
           ref={setVideoRef}
           src={activeVideoSource ?? undefined}
@@ -153,20 +170,27 @@ export default function WallpaperPreviewMedia({
     );
   }
 
-  const imagePath = authorizedCandidate.path
-    ?? (staticFallbackLoadFailed ? null : authorizedStaticFallback.path)
-    ?? (thumbnailLoadFailed ? undefined : thumbnail);
   if (imagePath) {
     return (
       <>
+        {!imageLoaded ? (
+          <span
+            aria-hidden="true"
+            className="wallpaper-thumb-placeholder wallpaper-thumb-placeholder--loading"
+          >
+            <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
+          </span>
+        ) : null}
         <img
           alt={alt}
-          className={className}
+          className={['wallpaper-preview-image', className].filter(Boolean).join(' ')}
           data-enhanced-preview={authorizedCandidate.path ? 'image' : undefined}
+          data-preview-loaded={imageLoaded || undefined}
           decoding="async"
           draggable={false}
           loading={loading}
           onError={() => {
+            setLoadedImagePath(null);
             if (authorizedCandidate.path) {
               handleEnhancedError();
             } else if (authorizedStaticFallback.path) {
@@ -175,6 +199,7 @@ export default function WallpaperPreviewMedia({
               setThumbnailLoadFailed(true);
             }
           }}
+          onLoad={() => setLoadedImagePath(imagePath)}
           src={safeFileSrc(imagePath)}
         />
         {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
@@ -185,13 +210,16 @@ export default function WallpaperPreviewMedia({
   return (
     <div
       className={`wallpaper-thumb-placeholder${className ? ` ${className}` : ''}`}
-      title={thumbnailFailure ? `Preview failed: ${thumbnailFailure}` : undefined}
     >
       <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
       {enhancedError ? (
         <span className="wallpaper-preview-status" role="status">Preview unavailable</span>
       ) : thumbnailFailure || thumbnailLoadFailed ? (
-        <span className="wallpaper-thumb-error">Preview failed</span>
+        <span
+          aria-label="Preview unavailable"
+          className="wallpaper-thumb-error"
+          title={thumbnailFailure ? `Preview unavailable: ${thumbnailFailure}` : 'Preview unavailable'}
+        >!</span>
       ) : null}
     </div>
   );

@@ -1,13 +1,25 @@
+import { createElement, type ReactNode } from 'react';
+import {
+  FileQuestion,
+  FileVideo,
+  Film,
+  Image as ImageIcon,
+} from 'lucide-react';
+
 import type { WallpaperDTO } from '../api/bridge';
 
-export function typeIcon(type: string): string {
+export function typeIcon(type: string): ReactNode {
   switch (type) {
-    case 'image': return '\u{1F5BC}';
-    case 'gif': return '\u{1F39E}';
-    case 'video': return '\u{1F3AC}';
+    case 'image':
+      return createElement(ImageIcon, { 'aria-hidden': true, size: 28, strokeWidth: 1.5 });
+    case 'gif':
+      return createElement(Film, { 'aria-hidden': true, size: 28, strokeWidth: 1.5 });
+    case 'video':
+      return createElement(FileVideo, { 'aria-hidden': true, size: 28, strokeWidth: 1.5 });
     case 'we_scene': return 'WE';
     case 'we_web': return 'WEB';
-    default: return '\u{1F4C4}';
+    default:
+      return createElement(FileQuestion, { 'aria-hidden': true, size: 28, strokeWidth: 1.5 });
   }
 }
 

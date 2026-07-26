@@ -14,6 +14,9 @@ export class ThumbnailSession {
   private cache = new Map<string, string>();
   private failures = new Map<string, string>();
   private listeners = new Map<string, Set<() => void>>();
+  private failureListeners = new Set<() => void>();
+  private failureNotifyPending = false;
+  private failureNotifyScheduled = false;
   private queue: ThumbnailRequestQueue;
   private enqueueScheduled = false;
   private pendingPaths: string[] = [];
@@ -38,6 +41,7 @@ export class ThumbnailSession {
       load,
       isCached: (path) => this.cache.has(path),
       onThumbnail: (path, thumbnail) => {
+        const previousFailureCount = this.failures.size;
         // Refresh insertion order so reads and replacements implement a small
         // LRU instead of retaining base64/file URLs for the entire session.
         this.cache.delete(path);
@@ -45,8 +49,10 @@ export class ThumbnailSession {
         this.failures.delete(path);
         this.evictUnusedCacheEntries();
         this.scheduleNotify(path);
+        if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
       },
       onFailure: (path, reason) => {
+        const previousFailureCount = this.failures.size;
         // A completed refresh failure is authoritative. Keeping the previous
         // media here would make a changed or deleted project look healthy
         // indefinitely, so replace it with the explicit failure state.
@@ -55,6 +61,7 @@ export class ThumbnailSession {
         this.failures.set(path, reason ?? 'thumbnail_failed');
         this.evictUnusedFailures();
         this.scheduleNotify(path);
+        if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
       },
     });
   }
@@ -79,6 +86,11 @@ export class ThumbnailSession {
     return this.listeners.size;
   }
 
+  subscribeFailures(cb: () => void): () => void {
+    this.failureListeners.add(cb);
+    return () => this.failureListeners.delete(cb);
+  }
+
   subscribe(path: string, cb: () => void): () => void {
     let listeners = this.listeners.get(path);
     if (!listeners) {
@@ -91,7 +103,7 @@ export class ThumbnailSession {
       if (listeners.size === 0 && this.listeners.get(path) === listeners) {
         this.listeners.delete(path);
         this.evictUnusedCacheEntries();
-        this.evictUnusedFailures();
+        if (this.evictUnusedFailures()) this.scheduleFailureNotify();
       }
     };
   }
@@ -129,16 +141,19 @@ export class ThumbnailSession {
   }
 
   forget(paths: string[]): void {
+    const previousFailureCount = this.failures.size;
     this.queue.forget(paths);
     for (const path of paths) {
       this.cache.delete(path);
       this.failures.delete(path);
       this.scheduleNotify(path);
     }
+    if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
   }
 
   reset(): void {
     const listenerPaths = Array.from(this.listeners.keys());
+    const previousFailureCount = this.failures.size;
     this.queue.reset();
     this.cache.clear();
     this.failures.clear();
@@ -148,18 +163,29 @@ export class ThumbnailSession {
     for (const path of listenerPaths) {
       this.scheduleNotify(path);
     }
+    if (previousFailureCount > 0) this.scheduleFailureNotify();
   }
 
   refreshSubscribed(): void {
     const listenerPaths = Array.from(this.listeners.keys());
+    const previousFailureCount = this.failures.size;
     this.queue.reset();
     for (const path of this.cache.keys()) {
       if (!this.listeners.has(path)) this.cache.delete(path);
     }
     this.failures.clear();
+    if (previousFailureCount > 0) this.scheduleFailureNotify();
     if (listenerPaths.length > 0) {
       this.queue.enqueue(listenerPaths, { priority: 'front', force: true });
     }
+  }
+
+  retryFailures(): void {
+    const paths = Array.from(this.failures.keys());
+    if (paths.length === 0) return;
+    this.failures.clear();
+    this.scheduleFailureNotify();
+    this.queue.enqueue(paths, { priority: 'front', force: true });
   }
 
   snapshot() {
@@ -185,6 +211,9 @@ export class ThumbnailSession {
       if (this.pendingNotifyPaths.size > 0) {
         this.scheduleNotifyFlush();
       }
+      if (this.failureNotifyPending) {
+        this.scheduleFailureNotify();
+      }
     }
     this.recordRevealPending();
   }
@@ -208,12 +237,29 @@ export class ThumbnailSession {
     }
   }
 
-  private evictUnusedFailures(): void {
+  private evictUnusedFailures(): boolean {
+    let changed = false;
     while (this.failures.size > this.cacheLimit) {
       const candidate = this.firstUnsubscribedPath(this.failures.keys());
-      if (candidate === null) return;
+      if (candidate === null) return changed;
       this.failures.delete(candidate);
+      changed = true;
     }
+    return changed;
+  }
+
+  private scheduleFailureNotify(): void {
+    this.failureNotifyPending = true;
+    if (this.revealPaused || this.failureNotifyScheduled) return;
+    this.failureNotifyScheduled = true;
+    const flush = () => {
+      this.failureNotifyScheduled = false;
+      if (this.revealPaused || !this.failureNotifyPending) return;
+      this.failureNotifyPending = false;
+      this.failureListeners.forEach((listener) => listener());
+    };
+    if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
+    else setTimeout(flush, 0);
   }
 
   private firstUnsubscribedPath(paths: Iterable<string>): string | null {

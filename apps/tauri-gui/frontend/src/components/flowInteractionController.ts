@@ -100,10 +100,14 @@ export class FlowInteractionController {
       ?? fallback;
   }
 
-  beginDirectInput(): void {
-    const alreadyTracking = this.phase === 'tracking';
+  noteUserIntent(): void {
     this.userInteracted = true;
     this.startupAnchorResolved = true;
+  }
+
+  beginDirectInput(): void {
+    const alreadyTracking = this.phase === 'tracking';
+    this.noteUserIntent();
     this.programmaticTarget = null;
     this.resizeAnchorId = null;
     if (!alreadyTracking) {

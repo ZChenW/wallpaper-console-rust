@@ -5,7 +5,21 @@ import {
   useRef,
   useState,
 } from 'react';
-import { FolderPlus, Heart, Search, Settings, Shuffle } from 'lucide-react';
+import {
+  ClockAlert,
+  FolderPlus,
+  Heart,
+  LoaderCircle,
+  ScanSearch,
+  Search,
+  SearchCheck,
+  SearchX,
+  Settings,
+  SlidersHorizontal,
+  Shuffle,
+  TriangleAlert,
+} from 'lucide-react';
+import { Popover } from 'radix-ui';
 
 import { api } from '../api/bridge.ts';
 import type {
@@ -14,7 +28,9 @@ import type {
 } from '../api/types.ts';
 import { commandErrorFeedback } from '../api/feedback.ts';
 import LibraryViewport from '../components/LibraryViewport.tsx';
+import LibraryState from '../components/LibraryState.tsx';
 import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
+import OverflowStrip from '../components/OverflowStrip.tsx';
 import {
   DISPLAY_APPLY_DISABLED_REASON,
   resolveLibraryModeSwitchAnchor,
@@ -24,7 +40,10 @@ import {
 import SelectField from '../components/SelectField.tsx';
 import { primaryApplyKind } from '../domain/applyActions.ts';
 import { useFeedbackBridge } from '../hooks/useFeedbackBridge.ts';
-import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
+import {
+  useThumbnailFailureCount,
+  useThumbnailStore,
+} from '../state/ThumbnailStoreContext.tsx';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
 import { buildDisplayTargetModel } from './displayTargets.ts';
 import DisplayTargetSelector from './DisplayTargetSelector.tsx';
@@ -93,6 +112,7 @@ function selectedDescription(entry: LibraryBrowserItemDTO | null): string {
 export default function SinglePageShell() {
   const [search, setSearch] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const [sourcesMounted, setSourcesMounted] = useState(false);
   const [sourcesReturnToSettings, setSourcesReturnToSettings] = useState(false);
@@ -107,9 +127,14 @@ export default function SinglePageShell() {
   const sourcePanelReturnFocusRef = useRef<HTMLButtonElement | null>(null);
   const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
   const libraryViewportAnchorRef = useRef<number | null>(null);
+  const [libraryViewportAnchorId, setLibraryViewportAnchorId] = useState<number | null>(null);
   const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
   const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
-  const { refreshSubscribed: refreshThumbnails } = useThumbnailStore();
+  const {
+    refreshSubscribed: refreshThumbnails,
+    retryFailures: retryThumbnailFailures,
+  } = useThumbnailStore();
+  const thumbnailFailureCount = useThumbnailFailureCount();
 
   const rememberOverlayTrigger = useCallback((trigger: HTMLElement) => {
     overlayReturnFocusRef.current = trigger;
@@ -387,6 +412,19 @@ export default function SinglePageShell() {
     showNotice(notice);
   }, [showNotice]);
 
+  useEffect(() => {
+    if (thumbnailFailureCount === 0) return;
+    showNotice({
+      channel: 'system',
+      severity: 'warning',
+      message: `${thumbnailFailureCount} preview${thumbnailFailureCount === 1 ? '' : 's'} could not be generated.`,
+      action: {
+        label: 'Retry',
+        invoke: retryThumbnailFailures,
+      },
+    });
+  }, [retryThumbnailFailures, showNotice, thumbnailFailureCount]);
+
   const addFirstRunDirectory = useCallback(async (path: string): Promise<void> => {
     try {
       const result = await addSuggestedDirectory(
@@ -540,6 +578,7 @@ export default function SinglePageShell() {
 
   const rememberLibraryAnchor = useCallback((wallpaperId: number) => {
     libraryViewportAnchorRef.current = wallpaperId;
+    setLibraryViewportAnchorId((current) => current === wallpaperId ? current : wallpaperId);
   }, []);
   const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
     if (mode === preferences.libraryViewMode) return;
@@ -621,6 +660,10 @@ export default function SinglePageShell() {
     sourcesOpen,
     toggleFavorite,
   ]);
+  const flowAnchorEntry = useMemo(
+    () => browser.entries.find((entry) => entry.wallpaperId === libraryViewportAnchorId) ?? null,
+    [browser.entries, libraryViewportAnchorId],
+  );
 
   const renderLibrary = () => {
     // Library loads independently of preferences, catalog, and display probes.
@@ -630,27 +673,37 @@ export default function SinglePageShell() {
       && !browser.emptyConfirmed
       && !browser.loadError) {
       return (
-        <div className="single-page-empty" role="alert">
-          <p>Loading wallpaper library is taking longer than expected.</p>
-          <button
-            className="btn"
-            type="button"
-            onClick={libraryLifecycle.startup.retry}
-          >
-            Retry
-          </button>
-        </div>
+        <LibraryState
+          action={(
+            <button
+              className="btn"
+              type="button"
+              onClick={libraryLifecycle.startup.retry}
+            >
+              Retry
+            </button>
+          )}
+          description="Wallpaper data has not arrived yet. Retry the library connection."
+          icon={<ClockAlert size={28} />}
+          role="alert"
+          title="Library is taking longer than expected"
+        />
       );
     }
     if (browser.initialLoading) {
-      return <div className="single-page-empty" role="status">Loading wallpaper library…</div>;
+      return (
+        <LibraryState
+          description="Preparing your saved wallpapers."
+          icon={<LoaderCircle className="library-state__spinner" size={28} />}
+          role="status"
+          title="Loading wallpaper library"
+        />
+      );
     }
     if (firstRunEligible) {
       return (
-        <section className="single-page-empty single-page-first-run">
-          <h2>Choose where your wallpapers live</h2>
-          <p>Add any number of folders. Nothing is scanned until you choose it.</p>
-          <div className="single-page-empty__actions">
+        <LibraryState
+          action={(
             <button
               className="btn primary"
               type="button"
@@ -661,7 +714,12 @@ export default function SinglePageShell() {
             >
               <FolderPlus size={16} aria-hidden="true" /> Add Folder
             </button>
-          </div>
+          )}
+          className="single-page-first-run"
+          description="Add any number of folders. Nothing is scanned until you choose it."
+          icon={<FolderPlus size={30} />}
+          title="Choose where your wallpapers live"
+        >
           <FirstRunSuggestions
             suggestions={libraryLifecycle.firstRun.suggestions}
             onAddDirectory={(path) => void addFirstRunDirectory(path)}
@@ -679,7 +737,7 @@ export default function SinglePageShell() {
               </button>
             </div>
           ) : null}
-        </section>
+        </LibraryState>
       );
     }
     if (browser.entries.length > 0) {
@@ -732,44 +790,175 @@ export default function SinglePageShell() {
       );
     }
     if (scanRunning) {
-      return <div className="single-page-empty" role="status">Indexing wallpapers…</div>;
+      return (
+        <LibraryState
+          description="New wallpapers will appear as the scan finds them."
+          icon={<ScanSearch className="library-state__spinner" size={28} />}
+          role="status"
+          title="Indexing wallpapers"
+        />
+      );
     }
     if (browser.loadError) {
       return (
-        <div className="single-page-empty" role="alert">
-          <p>Could not load the wallpaper library.</p>
-          {browser.loadErrorDetail ? <p>{browser.loadErrorDetail}</p> : null}
-          <button className="btn" type="button" onClick={() => void browser.reload()}>Retry</button>
-        </div>
+        <LibraryState
+          action={(
+            <button className="btn" type="button" onClick={() => void browser.reload()}>
+              Retry
+            </button>
+          )}
+          description={browser.loadErrorDetail ?? 'The library could not be read.'}
+          icon={<TriangleAlert size={28} />}
+          role="alert"
+          title="Could not load the wallpaper library"
+        />
       );
     }
     if (!browser.emptyConfirmed) {
-      return <div className="single-page-empty" role="status">Checking the library…</div>;
+      return (
+        <LibraryState
+          description="Confirming whether wallpapers match the current view."
+          icon={<SearchCheck className="library-state__spinner" size={28} />}
+          role="status"
+          title="Checking the library"
+        />
+      );
     }
     return (
-      <div className="single-page-empty">
-        <p>No wallpapers match the active filters.</p>
-        <button
-          className="btn"
-          type="button"
-          onClick={() => {
-            setSearch('');
-            updatePreferences((current) => ({
-              ...current,
-              sourceFilter: { kind: 'all' },
-              typeFilter: 'usable',
-              favoritesOnly: false,
-            }));
-          }}
-        >
-          Clear filters
-        </button>
-      </div>
+      <LibraryState
+        action={(
+          <button
+            className="btn"
+            type="button"
+            onClick={() => {
+              setSearch('');
+              updatePreferences((current) => ({
+                ...current,
+                sourceFilter: { kind: 'all' },
+                typeFilter: 'usable',
+                favoritesOnly: false,
+              }));
+            }}
+          >
+            Clear filters
+          </button>
+        )}
+        description="Try clearing the active filters or changing your search."
+        icon={<SearchX size={28} />}
+        title="No matching wallpapers"
+      />
     );
   };
 
+  const renderFilterControls = () => (
+    <>
+      {catalog.errors.sources ? (
+        <details className="single-page-source-warning">
+          <summary>Source list unavailable</summary>
+          <p>{catalog.errors.sources}</p>
+        </details>
+      ) : null}
+      <SelectField
+        aria-label="Source filter"
+        value={sourceFilterValue(effectiveSrcFilter)}
+        disabled={Boolean(catalog.errors.sources)}
+        options={[
+          { value: 'all', label: 'ALL SOURCES' },
+          ...catalog.sources.map((source) => ({
+            value: `source:${source.id}`,
+            label: `${source.displayName}${source.availability === 'offline' ? ' · Offline' : ''}`,
+          })),
+        ]}
+        onValueChange={(value) => {
+          const sourceFilter = sourceFilterFromValue(value);
+          updatePreferences((current) => ({ ...current, sourceFilter }));
+          setFiltersOpen(false);
+        }}
+        variant="compact"
+      />
+      <SelectField
+        aria-label="Wallpaper type filter"
+        value={preferences.typeFilter}
+        options={[
+          { value: 'usable', label: 'ALL' },
+          { value: 'image', label: 'Images' },
+          { value: 'gif', label: 'GIFs' },
+          { value: 'video', label: 'Videos' },
+          { value: 'weScene', label: 'Wallpaper Engine scenes' },
+          { value: 'unsupported', label: 'Unsupported' },
+        ]}
+        onValueChange={(value) => {
+          const typeFilter = value as LibraryTypeFilter;
+          updatePreferences((current) => ({ ...current, typeFilter }));
+          setFiltersOpen(false);
+        }}
+        variant="compact"
+      />
+      <label
+        className="single-page-favorite-filter"
+        data-active={preferences.favoritesOnly}
+      >
+        <input
+          type="checkbox"
+          checked={preferences.favoritesOnly}
+          onChange={(event) => {
+            const favoritesOnly = event.currentTarget.checked;
+            updatePreferences((current) => ({ ...current, favoritesOnly }));
+          }}
+        />
+        <Heart
+          aria-hidden="true"
+          fill={preferences.favoritesOnly ? 'currentColor' : 'none'}
+          size={15}
+        />
+        <span>FAVORITES</span>
+      </label>
+      <SelectField
+        aria-label="Library sort"
+        value={preferences.sort}
+        options={[
+          { value: 'recentlyAdded', label: 'Recently added' },
+          { value: 'nameAsc', label: 'Name A–Z' },
+          { value: 'nameDesc', label: 'Name Z–A' },
+        ]}
+        onValueChange={(value) => {
+          const sort = value as LibrarySort;
+          updatePreferences((current) => ({ ...current, sort }));
+          setFiltersOpen(false);
+        }}
+        variant="compact"
+      />
+      {preferences.libraryViewMode === 'grid' ? (
+        <SelectField
+          aria-label="Card size"
+          value={preferences.cardSize}
+          options={[
+            { value: 'small', label: 'Small' },
+            { value: 'medium', label: 'Medium' },
+            { value: 'large', label: 'Large' },
+          ]}
+          onValueChange={(value) => {
+            const cardSize = value as typeof preferences.cardSize;
+            updatePreferences((current) => ({ ...current, cardSize }));
+            setFiltersOpen(false);
+          }}
+          variant="compact"
+        />
+      ) : null}
+    </>
+  );
+  const scanActivityVisible = scan.presentation.kind !== 'hidden';
+  const feedbackVisible = feedbackState.notices.length > 0;
+  const shellNotificationsVisible = scanActivityVisible || feedbackVisible;
+
   return (
-    <div className={`single-page-shell${settingsOpen ? ' settings-open' : ''}`}>
+    <div
+      className={`single-page-shell library-view-${preferences.libraryViewMode}${
+        settingsOpen ? ' settings-open' : ''
+      }${shellNotificationsVisible ? ' has-notifications' : ''}${
+        scanActivityVisible ? ' has-scan' : ''
+      }${feedbackVisible ? ' has-feedback' : ''}`}
+    >
       <header className="single-page-topbar" data-tauri-drag-region="deep">
         <div className="single-page-brand" aria-label="Wallpaper Console">Wallpaper Console</div>
         <label className="single-page-search">
@@ -794,6 +983,7 @@ export default function SinglePageShell() {
         <button
           aria-label="Apply a random wallpaper from active filters"
           className="single-page-icon-button"
+          data-topbar-action="random"
           type="button"
           disabled={!canChooseRandomWallpaper({
             searchSettled: browser.searchSettled,
@@ -802,140 +992,78 @@ export default function SinglePageShell() {
             canApply: displayModel.canApply && !browser.criteriaReplacementPending,
           })}
           onClick={() => void chooseRandom()}
+          title="Apply a random wallpaper from active filters"
         >
           <Shuffle size={17} aria-hidden="true" />
         </button>
         <button
           aria-label="Open settings"
           className="single-page-icon-button"
+          data-topbar-action="settings"
           type="button"
           onClick={(event) => {
             rememberOverlayTrigger(event.currentTarget);
             setSettingsOpen(true);
           }}
+          title="Open settings"
         >
           <Settings size={18} aria-hidden="true" />
         </button>
       </header>
 
-      <div className="single-page-filters" aria-label="Library filters">
-        {catalog.errors.sources ? (
-          <details className="single-page-source-warning">
-            <summary>Source list unavailable</summary>
-            <p>{catalog.errors.sources}</p>
-          </details>
-        ) : null}
-        <SelectField
-          aria-label="Source filter"
-          value={sourceFilterValue(effectiveSrcFilter)}
-          disabled={Boolean(catalog.errors.sources)}
-          options={[
-            { value: 'all', label: 'ALL SOURCES' },
-            ...catalog.sources.map((source) => ({
-              value: `source:${source.id}`,
-              label: `${source.displayName}${source.availability === 'offline' ? ' · Offline' : ''}`,
-            })),
-          ]}
-          onValueChange={(value) => {
-            const sourceFilter = sourceFilterFromValue(value);
-            updatePreferences((current) => ({ ...current, sourceFilter }));
-          }}
-          variant="compact"
-        />
-        <SelectField
-          aria-label="Wallpaper type filter"
-          value={preferences.typeFilter}
-          options={[
-            { value: 'usable', label: 'ALL' },
-            { value: 'image', label: 'Images' },
-            { value: 'gif', label: 'GIFs' },
-            { value: 'video', label: 'Videos' },
-            { value: 'weScene', label: 'Wallpaper Engine scenes' },
-            { value: 'unsupported', label: 'Unsupported' },
-          ]}
-          onValueChange={(value) => {
-            const typeFilter = value as LibraryTypeFilter;
-            updatePreferences((current) => ({ ...current, typeFilter }));
-          }}
-          variant="compact"
-        />
-        <label
-          className="single-page-favorite-filter"
-          data-active={preferences.favoritesOnly}
-        >
-          <input
-            type="checkbox"
-            checked={preferences.favoritesOnly}
-            onChange={(event) => {
-              const favoritesOnly = event.currentTarget.checked;
-              updatePreferences((current) => ({ ...current, favoritesOnly }));
-            }}
-          />
-          <Heart
-            aria-hidden="true"
-            fill={preferences.favoritesOnly ? 'currentColor' : 'none'}
-            size={15}
-          />
-          <span>FAVORITES</span>
-        </label>
-        <SelectField
-          aria-label="Library sort"
-          value={preferences.sort}
-          options={[
-            { value: 'recentlyAdded', label: 'Recently added' },
-            { value: 'nameAsc', label: 'Name A–Z' },
-            { value: 'nameDesc', label: 'Name Z–A' },
-          ]}
-          onValueChange={(value) => {
-            const sort = value as LibrarySort;
-            updatePreferences((current) => ({ ...current, sort }));
-          }}
-          variant="compact"
-        />
+      <div className="single-page-library-controls">
+        <OverflowStrip className="single-page-filters" aria-label="Library filters">
+          {renderFilterControls()}
+        </OverflowStrip>
+        <Popover.Root open={filtersOpen} onOpenChange={setFiltersOpen}>
+          <Popover.Trigger asChild>
+            <button className="single-page-filter-popover__trigger" type="button">
+              <SlidersHorizontal aria-hidden="true" size={15} />
+              Filters
+            </button>
+          </Popover.Trigger>
+          <Popover.Portal>
+            <Popover.Content
+              align="center"
+              className="single-page-filter-popover"
+              sideOffset={7}
+            >
+              <div className="single-page-filter-popover__controls">
+                {renderFilterControls()}
+              </div>
+              <Popover.Arrow className="single-page-filter-popover__arrow" />
+            </Popover.Content>
+          </Popover.Portal>
+        </Popover.Root>
         <LibraryViewSwitch
           disabled={!preferencesReady}
           onChange={changeLibraryViewMode}
           value={preferences.libraryViewMode}
         />
         {preferences.libraryViewMode === 'grid' ? (
-          <SelectField
-            aria-label="Card size"
-            value={preferences.cardSize}
-            options={[
-              { value: 'small', label: 'Small' },
-              { value: 'medium', label: 'Medium' },
-              { value: 'large', label: 'Large' },
-            ]}
-            onValueChange={(value) => {
-              const cardSize = value as typeof preferences.cardSize;
-              updatePreferences((current) => ({ ...current, cardSize }));
-            }}
-            variant="compact"
-          />
+          <span className="single-page-count" aria-live="polite">
+            {browser.totalKnown
+              ? `${browser.entries.length} / ${browser.total}`
+              : `${browser.entries.length} loaded`}
+          </span>
         ) : null}
-        <span className="single-page-count" aria-live="polite">
-          {browser.totalKnown
-            ? `${browser.entries.length} / ${browser.total}`
-            : `${browser.entries.length} loaded`}
-        </span>
       </div>
 
-      {catalog.errors.displays || catalog.errors.displayState ? (
-        <div className="single-page-discovery-error" role="alert">
-          <span>
-            Display detection failed.
-            {' '}
-            {[catalog.errors.displays, catalog.errors.displayState]
-              .filter((detail): detail is string => Boolean(detail))
-              .join(' ')}
-          </span>
-          <button className="btn" type="button" onClick={() => void catalog.reloadDisplays()}>
-            Retry display detection
-          </button>
-        </div>
-      ) : null}
-
       <main className="single-page-library">
+        {catalog.errors.displays || catalog.errors.displayState ? (
+          <div className="single-page-discovery-error" role="alert">
+            <span>
+              Display detection failed.
+              {' '}
+              {[catalog.errors.displays, catalog.errors.displayState]
+                .filter((detail): detail is string => Boolean(detail))
+                .join(' ')}
+            </span>
+            <button className="btn" type="button" onClick={() => void catalog.reloadDisplays()}>
+              Retry display detection
+            </button>
+          </div>
+        ) : null}
         <LibraryRepairPrompt
           fault={libraryLifecycle.repair.fault}
           pending={libraryLifecycle.repair.pending}
@@ -945,7 +1073,13 @@ export default function SinglePageShell() {
       </main>
 
       <footer className="single-page-statusbar">
-        <span className="single-page-statusbar__selection">{selectedDescription(selectedEntry)}</span>
+        <span className="single-page-statusbar__selection">
+          {preferences.libraryViewMode === 'flow'
+            ? flowAnchorEntry
+              ? `Viewing: ${displayName(flowAnchorEntry)}`
+              : 'Flow is positioning the current wallpaper…'
+            : selectedDescription(selectedEntry)}
+        </span>
         <span className="single-page-statusbar__current">{currentWallpaperLabel(currentWallpaper)}</span>
         {runningStatus ? (
           <span className="single-page-statusbar__running" role="status">
@@ -1003,23 +1137,25 @@ export default function SinglePageShell() {
           onLibraryChanged={reconcileSourcesAndLibrary}
         />
       ) : null}
-      <ScanActivity
-        presentation={scan.presentation}
-        progress={scan.progress}
-        onCancel={() => void scan.requestCancel()}
-        onDismiss={scan.dismissCancelled}
-      />
       <WallpaperDetailsDialog
         open={detailsEntry !== null}
         wallpaper={detailsEntry}
         onClose={closeDetails}
       />
-      <FeedbackOverlay
-        state={feedbackState}
-        nowMs={feedbackNowMs}
-        dispatch={dispatchFeedback}
-        technicalDetails={technicalDetails}
-      />
+      <div className="shell-notifications">
+        <ScanActivity
+          presentation={scan.presentation}
+          progress={scan.progress}
+          onCancel={() => void scan.requestCancel()}
+          onDismiss={scan.dismissCancelled}
+        />
+        <FeedbackOverlay
+          state={feedbackState}
+          nowMs={feedbackNowMs}
+          dispatch={dispatchFeedback}
+          technicalDetails={technicalDetails}
+        />
+      </div>
     </div>
   );
 }

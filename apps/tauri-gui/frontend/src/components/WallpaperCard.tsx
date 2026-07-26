@@ -22,13 +22,14 @@ import {
   animatedPreviewPath,
   shouldStartAnimatedHover,
 } from './wallpaperGridHelpers';
+import { ApplyIndicator } from './ApplyIndicator.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 
 interface CardProps {
   entry: LibraryBrowserItemDTO;
   ordinal?: string;
   posInSet?: number;
-  setSize?: number;
+  columnIndex?: number;
   applying: boolean;
   onApply: (entry: LibraryBrowserItemDTO) => void;
   onSelect?: (entry: LibraryBrowserItemDTO) => void;
@@ -44,6 +45,10 @@ interface CardProps {
   applyAvailable?: boolean;
   applyDisabledReason?: string | null;
   isScrolling?: () => boolean;
+  thumbnailHeight?: number;
+  id?: string;
+  tabIndex?: number;
+  onFocus?: () => void;
 }
 
 const neverScrolling = () => false;
@@ -52,7 +57,7 @@ function WallpaperCardImpl({
   entry,
   ordinal,
   posInSet,
-  setSize,
+  columnIndex,
   applying,
   onApply,
   onSelect,
@@ -68,6 +73,10 @@ function WallpaperCardImpl({
   applyAvailable,
   applyDisabledReason = null,
   isScrolling = neverScrolling,
+  thumbnailHeight,
+  id,
+  tabIndex,
+  onFocus,
 }: CardProps) {
   const [hovered, setHovered] = useState(false);
   const reducedMotion = typeof window !== 'undefined'
@@ -142,6 +151,7 @@ function WallpaperCardImpl({
     });
     if (!interaction.select && !interaction.apply && !interaction.contextMenu) return;
     event.preventDefault();
+    event.stopPropagation();
     if (interaction.contextMenu) {
       const rect = event.currentTarget.getBoundingClientRect();
       onKeyboardContextMenu?.(entry.path, rect.left + 12, rect.top + 12);
@@ -154,7 +164,9 @@ function WallpaperCardImpl({
 
   const badge = weBadge(entry);
   const cardStyle = {
-    '--wallpaper-thumbnail-height': `${wallpaperCardMetrics(cardSize).thumbnailHeight}px`,
+    '--wallpaper-thumbnail-height': `${
+      thumbnailHeight ?? wallpaperCardMetrics(cardSize).thumbnailHeight
+    }px`,
   } as CSSProperties;
 
   return (
@@ -169,17 +181,20 @@ function WallpaperCardImpl({
       data-wallpaper-index={ordinal}
       data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
-      aria-posinset={posInSet}
-      aria-setsize={setSize}
-      role="listitem"
+      data-wallpaper-position={posInSet}
+      aria-colindex={columnIndex}
+      role="gridcell"
     >
       <button
         aria-busy={applying || undefined}
         aria-current={current ? 'true' : undefined}
         aria-describedby={stateDescription ? stateDescriptionId : undefined}
         className="wallpaper-card__primary"
+        id={id}
         onClick={handleClick}
+        onFocus={onFocus}
         onKeyDown={handleKeyDown}
+        tabIndex={tabIndex}
         title={cardHoverLabel(entry)}
         type="button"
       >
@@ -189,6 +204,9 @@ function WallpaperCardImpl({
             transientImagePath={animatedPreview}
           />
           {badge && <span className={weBadgeClass(entry)}>{badge}</span>}
+          {applying || pending ? (
+            <ApplyIndicator state={applying ? 'applying' : 'pending'} />
+          ) : null}
         </div>
         <div className="wallpaper-info">
           <span className="wallpaper-name">{displayName(entry)}</span>
@@ -203,6 +221,7 @@ function WallpaperCardImpl({
         className={`wallpaper-favorite-button${entry.favorite ? ' is-favorite' : ''}`}
         data-card-control
         disabled={favoritePending}
+        tabIndex={tabIndex === 0 ? 0 : -1}
         type="button"
         onClick={(event) => {
           event.stopPropagation();

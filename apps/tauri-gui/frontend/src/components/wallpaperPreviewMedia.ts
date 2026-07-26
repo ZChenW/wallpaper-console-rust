@@ -9,6 +9,29 @@ export interface EnhancedMediaCandidate {
   readonly path: string;
 }
 
+export interface PreviewImagePathInput {
+  readonly candidateKind: EnhancedMediaKind | null;
+  readonly authorizedCandidatePath: string | null;
+  readonly authorizedStaticFallbackPath: string | null;
+  readonly staticFallbackLoadFailed: boolean;
+  readonly thumbnail: string | undefined;
+  readonly thumbnailLoadFailed: boolean;
+}
+
+export function previewImagePath({
+  candidateKind,
+  authorizedCandidatePath,
+  authorizedStaticFallbackPath,
+  staticFallbackLoadFailed,
+  thumbnail,
+  thumbnailLoadFailed,
+}: PreviewImagePathInput): string | null | undefined {
+  if (candidateKind === 'video' && authorizedCandidatePath) return null;
+  return authorizedCandidatePath
+    ?? (staticFallbackLoadFailed ? null : authorizedStaticFallbackPath)
+    ?? (thumbnailLoadFailed ? undefined : thumbnail);
+}
+
 export interface EnhancedMediaEligibility {
   readonly active: boolean;
   readonly centered: boolean;

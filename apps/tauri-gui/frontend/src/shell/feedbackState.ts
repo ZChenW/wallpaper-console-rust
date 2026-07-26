@@ -2,6 +2,11 @@ export type FeedbackSeverity = 'success' | 'info' | 'warning' | 'error';
 
 export type FeedbackChannel = 'apply' | 'scan' | 'settings' | 'system';
 
+export interface FeedbackNoticeAction {
+  readonly label: string;
+  readonly invoke: () => void;
+}
+
 export interface FeedbackNotice {
   readonly channel: FeedbackChannel;
   readonly severity: FeedbackSeverity;
@@ -10,6 +15,7 @@ export interface FeedbackNotice {
   readonly durationMs: number | null;
   readonly expiresAtMs: number | null;
   readonly pausedRemainingMs: number | null;
+  readonly action?: FeedbackNoticeAction;
 }
 
 export interface FeedbackState {
@@ -27,6 +33,7 @@ export type FeedbackAction =
     readonly severity: FeedbackSeverity;
     readonly message: string;
     readonly nowMs: number;
+    readonly action?: FeedbackNoticeAction;
   }
   | { readonly type: 'pause'; readonly channel: FeedbackChannel; readonly nowMs: number }
   | { readonly type: 'resume'; readonly channel: FeedbackChannel; readonly nowMs: number }
@@ -65,6 +72,7 @@ function createNotice(action: Extract<FeedbackAction, { type: 'show' }>): Feedba
     durationMs,
     expiresAtMs: durationMs === null ? null : openedAtMs + durationMs,
     pausedRemainingMs: null,
+    action: action.action,
   };
 }
 

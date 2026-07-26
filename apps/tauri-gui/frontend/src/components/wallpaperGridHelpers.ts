@@ -27,6 +27,91 @@ export interface StableViewportAnchor {
   readonly rowOffset: number;
 }
 
+export interface GridKeyInput {
+  readonly key: string;
+  readonly shiftKey?: boolean;
+  readonly currentIndex: number;
+  readonly colCount: number;
+  readonly itemCount: number;
+  readonly pageRows: number;
+  readonly hasMore: boolean;
+  readonly loadingMore: boolean;
+}
+
+export type GridKeyResolution =
+  | {
+    readonly type: 'navigate';
+    readonly index: number;
+    readonly requestLoadMore: boolean;
+  }
+  | { readonly type: 'activate'; readonly index: number }
+  | { readonly type: 'context'; readonly index: number };
+
+export function resolveGridKey({
+  key,
+  shiftKey = false,
+  currentIndex,
+  colCount,
+  itemCount,
+  pageRows,
+  hasMore,
+  loadingMore,
+}: GridKeyInput): GridKeyResolution | null {
+  if (itemCount <= 0) return null;
+
+  const columns = Math.max(1, Math.trunc(colCount));
+  const lastIndex = itemCount - 1;
+  const index = Math.max(0, Math.min(lastIndex, Math.trunc(currentIndex)));
+  const rowStart = Math.floor(index / columns) * columns;
+  const rowEnd = Math.min(lastIndex, rowStart + columns - 1);
+  let nextIndex: number | null = null;
+
+  switch (key) {
+    case 'ArrowLeft':
+      nextIndex = Math.max(rowStart, index - 1);
+      break;
+    case 'ArrowRight':
+      nextIndex = Math.min(rowEnd, index + 1);
+      break;
+    case 'ArrowUp':
+      nextIndex = Math.max(0, index - columns);
+      break;
+    case 'ArrowDown':
+      nextIndex = Math.min(lastIndex, index + columns);
+      break;
+    case 'PageUp':
+      nextIndex = Math.max(0, index - columns * Math.max(1, Math.trunc(pageRows)));
+      break;
+    case 'PageDown':
+      nextIndex = Math.min(
+        lastIndex,
+        index + columns * Math.max(1, Math.trunc(pageRows)),
+      );
+      break;
+    case 'Home':
+      nextIndex = 0;
+      break;
+    case 'End':
+      nextIndex = lastIndex;
+      break;
+    case 'Enter':
+    case ' ':
+      return { type: 'activate', index };
+    case 'ContextMenu':
+      return { type: 'context', index };
+    case 'F10':
+      return shiftKey ? { type: 'context', index } : null;
+    default:
+      return null;
+  }
+
+  return {
+    type: 'navigate',
+    index: nextIndex,
+    requestLoadMore: key === 'End' && hasMore && !loadingMore,
+  };
+}
+
 export function wallpaperIdNearestGridViewportCenter<
   T extends { readonly wallpaperId: number },
 >({

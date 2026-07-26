@@ -31,6 +31,7 @@ function LibraryViewportImpl({
   const adapter = instantiateActiveLibraryAdapter(mode, {
     flow: () => (
       <WallpaperFlow
+        applyGesture={applyGesture}
         focusToken={focusToken}
         initialAnchorWallpaperId={initialAnchorWallpaperId}
         model={model}

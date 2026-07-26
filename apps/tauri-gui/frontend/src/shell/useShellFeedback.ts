@@ -11,6 +11,7 @@ import {
   feedbackReducer,
   type FeedbackAction,
   type FeedbackChannel,
+  type FeedbackNoticeAction,
   type FeedbackSeverity,
   type FeedbackState,
 } from './feedbackState.ts';
@@ -20,6 +21,7 @@ export interface ShellNoticeInput {
   readonly severity: FeedbackSeverity;
   readonly message: string;
   readonly technicalDetails?: string;
+  readonly action?: FeedbackNoticeAction;
 }
 
 export interface ShellRunningStatus {
@@ -100,6 +102,7 @@ export function useShellFeedback(now: () => number = Date.now) {
       severity: notice.severity,
       message: notice.message,
       nowMs: observedAtMs,
+      action: notice.action,
     });
   }, [now]);
 

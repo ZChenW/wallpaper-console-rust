@@ -17,12 +17,14 @@ interface ThumbnailSessionValue {
   getFailure: (path: string) => string | undefined;
   failureCount: () => number;
   subscribe: (path: string, cb: () => void) => () => void;
+  subscribeFailures: (cb: () => void) => () => void;
   observeVisible: (paths: string[], options?: EnqueueOptions) => void;
   setScrolling: (scrolling: boolean) => void;
   setInteracting: (interacting: boolean) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
   refreshSubscribed: () => void;
+  retryFailures: () => void;
   snapshot: () => { pending: string[]; active: number; cached: number };
   stats: () => { pending: number; active: number; cached: number; failures: number };
 }
@@ -44,6 +46,7 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
     getFailure: (path: string) => session.getFailure(path),
     failureCount: () => session.failureCount(),
     subscribe: (path: string, cb: () => void) => session.subscribe(path, cb),
+    subscribeFailures: (cb: () => void) => session.subscribeFailures(cb),
     observeVisible: (paths: string[], options?: EnqueueOptions) => {
       session.observeVisible(paths, options);
     },
@@ -52,6 +55,7 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
     forget: (paths: string[]) => session.forget(paths),
     reset: () => session.reset(),
     refreshSubscribed: () => session.refreshSubscribed(),
+    retryFailures: () => session.retryFailures(),
     snapshot: () => session.snapshot(),
     stats: () => session.stats(),
   }), [session]);
@@ -83,4 +87,13 @@ export function useThumbnail(path: string): {
   const thumbnail = useSyncExternalStore(subscribe, getThumbnail, getThumbnail);
   const failure = useSyncExternalStore(subscribe, getFailure, getFailure);
   return { thumbnail, failure };
+}
+
+export function useThumbnailFailureCount(): number {
+  const session = useThumbnailStore();
+  return useSyncExternalStore(
+    session.subscribeFailures,
+    session.failureCount,
+    session.failureCount,
+  );
 }

@@ -20,11 +20,9 @@ export interface FlowMetadataRailProps {
   readonly activeQueueName: string | null;
   readonly pendingQueueName: string | null;
   readonly allViewed: boolean;
-  readonly showReturnToTop: boolean;
   readonly onApply: (entry: LibraryBrowserItemDTO) => void;
   readonly onFavorite: (entry: LibraryBrowserItemDTO) => void;
   readonly onDetails: (entry: LibraryBrowserItemDTO) => void;
-  readonly onReturnToTop: () => void;
 }
 
 interface MetadataRowProps {
@@ -34,15 +32,15 @@ interface MetadataRowProps {
 }
 
 function MetadataRow({ label, value, priority = 'primary' }: MetadataRowProps) {
-  if (value === null) return null;
   return (
     <div
       className="flow-metadata-rail__metadata-row"
       data-flow-metadata-field={label.toLowerCase()}
+      data-flow-metadata-missing={value === null ? true : undefined}
       data-flow-metadata-priority={priority}
     >
       <dt>{label}</dt>
-      <dd>{value}</dd>
+      <dd>{value ?? '—'}</dd>
     </div>
   );
 }
@@ -64,17 +62,14 @@ export function FlowMetadataRailView({
   activeQueueName,
   pendingQueueName,
   allViewed,
-  showReturnToTop,
   onApply,
   onFavorite,
   onDetails,
-  onReturnToTop,
 }: FlowMetadataRailProps) {
   if (centeredEntry === null) {
     return (
       <aside aria-label="Centered wallpaper details" className="flow-metadata-rail">
         <p className="flow-metadata-rail__empty">No wallpaper centered</p>
-        <p className="flow-metadata-rail__progress">{loadedCount} loaded</p>
       </aside>
     );
   }
@@ -102,11 +97,6 @@ export function FlowMetadataRailView({
             {centeredIndex + 1} of {displayedTotal}
           </span>
           <h3 className="flow-metadata-rail__title">{presentation.name}</h3>
-          <span className="flow-metadata-rail__progress">
-            {totalKnown && total !== null
-              ? `${loadedCount} loaded / ${total} total`
-              : `${loadedCount} loaded`}
-          </span>
         </header>
 
         <div
@@ -121,7 +111,10 @@ export function FlowMetadataRailView({
           {favorite ? <span className="flow-metadata-rail__status">Favorite</span> : null}
         </div>
 
-        <dl className="flow-metadata-rail__metadata" data-flow-metadata-content={true}>
+      </Fragment>
+
+      <div className="flow-metadata-rail__body" data-flow-metadata-content={true}>
+        <dl className="flow-metadata-rail__metadata">
           <MetadataRow label="Source" value={presentation.sources} />
           <MetadataRow label="Type" value={presentation.type} />
           <MetadataRow label="Resolution" value={presentation.resolution} />
@@ -132,24 +125,36 @@ export function FlowMetadataRailView({
           <MetadataRow label="Workshop" priority="secondary" value={presentation.workshopId} />
           <MetadataRow label="Backend" priority="secondary" value={presentation.backend} />
         </dl>
-      </Fragment>
 
-      {(activeQueueName !== null || pendingQueueName !== null) ? (
-        <div aria-label="Apply queue" className="flow-metadata-rail__queue">
-          {activeQueueName !== null ? (
-            <p>
-              <span>Applying now</span>
-              <strong>{activeQueueName}</strong>
-            </p>
-          ) : null}
-          {pendingQueueName !== null ? (
-            <p>
-              <span>Queued next</span>
-              <strong>{pendingQueueName}</strong>
-            </p>
-          ) : null}
-        </div>
-      ) : null}
+        {(activeQueueName !== null || pendingQueueName !== null) ? (
+          <div aria-label="Apply queue" className="flow-metadata-rail__queue">
+            {activeQueueName !== null ? (
+              <p>
+                <span>Applying now</span>
+                <strong>{activeQueueName}</strong>
+              </p>
+            ) : null}
+            {pendingQueueName !== null ? (
+              <p>
+                <span>Queued next</span>
+                <strong>{pendingQueueName}</strong>
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+
+        {disabledReason ? (
+          <p className="flow-metadata-rail__disabled-reason" id={disabledReasonId}>
+            {disabledReason}
+          </p>
+        ) : null}
+
+        {allViewed ? (
+          <p className="flow-metadata-rail__completion">
+            All {displayedTotal} wallpapers viewed
+          </p>
+        ) : null}
+      </div>
 
       <div className="flow-metadata-rail__actions">
         <button
@@ -194,34 +199,6 @@ export function FlowMetadataRailView({
           Details
         </button>
       </div>
-
-      {disabledReason ? (
-        <p className="flow-metadata-rail__disabled-reason" id={disabledReasonId}>
-          {disabledReason}
-        </p>
-      ) : null}
-
-      {allViewed ? (
-        <p className="flow-metadata-rail__completion">
-          All {displayedTotal} wallpapers viewed
-        </p>
-      ) : null}
-
-      {showReturnToTop ? (
-        <button
-          aria-label="Return to first wallpaper"
-          className="flow-metadata-rail__return"
-          data-flow-action="return"
-          onClick={(event) => {
-            event.stopPropagation();
-            onReturnToTop();
-          }}
-          title="Return to first wallpaper"
-          type="button"
-        >
-          <span aria-hidden="true">↑</span>
-        </button>
-      ) : null}
     </aside>
   );
 }

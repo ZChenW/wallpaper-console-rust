@@ -1,5 +1,3 @@
-import type { CSSProperties } from 'react';
-
 import type { ScanProgressDTO } from '../api/types.ts';
 import type { ScanPresentation } from './feedbackState';
 
@@ -9,60 +7,6 @@ export interface ScanActivityProps {
   readonly onCancel: () => void;
   readonly onDismiss: () => void;
 }
-
-const activityStyle: CSSProperties = {
-  position: 'fixed',
-  insetInlineStart: '1rem',
-  bottom: '1rem',
-  zIndex: 900,
-  display: 'flex',
-  alignItems: 'center',
-  width: 'min(28rem, calc(100vw - 2rem))',
-  gap: '0.75rem',
-  padding: '0.7rem 0.8rem',
-  border: '1px solid color-mix(in srgb, currentColor 15%, transparent)',
-  borderRadius: '0.75rem',
-  background: 'color-mix(in srgb, Canvas 94%, transparent)',
-  color: 'CanvasText',
-  boxShadow: '0 0.6rem 1.8rem rgb(0 0 0 / 18%)',
-  backdropFilter: 'blur(14px)',
-};
-
-const textStyle: CSSProperties = {
-  display: 'grid',
-  minWidth: 0,
-  flex: 1,
-  gap: '0.15rem',
-};
-
-const titleStyle: CSSProperties = {
-  fontSize: '0.87rem',
-  fontWeight: 650,
-};
-
-const metaStyle: CSSProperties = {
-  fontSize: '0.75rem',
-  opacity: 0.72,
-};
-
-const progressStyle: CSSProperties = {
-  width: '100%',
-  height: '0.35rem',
-  accentColor: 'currentColor',
-};
-
-const actionStyle: CSSProperties = {
-  flex: '0 0 auto',
-  minHeight: '2rem',
-  padding: '0.3rem 0.65rem',
-  border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
-  borderRadius: '0.45rem',
-  background: 'transparent',
-  color: 'inherit',
-  cursor: 'pointer',
-  font: 'inherit',
-  fontSize: '0.78rem',
-};
 
 /** Formats elapsed scan time at one-second granularity so the label stays stable. */
 export function formatScanElapsed(elapsedMs: number): string {
@@ -108,13 +52,12 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
         data-non-modal="true"
         data-scan-kind="cancelled"
         role="status"
-        style={activityStyle}
       >
-        <div className="scan-activity__content" style={textStyle}>
-          <span className="scan-activity__title" style={titleStyle}>Scan cancelled</span>
-          <span className="scan-activity__meta" style={metaStyle}>Completed source updates were kept.</span>
+        <div className="scan-activity__content">
+          <span className="scan-activity__title">Scan cancelled</span>
+          <span className="scan-activity__meta">Completed source updates were kept.</span>
         </div>
-        <button className="scan-activity__action" onClick={onDismiss} style={actionStyle} type="button">
+        <button className="scan-activity__action" onClick={onDismiss} type="button">
           Dismiss
         </button>
       </section>
@@ -132,19 +75,17 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
       data-non-modal="true"
       data-scan-kind={presentation.kind}
       role="status"
-      style={activityStyle}
     >
-      <div className="scan-activity__content" style={textStyle}>
-        <span className="scan-activity__title" style={titleStyle}>
+      <div className="scan-activity__content">
+        <span className="scan-activity__title">
           {isCancelling ? 'Cancelling scan…' : 'Scanning wallpapers…'}
         </span>
         <progress
           aria-label="Wallpaper scan progress"
           className="scan-activity__progress"
-          style={progressStyle}
           {...(determinate ?? {})}
         />
-        <span className="scan-activity__meta" style={metaStyle}>
+        <span className="scan-activity__meta">
           Elapsed {formatScanElapsed(presentation.elapsedMs)}
         </span>
       </div>
@@ -152,7 +93,6 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
         className="scan-activity__action"
         disabled={!canCancel}
         onClick={canCancel ? onCancel : undefined}
-        style={{ ...actionStyle, cursor: canCancel ? 'pointer' : 'wait', opacity: canCancel ? 1 : 0.62 }}
         type="button"
       >
         {isCancelling ? 'Cancelling…' : 'Cancel'}

@@ -1,10 +1,8 @@
-export const FLOW_SCROLL_IDLE_MS = 100;
-export const FLOW_SNAP_DURATION_MS = 200;
-
 export interface FlowKeyInput {
   readonly key: string;
   readonly currentIndex: number;
   readonly itemCount: number;
+  readonly selectedIndex?: number | null;
   readonly pageStep?: number;
   readonly ctrlKey?: boolean;
   readonly metaKey?: boolean;
@@ -193,7 +191,9 @@ export function resolveFlowKey(input: FlowKeyInput): FlowKeyResolution | null {
       );
     case 'Enter': {
       const index = clampFlowIndex(input.currentIndex, input.itemCount) ?? 0;
-      return input.ctrlKey === true || input.metaKey === true
+      return input.ctrlKey === true
+        || input.metaKey === true
+        || input.selectedIndex === index
         ? { type: 'apply', index }
         : { type: 'select', index };
     }
@@ -247,15 +247,36 @@ export function nearestFlowCenterIndex<TId extends FlowItemId>(
   return nearest ? Math.trunc(nearest.index) : null;
 }
 
-export function localFlowIndexWindow(
-  centerIndex: number,
-  itemCount: number,
-): FlowIndexRange | null {
-  const center = clampFlowIndex(centerIndex, itemCount);
+export interface LocalFlowIndexWindowInput {
+  readonly centerIndex: number;
+  readonly itemCount: number;
+  readonly railHeight: number;
+  readonly rowHeight: number;
+}
+
+export function localFlowIndexWindow({
+  centerIndex,
+  itemCount,
+  railHeight,
+  rowHeight,
+}: LocalFlowIndexWindowInput): FlowIndexRange | null {
+  const count = normalizeItemCount(itemCount);
+  const center = clampFlowIndex(centerIndex, count);
   if (center == null) return null;
+  const safeRowHeight = Number.isFinite(rowHeight) && rowHeight > 0 ? rowHeight : 31;
+  const measuredRows = Number.isFinite(railHeight) && railHeight > 0
+    ? Math.ceil(railHeight / safeRowHeight)
+    : 15;
+  const windowSize = Math.min(count, Math.max(1, measuredRows));
+  const before = Math.floor((windowSize - 1) / 2);
+  const idealStart = center - before;
+  const startIndex = Math.min(
+    Math.max(0, idealStart),
+    Math.max(0, count - windowSize),
+  );
   return {
-    startIndex: Math.max(0, center - 7),
-    endIndex: Math.min(normalizeItemCount(itemCount) - 1, center + 7),
+    startIndex,
+    endIndex: startIndex + windowSize - 1,
   };
 }
 
@@ -448,18 +469,6 @@ export function flowScrollBehavior(
   immediate = false,
 ): FlowScrollBehavior {
   return reducedMotion || immediate ? 'auto' : 'smooth';
-}
-
-export function nextFlowScrollOffset(
-  currentOffset: number,
-  targetOffset: number,
-  maximumStep = 40,
-): number {
-  if (!Number.isFinite(currentOffset) || !Number.isFinite(targetOffset)) return currentOffset;
-  const step = Number.isFinite(maximumStep) && maximumStep > 0 ? maximumStep : 40;
-  const remaining = targetOffset - currentOffset;
-  if (Math.abs(remaining) <= step) return targetOffset;
-  return currentOffset + Math.sign(remaining) * step;
 }
 
 export function isEnhancedFlowMediaEligible(

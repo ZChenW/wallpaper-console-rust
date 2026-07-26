@@ -1,12 +1,30 @@
 import { memo, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
 import type { LibraryBrowserItemDTO } from '../api/bridge';
+import { emitFeedback } from '../events/appEvents.ts';
+import { recordMetric } from '../perf/metrics';
+import type { ApplyGesture } from '../shell/shellPreferences';
+import { useThumbnailStore } from '../state/ThumbnailStoreContext';
+import {
+  calculateWallpaperGridLayout,
+  GRID_GAP,
+  overscanRowsFor,
+  wallpaperCardMetrics,
+  wallpaperGridCardGeometry,
+  type GridLayout,
+  type WallpaperCardSize,
+} from '../utils/layout';
 import ContextMenu from './ContextMenu';
 import { WallpaperCard } from './WallpaperCard';
-import type { ContextAction } from './libraryViewModel.ts';
+import {
+  libraryEntryApplyAvailable,
+  libraryEntryApplyDisabledReason,
+  type ContextAction,
+} from './libraryViewModel.ts';
 import {
   anchoredScrollTopForLayoutChange,
   captureStableViewportAnchor,
+  resolveGridKey,
   restoreStableViewportAnchor,
   shouldApplyFocusToken,
   shouldRequestNextPage,
@@ -16,21 +34,6 @@ import {
   wallpaperApplyFlags,
   wallpaperOrdinal,
 } from './wallpaperGridHelpers';
-import { useThumbnailStore } from '../state/ThumbnailStoreContext';
-import { recordMetric } from '../perf/metrics';
-import {
-  calculateWallpaperGridLayout,
-  GRID_GAP,
-  overscanRowsFor,
-  wallpaperCardMetrics,
-  type GridLayout,
-  type WallpaperCardSize,
-} from '../utils/layout';
-import type { ApplyGesture } from '../shell/shellPreferences';
-import {
-  libraryEntryApplyAvailable,
-  libraryEntryApplyDisabledReason,
-} from './libraryViewModel.ts';
 
 interface Props {
   entries: readonly LibraryBrowserItemDTO[];
@@ -68,15 +71,18 @@ const METRICS_SAMPLE_MS = 500;
 
 interface WallpaperGridLayout extends GridLayout {
   rowHeight: number;
+  thumbnailHeight: number;
 }
 
 function initialGridLayout(cardSize: WallpaperCardSize): WallpaperGridLayout {
   const metrics = wallpaperCardMetrics(cardSize);
+  const geometry = wallpaperGridCardGeometry(metrics.minWidth, cardSize);
   return {
     colCount: 4,
     columnWidth: metrics.minWidth,
     rowWidth: metrics.minWidth * 4 + GRID_GAP * 3,
-    rowHeight: metrics.rowHeight,
+    rowHeight: geometry.rowHeight,
+    thumbnailHeight: geometry.thumbnailHeight,
   };
 }
 
@@ -111,11 +117,11 @@ function WallpaperGridImpl({
   onAnchorChange,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
+  const [activeIndex, setActiveIndex] = useState(0);
   const containerRef = useRef<HTMLDivElement>(null);
   const { observeVisible, setScrolling, setInteracting } = useThumbnailStore();
 
   const prevResetKeyRef = useRef(resetKey);
-  const cardMetrics = wallpaperCardMetrics(cardSize);
   const [gridLayout, setGridLayout] = useState<WallpaperGridLayout>(() => initialGridLayout(cardSize));
   const colCount = gridLayout.colCount;
   const isScrollingRef = useRef(false);
@@ -132,7 +138,9 @@ function WallpaperGridImpl({
   const initialAnchorAppliedRef = useRef(false);
   const lastHandledFocusTokenRef = useRef(0);
   const entriesRef = useRef(entries);
+  const activeIndexRef = useRef(activeIndex);
   entriesRef.current = entries;
+  activeIndexRef.current = activeIndex;
   colCountRef.current = colCount;
   entriesLengthRef.current = entries.length;
   activeRef.current = active;
@@ -164,9 +172,11 @@ function WallpaperGridImpl({
     (w: number) => {
       if (w <= 0) return;
       setGridLayout((prev) => {
+        const layout = calculateWallpaperGridLayout(w, cardSize);
+        const geometry = wallpaperGridCardGeometry(layout.columnWidth, cardSize);
         const next = {
-          ...calculateWallpaperGridLayout(w, cardSize),
-          rowHeight: cardMetrics.rowHeight,
+          ...layout,
+          ...geometry,
         };
         if (next.colCount !== prev.colCount || next.rowHeight !== prev.rowHeight) {
           anchorScrollForLayoutChange(
@@ -180,14 +190,15 @@ function WallpaperGridImpl({
           next.colCount === prev.colCount &&
           next.columnWidth === prev.columnWidth &&
           next.rowWidth === prev.rowWidth &&
-          next.rowHeight === prev.rowHeight
+          next.rowHeight === prev.rowHeight &&
+          next.thumbnailHeight === prev.thumbnailHeight
         ) {
           return prev;
         }
         return next;
       });
     },
-    [anchorScrollForLayoutChange, cardMetrics.rowHeight, cardSize],
+    [anchorScrollForLayoutChange, cardSize],
   );
 
   const beginScrolling = useCallback(() => {
@@ -258,13 +269,13 @@ function WallpaperGridImpl({
   const virtualizer = useVirtualizer({
     count: rowCount,
     getScrollElement: () => containerRef.current,
-    estimateSize: () => cardMetrics.rowHeight,
+    estimateSize: () => gridLayout.rowHeight,
     overscan,
   });
 
   useEffect(() => {
     virtualizer.measure();
-  }, [cardSize, virtualizer]);
+  }, [gridLayout.rowHeight, virtualizer]);
 
   useEffect(() => {
     const nextTop = pendingScrollTopRef.current;
@@ -287,6 +298,7 @@ function WallpaperGridImpl({
   useEffect(() => {
     if (shouldResetScroll(prevResetKeyRef.current, resetKey)) {
       prevResetKeyRef.current = resetKey;
+      setActiveIndex(0);
       if (active) {
         suppressScrollPauseRef.current = true;
         virtualizer.scrollToIndex(0);
@@ -304,6 +316,7 @@ function WallpaperGridImpl({
       ? 0
       : entries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
     const index = anchorIndex >= 0 ? anchorIndex : 0;
+    setActiveIndex(index);
     suppressScrollPauseRef.current = true;
     virtualizer.scrollToIndex(Math.floor(index / colCount), { align: 'start' });
     requestAnimationFrame(() => {
@@ -322,6 +335,7 @@ function WallpaperGridImpl({
       : currentEntries.findIndex((entry) => entry.wallpaperId === initialAnchorWallpaperId);
     const entry = currentEntries[anchorIndex >= 0 ? anchorIndex : 0];
     if (!entry) return;
+    setActiveIndex(anchorIndex >= 0 ? anchorIndex : 0);
     virtualizer.scrollToIndex(Math.floor((anchorIndex >= 0 ? anchorIndex : 0) / colCount), {
       align: 'start',
     });
@@ -333,6 +347,12 @@ function WallpaperGridImpl({
         ?.focus();
     }));
   }, [active, colCount, focusToken, initialAnchorWallpaperId, virtualizer]);
+
+  useEffect(() => {
+    setActiveIndex((current) => (
+      entries.length === 0 ? 0 : Math.min(current, entries.length - 1)
+    ));
+  }, [entries.length]);
 
   useEffect(() => {
     const previous = previousEntriesRef.current;
@@ -440,6 +460,103 @@ function WallpaperGridImpl({
     setContextMenu({ x, y, path });
   }, []);
 
+  const focusGridIndex = useCallback((index: number) => {
+    const entry = entriesRef.current[index];
+    if (!entry) return;
+    setActiveIndex(index);
+    virtualizer.scrollToIndex(Math.floor(index / Math.max(1, colCountRef.current)), {
+      align: 'auto',
+    });
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      document.getElementById(`wallpaper-grid-option-${entry.wallpaperId}`)?.focus({
+        preventScroll: true,
+      });
+    }));
+  }, [virtualizer]);
+
+  const handleGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
+    const target = event.target;
+    if (
+      target !== event.currentTarget
+      && (
+        !(target instanceof HTMLElement)
+        || target.closest('.wallpaper-card__primary') === null
+      )
+    ) {
+      return;
+    }
+    const el = containerRef.current;
+    const currentEntries = entriesRef.current;
+    const intent = resolveGridKey({
+      key: event.key,
+      shiftKey: event.shiftKey,
+      currentIndex: activeIndexRef.current,
+      colCount: colCountRef.current,
+      itemCount: currentEntries.length,
+      pageRows: el
+        ? Math.max(1, Math.floor(el.clientHeight / Math.max(1, gridLayout.rowHeight)))
+        : 1,
+      hasMore,
+      loadingMore,
+    });
+    if (!intent) return;
+    event.preventDefault();
+    event.stopPropagation();
+
+    const entry = currentEntries[intent.index];
+    if (!entry) return;
+    if (intent.type === 'navigate') {
+      focusGridIndex(intent.index);
+      if (intent.requestLoadMore) void onLoadMore?.();
+      return;
+    }
+    if (intent.type === 'context') {
+      focusGridIndex(intent.index);
+      requestAnimationFrame(() => {
+        const option = document.getElementById(`wallpaper-grid-option-${entry.wallpaperId}`);
+        const rect = option?.getBoundingClientRect();
+        handleKeyboardContextMenu(
+          entry.path,
+          (rect?.left ?? 16) + 12,
+          (rect?.top ?? 16) + 12,
+        );
+      });
+      return;
+    }
+
+    const canApply = libraryEntryApplyAvailable(
+      canApplyToDisplay,
+      isEntryApplicable ?? (() => true),
+      entry,
+    );
+    onSelect?.(entry);
+    if (canApply) {
+      onApply(entry);
+      return;
+    }
+    emitFeedback({
+      state: 'warning',
+      label: 'Cannot apply',
+      detail: libraryEntryApplyDisabledReason(
+        canApplyToDisplay,
+        displayApplyDisabledReason,
+        entry,
+      ) ?? 'This item cannot be applied as a live wallpaper.',
+    });
+  }, [
+    canApplyToDisplay,
+    displayApplyDisabledReason,
+    focusGridIndex,
+    gridLayout.rowHeight,
+    handleKeyboardContextMenu,
+    hasMore,
+    isEntryApplicable,
+    loadingMore,
+    onApply,
+    onLoadMore,
+    onSelect,
+  ]);
+
   const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
 
   const findEntry = (path: string): LibraryBrowserItemDTO | undefined => entryByPath.get(path);
@@ -452,11 +569,18 @@ function WallpaperGridImpl({
 
   return (
     <div
+      aria-activedescendant={entries[activeIndex]
+        ? `wallpaper-grid-option-${entries[activeIndex]!.wallpaperId}`
+        : undefined}
       className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`}
       ref={containerRef}
+      onKeyDown={handleGridKeyDown}
       onScroll={handleScroll}
       aria-label="Wallpaper library"
-      role="list"
+      aria-colcount={colCount}
+      aria-rowcount={setSize === undefined ? -1 : Math.ceil(setSize / colCount)}
+      role="grid"
+      tabIndex={active ? 0 : -1}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -465,7 +589,8 @@ function WallpaperGridImpl({
           return (
             <div
               key={virtualRow.key}
-              role="presentation"
+              aria-rowindex={virtualRow.index + 1}
+              role="row"
               style={{
                 position: 'absolute',
                 top: 0,
@@ -479,6 +604,7 @@ function WallpaperGridImpl({
               }}
             >
               {rowEntries.map((e, offset) => {
+                const entryIndex = start + offset;
                 const activity = wallpaperApplyFlags(
                   e.path,
                   applying,
@@ -488,9 +614,10 @@ function WallpaperGridImpl({
                 return (
                   <WallpaperCard
                     key={e.path}
+                    id={`wallpaper-grid-option-${e.wallpaperId}`}
                     entry={e}
                     posInSet={start + offset + 1}
-                    setSize={setSize}
+                    columnIndex={offset + 1}
                     ordinal={wallpaperOrdinal(start + offset)}
                     applying={activity.applying}
                     onApply={onApply}
@@ -515,6 +642,9 @@ function WallpaperGridImpl({
                       e,
                     )}
                     isScrolling={isScrolling}
+                    thumbnailHeight={gridLayout.thumbnailHeight}
+                    onFocus={() => setActiveIndex(entryIndex)}
+                    tabIndex={entryIndex === activeIndex ? 0 : -1}
                   />
                 );
               })}
