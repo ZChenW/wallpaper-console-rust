@@ -47,3 +47,4 @@ CONTEXT.md
 # Development-only scripts and fixtures
 scripts/
 /tests/
+*.html
