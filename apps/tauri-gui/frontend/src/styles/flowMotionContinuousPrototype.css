@@ -1,0 +1,39 @@
+/*
+ * Local Flow motion experiment C. Nothing changes unless the Flow root opts in
+ * with data-flow-motion-prototype="continuous".
+ */
+:root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+  .flow-preview-item:is([data-centered], :not([data-centered])) {
+  opacity: var(--flow-motion-opacity, 0.56);
+  transition: none;
+}
+
+:root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+  .flow-preview-item:is([data-centered], :not([data-centered]))
+  .flow-preview-item__media {
+  transform: scale(var(--flow-motion-scale, 0.97));
+  transition:
+    border-color 260ms var(--editorial-ease-out, ease-out),
+    box-shadow 220ms ease;
+}
+
+:root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+  .flow-preview-item:is([data-centered], :not([data-centered]))
+  .flow-preview-item__media > :is(img, video) {
+  filter:
+    grayscale(var(--flow-motion-grayscale, 0.55))
+    contrast(var(--flow-motion-contrast, 1.04));
+  opacity: var(--flow-motion-media-opacity, 0.9);
+  transition: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+    .flow-preview-item,
+  :root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+    .flow-preview-item__media,
+  :root .wallpaper-flow[data-flow-motion-prototype="continuous"]
+    .flow-preview-item__media > :is(img, video) {
+    transition: none;
+  }
+}
