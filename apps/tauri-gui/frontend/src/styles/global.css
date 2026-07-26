@@ -2383,10 +2383,10 @@ input:focus {
   padding: clamp(1.35rem, 4.8vh, 3.5rem) clamp(0.65rem, 2.1vw, 2rem);
   contain: layout paint style;
   cursor: pointer;
-  opacity: 0.44;
+  opacity: 0.56;
   scroll-snap-align: center;
   scroll-snap-stop: normal;
-  transition: opacity 220ms ease;
+  transition: opacity 420ms ease-in-out;
 }
 
 .flow-preview-item[data-centered] {
@@ -2415,12 +2415,12 @@ input:focus {
   border-radius: 0.28rem;
   background: var(--panel-alt);
   box-shadow: 0 1.2rem 3.6rem color-mix(in srgb, var(--shadow) 42%, transparent);
-  transform: scale(0.94);
+  transform: scale(0.97);
   transform-origin: center;
   transition:
-    border-color 180ms ease,
-    box-shadow 220ms ease,
-    transform 300ms cubic-bezier(.2, .8, .2, 1);
+    border-color 260ms ease-in-out,
+    box-shadow 420ms ease-in-out,
+    transform 420ms ease-in-out;
 }
 
 .flow-preview-item__indicator-layer {
@@ -2462,17 +2462,17 @@ input:focus {
 }
 
 .flow-preview-item__media > :is(img, video) {
-  transition: filter 240ms ease, opacity 240ms ease;
+  transition: filter 360ms ease-in-out, opacity 360ms ease-in-out;
 }
 
 .flow-preview-item:not([data-centered]) .flow-preview-item__media > img {
-  filter: grayscale(0.72) saturate(0.72);
-  opacity: 0.82;
+  filter: grayscale(0.55) contrast(1.04);
+  opacity: 0.9;
 }
 
 .flow-preview-item:not([data-centered]) .flow-preview-item__media > video {
-  filter: grayscale(0.72) saturate(0.72);
-  opacity: 0.82;
+  filter: grayscale(0.55) contrast(1.04);
+  opacity: 0.9;
 }
 
 .flow-preview-item[data-centered] .flow-preview-item__media > img {

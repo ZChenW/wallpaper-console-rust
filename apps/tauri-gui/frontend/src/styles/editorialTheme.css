@@ -363,8 +363,8 @@
 }
 
 :root[data-theme="editorial"] .flow-preview-item {
-  opacity: 0.34;
-  transition: opacity 300ms var(--editorial-ease-out);
+  opacity: 0.56;
+  transition: opacity 420ms ease-in-out;
 }
 
 :root[data-theme="editorial"] .flow-preview-item[data-centered] {
@@ -376,10 +376,10 @@
   border-radius: 0;
   background: var(--panel-alt);
   box-shadow: none;
-  transform: scale(0.925);
+  transform: scale(0.97);
   transition:
-    border-color 260ms var(--editorial-ease-out),
-    transform 560ms var(--editorial-ease-settle);
+    border-color 260ms ease-in-out,
+    transform 420ms ease-in-out;
 }
 
 :root[data-theme="editorial"] .flow-preview-item[data-centered] .flow-preview-item__media {
@@ -389,13 +389,13 @@
 }
 
 :root[data-theme="editorial"] .flow-preview-item:not([data-centered]) .flow-preview-item__media img {
-  filter: grayscale(1) contrast(1.08);
-  opacity: 0.78;
+  filter: grayscale(0.55) contrast(1.04);
+  opacity: 0.9;
 }
 
 :root[data-theme="editorial"] .flow-preview-item:not([data-centered]) .flow-preview-item__media video {
-  filter: grayscale(1) contrast(1.08);
-  opacity: 0.78;
+  filter: grayscale(0.55) contrast(1.04);
+  opacity: 0.9;
 }
 
 :root[data-theme="editorial"] .flow-preview-item[data-centered] .flow-preview-item__media img {
@@ -406,14 +406,6 @@
 :root[data-theme="editorial"] .flow-preview-item[data-centered] .flow-preview-item__media video {
   filter: grayscale(0) contrast(1);
   opacity: 1;
-}
-
-:root[data-theme="editorial"] .flow-preview-item:not([data-settled]) {
-  transition: none;
-}
-
-:root[data-theme="editorial"] .flow-preview-item:not([data-settled]) .flow-preview-item__media {
-  transition: none;
 }
 
 :root[data-theme="editorial"] .flow-preview-item__ordinal,

@@ -23,22 +23,13 @@ import type { ApplyGesture } from '../shell/shellPreferences.ts';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { ApplyIndicator } from './ApplyIndicator.tsx';
 import ContextMenu from './ContextMenu.tsx';
-import FlowMotionPrototypeSwitcher from './FlowMotionPrototypeSwitcher.tsx';
 import FlowIndexDialog from './FlowIndexDialog.tsx';
 import FlowIndexRail, { type FlowIndexRailEntry } from './FlowIndexRail.tsx';
 import FlowMetadataRail from './FlowMetadataRail.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 import { applyFlowHover } from './flowHoverDom.ts';
 import type { FlowMotionKind } from './flowInteractionController.ts';
-import {
-  applyContinuousFlowMotionPrototype,
-  clearContinuousFlowMotionPrototype,
-} from './flowMotionContinuousPrototype.ts';
 import { FlowMomentumController } from './flowMomentum.ts';
-import {
-  resolveFlowMotionPrototypeVariant,
-  type FlowMotionPrototypeVariant,
-} from './flowMotionPrototypeVariant.ts';
 import {
   libraryEntryApplyDisabledReason,
   resolveLibraryFlowStartupAnchor,
@@ -196,11 +187,6 @@ function WallpaperFlowReady({
 }: WallpaperFlowProps) {
   const flowRef = useRef<HTMLElement>(null);
   const streamRef = useRef<HTMLDivElement>(null);
-  const [flowMotionPrototype, setFlowMotionPrototype] =
-    useState<FlowMotionPrototypeVariant | null>(() => resolveFlowMotionPrototypeVariant(
-      typeof window === 'undefined' ? '' : window.location.search,
-      Boolean(import.meta.env?.DEV),
-    ));
   const { observeVisible, setScrolling, setInteracting } = useThumbnailStore();
   const reducedMotion = useReducedMotion();
   const initialAnchor = resolveLibraryFlowStartupAnchor(
@@ -267,49 +253,6 @@ function WallpaperFlowReady({
   const interactionActive = model.active && pageVisible && windowFocused && !indexOpen;
   const interactionActiveRef = useRef(interactionActive);
   interactionActiveRef.current = interactionActive;
-
-  const changeFlowMotionPrototype = useCallback((variant: FlowMotionPrototypeVariant) => {
-    setFlowMotionPrototype(variant);
-    const url = new URL(window.location.href);
-    url.searchParams.set('variant', variant);
-    window.history.replaceState(window.history.state, '', url);
-  }, []);
-
-  useEffect(() => {
-    if (!import.meta.env.DEV || flowMotionPrototype === null) return undefined;
-    void import('../styles/flowMotionPrototypeSwitcher.css');
-    if (flowMotionPrototype === 'balanced') {
-      void import('../styles/flowMotionBalancedPrototype.css');
-    } else {
-      void import('../styles/flowMotionContinuousPrototype.css');
-    }
-    return undefined;
-  }, [flowMotionPrototype]);
-
-  useEffect(() => {
-    const stream = streamRef.current;
-    if (!stream) return undefined;
-    if (flowMotionPrototype !== 'continuous') {
-      clearContinuousFlowMotionPrototype(stream);
-      return undefined;
-    }
-    return () => clearContinuousFlowMotionPrototype(stream);
-  }, [flowMotionPrototype]);
-
-  useEffect(() => {
-    const stream = streamRef.current;
-    if (!stream || flowMotionPrototype !== 'continuous') return undefined;
-    const frame = window.requestAnimationFrame(() => {
-      applyContinuousFlowMotionPrototype(stream);
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [
-    centeredIndex,
-    dimensions.height,
-    dimensions.width,
-    flowMotionPrototype,
-    model.entries.length,
-  ]);
 
   const handleFlowHover = useCallback((wallpaperId: number | null) => {
     hoveredWallpaperIdRef.current = wallpaperId;
@@ -630,9 +573,6 @@ function WallpaperFlowReady({
     if (snapshot.resizeAnchorId !== null || snapshot.phase === 'resize') return null;
     const stream = streamRef.current;
     if (!stream) return null;
-    if (flowMotionPrototype === 'continuous') {
-      applyContinuousFlowMotionPrototype(stream);
-    }
     const nearestIndex = nearestRenderedFlowIndex(stream, model.entries.length);
     if (nearestIndex !== null) {
       const entry = model.entries[nearestIndex];
@@ -646,12 +586,7 @@ function WallpaperFlowReady({
       }
     }
     return nearestIndex;
-  }, [
-    flowMotionPrototype,
-    interactionController,
-    model.entries,
-    updateInteraction,
-  ]);
+  }, [interactionController, model.entries, updateInteraction]);
 
   const scheduleMovingCenterUpdate = useCallback(() => {
     if (scrollCenterFrameRef.current !== null) return;
@@ -1323,7 +1258,6 @@ function WallpaperFlowReady({
       aria-label="Flow wallpaper browser"
       className={`wallpaper-flow${model.refreshing ? ' is-refreshing' : ''}`}
       data-active={interactionActive || undefined}
-      data-flow-motion-prototype={flowMotionPrototype ?? undefined}
       data-scrolling={!settled || undefined}
       ref={flowRef}
     >
@@ -1524,12 +1458,6 @@ function WallpaperFlowReady({
         />
       ) : null}
 
-      {import.meta.env.DEV && flowMotionPrototype ? (
-        <FlowMotionPrototypeSwitcher
-          onChange={changeFlowMotionPrototype}
-          value={flowMotionPrototype}
-        />
-      ) : null}
     </section>
   );
 }
