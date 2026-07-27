@@ -254,7 +254,11 @@ impl AppService {
                 entry.file_type,
                 entry.path.as_str(),
             )),
-            Backend::Awww | Backend::Mpvpaper | Backend::LinuxWallpaperEngine => Ok(backend),
+            Backend::Awww
+            | Backend::Mpvpaper
+            | Backend::Swaybg
+            | Backend::Feh
+            | Backend::LinuxWallpaperEngine => Ok(backend),
         }
     }
 }

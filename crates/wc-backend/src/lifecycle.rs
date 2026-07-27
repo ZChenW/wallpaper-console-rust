@@ -18,6 +18,8 @@ pub enum RunningBackend {
     None,
     Awww,
     Mpvpaper,
+    Swaybg,
+    Feh,
     LinuxWallpaperEngine,
     Unsupported,
     Unknown,
@@ -29,6 +31,8 @@ impl RunningBackend {
             "" => RunningBackend::None,
             "awww" | "swww" => RunningBackend::Awww,
             "mpvpaper" => RunningBackend::Mpvpaper,
+            "swaybg" => RunningBackend::Swaybg,
+            "feh" => RunningBackend::Feh,
             LWE_BACKEND_NAME => RunningBackend::LinuxWallpaperEngine,
             "unsupported" => RunningBackend::Unsupported,
             _ => RunningBackend::Unknown,
@@ -42,6 +46,7 @@ pub enum StopPlan {
     AwwwDaemonOnly,
     LweOnly,
     MpvpaperOnly,
+    SwaybgOnly,
     NonLwe,
     None,
 }
@@ -68,17 +73,43 @@ pub fn plan_apply_lifecycle(previous_raw: &str, target: Backend) -> ApplyLifecyc
 
 pub fn pre_stop_plan(previous: RunningBackend, target: Backend) -> StopPlan {
     match target {
-        Backend::Awww => StopPlan::None,
+        Backend::Awww => match previous {
+            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
+            _ => StopPlan::None,
+        },
         Backend::Mpvpaper => match previous {
             RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
             RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
+            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
+            RunningBackend::Feh => StopPlan::None,
             RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
             RunningBackend::None => StopPlan::All,
             RunningBackend::Unsupported | RunningBackend::Unknown => StopPlan::None,
         },
+        Backend::Swaybg => match previous {
+            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
+            RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
+            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
+            RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
+            RunningBackend::Feh => StopPlan::None,
+            RunningBackend::None => StopPlan::All,
+            RunningBackend::Unsupported | RunningBackend::Unknown => StopPlan::None,
+        },
+        Backend::Feh => match previous {
+            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
+            RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
+            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
+            RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
+            RunningBackend::Feh
+            | RunningBackend::None
+            | RunningBackend::Unsupported
+            | RunningBackend::Unknown => StopPlan::None,
+        },
         Backend::LinuxWallpaperEngine => match previous {
             RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
             RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
+            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
+            RunningBackend::Feh => StopPlan::None,
             RunningBackend::LinuxWallpaperEngine => StopPlan::NonLwe,
             RunningBackend::None | RunningBackend::Unsupported | RunningBackend::Unknown => {
                 StopPlan::None
@@ -94,11 +125,15 @@ pub fn post_success_stop_plan(previous: RunningBackend, target: Backend) -> Stop
             RunningBackend::Awww => StopPlan::MpvpaperOnly,
             RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
             RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
+            RunningBackend::Swaybg => StopPlan::None,
+            RunningBackend::Feh => StopPlan::None,
             RunningBackend::None | RunningBackend::Unsupported | RunningBackend::Unknown => {
                 StopPlan::None
             }
         },
         Backend::Mpvpaper => StopPlan::None,
+        Backend::Swaybg => StopPlan::None,
+        Backend::Feh => StopPlan::None,
         Backend::LinuxWallpaperEngine => StopPlan::None,
         Backend::Unsupported => StopPlan::None,
     }
@@ -111,6 +146,8 @@ pub fn post_success_settle_ms(previous: RunningBackend, target: Backend) -> u64 
         | (RunningBackend::Unsupported, _) => 0,
         (RunningBackend::Awww, Backend::Awww)
         | (RunningBackend::Mpvpaper, Backend::Mpvpaper)
+        | (RunningBackend::Swaybg, Backend::Swaybg)
+        | (RunningBackend::Feh, Backend::Feh)
         | (RunningBackend::LinuxWallpaperEngine, Backend::LinuxWallpaperEngine) => 0,
         (RunningBackend::Mpvpaper | RunningBackend::LinuxWallpaperEngine, Backend::Awww) => {
             AWWW_CROSS_BACKEND_SETTLE_MS
@@ -118,9 +155,17 @@ pub fn post_success_settle_ms(previous: RunningBackend, target: Backend) -> u64 
         (RunningBackend::Awww | RunningBackend::LinuxWallpaperEngine, Backend::Mpvpaper) => {
             MPVPAPER_CROSS_BACKEND_SETTLE_MS
         }
+        (_, Backend::Swaybg) => 0,
+        (_, Backend::Feh) => 0,
         (RunningBackend::Awww | RunningBackend::Mpvpaper, Backend::LinuxWallpaperEngine) => {
             LWE_CROSS_BACKEND_SETTLE_MS
         }
+        (RunningBackend::Swaybg, Backend::Awww)
+        | (RunningBackend::Swaybg, Backend::Mpvpaper)
+        | (RunningBackend::Swaybg, Backend::LinuxWallpaperEngine) => 0,
+        (RunningBackend::Feh, Backend::Awww)
+        | (RunningBackend::Feh, Backend::Mpvpaper)
+        | (RunningBackend::Feh, Backend::LinuxWallpaperEngine) => 0,
         (_, Backend::Unsupported) => 0,
     }
 }
@@ -150,6 +195,24 @@ mod tests {
         let plan = plan_apply_lifecycle("awww", Backend::Mpvpaper);
         assert_eq!(plan.pre_stop, StopPlan::AwwwDaemonOnly);
         assert_eq!(plan.post_success_stop, StopPlan::None);
+    }
+
+    #[test]
+    fn swaybg_replacement_stops_the_previous_swaybg_process_first() {
+        let plan = plan_apply_lifecycle("swaybg", Backend::Swaybg);
+        assert_eq!(plan.pre_stop, StopPlan::SwaybgOnly);
+        assert_eq!(plan.post_success_stop, StopPlan::None);
+    }
+
+    #[test]
+    fn feh_is_a_one_shot_target_but_stops_a_previous_persistent_renderer() {
+        let from_swaybg = plan_apply_lifecycle("swaybg", Backend::Feh);
+        assert_eq!(from_swaybg.pre_stop, StopPlan::SwaybgOnly);
+        assert_eq!(from_swaybg.post_success_stop, StopPlan::None);
+
+        let from_feh = plan_apply_lifecycle("feh", Backend::Feh);
+        assert_eq!(from_feh.pre_stop, StopPlan::None);
+        assert_eq!(from_feh.post_success_stop, StopPlan::None);
     }
 
     #[test]

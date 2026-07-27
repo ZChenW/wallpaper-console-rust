@@ -33,6 +33,8 @@ fn backend_renderer_name(backend: Backend) -> &'static str {
         Backend::LinuxWallpaperEngine => "linux-wallpaperengine",
         Backend::Awww => "Awww",
         Backend::Mpvpaper => "mpvpaper",
+        Backend::Swaybg => "swaybg",
+        Backend::Feh => "feh",
         Backend::Unsupported => "renderer",
     }
 }

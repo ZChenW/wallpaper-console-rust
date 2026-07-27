@@ -181,6 +181,9 @@ pub fn observe_runtime_wallpapers_with(
     let mpvpaper = processes
         .as_ref()
         .map(|processes| collect_mpvpaper_evidence(processes, connected_outputs));
+    let swaybg = processes
+        .as_ref()
+        .map(|processes| collect_swaybg_evidence(processes, connected_outputs));
     let lwe = processes
         .as_ref()
         .map(|processes| collect_lwe_evidence(processes));
@@ -191,9 +194,14 @@ pub fn observe_runtime_wallpapers_with(
             let Some(saved) = expected.get(output.as_str()) else {
                 return unknown(output, "No saved runtime assignment for this output.");
             };
-            if let Some(reason) =
-                runtime_ambiguity_reason(output, &awww, awww_daemon_running, &mpvpaper, &lwe)
-            {
+            if let Some(reason) = runtime_ambiguity_reason(
+                output,
+                &awww,
+                awww_daemon_running,
+                &mpvpaper,
+                &swaybg,
+                &lwe,
+            ) {
                 return unknown(output, &reason);
             }
             match crate::driver::driver_for_persisted_name(saved.backend) {
@@ -228,6 +236,13 @@ pub fn observe_runtime_wallpapers_with(
                     wc_core::types::Backend::Mpvpaper => {
                         observe_mpvpaper(output, saved.wallpaper_path, &mpvpaper)
                     }
+                    wc_core::types::Backend::Swaybg => {
+                        observe_swaybg(output, saved.wallpaper_path, &swaybg)
+                    }
+                    wc_core::types::Backend::Feh => unknown(
+                        output,
+                        "feh is a one-shot X root pixmap setter and exposes no process evidence.",
+                    ),
                     wc_core::types::Backend::LinuxWallpaperEngine => {
                         observe_lwe(output, saved.wallpaper_path, &lwe)
                     }
@@ -246,6 +261,7 @@ fn runtime_ambiguity_reason(
     awww: &AwwwEvidence,
     awww_daemon_running: bool,
     mpvpaper: &Result<MpvpaperEvidence, &String>,
+    swaybg: &Result<SwaybgEvidence, &String>,
     lwe: &Result<LweEvidence, &String>,
 ) -> Option<String> {
     if let AwwwEvidence::Ambiguous(error) = awww {
@@ -267,6 +283,12 @@ fn runtime_ambiguity_reason(
     {
         return Some("A running mpvpaper process has an ambiguous command line.".into());
     }
+    if swaybg
+        .as_ref()
+        .is_ok_and(|evidence| evidence.malformed_process)
+    {
+        return Some("A running swaybg process has an ambiguous command line.".into());
+    }
     if lwe
         .as_ref()
         .is_ok_and(|evidence| evidence.malformed_process || evidence.process_count > 1)
@@ -282,10 +304,129 @@ fn runtime_ambiguity_reason(
             .as_ref()
             .is_ok_and(|evidence| evidence.by_output.contains_key(output)),
     ) + usize::from(
+        swaybg
+            .as_ref()
+            .is_ok_and(|evidence| evidence.by_output.contains_key(output)),
+    ) + usize::from(
         lwe.as_ref()
             .is_ok_and(|evidence| evidence.by_output.contains_key(output)),
     );
     (renderer_count > 1).then(|| format!("Conflicting renderer processes claim output {output}."))
+}
+
+#[derive(Debug, Default)]
+struct SwaybgEvidence {
+    by_output: HashMap<String, Vec<String>>,
+    malformed_process: bool,
+}
+
+fn collect_swaybg_evidence(
+    processes: &[ProcessCommandLine],
+    connected_outputs: &[String],
+) -> SwaybgEvidence {
+    let mut evidence = SwaybgEvidence::default();
+    for process in processes {
+        if !program_is(&process.argv, "swaybg") {
+            continue;
+        }
+        let Some(assignments) = parse_swaybg_command_line(&process.argv, connected_outputs) else {
+            evidence.malformed_process = true;
+            continue;
+        };
+        for (output, path) in assignments {
+            evidence.by_output.entry(output).or_default().push(path);
+        }
+    }
+    evidence
+}
+
+fn parse_swaybg_command_line(
+    argv: &[String],
+    connected_outputs: &[String],
+) -> Option<Vec<(String, String)>> {
+    let mut named = Vec::new();
+    let mut global_image = None;
+    let mut current_output: Option<&str> = None;
+    let mut index = 1;
+    while index < argv.len() {
+        match argv[index].as_str() {
+            "--output" | "-o" => {
+                let output = argv.get(index + 1)?.trim();
+                if output.is_empty()
+                    || !connected_outputs
+                        .iter()
+                        .any(|connected| connected == output)
+                {
+                    return None;
+                }
+                current_output = Some(output);
+                index += 2;
+            }
+            "--image" | "-i" => {
+                let path = argv.get(index + 1)?.trim();
+                if path.is_empty() {
+                    return None;
+                }
+                if let Some(output) = current_output {
+                    named.push((output.to_string(), path.to_string()));
+                } else if global_image.replace(path.to_string()).is_some() {
+                    return None;
+                }
+                index += 2;
+            }
+            "--mode" | "-m" | "--color" | "-c" => {
+                argv.get(index + 1)?;
+                index += 2;
+            }
+            _ => return None,
+        }
+    }
+    if !named.is_empty() {
+        if global_image.is_some() {
+            return None;
+        }
+        let mut seen = std::collections::HashSet::new();
+        if named.iter().any(|(output, _)| !seen.insert(output.clone())) {
+            return None;
+        }
+        return Some(named);
+    }
+    global_image.map(|path| {
+        connected_outputs
+            .iter()
+            .cloned()
+            .map(|output| (output, path.clone()))
+            .collect()
+    })
+}
+
+fn observe_swaybg(
+    output: &str,
+    expected_path: &str,
+    probe: &Result<SwaybgEvidence, &String>,
+) -> RuntimeWallpaperObservation {
+    let evidence = match probe {
+        Ok(evidence) => evidence,
+        Err(error) => return unknown(output, &format!("process inspection failed: {error}")),
+    };
+    if evidence.malformed_process {
+        return unknown(output, "A running swaybg command line was ambiguous.");
+    }
+    let Some(paths) = evidence.by_output.get(output) else {
+        return unknown(output, "No swaybg process owns this output.");
+    };
+    if paths.len() != 1 {
+        return unknown(output, "Multiple swaybg processes claim this output.");
+    }
+    if paths[0] != expected_path {
+        return unknown(output, "swaybg did not confirm the saved wallpaper path.");
+    }
+    RuntimeWallpaperObservation {
+        output: output.to_string(),
+        wallpaper_path: Some(paths[0].clone()),
+        status: RuntimeObservationStatus::Confirmed,
+        reason: None,
+    }
 }
 
 #[derive(Debug)]
@@ -693,7 +834,9 @@ mod tests {
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
 
-    use super::{awww_query_arguments, decode_proc_cmdline, output_with_timeout};
+    use super::{
+        awww_query_arguments, decode_proc_cmdline, output_with_timeout, parse_swaybg_command_line,
+    };
 
     #[test]
     fn awww_query_covers_every_running_namespace() {
@@ -711,6 +854,34 @@ mod tests {
                 "--",
                 "/walls/night sky.mp4"
             ]
+        );
+    }
+
+    #[test]
+    fn swaybg_command_line_maps_named_and_global_images_to_outputs() {
+        let outputs = vec!["eDP-1".to_string(), "HDMI-A-1".to_string()];
+        let named = [
+            "swaybg",
+            "--output",
+            "eDP-1",
+            "--image",
+            "/walls/a.png",
+            "--mode",
+            "fill",
+        ]
+        .map(str::to_string);
+        assert_eq!(
+            parse_swaybg_command_line(&named, &outputs),
+            Some(vec![("eDP-1".into(), "/walls/a.png".into())])
+        );
+
+        let global = ["swaybg", "--image", "/walls/a.png", "--mode", "fit"].map(str::to_string);
+        assert_eq!(
+            parse_swaybg_command_line(&global, &outputs),
+            Some(vec![
+                ("eDP-1".into(), "/walls/a.png".into()),
+                ("HDMI-A-1".into(), "/walls/a.png".into()),
+            ])
         );
     }
 

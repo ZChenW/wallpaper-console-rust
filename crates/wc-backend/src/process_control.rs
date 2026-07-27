@@ -13,6 +13,7 @@ use std::time::Duration;
 
 pub(crate) const LWE_PROGRAM_NAME: &str = "linux-wallpaperengine";
 pub(crate) const MPVPAPER_PROGRAM_NAME: &str = "mpvpaper";
+pub(crate) const SWAYBG_PROGRAM_NAME: &str = "swaybg";
 
 /// True when a command-line token looks like an argv0 invocation of `linux-wallpaperengine`.
 pub(crate) fn token_is_lwe_program(token: &str) -> bool {
@@ -26,6 +27,12 @@ pub(crate) fn token_is_mpvpaper_program(token: &str) -> bool {
     Path::new(token.trim())
         .file_name()
         .is_some_and(|name| name == MPVPAPER_PROGRAM_NAME)
+}
+
+pub(crate) fn token_is_swaybg_program(token: &str) -> bool {
+    Path::new(token.trim())
+        .file_name()
+        .is_some_and(|name| name == SWAYBG_PROGRAM_NAME)
 }
 
 /// Safer pgrep -f pattern for linux-wallpaperengine (argv0 anchored).
@@ -113,6 +120,15 @@ pub(crate) fn pid_looks_like_mpvpaper(pid: i32) -> bool {
     read_proc_cmdline_tokens(pid)
         .and_then(|tokens| tokens.first().cloned())
         .is_some_and(|argv0| token_is_mpvpaper_program(&argv0))
+}
+
+pub(crate) fn pid_looks_like_swaybg(pid: i32) -> bool {
+    if pid <= 0 {
+        return false;
+    }
+    read_proc_cmdline_tokens(pid)
+        .and_then(|tokens| tokens.first().cloned())
+        .is_some_and(|argv0| token_is_swaybg_program(&argv0))
 }
 
 /// Send SIGTERM then SIGKILL to `pid`'s process group when it still looks like LWE.

@@ -96,13 +96,15 @@ fn is_blank(value: &str) -> bool {
 
 /// Normalize a backend identifier for new display-state writes/migration.
 ///
-/// Accepts the three supported backends and the intentional legacy alias
+/// Accepts the supported backends and the intentional legacy alias
 /// `swww` → `awww`. Rejects typos and unknown values so we never persist an
 /// unrestorable backend id.
 fn normalize_supported_backend(raw: &str) -> Result<&'static str, WcError> {
     match raw.trim() {
         "awww" | "swww" => Ok("awww"),
         "mpvpaper" => Ok("mpvpaper"),
+        "swaybg" => Ok("swaybg"),
+        "feh" => Ok("feh"),
         "linux-wallpaperengine" => Ok("linux-wallpaperengine"),
         _ => Err(WcError::Other(format!(
             "unsupported display state backend: {raw}"
@@ -1040,7 +1042,7 @@ mod tests {
     #[test]
     fn upsert_accepts_supported_backends() {
         let conn = open_db();
-        for (i, backend) in ["awww", "mpvpaper", "linux-wallpaperengine"]
+        for (i, backend) in ["awww", "mpvpaper", "swaybg", "feh", "linux-wallpaperengine"]
             .into_iter()
             .enumerate()
         {

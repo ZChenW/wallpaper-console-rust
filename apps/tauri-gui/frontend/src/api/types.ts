@@ -193,6 +193,8 @@ export type LinuxWallpaperEngineStatusDTO = BackendStatusDTO;
 export interface RendererStatusesDTO {
   awww: BackendStatusDTO;
   mpvpaper: BackendStatusDTO;
+  swaybg: BackendStatusDTO;
+  feh: BackendStatusDTO;
   linuxWallpaperEngine: BackendStatusDTO;
 }
 
@@ -368,7 +370,7 @@ export interface WallpaperConsoleApi {
   exportDiagnostics(): Promise<CommandResult>;
 }
 
-export type ImageRendererDTO = 'awww' | 'mpvpaper';
+export type ImageRendererDTO = 'awww' | 'mpvpaper' | 'swaybg' | 'feh';
 export type GifRendererDTO = 'awww' | 'mpvpaper';
 export type VideoRendererDTO = 'mpvpaper';
 export type WallpaperFillModeDTO = 'crop' | 'fit' | 'stretch';

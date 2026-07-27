@@ -23,6 +23,8 @@ pub enum Evidence {
 /// How a backend addresses Wayland/X outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputTargetMode {
+    /// Backend can only address the X root / all displays.
+    AllDisplaysOnly,
     /// Named outputs via an explicit selector (awww `--outputs`).
     NamedOutputs,
     /// Exactly one output name per process invocation (mpvpaper).
@@ -45,6 +47,8 @@ pub enum AllDisplaysTargeting {
 /// Scope of the backend's stop/cleanup path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopScope {
+    /// One-shot setter leaves no renderer process to stop.
+    NoPersistentProcess,
     /// Stopping the shared daemon clears wallpaper for all outputs.
     DaemonWide,
     /// Current stop kills every process matching the backend binary name.
@@ -73,6 +77,8 @@ pub enum SameTargetReplacement {
 /// Whether multiple backend instances can own different outputs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MultiInstanceSupport {
+    /// One-shot command exits after updating desktop state.
+    OneShot,
     /// One shared daemon owns all outputs (awww-daemon).
     SharedDaemon,
     /// Separate per-output processes are CLI-shaped but coexistence unproven.
@@ -189,6 +195,8 @@ pub fn all_capabilities() -> Vec<BackendCapability> {
     [
         Backend::Awww,
         Backend::Mpvpaper,
+        Backend::Swaybg,
+        Backend::Feh,
         Backend::LinuxWallpaperEngine,
     ]
     .into_iter()
@@ -206,11 +214,13 @@ mod tests {
     }
 
     #[test]
-    fn matrix_covers_three_supported_backends() {
+    fn matrix_covers_five_supported_backends() {
         let caps = all_capabilities();
-        assert_eq!(caps.len(), 3);
+        assert_eq!(caps.len(), 5);
         assert!(caps.iter().any(|c| c.backend == Backend::Awww));
         assert!(caps.iter().any(|c| c.backend == Backend::Mpvpaper));
+        assert!(caps.iter().any(|c| c.backend == Backend::Swaybg));
+        assert!(caps.iter().any(|c| c.backend == Backend::Feh));
         assert!(caps
             .iter()
             .any(|c| c.backend == Backend::LinuxWallpaperEngine));
@@ -259,6 +269,17 @@ mod tests {
             CrossOutputCoexistence::Unknown
         );
         assert!(!cap.cross_output_coexistence_verified());
+    }
+
+    #[test]
+    fn feh_is_an_all_displays_one_shot_backend() {
+        let cap = capability_for(Backend::Feh).expect("feh");
+        assert_eq!(cap.output_target_mode, OutputTargetMode::AllDisplaysOnly);
+        assert!(!cap.verified_named_output_targeting());
+        assert_eq!(cap.stop_scope, StopScope::NoPersistentProcess);
+        assert!(!cap.stop_may_affect_non_target_outputs());
+        assert_eq!(cap.multi_instance, MultiInstanceSupport::OneShot);
+        assert_eq!(cap.same_target_replacement, SameTargetReplacement::InPlace);
     }
 
     #[test]

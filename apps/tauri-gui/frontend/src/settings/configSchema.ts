@@ -29,8 +29,8 @@ export const ALL_SETTINGS: SettingEntry[] = [
   // ── Wallpaper (image/GIF/video backends) ──
   {
     key: 'image_backend', label: 'Image backend', type: 'select',
-    options: ['awww', 'mpvpaper'], category: 'wallpaper',
-    description: 'Recommended: awww for smooth static image transitions',
+    options: ['awww', 'mpvpaper', 'swaybg', 'feh'], category: 'wallpaper',
+    description: 'awww and swaybg target Wayland; feh targets Xorg; mpvpaper supports animated media.',
   },
   {
     key: 'gif_backend', label: 'GIF backend', type: 'select',
@@ -45,7 +45,7 @@ export const ALL_SETTINGS: SettingEntry[] = [
   {
     key: 'awww_resize', label: 'Image fit mode', type: 'select',
     options: ['crop', 'fit', 'stretch'], category: 'wallpaper',
-    description: 'Controls how static images are scaled by awww.',
+    description: 'Controls how static images are scaled by awww, swaybg, or feh.',
   },
   {
     key: 'awww_transition_type', label: 'Transition', type: 'select',

@@ -641,6 +641,8 @@ pub(crate) fn parse_backend(raw: &str) -> Result<Backend, AppError> {
     match raw {
         "awww" => Ok(Backend::Awww),
         "mpvpaper" => Ok(Backend::Mpvpaper),
+        "swaybg" => Ok(Backend::Swaybg),
+        "feh" => Ok(Backend::Feh),
         "linux-wallpaperengine" => Ok(Backend::LinuxWallpaperEngine),
         other => Err(AppError {
             code: "invalid_display_state".into(),

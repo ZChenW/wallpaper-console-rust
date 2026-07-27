@@ -1,6 +1,6 @@
 # Wallpaper Console
 
-A wallpaper manager for Linux Wayland desktops.
+A wallpaper manager for Linux Wayland and Xorg desktops.
 
 Browse local wallpapers and supported Wallpaper Engine projects, organize
 favorites, and apply different wallpapers to connected displays.
@@ -63,11 +63,22 @@ download and install commands.
 
 Wallpaper Console uses an external renderer when applying a wallpaper:
 
-- `awww` for images and GIFs
-- `mpvpaper` for videos
+- `awww` for images and GIFs on Wayland
+- `swaybg` for static images on Wayland
+- `feh` for static images on Xorg (All Displays only)
+- `mpvpaper` for images, GIFs, and videos on Wayland
 - `linux-wallpaperengine` for compatible Wallpaper Engine scenes
 
 You only need the renderers for the wallpaper types you use.
+On Arch Linux, install the two optional static-image backends with:
+
+```bash
+sudo pacman -S --needed swaybg feh
+```
+
+The GUI enables only renderers compatible with the current session. swaybg
+supports named Wayland outputs; feh updates the X root wallpaper and therefore
+does not offer named-display targeting.
 
 If the GUI opens to a blank window on a system with WebKitGTK rendering issues,
 start it once with:

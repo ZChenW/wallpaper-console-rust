@@ -118,6 +118,9 @@ export function CompactSettingsPanelView({
 
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
+  const usesFillMode = usesAwww
+    || behaviorSettings.imageBackend === 'swaybg'
+    || behaviorSettings.imageBackend === 'feh';
   const rendererDetectionReady = !rendererStatusesLoading
     && rendererStatusesError === null
     && rendererStatuses !== null;
@@ -125,6 +128,10 @@ export function CompactSettingsPanelView({
     || rendererStatuses?.awww.available !== true;
   const mpvpaperUnavailable = !rendererDetectionReady
     || rendererStatuses?.mpvpaper.available !== true;
+  const swaybgUnavailable = !rendererDetectionReady
+    || rendererStatuses?.swaybg.available !== true;
+  const fehUnavailable = !rendererDetectionReady
+    || rendererStatuses?.feh.available !== true;
   const lweUnavailable = !rendererDetectionReady
     || rendererStatuses?.linuxWallpaperEngine.available !== true;
   const updateTheme = (value: string) => {
@@ -190,10 +197,11 @@ export function CompactSettingsPanelView({
     if (event.target === event.currentTarget) onClose();
   };
   const rendererCard = (
-    renderer: 'awww' | 'mpvpaper',
+    renderer: 'awww' | 'mpvpaper' | 'swaybg' | 'feh',
     selected: boolean,
     unavailable: boolean,
     onClick?: () => void,
+    unavailableDetail?: string,
   ) => (
     <button
       aria-disabled={onClick ? undefined : true}
@@ -203,6 +211,9 @@ export function CompactSettingsPanelView({
       data-renderer={renderer}
       disabled={onClick ? !behaviorReady || unavailable : undefined}
       tabIndex={onClick ? undefined : -1}
+      title={unavailable
+        ? unavailableDetail ?? 'Renderer status is unavailable.'
+        : undefined}
       type="button"
       onClick={onClick}
     >
@@ -343,9 +354,13 @@ export function CompactSettingsPanelView({
                 <span>Image</span>
                 <div className="settings-renderer-cards">
                   {rendererCard('awww', behaviorSettings.imageBackend === 'awww', awwwUnavailable,
-                    () => updateImageRenderer('awww'))}
+                    () => updateImageRenderer('awww'), rendererStatuses?.awww.detail)}
                   {rendererCard('mpvpaper', behaviorSettings.imageBackend === 'mpvpaper', mpvpaperUnavailable,
-                    () => updateImageRenderer('mpvpaper'))}
+                    () => updateImageRenderer('mpvpaper'), rendererStatuses?.mpvpaper.detail)}
+                  {rendererCard('swaybg', behaviorSettings.imageBackend === 'swaybg', swaybgUnavailable,
+                    () => updateImageRenderer('swaybg'), rendererStatuses?.swaybg.detail)}
+                  {rendererCard('feh', behaviorSettings.imageBackend === 'feh', fehUnavailable,
+                    () => updateImageRenderer('feh'), rendererStatuses?.feh.detail)}
                 </div>
               </div>
               <div
@@ -356,9 +371,9 @@ export function CompactSettingsPanelView({
                 <span>GIF</span>
                 <div className="settings-renderer-cards">
                   {rendererCard('awww', behaviorSettings.gifBackend === 'awww', awwwUnavailable,
-                    () => updateGifRenderer('awww'))}
+                    () => updateGifRenderer('awww'), rendererStatuses?.awww.detail)}
                   {rendererCard('mpvpaper', behaviorSettings.gifBackend === 'mpvpaper', mpvpaperUnavailable,
-                    () => updateGifRenderer('mpvpaper'))}
+                    () => updateGifRenderer('mpvpaper'), rendererStatuses?.mpvpaper.detail)}
                 </div>
               </div>
               <div
@@ -368,20 +383,28 @@ export function CompactSettingsPanelView({
               >
                 <span>Video</span>
                 <div className="settings-renderer-cards settings-renderer-cards--single">
-                  {rendererCard('mpvpaper', true, mpvpaperUnavailable)}
+                  {rendererCard(
+                    'mpvpaper',
+                    true,
+                    mpvpaperUnavailable,
+                    undefined,
+                    rendererStatuses?.mpvpaper.detail,
+                  )}
                 </div>
               </div>
             </div>
           </div>
           <h4 className="settings-behavior-category">Image appearance</h4>
-          {usesAwww ? (
+          {usesFillMode ? (
             <div
               aria-labelledby="settings-fill-transition-heading"
               className="settings-behavior-card"
               data-behavior-card="image-appearance"
               role="group"
             >
-              <h5 id="settings-fill-transition-heading">Fill &amp; transition</h5>
+              <h5 id="settings-fill-transition-heading">
+                {usesAwww ? 'Fill & transition' : 'Fill'}
+              </h5>
               <div className="settings-behavior-card__rows">
                 <div className="settings-behavior-row">
                   <span>Fill behavior</span>
@@ -399,53 +422,57 @@ export function CompactSettingsPanelView({
                     variant="settings"
                   />
                 </div>
-                <div className="settings-behavior-row">
-                  <span>Transition</span>
-                  <SelectField
-                    aria-label="awww transition type"
-                    dataBehaviorControl={true}
-                    disabled={!behaviorReady}
-                    onValueChange={updateAwwwTransitionType}
-                    options={AWWW_TRANSITION_TYPES.map((transitionType) => ({
-                      value: transitionType,
-                      label: transitionType,
-                    }))}
-                    value={behaviorSettings.awwwTransitionType}
-                    variant="settings"
-                  />
-                </div>
-                <label className="settings-behavior-row">
-                  <span>Transition duration</span>
-                  <DeferredNumberInput
-                    aria-label="awww transition duration"
-                    confirmed={behaviorSettings.awwwTransitionDuration}
-                    disabled={!behaviorReady}
-                    max={60}
-                    min={0}
-                    onCommit={updateAwwwTransitionDuration}
-                    step={0.1}
-                    unit="s"
-                    unitKind="seconds"
-                  />
-                </label>
-                <label className="settings-behavior-row">
-                  <span>Transition FPS</span>
-                  <DeferredNumberInput
-                    aria-label="awww transition FPS"
-                    confirmed={behaviorSettings.awwwTransitionFps}
-                    disabled={!behaviorReady}
-                    max={240}
-                    min={1}
-                    onCommit={updateAwwwTransitionFps}
-                    step={1}
-                    unit="FPS"
-                    unitKind="transition-fps"
-                  />
-                </label>
+                {usesAwww ? (
+                  <>
+                    <div className="settings-behavior-row">
+                      <span>Transition</span>
+                      <SelectField
+                        aria-label="awww transition type"
+                        dataBehaviorControl={true}
+                        disabled={!behaviorReady}
+                        onValueChange={updateAwwwTransitionType}
+                        options={AWWW_TRANSITION_TYPES.map((transitionType) => ({
+                          value: transitionType,
+                          label: transitionType,
+                        }))}
+                        value={behaviorSettings.awwwTransitionType}
+                        variant="settings"
+                      />
+                    </div>
+                    <label className="settings-behavior-row">
+                      <span>Transition duration</span>
+                      <DeferredNumberInput
+                        aria-label="awww transition duration"
+                        confirmed={behaviorSettings.awwwTransitionDuration}
+                        disabled={!behaviorReady}
+                        max={60}
+                        min={0}
+                        onCommit={updateAwwwTransitionDuration}
+                        step={0.1}
+                        unit="s"
+                        unitKind="seconds"
+                      />
+                    </label>
+                    <label className="settings-behavior-row">
+                      <span>Transition FPS</span>
+                      <DeferredNumberInput
+                        aria-label="awww transition FPS"
+                        confirmed={behaviorSettings.awwwTransitionFps}
+                        disabled={!behaviorReady}
+                        max={240}
+                        min={1}
+                        onCommit={updateAwwwTransitionFps}
+                        step={1}
+                        unit="FPS"
+                        unitKind="transition-fps"
+                      />
+                    </label>
+                  </>
+                ) : null}
               </div>
             </div>
           ) : (
-            <p>Fill and transition controls are available when awww handles images or GIFs.</p>
+            <p>Image appearance is controlled by the selected renderer.</p>
           )}
 
           <h4 className="settings-behavior-category">Wallpaper Engine</h4>

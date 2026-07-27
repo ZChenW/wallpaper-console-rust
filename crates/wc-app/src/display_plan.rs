@@ -320,6 +320,14 @@ fn reject_same_backend_on_other_output(
     other: &RunningAssignment,
 ) -> Result<(), RejectionReason> {
     match capability.multi_instance {
+        MultiInstanceSupport::OneShot => Err(RejectionReason::WouldAffectNonTargetDisplay {
+            non_target: other.output.clone(),
+            explanation: format!(
+                "{} is an all-displays one-shot setter and cannot change only {}",
+                request.backend.as_str(),
+                target
+            ),
+        }),
         MultiInstanceSupport::SharedDaemon => Ok(()),
         MultiInstanceSupport::SeparateProcessesVerified => {
             if capability.stop_may_affect_non_target_outputs() {
@@ -737,6 +745,36 @@ mod tests {
                 outputs: dual_outputs(),
             }]
         );
+    }
+
+    #[test]
+    fn feh_accepts_only_explicit_all_displays() {
+        let plan = plan_display_apply(&req(
+            DisplayTarget::AllDisplays,
+            Backend::Feh,
+            dual_outputs(),
+            vec![],
+        ))
+        .expect("feh may intentionally update the X root for all displays");
+        assert_eq!(
+            plan.actions,
+            vec![PlannedAction::Apply {
+                backend: Backend::Feh,
+                outputs: dual_outputs(),
+            }]
+        );
+
+        let error = plan_display_apply(&req(
+            DisplayTarget::Output(edp()),
+            Backend::Feh,
+            dual_outputs(),
+            vec![],
+        ))
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            RejectionReason::UnverifiedTargetScope { .. }
+        ));
     }
 
     #[test]

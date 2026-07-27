@@ -25,6 +25,8 @@ pub const BEHAVIOR_SETTING_KEYS: &[&str] = &[
 pub enum ImageRenderer {
     Awww,
     Mpvpaper,
+    Swaybg,
+    Feh,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -148,10 +150,11 @@ impl BehaviorSettings {
     pub fn from_config(values: &HashMap<String, String>) -> Self {
         let value = |key: &str| values.get(key).map(String::as_str).unwrap_or_default();
         Self {
-            image_backend: if value("image_backend") == "mpvpaper" {
-                ImageRenderer::Mpvpaper
-            } else {
-                ImageRenderer::Awww
+            image_backend: match value("image_backend") {
+                "mpvpaper" => ImageRenderer::Mpvpaper,
+                "swaybg" => ImageRenderer::Swaybg,
+                "feh" => ImageRenderer::Feh,
+                _ => ImageRenderer::Awww,
             },
             gif_backend: if value("gif_backend") == "mpvpaper" {
                 GifRenderer::Mpvpaper
@@ -413,5 +416,29 @@ mod tests {
         );
         assert!(entries.contains(&("awww_transition_duration", "1".into())));
         assert!(entries.contains(&("restore_on_login", "off".into())));
+    }
+
+    #[test]
+    fn swaybg_image_renderer_round_trips_through_config() {
+        let settings = BehaviorSettings::from_config(&HashMap::from([(
+            "image_backend".into(),
+            "swaybg".into(),
+        )]));
+
+        assert_eq!(settings.image_backend, ImageRenderer::Swaybg);
+        assert!(settings
+            .config_entries()
+            .contains(&("image_backend", "swaybg".into())));
+    }
+
+    #[test]
+    fn feh_image_renderer_round_trips_through_config() {
+        let settings =
+            BehaviorSettings::from_config(&HashMap::from([("image_backend".into(), "feh".into())]));
+
+        assert_eq!(settings.image_backend, ImageRenderer::Feh);
+        assert!(settings
+            .config_entries()
+            .contains(&("image_backend", "feh".into())));
     }
 }

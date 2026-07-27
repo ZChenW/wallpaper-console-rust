@@ -36,6 +36,8 @@ impl FileType {
 pub enum Backend {
     Awww,
     Mpvpaper,
+    Swaybg,
+    Feh,
     #[serde(rename = "linux-wallpaperengine")]
     LinuxWallpaperEngine,
     Unsupported,
@@ -46,6 +48,8 @@ impl Backend {
         match self {
             Backend::Awww => "awww",
             Backend::Mpvpaper => "mpvpaper",
+            Backend::Swaybg => "swaybg",
+            Backend::Feh => "feh",
             Backend::LinuxWallpaperEngine => "linux-wallpaperengine",
             Backend::Unsupported => "unsupported",
         }

@@ -16,8 +16,8 @@ pub struct BackendRouting {
 impl BackendRouting {
     pub fn from_raw(image: &str, gif: &str, _video: &str) -> Self {
         Self {
-            image: normalize_still_or_animated_image_backend(image),
-            gif: normalize_still_or_animated_image_backend(gif),
+            image: normalize_image_backend(image),
+            gif: normalize_gif_backend(gif),
         }
     }
 
@@ -38,7 +38,15 @@ impl Default for BackendRouting {
     }
 }
 
-fn normalize_still_or_animated_image_backend(raw: &str) -> Backend {
+fn normalize_image_backend(raw: &str) -> Backend {
+    match raw {
+        "swaybg" => Backend::Swaybg,
+        "feh" => Backend::Feh,
+        raw => normalize_gif_backend(raw),
+    }
+}
+
+fn normalize_gif_backend(raw: &str) -> Backend {
     match raw {
         "mpvpaper" => Backend::Mpvpaper,
         _ => Backend::Awww,
@@ -74,6 +82,22 @@ mod tests {
 
         assert_eq!(routing.backend_for(FileType::Image), Backend::Mpvpaper);
         assert_eq!(routing.backend_for(FileType::Gif), Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn static_images_can_opt_into_swaybg_without_routing_gifs_to_it() {
+        let routing = BackendRouting::from_raw("swaybg", "swaybg", "mpvpaper");
+
+        assert_eq!(routing.backend_for(FileType::Image), Backend::Swaybg);
+        assert_eq!(routing.backend_for(FileType::Gif), Backend::Awww);
+    }
+
+    #[test]
+    fn static_images_can_opt_into_feh_without_routing_gifs_to_it() {
+        let routing = BackendRouting::from_raw("feh", "feh", "mpvpaper");
+
+        assert_eq!(routing.backend_for(FileType::Image), Backend::Feh);
+        assert_eq!(routing.backend_for(FileType::Gif), Backend::Awww);
     }
 
     #[test]

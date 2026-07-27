@@ -27,6 +27,8 @@ pub fn wallpaper_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Wal
     let backend = match backend_s.as_str() {
         "awww" | "swww" => Backend::Awww,
         "mpvpaper" => Backend::Mpvpaper,
+        "swaybg" => Backend::Swaybg,
+        "feh" => Backend::Feh,
         "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
         "chromium-web" | "webkit-layer-shell" => Backend::Unsupported,
         _ => Backend::Unsupported,

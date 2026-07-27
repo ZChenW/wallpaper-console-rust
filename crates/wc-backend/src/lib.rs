@@ -29,6 +29,7 @@ mod deadline_command;
 mod debug_log;
 mod mpvpaper;
 mod restore;
+mod swaybg;
 
 pub use apply_transition::{
     execute_apply_transition, plan_apply_transition, preflight_apply_transition,
@@ -48,6 +49,7 @@ use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
     linux_wallpaperengine::stop(s);
     mpvpaper::stop_mpvpaper();
+    swaybg::stop_swaybg();
     stop_awww();
     // Fallback cleanup: kill residual scene renderer processes that may not have been
     // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
@@ -74,6 +76,9 @@ pub(crate) fn execute_stop_plan_with_runtime(
             if let Some(d) = driver::driver_for(Backend::Mpvpaper) {
                 d.stop(runtime, Some(s));
             }
+            if let Some(d) = driver::driver_for(Backend::Swaybg) {
+                d.stop(runtime, Some(s));
+            }
             if let Some(d) = driver::driver_for(Backend::LinuxWallpaperEngine) {
                 d.stop(runtime, Some(s));
             }
@@ -91,6 +96,12 @@ pub(crate) fn execute_stop_plan_with_runtime(
             }
             Ok(())
         }
+        lifecycle::StopPlan::SwaybgOnly => {
+            if let Some(d) = driver::driver_for(Backend::Swaybg) {
+                d.stop(runtime, Some(s));
+            }
+            Ok(())
+        }
         lifecycle::StopPlan::LweOnly => {
             if let Some(d) = driver::driver_for(Backend::LinuxWallpaperEngine) {
                 d.stop(runtime, Some(s));
@@ -102,6 +113,9 @@ pub(crate) fn execute_stop_plan_with_runtime(
                 d.stop(runtime, Some(s));
             }
             if let Some(d) = driver::driver_for(Backend::Mpvpaper) {
+                d.stop(runtime, Some(s));
+            }
+            if let Some(d) = driver::driver_for(Backend::Swaybg) {
                 d.stop(runtime, Some(s));
             }
             Ok(())
@@ -1673,6 +1687,65 @@ mod tests {
             rt.command_output_count >= 1,
             "awww instant fallback must use runtime.command_output"
         );
+    }
+
+    #[test]
+    fn swaybg_apply_launches_and_confirms_the_renderer_before_writing_state() {
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("").unwrap();
+        let image = tmp.path().join("swaybg.png");
+        std::fs::write(&image, b"image").unwrap();
+        let mut runtime = FakeRuntime {
+            command_status_success: true,
+            swaybg_ready_pid: Some(52),
+            ..Default::default()
+        };
+
+        apply_with_fake_runtime(
+            &s,
+            &image.to_string_lossy(),
+            Backend::Swaybg,
+            None,
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.command_status_programs, ["setsid"]);
+        assert_eq!(runtime.swaybg_wait_count, 1);
+        assert_eq!(runtime.swaybg_pid_running_checks, [52]);
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("swaybg"));
+    }
+
+    #[test]
+    fn feh_apply_runs_once_and_writes_state_only_after_success() {
+        let (tmp, s) = temp_storage();
+        s.last_backend_write("").unwrap();
+        let image = tmp.path().join("feh.png");
+        std::fs::write(&image, b"image").unwrap();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            ..Default::default()
+        };
+
+        apply_with_fake_runtime(
+            &s,
+            &image.to_string_lossy(),
+            Backend::Feh,
+            None,
+            &mut runtime,
+        )
+        .unwrap();
+
+        assert_eq!(runtime.command_output_programs, ["feh"]);
+        assert_eq!(
+            runtime.command_output_args,
+            [vec![
+                "--no-fehbg".to_string(),
+                "--bg-fill".to_string(),
+                image.to_string_lossy().to_string(),
+            ]]
+        );
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("feh"));
     }
 
     #[test]

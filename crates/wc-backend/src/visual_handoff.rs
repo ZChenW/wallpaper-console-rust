@@ -39,6 +39,18 @@ pub fn plan_visual_handoff(
     match target {
         Backend::Awww => plan_awww_handoff(previous, fallback_path),
         Backend::Mpvpaper => plan_mpvpaper_handoff(previous, fallback_path),
+        Backend::Swaybg => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: 0,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
+        Backend::Feh => VisualHandoffPlan {
+            fallback_stage: FallbackStage::None,
+            target_startup_settle_ms: 0,
+            stop_previous_after_fallback: false,
+            stop_fallback_after_target_settle: false,
+        },
         Backend::LinuxWallpaperEngine => plan_lwe_handoff(previous, fallback_path),
         Backend::Unsupported => VisualHandoffPlan {
             fallback_stage: FallbackStage::None,
@@ -52,6 +64,8 @@ pub fn plan_visual_handoff(
 fn plan_awww_handoff(previous: RunningBackend, fallback_path: Option<&str>) -> VisualHandoffPlan {
     match previous {
         RunningBackend::Awww
+        | RunningBackend::Swaybg
+        | RunningBackend::Feh
         | RunningBackend::None
         | RunningBackend::Unknown
         | RunningBackend::Unsupported => VisualHandoffPlan {
