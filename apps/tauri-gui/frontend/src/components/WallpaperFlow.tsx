@@ -437,6 +437,11 @@ function WallpaperFlowReady({
     setScrolling(true);
     const targetRendered = virtualizer.getVirtualItems().some((item) => item.index === index);
     const immediate = direct || reducedMotion || !targetRendered;
+    if (immediate) {
+      streamRef.current?.setAttribute('data-instant-navigation', 'true');
+    } else {
+      streamRef.current?.removeAttribute('data-instant-navigation');
+    }
     virtualizer.scrollToIndex(index, {
       align: 'center',
       behavior: flowScrollBehavior(reducedMotion, immediate),
@@ -510,6 +515,7 @@ function WallpaperFlowReady({
     const finalizeSettledAnchor = () => {
       directInputActiveRef.current = false;
       streamRef.current?.removeAttribute('data-direct-scroll');
+      streamRef.current?.removeAttribute('data-instant-navigation');
       suppressProgrammaticScrollRef.current = false;
       clearPending();
       scrollingRef.current = false;
@@ -675,6 +681,7 @@ function WallpaperFlowReady({
   const cancelProgrammaticScroll = useCallback(() => {
     momentumControllerRef.current?.cancel();
     const stream = streamRef.current;
+    stream?.removeAttribute('data-instant-navigation');
     if (suppressProgrammaticScrollRef.current && stream) {
       stream.scrollTo({ top: stream.scrollTop, behavior: 'auto' });
     }
@@ -1057,6 +1064,7 @@ function WallpaperFlowReady({
     interactionController.abortAdapterMotion();
     interactionController.releaseAppend();
     streamRef.current?.removeAttribute('data-direct-scroll');
+    streamRef.current?.removeAttribute('data-instant-navigation');
     suppressProgrammaticScrollRef.current = false;
     setScrolling(false);
     setInteracting(true);

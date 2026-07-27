@@ -195,6 +195,12 @@ select:focus, input:focus { border-color: #555; }
 .wallpaper-preview-image[data-preview-loaded] {
   animation: wallpaper-preview-enter 160ms ease-out both;
 }
+.wallpaper-preview-image--preload {
+  position: absolute;
+  inset: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
 @keyframes wallpaper-placeholder-pulse {
   0%, 100% { opacity: 0.58; }
   50% { opacity: 0.92; }
@@ -2463,6 +2469,12 @@ input:focus {
 
 .flow-preview-item__media > :is(img, video) {
   transition: filter 360ms ease-in-out, opacity 360ms ease-in-out;
+}
+
+.flow-preview-stream[data-instant-navigation] .flow-preview-item,
+.flow-preview-stream[data-instant-navigation] .flow-preview-item__media,
+.flow-preview-stream[data-instant-navigation] .flow-preview-item__media > :is(img, video) {
+  transition: none;
 }
 
 .wallpaper-preview-image[data-preview-entry-stable] {

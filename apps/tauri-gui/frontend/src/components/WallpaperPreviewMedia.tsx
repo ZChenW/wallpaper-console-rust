@@ -93,6 +93,7 @@ export default function WallpaperPreviewMedia({
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
   const [thumbnailLoadFailed, setThumbnailLoadFailed] = useState(false);
   const [loadedImage, setLoadedImage] = useState<{
+    entryPath: string;
     path: string;
     stableEntry: boolean;
   } | null>(null);
@@ -161,10 +162,50 @@ export default function WallpaperPreviewMedia({
   });
   const videoPosterPath = (staticFallbackLoadFailed ? null : authorizedStaticFallback.path)
     ?? (thumbnailLoadFailed ? undefined : thumbnail);
+  const displayedImage = loadedImage?.entryPath === entry.path ? loadedImage : null;
   const imageLoaded = imagePath !== null
     && imagePath !== undefined
-    && loadedImage?.path === imagePath;
-  const imageEntryStable = imageLoaded && loadedImage.stableEntry;
+    && displayedImage?.path === imagePath;
+  const pendingImagePath = imagePath && !imageLoaded ? imagePath : null;
+
+  const handleImageError = (failedPath: string) => {
+    setLoadedImage((current) => (
+      current?.entryPath === entry.path && current.path === failedPath ? null : current
+    ));
+    if (failedPath !== imagePath) return;
+    if (authorizedCandidate.path) {
+      handleEnhancedError();
+    } else if (authorizedStaticFallback.path) {
+      setStaticFallbackLoadFailed(true);
+    } else {
+      setThumbnailLoadFailed(true);
+    }
+  };
+
+  const handleImageLoad = (
+    image: HTMLImageElement,
+    loadedPath: string,
+    replacingDisplayedImage: boolean,
+  ) => {
+    const commitDecodedImage = () => {
+      if (!image.isConnected || image.getAttribute('data-preview-path') !== loadedPath) return;
+      setLoadedImage({
+        entryPath: entry.path,
+        path: loadedPath,
+        stableEntry: replacingDisplayedImage || (
+          entranceStabilityRef.current.entryPath === entry.path
+          && entranceStabilityRef.current.stabilize
+        ),
+      });
+    };
+    if (typeof image.decode !== 'function') {
+      commitDecodedImage();
+      return;
+    }
+    void image.decode().then(commitDecodedImage, () => {
+      if (image.complete && image.naturalWidth > 0) commitDecodedImage();
+    });
+  };
 
   if (activeCandidate?.kind === 'video' && authorizedCandidate.path) {
     return (
@@ -189,9 +230,10 @@ export default function WallpaperPreviewMedia({
   }
 
   if (imagePath) {
+    const imageClassName = ['wallpaper-preview-image', className].filter(Boolean).join(' ');
     return (
       <>
-        {!imageLoaded ? (
+        {!displayedImage ? (
           <span
             aria-hidden="true"
             className="wallpaper-thumb-placeholder wallpaper-thumb-placeholder--loading"
@@ -199,32 +241,51 @@ export default function WallpaperPreviewMedia({
             <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
           </span>
         ) : null}
-        <img
-          alt={alt}
-          className={['wallpaper-preview-image', className].filter(Boolean).join(' ')}
-          data-enhanced-preview={authorizedCandidate.path ? 'image' : undefined}
-          data-preview-entry-stable={imageEntryStable || undefined}
-          data-preview-loaded={imageLoaded || undefined}
-          decoding="async"
-          draggable={false}
-          loading={loading}
-          onError={() => {
-            setLoadedImage(null);
-            if (authorizedCandidate.path) {
-              handleEnhancedError();
-            } else if (authorizedStaticFallback.path) {
-              setStaticFallbackLoadFailed(true);
-            } else {
-              setThumbnailLoadFailed(true);
+        {displayedImage ? (
+          <img
+            alt={alt}
+            className={imageClassName}
+            data-enhanced-preview={
+              displayedImage.path === authorizedCandidate.path ? 'image' : undefined
             }
-          }}
-          onLoad={() => setLoadedImage({
-            path: imagePath,
-            stableEntry: entranceStabilityRef.current.entryPath === entry.path
-              && entranceStabilityRef.current.stabilize,
-          })}
-          src={safeFileSrc(imagePath)}
-        />
+            data-preview-entry-stable={displayedImage.stableEntry || undefined}
+            data-preview-loaded="true"
+            data-preview-path={displayedImage.path}
+            decoding="async"
+            draggable={false}
+            key={displayedImage.path}
+            loading={loading}
+            onError={() => handleImageError(displayedImage.path)}
+            onLoad={(event) => handleImageLoad(
+              event.currentTarget,
+              displayedImage.path,
+              false,
+            )}
+            src={safeFileSrc(displayedImage.path)}
+          />
+        ) : null}
+        {pendingImagePath ? (
+          <img
+            alt={displayedImage ? '' : alt}
+            aria-hidden={displayedImage ? 'true' : undefined}
+            className={[
+              imageClassName,
+              displayedImage ? 'wallpaper-preview-image--preload' : '',
+            ].filter(Boolean).join(' ')}
+            data-preview-path={pendingImagePath}
+            decoding="async"
+            draggable={false}
+            key={pendingImagePath}
+            loading={loading}
+            onError={() => handleImageError(pendingImagePath)}
+            onLoad={(event) => handleImageLoad(
+              event.currentTarget,
+              pendingImagePath,
+              displayedImage !== null,
+            )}
+            src={safeFileSrc(pendingImagePath)}
+          />
+        ) : null}
         {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
       </>
     );
