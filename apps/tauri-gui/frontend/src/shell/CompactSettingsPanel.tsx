@@ -11,6 +11,7 @@ import { isShellTheme, SHELL_THEME_OPTIONS } from './shellThemes.ts';
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
 import {
   AWWW_TRANSITION_TYPES,
+  DEFAULT_MPVPAPER_OPTIONS,
   LWE_SCALING_MODES,
   type AwwwTransitionType,
   type GifRenderer,
@@ -45,6 +46,52 @@ export interface CompactSettingsPanelProps {
 
 function errorMessage(error: Error): string {
   return error.message.trim() || 'Unknown configuration error';
+}
+
+function BehaviorHelp({
+  id,
+  label,
+  text,
+}: {
+  readonly id: string;
+  readonly label: string;
+  readonly text: string;
+}) {
+  return (
+    <span className="settings-behavior-help-wrap">
+      <button
+        aria-describedby={id}
+        aria-label={label}
+        className="settings-behavior-help"
+        data-behavior-help={label}
+        data-help-dismissed="false"
+        onBlur={(event) => {
+          event.currentTarget.dataset.helpDismissed = 'false';
+        }}
+        onKeyDown={(event) => {
+          if (
+            event.key !== 'Escape'
+            || event.currentTarget.dataset.helpDismissed === 'true'
+          ) return;
+          event.preventDefault();
+          event.stopPropagation();
+          event.currentTarget.dataset.helpDismissed = 'true';
+        }}
+        onMouseEnter={(event) => {
+          event.currentTarget.dataset.helpDismissed = 'false';
+        }}
+        onMouseLeave={(event) => {
+          event.currentTarget.dataset.helpDismissed = 'true';
+        }}
+        type="button"
+      >
+        <span aria-hidden="true">?</span>
+      </button>
+      <span className="settings-behavior-tooltip" id={id} role="tooltip">
+        {text}
+      </span>
+    </span>
+  );
 }
 
 export function lockBodyScroll(body: { style: { overflow: string } }): () => void {
@@ -97,6 +144,11 @@ export function CompactSettingsPanelView({
         >
           <header className="settings-panel__header">
             <h2>Settings</h2>
+            <span
+              aria-hidden="true"
+              className="settings-panel__drag-region"
+              data-tauri-drag-region="deep"
+            />
             <button
               autoFocus
               aria-label="Close settings"
@@ -121,6 +173,9 @@ export function CompactSettingsPanelView({
   const usesFillMode = usesAwww
     || behaviorSettings.imageBackend === 'swaybg'
     || behaviorSettings.imageBackend === 'feh';
+  const usesMpvpaper = behaviorSettings.imageBackend === 'mpvpaper'
+    || behaviorSettings.gifBackend === 'mpvpaper'
+    || behaviorSettings.videoBackend === 'mpvpaper';
   const rendererDetectionReady = !rendererStatusesLoading
     && rendererStatusesError === null
     && rendererStatuses !== null;
@@ -166,6 +221,33 @@ export function CompactSettingsPanelView({
   const updateAwwwTransitionFps = (awwwTransitionFps: number) => {
     updateBehaviorSettings((current) => ({ ...current, awwwTransitionFps }));
   };
+  const updateMpvpaperOptions = (mpvpaperOptions: string) => {
+    updateBehaviorSettings((current) => ({ ...current, mpvpaperOptions }));
+  };
+  let mpvpaperOptionsInput: HTMLInputElement | null = null;
+  const commitMpvpaperOptions = (input: HTMLInputElement) => {
+    const next = input.value;
+    input.value = behaviorSettings.mpvpaperOptions;
+    if (next !== behaviorSettings.mpvpaperOptions) updateMpvpaperOptions(next);
+  };
+  const handleMpvpaperOptionsKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
+    if (event.key === 'Enter') {
+      event.preventDefault();
+      event.currentTarget.blur();
+      return;
+    }
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      event.currentTarget.value = behaviorSettings.mpvpaperOptions;
+      event.currentTarget.blur();
+    }
+  };
+  const restoreDefaultMpvpaperOptions = () => {
+    if (mpvpaperOptionsInput) mpvpaperOptionsInput.value = DEFAULT_MPVPAPER_OPTIONS;
+    if (behaviorSettings.mpvpaperOptions !== DEFAULT_MPVPAPER_OPTIONS) {
+      updateMpvpaperOptions(DEFAULT_MPVPAPER_OPTIONS);
+    }
+  };
   const updateLweScaling = (value: string) => {
     const lweScaling = value as LweScalingMode;
     updateBehaviorSettings((current) => ({ ...current, lweScaling }));
@@ -189,7 +271,7 @@ export function CompactSettingsPanelView({
     updateBehaviorSettings((current) => ({ ...current, openProjectLocationMode }));
   };
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
-    if (event.key !== 'Escape') return;
+    if (event.key !== 'Escape' || event.defaultPrevented) return;
     event.preventDefault();
     onClose();
   };
@@ -242,6 +324,11 @@ export function CompactSettingsPanelView({
       >
         <header className="settings-panel__header">
           <h2>Settings</h2>
+          <span
+            aria-hidden="true"
+            className="settings-panel__drag-region"
+            data-tauri-drag-region="deep"
+          />
           <button
             autoFocus
             aria-label="Close settings"
@@ -394,89 +481,158 @@ export function CompactSettingsPanelView({
               </div>
             </div>
           </div>
-          <h4 className="settings-behavior-category">Image appearance</h4>
-          {usesFillMode ? (
-            <div
-              aria-labelledby="settings-fill-transition-heading"
-              className="settings-behavior-card"
-              data-behavior-card="image-appearance"
-              role="group"
-            >
-              <h5 id="settings-fill-transition-heading">
-                {usesAwww ? 'Fill & transition' : 'Fill'}
-              </h5>
-              <div className="settings-behavior-card__rows">
-                <div className="settings-behavior-row">
-                  <span>Fill behavior</span>
-                  <SelectField
-                    aria-label="Fill behavior"
-                    dataBehaviorControl={true}
-                    disabled={!behaviorReady}
-                    onValueChange={updateFillMode}
-                    options={[
-                      { value: 'crop', label: 'Crop to fill' },
-                      { value: 'fit', label: 'Fit inside' },
-                      { value: 'stretch', label: 'Stretch' },
-                    ]}
-                    value={behaviorSettings.fillMode}
-                    variant="settings"
-                  />
-                </div>
-                {usesAwww ? (
-                  <>
-                    <div className="settings-behavior-row">
-                      <span>Transition</span>
-                      <SelectField
-                        aria-label="awww transition type"
-                        dataBehaviorControl={true}
-                        disabled={!behaviorReady}
-                        onValueChange={updateAwwwTransitionType}
-                        options={AWWW_TRANSITION_TYPES.map((transitionType) => ({
-                          value: transitionType,
-                          label: transitionType,
-                        }))}
-                        value={behaviorSettings.awwwTransitionType}
-                        variant="settings"
-                      />
-                    </div>
-                    <label className="settings-behavior-row">
-                      <span>Transition duration</span>
-                      <DeferredNumberInput
-                        aria-label="awww transition duration"
-                        confirmed={behaviorSettings.awwwTransitionDuration}
-                        disabled={!behaviorReady}
-                        max={60}
-                        min={0}
-                        onCommit={updateAwwwTransitionDuration}
-                        step={0.1}
-                        unit="s"
-                        unitKind="seconds"
-                      />
-                    </label>
-                    <label className="settings-behavior-row">
-                      <span>Transition FPS</span>
-                      <DeferredNumberInput
-                        aria-label="awww transition FPS"
-                        confirmed={behaviorSettings.awwwTransitionFps}
-                        disabled={!behaviorReady}
-                        max={240}
-                        min={1}
-                        onCommit={updateAwwwTransitionFps}
-                        step={1}
-                        unit="FPS"
-                        unitKind="transition-fps"
-                      />
-                    </label>
-                  </>
-                ) : null}
+          <h4 className="settings-behavior-category">Renderer options</h4>
+          <div
+            aria-disabled={!behaviorReady || !usesFillMode}
+            aria-labelledby="settings-image-gif-fitting-heading"
+            className="settings-behavior-card"
+            data-behavior-card="image-gif-fitting"
+            role="group"
+          >
+            <div className="settings-behavior-card__heading">
+              <h5 id="settings-image-gif-fitting-heading">Image &amp; GIF fitting</h5>
+              <BehaviorHelp
+                id="settings-image-gif-fitting-help"
+                label="About Image & GIF fitting"
+                text={`Shared by awww for images and GIFs, and by swaybg and feh for images.${
+                  !usesFillMode ? ' Select one of those renderers to edit.' : ''
+                }`}
+              />
+            </div>
+            <div className="settings-behavior-card__rows">
+              <div className="settings-behavior-row">
+                <span>Fill behavior</span>
+                <SelectField
+                  aria-label="Fill behavior"
+                  dataBehaviorControl={true}
+                  disabled={!behaviorReady || !usesFillMode}
+                  onValueChange={updateFillMode}
+                  options={[
+                    { value: 'crop', label: 'Crop to fill' },
+                    { value: 'fit', label: 'Fit inside' },
+                    { value: 'stretch', label: 'Stretch' },
+                  ]}
+                  value={behaviorSettings.fillMode}
+                  variant="settings"
+                />
               </div>
             </div>
-          ) : (
-            <p>Image appearance is controlled by the selected renderer.</p>
-          )}
+          </div>
+          <div
+            aria-disabled={!behaviorReady || !usesAwww}
+            aria-labelledby="settings-awww-transitions-heading"
+            className="settings-behavior-card"
+            data-behavior-card="awww-transitions"
+            role="group"
+          >
+            <div className="settings-behavior-card__heading">
+              <h5 id="settings-awww-transitions-heading">awww transitions</h5>
+              <BehaviorHelp
+                id="settings-awww-transitions-help"
+                label="About awww transitions"
+                text={`Applies whenever awww handles images or GIFs.${
+                  !usesAwww ? ' Select awww to edit.' : ''
+                }`}
+              />
+            </div>
+            <div className="settings-behavior-card__rows">
+              <div className="settings-behavior-row">
+                <span>Transition</span>
+                <SelectField
+                  aria-label="awww transition type"
+                  dataBehaviorControl={true}
+                  disabled={!behaviorReady || !usesAwww}
+                  onValueChange={updateAwwwTransitionType}
+                  options={AWWW_TRANSITION_TYPES.map((transitionType) => ({
+                    value: transitionType,
+                    label: transitionType,
+                  }))}
+                  value={behaviorSettings.awwwTransitionType}
+                  variant="settings"
+                />
+              </div>
+              <label className="settings-behavior-row">
+                <span>Transition duration</span>
+                <DeferredNumberInput
+                  aria-label="awww transition duration"
+                  confirmed={behaviorSettings.awwwTransitionDuration}
+                  disabled={!behaviorReady || !usesAwww}
+                  max={60}
+                  min={0}
+                  onCommit={updateAwwwTransitionDuration}
+                  step={0.1}
+                  unit="s"
+                  unitKind="seconds"
+                />
+              </label>
+              <label className="settings-behavior-row">
+                <span>Transition FPS</span>
+                <DeferredNumberInput
+                  aria-label="awww transition FPS"
+                  confirmed={behaviorSettings.awwwTransitionFps}
+                  disabled={!behaviorReady || !usesAwww}
+                  max={240}
+                  min={1}
+                  onCommit={updateAwwwTransitionFps}
+                  step={1}
+                  unit="FPS"
+                  unitKind="transition-fps"
+                />
+              </label>
+            </div>
+          </div>
+          <div
+            aria-disabled={!behaviorReady || !usesMpvpaper}
+            aria-labelledby="settings-mpvpaper-playback-heading"
+            className="settings-behavior-card"
+            data-behavior-card="mpvpaper-playback"
+            role="group"
+          >
+            <div className="settings-behavior-card__heading">
+              <h5 id="settings-mpvpaper-playback-heading">mpvpaper playback</h5>
+              <BehaviorHelp
+                id="settings-mpvpaper-playback-help"
+                label="About mpvpaper playback"
+                text="One global argument string shared by every image, GIF, and video applied with mpvpaper. Leave it empty to pass no extra arguments."
+              />
+            </div>
+            <div className="settings-behavior-card__rows">
+              <label className="settings-behavior-row settings-behavior-row--options">
+                <span>mpv arguments</span>
+                <span className="settings-options-control">
+                  <input
+                    aria-label="mpvpaper options"
+                    data-behavior-control={true}
+                    defaultValue={behaviorSettings.mpvpaperOptions}
+                    disabled={!behaviorReady || !usesMpvpaper}
+                    key={behaviorSettings.mpvpaperOptions}
+                    onBlur={(event) => commitMpvpaperOptions(event.currentTarget)}
+                    onKeyDown={handleMpvpaperOptionsKeyDown}
+                    ref={(input) => {
+                      mpvpaperOptionsInput = input;
+                    }}
+                    spellCheck={false}
+                    type="text"
+                  />
+                  <button
+                    aria-label="Restore default mpvpaper options"
+                    className="btn settings-options-reset"
+                    data-behavior-control={true}
+                    disabled={!behaviorReady || !usesMpvpaper}
+                    onClick={restoreDefaultMpvpaperOptions}
+                    onMouseDown={(event) => event.preventDefault()}
+                    type="button"
+                  >
+                    Restore default
+                  </button>
+                </span>
+              </label>
+            </div>
+          </div>
 
           <h4 className="settings-behavior-category">Wallpaper Engine</h4>
           <div
+            aria-disabled={!behaviorReady || lweUnavailable}
             aria-labelledby="settings-scene-playback-heading"
             className="settings-behavior-card"
             data-behavior-card="scene-playback"

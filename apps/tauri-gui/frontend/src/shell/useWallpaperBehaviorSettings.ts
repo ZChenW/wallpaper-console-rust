@@ -19,6 +19,8 @@ import type {
   WallpaperFillModeDTO,
 } from '../api/types.ts';
 
+export const DEFAULT_MPVPAPER_OPTIONS = '--loop-file=inf --panscan=1.0';
+
 export const AWWW_TRANSITION_TYPES = Object.freeze([
   'simple',
   'fade',
@@ -74,6 +76,7 @@ const SETTING_FIELDS = Object.freeze([
   'imageBackend',
   'gifBackend',
   'videoBackend',
+  'mpvpaperOptions',
   'fillMode',
   'awwwTransitionType',
   'awwwTransitionDuration',

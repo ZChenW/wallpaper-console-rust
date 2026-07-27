@@ -4,10 +4,13 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+pub const DEFAULT_MPVPAPER_OPTIONS: &str = "--loop-file=inf --panscan=1.0";
+
 pub const BEHAVIOR_SETTING_KEYS: &[&str] = &[
     "image_backend",
     "gif_backend",
     "video_backend",
+    "mpvpaper_options",
     "awww_resize",
     "awww_transition_type",
     "awww_transition_duration",
@@ -89,6 +92,7 @@ pub struct BehaviorSettings {
     pub image_backend: ImageRenderer,
     pub gif_backend: GifRenderer,
     pub video_backend: VideoRenderer,
+    pub mpvpaper_options: String,
     pub fill_mode: WallpaperFillMode,
     pub awww_transition_type: AwwwTransitionType,
     pub awww_transition_duration: f64,
@@ -107,6 +111,7 @@ impl Default for BehaviorSettings {
             image_backend: ImageRenderer::Awww,
             gif_backend: GifRenderer::Awww,
             video_backend: VideoRenderer::Mpvpaper,
+            mpvpaper_options: DEFAULT_MPVPAPER_OPTIONS.into(),
             fill_mode: WallpaperFillMode::Crop,
             awww_transition_type: AwwwTransitionType::Fade,
             awww_transition_duration: 1.0,
@@ -127,6 +132,7 @@ pub struct BehaviorSettingsPatch {
     pub image_backend: Option<ImageRenderer>,
     pub gif_backend: Option<GifRenderer>,
     pub video_backend: Option<VideoRenderer>,
+    pub mpvpaper_options: Option<String>,
     pub fill_mode: Option<WallpaperFillMode>,
     pub awww_transition_type: Option<AwwwTransitionType>,
     pub awww_transition_duration: Option<f64>,
@@ -162,6 +168,10 @@ impl BehaviorSettings {
                 GifRenderer::Awww
             },
             video_backend: VideoRenderer::Mpvpaper,
+            mpvpaper_options: values
+                .get("mpvpaper_options")
+                .cloned()
+                .unwrap_or_else(|| DEFAULT_MPVPAPER_OPTIONS.into()),
             fill_mode: match value("awww_resize") {
                 "fit" => WallpaperFillMode::Fit,
                 "stretch" => WallpaperFillMode::Stretch,
@@ -218,6 +228,9 @@ impl BehaviorSettings {
         replace!(image_backend);
         replace!(gif_backend);
         replace!(video_backend);
+        if let Some(value) = &patch.mpvpaper_options {
+            next.mpvpaper_options = value.clone();
+        }
         replace!(fill_mode);
         replace!(awww_transition_type);
         if let Some(value) = patch.awww_transition_duration {
@@ -248,6 +261,7 @@ impl BehaviorSettings {
             ("image_backend", enum_value(self.image_backend)),
             ("gif_backend", enum_value(self.gif_backend)),
             ("video_backend", "mpvpaper".into()),
+            ("mpvpaper_options", self.mpvpaper_options.clone()),
             ("awww_resize", enum_value(self.fill_mode)),
             (
                 "awww_transition_type",

@@ -1651,9 +1651,18 @@ input:focus {
 .settings-panel__header {
   display: flex;
   align-items: center;
-  justify-content: space-between;
   gap: 1rem;
   padding-bottom: 0.65rem;
+}
+
+.settings-panel__header > h2 {
+  user-select: text;
+}
+
+.settings-panel__drag-region {
+  min-width: 2rem;
+  align-self: stretch;
+  flex: 1 1 auto;
 }
 
 .settings-panel__close {
@@ -1834,19 +1843,124 @@ input:focus {
 
 .settings-behavior-card {
   min-width: 0;
-  overflow: hidden;
+  overflow: visible;
   border: 1px solid var(--border);
   border-radius: 0.65rem;
   background: color-mix(in srgb, var(--panel) 68%, var(--surface));
 }
 
-.settings-behavior-card > :is(h4, h5) {
+.settings-behavior-card:has(
+  .settings-behavior-help[data-help-dismissed="false"]:is(:hover, :focus-visible)
+) {
+  position: relative;
+  z-index: 4;
+}
+
+.settings-behavior-card[aria-disabled="true"] {
+  opacity: 0.58;
+}
+
+.settings-behavior-card > :is(h4, h5, .settings-behavior-card__heading) {
   padding: 0.68rem 0.78rem;
   border-bottom: 1px solid var(--border);
   background: color-mix(in srgb, var(--panel-hover) 55%, transparent);
   color: var(--text);
   font-size: 0.8rem;
   font-weight: 680;
+}
+
+.settings-behavior-card__heading {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.35rem;
+  border-start-start-radius: inherit;
+  border-start-end-radius: inherit;
+}
+
+.settings-behavior-card__heading > h5 {
+  margin: 0;
+  color: inherit;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+}
+
+.settings-behavior-help-wrap {
+  position: relative;
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.settings-behavior-help {
+  display: inline-grid;
+  flex: 0 0 auto;
+  width: 1.1rem;
+  height: 1.1rem;
+  place-items: center;
+  padding: 0;
+  border: 1px solid currentColor;
+  border-radius: 0;
+  background: transparent;
+  color: inherit;
+  cursor: default;
+  font-size: 0.68rem;
+  font-weight: 760;
+  line-height: 1;
+  opacity: 0.68;
+}
+
+.settings-behavior-help:hover,
+.settings-behavior-help:focus-visible {
+  opacity: 1;
+}
+
+.settings-behavior-help[data-help-dismissed="false"]:is(:hover, :focus-visible) {
+  border-color: transparent;
+  color: transparent;
+  outline: none;
+}
+
+.settings-behavior-help[data-help-dismissed="false"]:focus-visible,
+:root[data-theme="glass"] .settings-behavior-card
+  .settings-behavior-help[data-help-dismissed="false"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+.settings-behavior-tooltip {
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 0.45rem);
+  left: 50%;
+  display: none;
+  width: max-content;
+  max-width: min(22rem, calc(100vw - 2rem));
+  padding: 0.52rem 0.62rem;
+  border: 1px solid var(--border-strong);
+  border-radius: 0.4rem;
+  background: var(--panel);
+  box-shadow: 0 0.55rem 1.35rem rgb(0 0 0 / 22%);
+  color: var(--text);
+  font-size: 0.7rem;
+  font-weight: 520;
+  letter-spacing: normal;
+  line-height: 1.4;
+  pointer-events: none;
+  text-transform: none;
+  transform: translateX(-40%);
+}
+
+.settings-behavior-help[data-help-dismissed="false"]:is(:hover, :focus-visible)
+  + .settings-behavior-tooltip {
+  display: block;
+}
+
+.settings-behavior-help[data-help-dismissed="false"]:focus-visible
+  + .settings-behavior-tooltip {
+  text-decoration: underline 2px currentColor;
+  text-underline-offset: 0.2rem;
 }
 
 .settings-behavior-card__rows {
@@ -1874,6 +1988,11 @@ input:focus {
 .settings-behavior-row > :is(select, .select-field-trigger) {
   width: 100%;
   min-width: 0;
+}
+
+.settings-behavior-row--options {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 0.38rem;
 }
 
 .settings-number-control {
@@ -1909,12 +2028,48 @@ input:focus {
   border-color: transparent;
 }
 
+.settings-number-control input[type="number"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 .settings-number-control [data-control-unit] {
   padding: 0 0.58rem 0 0.2rem;
   color: var(--text-muted);
   font-size: 0.68rem;
   font-variant-numeric: tabular-nums;
   pointer-events: none;
+}
+
+.settings-options-control {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.45rem;
+}
+
+.settings-options-control input {
+  width: 100%;
+  min-width: 0;
+  height: 2.05rem;
+  padding: 0.3rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 0;
+  background: var(--panel);
+}
+
+.settings-options-control input:focus {
+  border-color: var(--primary);
+}
+
+.settings-options-control input:disabled {
+  cursor: not-allowed;
+}
+
+.settings-options-reset {
+  min-height: 2.05rem;
+  padding-inline: 0.65rem;
+  white-space: nowrap;
 }
 
 .settings-switch-input {
@@ -1974,8 +2129,13 @@ input:focus {
   }
 
   .settings-behavior-row > :is(select, .select-field-trigger),
-  .settings-number-control {
+  .settings-number-control,
+  .settings-options-control {
     width: 100%;
+  }
+
+  .settings-options-control {
+    grid-template-columns: minmax(0, 1fr);
   }
 }
 

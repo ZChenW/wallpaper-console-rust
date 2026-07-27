@@ -384,6 +384,7 @@ export interface BehaviorSettingsDTO {
   readonly imageBackend: ImageRendererDTO;
   readonly gifBackend: GifRendererDTO;
   readonly videoBackend: VideoRendererDTO;
+  readonly mpvpaperOptions: string;
   readonly fillMode: WallpaperFillModeDTO;
   readonly awwwTransitionType: AwwwTransitionTypeDTO;
   readonly awwwTransitionDuration: number;

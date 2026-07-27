@@ -988,7 +988,7 @@
   background: var(--panel);
 }
 
-:root[data-theme="editorial"] .settings-behavior-card > :is(h4, h5) {
+:root[data-theme="editorial"] .settings-behavior-card > :is(h4, h5, .settings-behavior-card__heading) {
   padding: 0.62rem 0.75rem;
   border-bottom: var(--editorial-rule);
   background: var(--text);
@@ -1015,6 +1015,22 @@
 }
 
 :root[data-theme="editorial"] .settings-number-control {
+  border-color: var(--text);
+  background: var(--bg);
+}
+
+:root[data-theme="editorial"] .settings-number-control:focus-within {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+  box-shadow: 0 0 0 2px var(--bg);
+}
+
+:root[data-theme="editorial"] .settings-number-control input[type="number"]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
+:root[data-theme="editorial"] .settings-options-control input {
   border-color: var(--text);
   background: var(--bg);
 }
@@ -1257,6 +1273,11 @@
   outline: 2px solid var(--text);
   outline-offset: 3px;
   box-shadow: 0 0 0 2px var(--bg);
+}
+
+:root[data-theme="editorial"] .settings-behavior-card .settings-behavior-help[data-help-dismissed="false"]:focus-visible {
+  outline: none;
+  box-shadow: none;
 }
 
 :root[data-theme="editorial"] .wallpaper-card .wallpaper-card__primary:focus-visible {

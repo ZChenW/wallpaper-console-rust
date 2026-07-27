@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use crate::behavior_setting::DEFAULT_MPVPAPER_OPTIONS;
+
 const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gif_backend", "awww"),
     ("image_backend", "awww"),
     ("video_backend", "mpvpaper"),
-    ("mpvpaper_options", "--loop-file=inf --panscan=1.0"),
+    ("mpvpaper_options", DEFAULT_MPVPAPER_OPTIONS),
     ("mpvpaper_output", "*"),
     ("awww_transition_type", "fade"),
     ("awww_transition_duration", "1"),

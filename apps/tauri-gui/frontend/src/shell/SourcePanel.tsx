@@ -141,6 +141,7 @@ const headerStyle: CSSProperties = {
 const titleStyle: CSSProperties = {
   margin: 0,
   fontSize: '1.05rem',
+  userSelect: 'text',
 };
 
 const headerTitleStyle: CSSProperties = {
@@ -148,6 +149,12 @@ const headerTitleStyle: CSSProperties = {
   minWidth: 0,
   alignItems: 'center',
   gap: '0.45rem',
+};
+
+const headerDragRegionStyle: CSSProperties = {
+  alignSelf: 'stretch',
+  minWidth: '2rem',
+  flex: '1 1 auto',
 };
 
 const closeStyle: CSSProperties = {
@@ -753,6 +760,11 @@ export function SourcePanelView({
             ) : null}
             <h2 style={titleStyle}>Wallpaper sources</h2>
           </div>
+          <span
+            aria-hidden="true"
+            data-tauri-drag-region="deep"
+            style={headerDragRegionStyle}
+          />
           <button
             autoFocus
             aria-label="Close wallpaper sources"
