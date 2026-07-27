@@ -96,6 +96,18 @@ export default function WallpaperPreviewMedia({
     path: string;
     stableEntry: boolean;
   } | null>(null);
+  const entranceStabilityRef = useRef({
+    entryPath: entry.path,
+    stabilize: stabilizeEntranceDuringMotion && !eligibility.settled,
+  });
+  if (entranceStabilityRef.current.entryPath !== entry.path) {
+    entranceStabilityRef.current = {
+      entryPath: entry.path,
+      stabilize: stabilizeEntranceDuringMotion && !eligibility.settled,
+    };
+  } else if (stabilizeEntranceDuringMotion && !eligibility.settled) {
+    entranceStabilityRef.current.stabilize = true;
+  }
   const videoRef = useRef<HTMLVideoElement | null>(null);
 
   useEffect(() => {
@@ -208,7 +220,8 @@ export default function WallpaperPreviewMedia({
           }}
           onLoad={() => setLoadedImage({
             path: imagePath,
-            stableEntry: stabilizeEntranceDuringMotion && !eligibility.settled,
+            stableEntry: entranceStabilityRef.current.entryPath === entry.path
+              && entranceStabilityRef.current.stabilize,
           })}
           src={safeFileSrc(imagePath)}
         />

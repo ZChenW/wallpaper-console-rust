@@ -861,8 +861,8 @@ input:focus {
   }
 
   .single-page-shell.library-view-flow > .shell-notifications > .feedback-overlay {
-    grid-column: 2;
-    justify-self: start;
+    grid-column: 3;
+    justify-self: end;
   }
 }
 
