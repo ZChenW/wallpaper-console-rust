@@ -2543,24 +2543,28 @@ input:focus {
 }
 
 .flow-preview-item {
+  --flow-center-proximity: 0;
   display: grid;
   width: 100%;
   place-items: center;
   padding: clamp(1.35rem, 4.8vh, 3.5rem) clamp(0.65rem, 2.1vw, 2rem);
   contain: layout paint style;
   cursor: pointer;
-  opacity: 0.56;
+  opacity: calc(0.56 + var(--flow-center-proximity) * 0.44);
   scroll-snap-align: center;
   scroll-snap-stop: normal;
-  transition: opacity 420ms ease-in-out;
+  transition: opacity 100ms linear;
 }
 
 .flow-preview-item[data-centered] {
-  opacity: 1;
+  --flow-center-proximity: 1;
 }
 
 .flow-preview-item[data-hovered] {
-  opacity: 0.74;
+  opacity: max(
+    0.74,
+    calc(0.56 + var(--flow-center-proximity) * 0.44)
+  );
 }
 
 .flow-preview-item__media,
@@ -2581,12 +2585,9 @@ input:focus {
   border-radius: 0.28rem;
   background: var(--panel-alt);
   box-shadow: 0 1.2rem 3.6rem color-mix(in srgb, var(--shadow) 42%, transparent);
-  transform: scale(0.97);
-  transform-origin: center;
   transition:
     border-color 260ms ease-in-out,
-    box-shadow 420ms ease-in-out,
-    transform 420ms ease-in-out;
+    box-shadow 420ms ease-in-out;
 }
 
 .flow-preview-item__indicator-layer {
@@ -2613,11 +2614,23 @@ input:focus {
 .flow-preview-item[data-centered] .flow-preview-item__media {
   border-color: var(--border-strong);
   box-shadow: 0 1.5rem 4.8rem color-mix(in srgb, var(--shadow) 58%, transparent);
-  transform: scale(1);
 }
 
 .flow-preview-item[data-hovered] .flow-preview-item__media {
   border-color: var(--text-muted);
+}
+
+.wallpaper-flow[data-scrolling] .flow-preview-item__media {
+  border-color: color-mix(in srgb, var(--border) 78%, transparent);
+  box-shadow: 0 1.2rem 3.6rem color-mix(in srgb, var(--shadow) 42%, transparent);
+  transition: none;
+}
+
+.wallpaper-flow[data-scrolling]
+  .flow-preview-item[data-flow-visual-focus]
+  .flow-preview-item__media {
+  border-color: var(--border-strong);
+  box-shadow: 0 1.5rem 4.8rem color-mix(in srgb, var(--shadow) 58%, transparent);
 }
 
 .flow-preview-item__media > :is(img, video, .wallpaper-thumb-placeholder) {
@@ -2628,7 +2641,7 @@ input:focus {
 }
 
 .flow-preview-item__media > :is(img, video) {
-  transition: filter 360ms ease-in-out, opacity 360ms ease-in-out;
+  transition: filter 160ms ease-out, opacity 160ms ease-out;
 }
 
 .flow-preview-stream[data-instant-navigation] .flow-preview-item,
@@ -2677,6 +2690,13 @@ input:focus {
 .flow-preview-item[data-centered] .flow-preview-item__media > video {
   filter: none;
   opacity: 1;
+}
+
+.wallpaper-flow[data-scrolling]
+  .flow-preview-item__media > :is(img, video) {
+  filter: none;
+  opacity: 1;
+  transition: none;
 }
 
 .flow-preview-item__media > video {

@@ -129,7 +129,7 @@ function entryLabelForPath(
   return path.split(/[\\/]/).filter(Boolean).at(-1) ?? path;
 }
 
-function nearestRenderedFlowIndex(
+function updateFlowVisualProximity(
   stream: HTMLElement,
   itemCount: number,
 ): number | null {
@@ -137,14 +137,26 @@ function nearestRenderedFlowIndex(
   const streamCenter = streamBounds.top + streamBounds.height / 2;
   let nearestIndex: number | null = null;
   let nearestDelta = Number.POSITIVE_INFINITY;
+  const proximityUpdates: Array<{
+    index: number;
+    item: HTMLElement;
+    proximity: number;
+  }> = [];
   for (const item of stream.querySelectorAll<HTMLElement>('.flow-preview-item')) {
     const index = Number(item.dataset.index);
     if (!Number.isInteger(index) || index < 0 || index >= itemCount) continue;
     const bounds = item.getBoundingClientRect();
     const delta = Math.abs(bounds.top + bounds.height / 2 - streamCenter);
+    const proximitySpan = Math.max(1, (bounds.height + FLOW_ITEM_GAP) * 1.5);
+    const proximity = Math.max(0, 1 - delta / proximitySpan);
+    proximityUpdates.push({ index, item, proximity });
     if (delta >= nearestDelta) continue;
     nearestIndex = index;
     nearestDelta = delta;
+  }
+  for (const { index, item, proximity } of proximityUpdates) {
+    item.style.setProperty('--flow-center-proximity', String(proximity));
+    item.toggleAttribute('data-flow-visual-focus', index === nearestIndex);
   }
   return nearestIndex;
 }
@@ -579,7 +591,7 @@ function WallpaperFlowReady({
     if (snapshot.resizeAnchorId !== null || snapshot.phase === 'resize') return null;
     const stream = streamRef.current;
     if (!stream) return null;
-    const nearestIndex = nearestRenderedFlowIndex(stream, model.entries.length);
+    const nearestIndex = updateFlowVisualProximity(stream, model.entries.length);
     if (nearestIndex !== null) {
       const entry = model.entries[nearestIndex];
       if (!entry) return null;
