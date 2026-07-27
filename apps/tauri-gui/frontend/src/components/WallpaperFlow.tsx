@@ -60,6 +60,18 @@ const FLOW_WHEEL_BURST_RESET_MS = 160;
 const FLOW_DIRECT_INPUT_IDLE_MS = FLOW_WHEEL_BURST_RESET_MS;
 const FLOW_INDEX_ROW_HEIGHT = 31;
 const FLOW_INDEX_INITIAL_VIEWPORT_HEIGHT = FLOW_INDEX_ROW_HEIGHT * 15;
+const FLOW_USES_NATIVE_SCROLL_END =
+  typeof window === 'undefined' || 'onscrollend' in window;
+const FLOW_SCROLL_SETTLE_POLICIES = {
+  'confirmed-end': {
+    idleMs: 112,
+    targeting: 'nearest',
+  },
+  'idle-fallback': {
+    idleMs: FLOW_DIRECT_INPUT_IDLE_MS,
+    targeting: 'projected',
+  },
+} as const;
 const FLOW_UNCLAIMED_NAVIGATION_KEYS = new Set([
   'ArrowDown',
   'ArrowUp',
@@ -79,6 +91,8 @@ type FlowKeyEvent = Pick<
   | 'shiftKey'
   | 'stopPropagation'
 >;
+
+type FlowScrollSettleReason = keyof typeof FLOW_SCROLL_SETTLE_POLICIES;
 
 export interface WallpaperFlowProps {
   readonly model: LibraryViewModel;
@@ -254,7 +268,9 @@ function WallpaperFlowReady({
   const directInputDirectionRef = useRef(0);
   const directInputLastEventAtRef = useRef(Number.NEGATIVE_INFINITY);
   const scrollLifecycleObservedRef = useRef(false);
-  const settleScrollLifecycleRef = useRef<() => void>(() => {});
+  const settleScrollLifecycleRef = useRef<
+    (reason?: FlowScrollSettleReason) => void
+  >(() => {});
   const suppressProgrammaticScrollRef = useRef(false);
   const momentumControllerRef = useRef<FlowMomentumController | null>(null);
   momentumControllerRef.current ??= new FlowMomentumController();
@@ -318,7 +334,9 @@ function WallpaperFlowReady({
       }
       if (!scrollLifecycleObservedRef.current) return;
       scrollLifecycleObservedRef.current = false;
-      settleScrollLifecycleRef.current();
+      settleScrollLifecycleRef.current(
+        FLOW_USES_NATIVE_SCROLL_END ? 'confirmed-end' : 'idle-fallback',
+      );
     },
   });
 
@@ -614,7 +632,9 @@ function WallpaperFlowReady({
     });
   }, [computeCentered]);
 
-  const settleScrollLifecycle = useCallback(() => {
+  const settleScrollLifecycle = useCallback((
+    reason: FlowScrollSettleReason = 'idle-fallback',
+  ) => {
     if (scrollEndFallbackTimerRef.current !== null) {
       window.clearTimeout(scrollEndFallbackTimerRef.current);
       scrollEndFallbackTimerRef.current = null;
@@ -632,11 +652,12 @@ function WallpaperFlowReady({
       return;
     }
     const directInputIdleFor = performance.now() - directInputLastEventAtRef.current;
-    if (directInputIdleFor < FLOW_DIRECT_INPUT_IDLE_MS) {
+    const policy = FLOW_SCROLL_SETTLE_POLICIES[reason];
+    if (directInputIdleFor < policy.idleMs) {
       scrollEndFallbackTimerRef.current = window.setTimeout(() => {
         scrollEndFallbackTimerRef.current = null;
-        settleScrollLifecycleRef.current();
-      }, FLOW_DIRECT_INPUT_IDLE_MS - directInputIdleFor);
+        settleScrollLifecycleRef.current(reason);
+      }, policy.idleMs - directInputIdleFor);
       return;
     }
     const snapshot = interactionController.snapshot();
@@ -657,6 +678,7 @@ function WallpaperFlowReady({
       viewportSize: stream.clientHeight,
       targets,
       reducedMotion,
+      targeting: policy.targeting,
       onTarget: ({ index }) => {
         const entry = model.entries[index];
         if (!entry) return;

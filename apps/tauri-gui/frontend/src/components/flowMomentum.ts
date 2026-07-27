@@ -30,6 +30,7 @@ export interface FlowMomentumCapture {
   readonly viewportSize: number;
   readonly targets: readonly FlowMomentumTarget[];
   readonly reducedMotion: boolean;
+  readonly targeting?: 'nearest' | 'projected';
   readonly onTarget: (target: FlowMomentumTarget) => void;
   readonly onUpdate: (offset: number) => void;
   readonly onComplete: (target: FlowMomentumTarget) => void;
@@ -248,11 +249,13 @@ export class FlowMomentumController {
     this.playback = null;
     const ageMs = this.sample === null ? 0 : Math.max(0, at - this.sample.at);
     const sampledVelocity = this.sample?.velocity ?? 0;
-    const velocity = clamp(
-      sampledVelocity * Math.exp(-ageMs / 240),
-      -FLOW_MAX_RELEASE_VELOCITY,
-      FLOW_MAX_RELEASE_VELOCITY,
-    );
+    const velocity = input.targeting === 'nearest'
+      ? 0
+      : clamp(
+        sampledVelocity * Math.exp(-ageMs / 240),
+        -FLOW_MAX_RELEASE_VELOCITY,
+        FLOW_MAX_RELEASE_VELOCITY,
+      );
     const gestureSpan = directGestureSpan(this.sample, input.offset, input.targets);
     const multiTargetIntent = gestureSpan >= FLOW_MULTI_TARGET_UNAMBIGUOUS_DIRECT_SPAN;
     const targetPolicy = !multiTargetIntent && this.sample !== null
