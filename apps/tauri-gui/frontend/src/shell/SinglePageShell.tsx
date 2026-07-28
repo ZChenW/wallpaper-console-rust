@@ -26,7 +26,7 @@ import type {
   CommandResult,
   LibraryBrowserItemDTO,
 } from '../api/types.ts';
-import { commandErrorFeedback } from '../api/feedback.ts';
+import { commandErrorFeedback, commandResultMessage } from '../api/feedback.ts';
 import LibraryViewport from '../components/LibraryViewport.tsx';
 import LibraryState from '../components/LibraryState.tsx';
 import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
@@ -546,7 +546,11 @@ export default function SinglePageShell() {
     try {
       const result = await api.scanSteamWorkshop();
       if (result.success) {
-        showNotice({ channel: 'scan', severity: 'success', message: 'Wallpaper Engine scan finished.' });
+        showNotice({
+          channel: 'scan',
+          severity: 'success',
+          message: commandResultMessage(result, 'Wallpaper Engine scan finished.'),
+        });
       } else {
         showNotice({
           channel: 'scan',
@@ -958,6 +962,16 @@ export default function SinglePageShell() {
       }${shellNotificationsVisible ? ' has-notifications' : ''}${
         scanActivityVisible ? ' has-scan' : ''
       }${feedbackVisible ? ' has-feedback' : ''}`}
+      onContextMenu={(event) => {
+        const target = event.target;
+        if (
+          target instanceof Element
+          && target.closest('input, textarea, [contenteditable="true"]')
+        ) {
+          return;
+        }
+        event.preventDefault();
+      }}
     >
       <header className="single-page-topbar" data-tauri-drag-region="deep">
         <div className="single-page-brand" aria-label="Wallpaper Console">Wallpaper Console</div>

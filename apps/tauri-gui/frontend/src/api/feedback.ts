@@ -7,6 +7,10 @@ export type CommandFeedback =
   | { state: 'warning'; label: string; detail: string }
   | { state: 'error'; label: string; detail: string };
 
+export function commandResultMessage(result: CommandResult, fallback: string): string {
+  return result.stdout.trim() || fallback;
+}
+
 export function commandSuccessFeedback(label: string, result?: CommandResult | void): CommandFeedback {
   return {
     state: 'success',

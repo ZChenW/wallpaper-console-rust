@@ -10,6 +10,7 @@ import {
 } from 'react';
 import { ArrowLeft, Pencil, RefreshCw, Trash2 } from 'lucide-react';
 
+import { commandResultMessage } from '../api/feedback.ts';
 import type { CommandResult, SourceDTO } from '../api/types';
 import {
   useWallpaperSources,
@@ -110,7 +111,7 @@ export interface SourcePanelViewProps {
 type RunCommandOptions = {
   readonly action: () => Promise<CommandResult>;
   readonly channel: SourcePanelNotice['channel'];
-  readonly successMessage: string;
+  readonly successMessage: string | ((result: CommandResult) => string);
   readonly failureMessage: string;
   readonly onNotice: (notice: SourcePanelNotice) => void;
 };
@@ -353,7 +354,13 @@ async function runCommand({
   try {
     const result = await action();
     if (result.success) {
-      onNotice({ channel, severity: 'success', message: successMessage });
+      onNotice({
+        channel,
+        severity: 'success',
+        message: typeof successMessage === 'function'
+          ? successMessage(result)
+          : successMessage,
+      });
       return true;
     }
     onNotice({
@@ -413,7 +420,10 @@ export async function runWallpaperEngineScanAction(
     return await runCommand({
       action,
       channel: 'scan',
-      successMessage: 'Wallpaper Engine scan finished',
+      successMessage: (result) => commandResultMessage(
+        result,
+        'Wallpaper Engine scan finished',
+      ),
       failureMessage: 'Could not scan Wallpaper Engine',
       onNotice,
     });
