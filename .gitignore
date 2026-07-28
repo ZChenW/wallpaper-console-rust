@@ -38,6 +38,7 @@ xtask/tests/
 .superpowers/
 .worktrees/
 AGENTS.md
+skills-lock.json
 
 # Planning / agent docs
 doc/
