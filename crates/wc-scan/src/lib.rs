@@ -2,6 +2,8 @@
 
 pub mod source_scan;
 pub use source_scan::*;
+mod steam_discovery;
+pub use steam_discovery::{discover_steam_workshop_roots, steam_workshop_root_candidates};
 
 use std::collections::HashSet;
 use std::fs;
@@ -21,41 +23,15 @@ const RESOLUTION_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 const RESOLUTION_PROBE_OUTPUT_CAP: usize = 32 * 1024;
 const RESOLUTION_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
+#[cfg(test)]
+use steam_discovery::{
+    discover_steam_workshop_roots_with_xdg_data_home, STEAM_LIBRARY_FOLDERS_SIZE_CAP,
+};
+
 const WE_MARKER: &str = "/steamapps/workshop/content/431960";
 /// Flatpak Steam installs workshop content under a different prefix.
 const FLATPAK_WE_MARKER: &str =
     "/.var/app/com.valvesoftware.Steam/data/Steam/steamapps/workshop/content/431960";
-
-/// Candidate Wallpaper Engine workshop roots for common native and Flatpak
-/// Steam installs under `home`.
-pub fn steam_workshop_root_candidates(home: &Path) -> Vec<PathBuf> {
-    [
-        ".local/share/Steam",
-        ".steam/steam",
-        ".steam/root",
-        ".var/app/com.valvesoftware.Steam/.local/share/Steam",
-        ".var/app/com.valvesoftware.Steam/.steam/steam",
-        ".var/app/com.valvesoftware.Steam/data/Steam",
-    ]
-    .into_iter()
-    .map(|base| home.join(base).join("steamapps/workshop/content/431960"))
-    .collect()
-}
-
-/// Discover existing Wallpaper Engine workshop roots, canonicalized and
-/// deduplicated. This is shared by CLI and GUI so both ingest paths behave the
-/// same way.
-pub fn discover_steam_workshop_roots(home: &Path) -> Vec<PathBuf> {
-    let mut seen = HashSet::new();
-    let mut roots = Vec::new();
-    for candidate in steam_workshop_root_candidates(home) {
-        let canonical = std::fs::canonicalize(&candidate).unwrap_or(candidate);
-        if canonical.is_dir() && seen.insert(canonical.clone()) {
-            roots.push(canonical);
-        }
-    }
-    roots
-}
 
 /// Deduplicate sources by canonical path before scanning.
 pub fn dedupe_sources(sources: &[String]) -> Vec<String> {
@@ -220,24 +196,30 @@ enum WeKind {
     Normal,
 }
 
-fn we_source_kind(path: &str) -> WeKind {
-    if !path.contains(WE_MARKER) && !path.contains(FLATPAK_WE_MARKER) {
-        return WeKind::Normal;
-    }
+fn find_we_marker(path: &str) -> Option<(usize, &'static str)> {
     for marker in [WE_MARKER, FLATPAK_WE_MARKER] {
-        if let Some(pos) = path.find(marker) {
-            let after = &path[pos + marker.len()..];
-            let after = after.trim_start_matches('/');
-            if !after.is_empty() {
-                let first_seg = after.split('/').next().unwrap_or("");
-                if first_seg.chars().all(|c| c.is_ascii_digit()) {
-                    return WeKind::ProjectDir;
-                }
+        for (position, _) in path.match_indices(marker) {
+            let end = position + marker.len();
+            if end == path.len() || path.as_bytes().get(end) == Some(&b'/') {
+                return Some((position, marker));
             }
-            return WeKind::WorkshopRoot;
         }
     }
-    WeKind::Normal
+    None
+}
+
+fn we_source_kind(path: &str) -> WeKind {
+    let Some((pos, marker)) = find_we_marker(path) else {
+        return WeKind::Normal;
+    };
+    let after = path[pos + marker.len()..].trim_start_matches('/');
+    if !after.is_empty() {
+        let first_seg = after.split('/').next().unwrap_or("");
+        if first_seg.chars().all(|c| c.is_ascii_digit()) {
+            return WeKind::ProjectDir;
+        }
+    }
+    WeKind::WorkshopRoot
 }
 
 /// Scan a Wallpaper Engine workshop root with cancellation support.
@@ -438,21 +420,17 @@ pub fn normalize_source_path(path: &str) -> String {
 }
 
 fn we_workshop_root(path: &str) -> Option<String> {
-    for marker in [WE_MARKER, FLATPAK_WE_MARKER] {
-        if let Some(pos) = path.find(marker) {
-            let after = &path[pos + marker.len()..];
-            let after = after.trim_start_matches('/');
-            let first_seg = after.split('/').next().unwrap_or("");
-            if !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit()) {
-                return Some(path[..pos + marker.len()].to_string());
-            }
-        }
+    let (pos, marker) = find_we_marker(path)?;
+    let after = path[pos + marker.len()..].trim_start_matches('/');
+    let first_seg = after.split('/').next().unwrap_or("");
+    if !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit()) {
+        return Some(path[..pos + marker.len()].to_string());
     }
     None
 }
 
 pub fn is_wallpaper_engine_source(path: &str) -> bool {
-    path.contains(WE_MARKER) || path.contains(FLATPAK_WE_MARKER)
+    find_we_marker(path).is_some()
 }
 
 /// Parsed Wallpaper Engine project.json metadata.
@@ -623,11 +601,10 @@ pub fn safe_join(root: &Path, file: &str) -> Result<std::path::PathBuf, String> 
 
 pub fn workshop_id_from_path(project_dir: &Path) -> Option<String> {
     let path_str = project_dir.to_string_lossy();
-    let pos = path_str.find("/431960/")?;
-    let after = &path_str[pos + 7..];
-    let after = after.trim_start_matches('/');
+    let (pos, marker) = find_we_marker(&path_str)?;
+    let after = path_str[pos + marker.len()..].trim_start_matches('/');
     let first_seg = after.split('/').next()?;
-    if first_seg.chars().all(|c| c.is_ascii_digit()) {
+    if !first_seg.is_empty() && first_seg.chars().all(|c| c.is_ascii_digit()) {
         Some(first_seg.to_string())
     } else {
         None
@@ -1184,6 +1161,27 @@ mod tests {
     }
 
     #[test]
+    fn discover_steam_workshop_roots_covers_xdg_and_legacy_install_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let xdg_data_home = tmp.path().join("xdg-data");
+        let xdg_workshop = xdg_data_home.join("Steam/steamapps/workshop/content/431960");
+        let legacy_workshop = home.join("Steam/steamapps/workshop/content/431960");
+        std::fs::create_dir_all(&xdg_workshop).unwrap();
+        std::fs::create_dir_all(&legacy_workshop).unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, Some(&xdg_data_home));
+
+        assert_eq!(
+            roots.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([
+                std::fs::canonicalize(xdg_workshop).unwrap(),
+                std::fs::canonicalize(legacy_workshop).unwrap(),
+            ])
+        );
+    }
+
+    #[test]
     fn discover_steam_workshop_roots_deduplicates_symlinked_roots() {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path();
@@ -1200,6 +1198,154 @@ mod tests {
         let roots = discover_steam_workshop_roots(home);
         assert_eq!(roots.len(), 1);
         assert_eq!(roots[0], std::fs::canonicalize(native).unwrap());
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_includes_configured_steam_libraries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".local/share/Steam");
+        let external_library = tmp.path().join("games/SteamLibrary");
+        let workshop = external_library.join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(steam_root.join("steamapps")).unwrap();
+        std::fs::create_dir_all(&workshop).unwrap();
+        std::fs::write(
+            steam_root.join("steamapps/libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders"
+{{
+    "0"
+    {{
+        "path" "{}"
+        "apps"
+        {{
+            "431960" "1"
+        }}
+    }}
+}}"#,
+                external_library.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let roots = discover_steam_workshop_roots(&home);
+
+        assert_eq!(roots, vec![std::fs::canonicalize(workshop).unwrap()]);
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_reads_the_client_config_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".local/share/Steam");
+        let external_library = tmp.path().join("external/SteamLibrary");
+        let workshop = external_library.join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(steam_root.join("config")).unwrap();
+        std::fs::create_dir_all(&workshop).unwrap();
+        std::fs::write(
+            steam_root.join("config/libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders"
+{{
+    "1" "{}"
+}}"#,
+                external_library.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, None);
+
+        assert_eq!(roots, vec![std::fs::canonicalize(workshop).unwrap()]);
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_ignores_oversized_library_configuration() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".local/share/Steam");
+        let external_library = tmp.path().join("external/SteamLibrary");
+        let workshop = external_library.join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(steam_root.join("config")).unwrap();
+        std::fs::create_dir_all(&workshop).unwrap();
+        let mut config = format!(
+            r#""libraryfolders"
+{{
+    "1" "{}"
+}}"#,
+            external_library.to_string_lossy()
+        );
+        config.push_str(&" ".repeat(STEAM_LIBRARY_FOLDERS_SIZE_CAP));
+        std::fs::write(steam_root.join("config/libraryfolders.vdf"), config).unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, None);
+
+        assert!(roots.is_empty());
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_reads_flatpak_external_library() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".var/app/com.valvesoftware.Steam/.local/share/Steam");
+        let external_library = tmp.path().join("mounted/SteamLibrary");
+        let workshop = external_library.join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(steam_root.join("config")).unwrap();
+        std::fs::create_dir_all(&workshop).unwrap();
+        std::fs::write(
+            steam_root.join("config/libraryfolders.vdf"),
+            format!(
+                r#""libraryfolders"
+{{
+    "1" {{ "path" "{}" }}
+}}"#,
+                external_library.to_string_lossy()
+            ),
+        )
+        .unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, None);
+
+        assert_eq!(roots, vec![std::fs::canonicalize(workshop).unwrap()]);
+    }
+
+    #[test]
+    fn malformed_library_configuration_does_not_hide_fixed_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".local/share/Steam");
+        let workshop = steam_root.join("steamapps/workshop/content/431960");
+        std::fs::create_dir_all(steam_root.join("config")).unwrap();
+        std::fs::create_dir_all(&workshop).unwrap();
+        std::fs::write(
+            steam_root.join("config/libraryfolders.vdf"),
+            r#""libraryfolders" { "1" { "path" "unterminated }"#,
+        )
+        .unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, None);
+
+        assert_eq!(roots, vec![std::fs::canonicalize(workshop).unwrap()]);
+    }
+
+    #[test]
+    fn discover_steam_workshop_roots_ignores_relative_vdf_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        let steam_root = home.join(".local/share/Steam");
+        let relative_library = home.join("relative-library");
+        std::fs::create_dir_all(steam_root.join("config")).unwrap();
+        std::fs::create_dir_all(relative_library.join("steamapps/workshop/content/431960"))
+            .unwrap();
+        std::fs::write(
+            steam_root.join("config/libraryfolders.vdf"),
+            r#""libraryfolders" { "1" "relative-library" }"#,
+        )
+        .unwrap();
+
+        let roots = discover_steam_workshop_roots_with_xdg_data_home(&home, None);
+
+        assert!(roots.is_empty());
     }
 
     #[test]
@@ -1258,7 +1404,16 @@ mod tests {
         assert!(is_wallpaper_engine_source(
             "/home/user/.steam/steam/steamapps/workshop/content/431960"
         ));
+        assert!(is_wallpaper_engine_source(
+            "/home/user/.steam/steam/steamapps/workshop/content/431960/123456"
+        ));
         assert!(!is_wallpaper_engine_source("/home/user/Pictures"));
+        assert!(!is_wallpaper_engine_source(
+            "/home/user/steamapps/workshop/content/4319600"
+        ));
+        assert!(!is_wallpaper_engine_source(
+            "/home/user/steamapps/workshop/content/431960-backup"
+        ));
     }
 
     #[test]

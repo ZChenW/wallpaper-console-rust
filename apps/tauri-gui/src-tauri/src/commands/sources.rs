@@ -416,7 +416,6 @@ pub async fn scan_steam_workshop(
     state: tauri::State<'_, crate::library_service::LibraryService>,
 ) -> Result<CommandResult, String> {
     let service = state.inner().clone();
-    service.manual_refresh_all_requested();
     Ok(tauri::async_runtime::spawn_blocking(move || {
         if let Err(err) = mark_scan_started("discovering Wallpaper Engine") {
             return fail(err);

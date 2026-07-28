@@ -435,7 +435,7 @@ pub(crate) fn index_current_sources(
     })
 }
 
-/// Discover/add Wallpaper Engine workshop roots, then run a full library rescan with live progress.
+/// Discover/add Wallpaper Engine workshop roots, then refresh configured WE roots with live progress.
 pub(crate) fn scan_steam_workshop_and_index(
     storage: &wc_storage::StorageApi,
     home: &std::path::Path,
@@ -451,22 +451,37 @@ pub(crate) fn scan_steam_workshop_and_index(
         })
         .map_err(|error| error.to_string())?;
 
+    let refresh_message = report.refresh.as_ref().map(|refresh| {
+        if let LegacyProjectionStatus::Degraded { message } = &refresh.projection {
+            log::warn!(
+                "Wallpaper Engine refresh completed with degraded TSV projection: {message}"
+            );
+        }
+        apply_refresh_report_to_progress(&refresh.refresh, refresh.library_rows);
+        format_index_sources_message(&index_result_from_report(
+            &refresh.refresh,
+            refresh.library_rows,
+        ))
+    });
     if report.roots.is_empty() {
-        return Ok(
+        let mut message =
             "No Wallpaper Engine workshop directory found. Install or download Wallpaper Engine workshop content in Steam, then scan again."
-                .to_string(),
-        );
+                .to_string();
+        if let Some(refresh_message) = refresh_message {
+            message.push(' ');
+            message.push_str(&refresh_message);
+        }
+        return Ok(message);
     }
 
-    let rescan = report
-        .rescan
-        .ok_or_else(|| "steam workshop scan did not produce a library rescan report".to_string())?;
-    let index_result = finish_rescan(storage, Ok(rescan))?;
+    let refresh_message = refresh_message.ok_or_else(|| {
+        "steam workshop scan did not produce a Wallpaper Engine refresh report".to_string()
+    })?;
     Ok(format!(
         "Wallpaper Engine scan complete. {} source root(s) found, {} new source(s). {}",
         report.roots.len(),
         report.added_paths.len(),
-        format_index_sources_message(&index_result)
+        refresh_message
     ))
 }
 
