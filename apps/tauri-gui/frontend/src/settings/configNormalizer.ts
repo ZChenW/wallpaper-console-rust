@@ -2,9 +2,6 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'storage_backend') {
     return 'sqlite';
   }
-  if (key === 'gui_theme') {
-    return value === 'obsidian_warm' ? 'obsidian_warm' : 'light';
-  }
   if (key === 'awww_transition_type') {
     if (value === 'slide') return 'left';
     const valid = ['simple', 'fade', 'left', 'right', 'top', 'bottom', 'wipe', 'grow', 'center', 'outer', 'random', 'wave'];

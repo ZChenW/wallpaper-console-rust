@@ -7,7 +7,6 @@ import type {
   ApplyGesture,
   ShellPreferences,
 } from './shellPreferences.ts';
-import { isShellTheme, SHELL_THEME_OPTIONS } from './shellThemes.ts';
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
 import {
   AWWW_TRANSITION_TYPES,
@@ -189,10 +188,6 @@ export function CompactSettingsPanelView({
     || rendererStatuses?.feh.available !== true;
   const lweUnavailable = !rendererDetectionReady
     || rendererStatuses?.linuxWallpaperEngine.available !== true;
-  const updateTheme = (value: string) => {
-    if (!isShellTheme(value)) return;
-    updatePreferences((current) => ({ ...current, theme: value }));
-  };
   const updateGesture = (value: string) => {
     const applyGesture = value as ApplyGesture;
     updatePreferences((current) => ({ ...current, applyGesture }));
@@ -355,16 +350,6 @@ export function CompactSettingsPanelView({
           >
             <h4 id="settings-interface-heading">Interface</h4>
             <div className="settings-behavior-card__rows">
-              <div className="settings-behavior-row">
-                <span>Theme</span>
-                <SelectField
-                  aria-label="Theme"
-                  onValueChange={updateTheme}
-                  options={SHELL_THEME_OPTIONS}
-                  value={preferences.theme}
-                  variant="settings"
-                />
-              </div>
               <div className="settings-behavior-row">
                 <span>Apply gesture</span>
                 <SelectField

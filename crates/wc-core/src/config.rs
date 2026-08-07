@@ -27,7 +27,6 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_thumbnail_cleanup_days", "30"),
     ("gui_thumbnail_failure_ttl_secs", "900"),
     ("gui_debug_logs", "off"),
-    ("gui_theme", "light"),
     ("storage_backend", "sqlite"),
     ("open_project_location_mode", "file_manager"),
     ("gui_file_manager", "auto"),
@@ -152,9 +151,9 @@ mod tests {
     }
 
     #[test]
-    fn default_config_includes_gui_theme() {
+    fn default_config_excludes_obsolete_gui_theme() {
         let defaults = default_config();
-        assert_eq!(defaults.get("gui_theme").map(|s| s.as_str()), Some("light"));
+        assert!(!defaults.contains_key("gui_theme"));
     }
 
     #[test]

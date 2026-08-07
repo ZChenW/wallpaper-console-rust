@@ -47,7 +47,7 @@ export const DEFAULT_SHELL_PREFERENCES: Readonly<ShellPreferences> = Object.free
   cardSize: 'medium',
   displayTarget: Object.freeze({ kind: 'allDisplays' as const }),
   applyGesture: 'single',
-  theme: 'system',
+  theme: 'editorial',
   libraryViewMode: 'grid',
 });
 
@@ -111,7 +111,7 @@ export function normalizeShellPreferences(value: unknown): ShellPreferences {
     cardSize: memberOf(record.cardSize, CARD_SIZES, 'medium'),
     displayTarget: normalizeDisplayTarget(record.displayTarget),
     applyGesture: memberOf(record.applyGesture, APPLY_GESTURES, 'single'),
-    theme: isShellTheme(record.theme) ? record.theme : 'system',
+    theme: isShellTheme(record.theme) ? record.theme : 'editorial',
     libraryViewMode: memberOf(record.libraryViewMode, LIBRARY_VIEW_MODES, 'grid'),
   };
 }

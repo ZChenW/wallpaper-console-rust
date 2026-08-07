@@ -15,17 +15,6 @@ export interface SettingEntry {
 
 export const ALL_SETTINGS: SettingEntry[] = [
   // ── General ──
-  {
-    key: 'gui_theme', label: 'Theme', type: 'select',
-    options: ['light', 'obsidian_warm'],
-    optionLabels: {
-      light: 'Light',
-      obsidian_warm: 'Obsidian Warm',
-    },
-    category: 'general',
-    description: 'Switch between the current UI palette and a warm Obsidian-style palette.',
-  },
-
   // ── Wallpaper (image/GIF/video backends) ──
   {
     key: 'image_backend', label: 'Image backend', type: 'select',

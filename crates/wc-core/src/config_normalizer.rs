@@ -346,10 +346,6 @@ mod tests {
         // GUI-only keys must pass through the `_ => value.to_string()` arm unchanged,
         // so the Rust normalizer never rewrites frontend-specific settings.
         assert_eq!(
-            normalize_config_value("gui_theme", "obsidian_warm"),
-            "obsidian_warm"
-        );
-        assert_eq!(
             normalize_config_value("gui_file_manager", "nautilus"),
             "nautilus"
         );

@@ -1,44 +1,26 @@
-import { useEffect, useLayoutEffect, useRef } from 'react';
+import { useLayoutEffect, useRef } from 'react';
 import { invoke } from '@tauri-apps/api/core';
 import { setTheme as setTauriTheme } from '@tauri-apps/api/app';
 
-import type { ShellTheme } from './shellPreferences.ts';
 import {
-  readBootstrappedShellThemePreference,
-  writeBootstrappedShellThemePreference,
-} from './shellThemeBootstrap.ts';
-import {
-  nativeWindowTheme,
-  resolveShellTheme,
+  EDITORIAL_THEME,
+  EDITORIAL_WINDOW_THEME,
   type NativeShellTheme,
   type ResolvedShellTheme,
 } from './shellThemes.ts';
 
-export type { ResolvedShellTheme } from './shellThemes.ts';
-export { resolveShellTheme } from './shellThemes.ts';
-
 export interface ShellThemeSurface {
   setDocumentTheme(theme: ResolvedShellTheme): void;
-  setWindowTheme(theme: NativeShellTheme | null): Promise<void>;
+  setWindowTheme(theme: NativeShellTheme): Promise<void>;
   revealWindow(): Promise<void>;
 }
 
-export function resolvedThemeWhenReady(
-  theme: ShellTheme,
-  prefersDark: boolean,
-  ready: boolean,
-): ResolvedShellTheme | null {
-  return ready ? resolveShellTheme(theme, prefersDark) : null;
-}
-
 export async function applyShellThemeToSurface(
-  theme: ShellTheme,
-  prefersDark: boolean,
   surface: ShellThemeSurface,
 ): Promise<void> {
-  surface.setDocumentTheme(resolveShellTheme(theme, prefersDark));
+  surface.setDocumentTheme(EDITORIAL_THEME);
   try {
-    await surface.setWindowTheme(nativeWindowTheme(theme));
+    await surface.setWindowTheme(EDITORIAL_WINDOW_THEME);
   } catch {
     // Browser, mock, and smoke environments may not expose a Tauri window.
   }
@@ -63,52 +45,13 @@ const browserThemeSurface: ShellThemeSurface = {
   },
 };
 
-/**
- * Keep the last known preference for the next cold start's inline bootstrap.
- * While preferences are still loading, leave any bootstrapped `data-theme`
- * alone so the first visible paint is the previous session's theme — not a
- * blank frame or the compile-time default.
- */
-export function useShellTheme(theme: ShellTheme, ready = true): void {
-  const revealedRef = useRef(false);
+/** Keep the fixed Editorial document and native window themes in sync. */
+export function useShellTheme(): void {
+  const initializedRef = useRef(false);
 
   useLayoutEffect(() => {
-    if (!ready) {
-      // Preserve index.html / prior-session bootstrap. Clearing here is what
-      // produced: blank window → default tokens → saved theme.
-      return undefined;
-    }
-    const media = window.matchMedia?.('(prefers-color-scheme: dark)');
-    const apply = () => {
-      const resolved = resolveShellTheme(theme, media?.matches ?? false);
-      browserThemeSurface.setDocumentTheme(resolved);
-      writeBootstrappedShellThemePreference(theme);
-    };
-    apply();
-    if (theme !== 'system' || !media) return undefined;
-    media.addEventListener('change', apply);
-    return () => media.removeEventListener('change', apply);
-  }, [ready, theme]);
-
-  useEffect(() => {
-    if (!ready) return;
-    void browserThemeSurface.setWindowTheme(nativeWindowTheme(theme)).catch(() => {
-      // Browser, mock, and smoke environments may not expose a Tauri window.
-    });
-  }, [ready, theme]);
-
-  useLayoutEffect(() => {
-    if (revealedRef.current) return;
-    const hasDocumentTheme = Boolean(document.documentElement.dataset.theme);
-    if (!hasDocumentTheme) return;
-    // With a prior-session bootstrap, reveal immediately. Otherwise wait for
-    // preferences so the first mapped frame is the authoritative theme.
-    const hasBootstrap = readBootstrappedShellThemePreference() !== null;
-    if (!ready && !hasBootstrap) return;
-    revealedRef.current = true;
-    void browserThemeSurface.revealWindow().catch(() => {
-      // Allow a later ready/theme commit to retry (e.g. invoke not ready yet).
-      revealedRef.current = false;
-    });
-  }, [ready, theme]);
+    if (initializedRef.current) return;
+    initializedRef.current = true;
+    void applyShellThemeToSurface(browserThemeSurface);
+  }, []);
 }

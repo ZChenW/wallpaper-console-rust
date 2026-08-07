@@ -1,38 +1,9 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="editorial">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Wallpaper Console</title>
-    <!--
-      Cold-start theme bootstrap. Storage key must stay in sync with
-      SHELL_THEME_BOOTSTRAP_STORAGE_KEY in src/shell/shellThemeBootstrap.ts.
-      Only runs when a prior session wrote a preference — otherwise the window
-      stays hidden until React applies the authoritative config theme.
-    -->
-    <script>
-      (function () {
-        var KEY = 'wc.shellThemePreference';
-        var ALLOWED = {
-          system: 1,
-          light: 1,
-          dark: 1,
-          glass: 1,
-          editorial: 1,
-        };
-        try {
-          var pref = localStorage.getItem(KEY);
-          if (!ALLOWED[pref]) return;
-          var resolved =
-            pref === 'system'
-              ? window.matchMedia('(prefers-color-scheme: dark)').matches
-                ? 'dark'
-                : 'light'
-              : pref;
-          document.documentElement.setAttribute('data-theme', resolved);
-        } catch (e) {}
-      })();
-    </script>
   </head>
   <body>
     <div id="root"></div>

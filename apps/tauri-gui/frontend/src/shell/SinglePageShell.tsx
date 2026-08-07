@@ -179,7 +179,7 @@ export default function SinglePageShell() {
     saveError: preferencesSaveError,
     updatePreferences,
   } = useShellPreferences(api);
-  useShellTheme(preferences.theme, preferencesReady);
+  useShellTheme();
 
   const behavior = useWallpaperBehaviorSettings(api);
   const rendererStatuses = useRendererStatuses(api, settingsOpen);

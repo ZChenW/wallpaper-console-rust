@@ -10,7 +10,6 @@ use super::files;
 /// Mirrors `apps/tauri-gui/frontend/src/settings/configSchema.ts` plus keys
 /// written directly from shell preference hooks.
 const WRITABLE_CONFIG_KEYS: &[&str] = &[
-    "gui_theme",
     "image_backend",
     "gif_backend",
     "video_backend",
@@ -426,7 +425,6 @@ mod tests {
 
     #[test]
     fn config_set_allows_known_gui_keys() {
-        assert!(validate_writable_config_set("gui_theme", "light").is_ok());
         assert!(validate_writable_config_set("restore_on_login", "on").is_ok());
         assert!(validate_writable_config_set("post_apply_enabled", "on").is_ok());
         assert!(
@@ -438,6 +436,12 @@ mod tests {
 
     #[test]
     fn config_set_rejects_unknown_keys() {
+        let error = validate_writable_config_set("gui_theme", "light").unwrap_err();
+        assert!(
+            error.contains("Config key is not writable from the GUI: gui_theme"),
+            "{error}"
+        );
+
         let error = validate_writable_config_set("lwe_last_stderr", "evil").unwrap_err();
         assert!(
             error.contains("Config key is not writable from the GUI: lwe_last_stderr"),
@@ -453,7 +457,7 @@ mod tests {
 
     #[test]
     fn config_set_rejects_multiline_values() {
-        let error = validate_writable_config_set("gui_theme", "light\nevil").unwrap_err();
+        let error = validate_writable_config_set("post_apply_command", "safe\nevil").unwrap_err();
         assert!(error.contains("line breaks"), "{error}");
     }
 
