@@ -762,7 +762,7 @@ export default function SinglePageShell() {
             applyGesture={preferences.applyGesture}
             cardSize={preferences.cardSize}
             focusToken={libraryViewFocusToken}
-            initialAnchorWallpaperId={libraryModeAnchorId}
+            initialAnchorWallpaperId={libraryViewportAnchorId ?? libraryModeAnchorId}
             mode={preferences.libraryViewMode}
             model={libraryViewModel}
             onAnchorChange={rememberLibraryAnchor}

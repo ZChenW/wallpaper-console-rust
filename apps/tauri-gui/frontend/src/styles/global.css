@@ -2530,6 +2530,7 @@ input:focus {
   min-height: 2.1em;
   overflow: hidden;
   overflow-wrap: anywhere;
+  padding-block-start: 1px;
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   color: var(--text);

@@ -161,6 +161,7 @@ export default function FlowIndexDialog({
                   data-active={row.index === activeIndex || undefined}
                   data-current={current || undefined}
                   data-flow-index={row.index}
+                  data-index={row.index}
                   data-selected={selected || undefined}
                   key={row.key}
                   onClick={() => activate(row.index)}
