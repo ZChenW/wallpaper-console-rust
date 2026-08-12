@@ -27,13 +27,14 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_added_at ON wallpapers(added_at DESC, id DESC);
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
-pub const CURRENT_SCHEMA_VERSION: i64 = 6;
+pub const CURRENT_SCHEMA_VERSION: i64 = 7;
 pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "config",
     "sources",
     "wallpapers",
     "wallpaper_sources",
     "favorites",
+    "user_unsupported",
     "history",
     "state",
     "display_state",
@@ -121,6 +122,12 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             path        TEXT NOT NULL UNIQUE,
             added_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS user_unsupported (
+            identity_key TEXT PRIMARY KEY,
+            added_at     TEXT NOT NULL DEFAULT (datetime('now')),
+            CHECK (identity_key <> '')
         );
 
         CREATE TABLE IF NOT EXISTS history (
@@ -1736,12 +1743,12 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v6_schema_initializes_revision_refresh_and_derived_search_state() {
+    fn fresh_v7_schema_initializes_revision_refresh_and_derived_search_state() {
         let conn = Connection::open_in_memory().unwrap();
 
         create_schema(&conn).unwrap();
 
-        assert_eq!(CURRENT_SCHEMA_VERSION, 6);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 7);
         assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
         assert!(source_refresh_state_table_exists(&conn));
         assert_eq!(

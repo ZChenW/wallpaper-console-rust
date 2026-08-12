@@ -54,6 +54,7 @@ export interface LibraryBrowserSourceDTO {
 export interface LibraryBrowserItemDTO extends WallpaperDTO {
   wallpaperId: number;
   favorite: boolean;
+  userUnsupported?: boolean;
   author: string | null;
   addedAt: string;
   sources: LibraryBrowserSourceDTO[];
@@ -324,6 +325,8 @@ export interface WallpaperConsoleApi {
   favoritesPage(offset: number, limit: number): Promise<LibraryPageDTO>;
   favoriteAdd(path: string): Promise<CommandResult>;
   favoriteRemove(path: string): Promise<CommandResult>;
+  userUnsupportedAdd(wallpaperId: number): Promise<CommandResult>;
+  userUnsupportedRemove(wallpaperId: number): Promise<CommandResult>;
 
   sourcesList(): Promise<SourceDTO[]>;
   firstRunSourceSuggestions(): Promise<FirstRunSourceSuggestionDTO[]>;

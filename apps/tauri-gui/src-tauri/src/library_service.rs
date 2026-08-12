@@ -1377,6 +1377,7 @@ mod tests {
                     wallpaper_id: 1,
                     entry,
                     favorite: false,
+                    user_unsupported: false,
                     author: None,
                     added_at: String::new(),
                     sources: Vec::new(),

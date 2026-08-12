@@ -187,6 +187,13 @@ impl AppService {
 
     pub fn resolve_apply_target(&self, path: &str) -> Result<ApplyTarget, AppError> {
         let resolved_path = resolve_wallpaper_path(path).map_err(AppError::from_wc_error)?;
+        if self
+            .storage
+            .user_unsupported_contains_path(&resolved_path)
+            .map_err(AppError::from_wc_error)?
+        {
+            return Err(AppError::user_unsupported());
+        }
         let entry = wc_scan::make_entry(&resolved_path)
             .ok_or_else(|| AppError::unsupported_path(&resolved_path))?;
         let backend = self.backend_for_entry(&entry)?;
@@ -225,6 +232,13 @@ impl AppService {
             ApplyRequestKind::ApplyPreview => {
                 let project_path =
                     resolve_wallpaper_path(&request.path).map_err(AppError::from_wc_error)?;
+                if self
+                    .storage
+                    .user_unsupported_contains_path(&project_path)
+                    .map_err(AppError::from_wc_error)?
+                {
+                    return Err(AppError::user_unsupported());
+                }
                 let project = std::path::Path::new(&project_path);
                 let info = wc_scan::read_we_project_info(project)
                     .ok_or_else(|| AppError::preview_missing(&request.path))?;
@@ -323,7 +337,7 @@ impl AppError {
                          linux-wallpaperengine."
                             .to_string(),
                         Some(
-                            "Use the preview GIF or choose another Wallpaper Engine scene."
+                            "Move this scene to Unsupported so it is excluded from future choices, or choose another scene."
                                 .to_string(),
                         ),
                     ),
@@ -349,7 +363,7 @@ impl AppError {
                         "linux_wallpaperengine_failed",
                         "Wallpaper Engine scene support is not ready.".to_string(),
                         Some(
-                            "Use the preview GIF or choose another Wallpaper Engine scene."
+                            "Retry once. If the scene remains broken, move it to Unsupported or choose another scene."
                                 .to_string(),
                         ),
                     ),
@@ -387,6 +401,16 @@ impl AppError {
         }
     }
 
+    fn user_unsupported() -> Self {
+        AppError {
+            code: "user_unsupported".into(),
+            message: "This scene is in Unsupported and cannot be applied.".into(),
+            detail: None,
+            recoverable: true,
+            suggestion: Some("Restore it to the Library before applying it again.".into()),
+        }
+    }
+
     fn unsupported_backend(file_type: FileType, path: &str) -> Self {
         if file_type == FileType::WeWeb {
             return AppError::we_web_unsupported();
@@ -410,7 +434,7 @@ impl AppError {
             detail: Some("WE Web projects are kept in the library for browsing, preview thumbnails, project-folder access, and workshop ID lookup only.".into()),
             recoverable: true,
             suggestion: Some(
-                "Use Apply preview GIF if the project has one, or choose a WE Scene/image/video wallpaper.".into(),
+                "Keep this item in Unsupported and choose a Scene, image, GIF, or video wallpaper instead.".into(),
             ),
         }
     }

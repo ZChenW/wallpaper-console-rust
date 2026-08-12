@@ -2833,6 +2833,21 @@ input:focus {
     gap: 0.35rem;
   }
 
+  .flow-metadata-rail__metadata-row[data-flow-metadata-layout="narrative"] {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.18rem;
+  }
+
+  .flow-metadata-rail__metadata-row[data-flow-metadata-layout="narrative"] dd {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    line-height: 1.35;
+    text-align: start;
+    white-space: normal;
+  }
+
   .flow-metadata-rail__metadata-row[data-flow-metadata-priority="secondary"] {
     display: none;
   }
@@ -2932,6 +2947,14 @@ input:focus {
     text-align: start;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+  .flow-metadata-rail__metadata-row[data-flow-metadata-layout="narrative"] {
+    grid-column: 1 / -1;
+  }
+  .flow-metadata-rail__metadata-row[data-flow-metadata-layout="narrative"] dd {
+    -webkit-line-clamp: 2;
+    text-overflow: clip;
+    white-space: normal;
   }
   .flow-metadata-rail__actions {
     grid-area: actions;

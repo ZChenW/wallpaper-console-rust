@@ -161,6 +161,7 @@ pub struct LibraryBrowserItemDto {
     pub wallpaper: WallpaperDto,
     pub wallpaper_id: i64,
     pub favorite: bool,
+    pub user_unsupported: bool,
     pub author: Option<String>,
     pub added_at: String,
     pub sources: Vec<LibraryBrowserSourceDto>,

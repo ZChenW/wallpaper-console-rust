@@ -122,10 +122,28 @@ fn browser_item_dto(
     routing: &wc_core::backend_routing::BackendRouting,
     we_compat: Option<&mut wc_storage::we_compat::WeCompatCache>,
 ) -> LibraryBrowserItemDto {
+    let mut wallpaper = dto_from_entry_with_routing(item.entry, routing, we_compat);
+    if item.user_unsupported {
+        wallpaper.apply_availability = Some("unsupported".into());
+        wallpaper.apply_backend = None;
+        wallpaper.apply_reason = Some(
+            "Manually moved to Unsupported. Restore it to the Library before applying it.".into(),
+        );
+        if let Some(actions) = wallpaper.apply_actions.as_mut() {
+            actions.retain(|action| {
+                matches!(action.kind.as_str(), "open_folder" | "copy_workshop_id")
+            });
+        }
+        wallpaper.renderer_compatibility = Some(
+            "Excluded by the user because linux-wallpaperengine does not render it correctly."
+                .into(),
+        );
+    }
     LibraryBrowserItemDto {
-        wallpaper: dto_from_entry_with_routing(item.entry, routing, we_compat),
+        wallpaper,
         wallpaper_id: item.wallpaper_id,
         favorite: item.favorite,
+        user_unsupported: item.user_unsupported,
         author: item.author,
         added_at: item.added_at,
         sources: item
@@ -374,6 +392,54 @@ pub async fn favorite_remove(
         })
         .await
         .unwrap_or_else(|e| fail(e.to_string())),
+    )
+}
+
+#[tauri::command]
+pub async fn user_unsupported_add(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    wallpaper_id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => match storage.user_unsupported_add(wallpaper_id) {
+                Ok(changed) => {
+                    if changed {
+                        service.invalidate_local_write();
+                    }
+                    ok("Moved to Unsupported.")
+                }
+                Err(error) => fail(error.to_string()),
+            },
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
+    )
+}
+
+#[tauri::command]
+pub async fn user_unsupported_remove(
+    state: tauri::State<'_, crate::library_service::LibraryService>,
+    wallpaper_id: i64,
+) -> Result<CommandResult, String> {
+    let service = state.inner().clone();
+    Ok(
+        tauri::async_runtime::spawn_blocking(move || match storage() {
+            Ok(storage) => match storage.user_unsupported_remove(wallpaper_id) {
+                Ok(changed) => {
+                    if changed {
+                        service.invalidate_local_write();
+                    }
+                    ok("Restored to the Library.")
+                }
+                Err(error) => fail(error.to_string()),
+            },
+            Err(error) => fail(error),
+        })
+        .await
+        .unwrap_or_else(|error| fail(error.to_string())),
     )
 }
 

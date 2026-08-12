@@ -5,7 +5,6 @@ use wc_config::ConfigDirExt;
 
 use wc_storage::StorageApi;
 
-use crate::library::library_paths;
 use crate::Commands;
 
 fn parse_display_target(raw: &str) -> anyhow::Result<wc_app::DisplayTarget> {
@@ -213,18 +212,15 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         | Commands::RandomGif
         | Commands::RandomVideo => {
             let filter = match &cmd {
-                Commands::RandomImage => Some(wc_core::types::FileType::Image),
-                Commands::RandomGif => Some(wc_core::types::FileType::Gif),
-                Commands::RandomVideo => Some(wc_core::types::FileType::Video),
-                _ => None,
+                Commands::RandomImage => wc_storage::sqlite::LibraryBrowserType::Image,
+                Commands::RandomGif => wc_storage::sqlite::LibraryBrowserType::Gif,
+                Commands::RandomVideo => wc_storage::sqlite::LibraryBrowserType::Video,
+                _ => wc_storage::sqlite::LibraryBrowserType::Usable,
             };
-            let paths = library_paths(s, filter)?;
-            if paths.is_empty() {
+            let Some(chosen) = crate::library::random_browser_entry(s, filter, false)? else {
                 anyhow::bail!("no matching wallpapers found");
-            }
-            let idx = rand::random::<usize>() % paths.len();
-            let chosen = &paths[idx];
-            apply_selected(s, chosen)?;
+            };
+            apply_selected(s, chosen.path.as_ref())?;
         }
 
         // ── Sources ──────────────────────────────────────────────────
@@ -360,13 +356,15 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
 
         Commands::FavoriteRandom => {
-            let favs = s.favorites_list()?;
-            if favs.is_empty() {
+            let Some(chosen) = crate::library::random_browser_entry(
+                s,
+                wc_storage::sqlite::LibraryBrowserType::Usable,
+                true,
+            )?
+            else {
                 anyhow::bail!("no favorites configured");
-            }
-            let idx = rand::random::<usize>() % favs.len();
-            let chosen = &favs[idx];
-            apply_selected(s, chosen)?;
+            };
+            apply_selected(s, chosen.path.as_ref())?;
         }
 
         Commands::FavoriteRemove { file } => {

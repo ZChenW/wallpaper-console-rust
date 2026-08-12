@@ -27,15 +27,17 @@ export interface FlowMetadataRailProps {
 
 interface MetadataRowProps {
   readonly label: string;
+  readonly layout?: 'narrative';
   readonly value: string | null;
   readonly priority?: 'primary' | 'secondary';
 }
 
-function MetadataRow({ label, value, priority = 'primary' }: MetadataRowProps) {
+function MetadataRow({ label, layout, value, priority = 'primary' }: MetadataRowProps) {
   return (
     <div
       className="flow-metadata-rail__metadata-row"
       data-flow-metadata-field={label.toLowerCase()}
+      data-flow-metadata-layout={layout}
       data-flow-metadata-missing={value === null ? true : undefined}
       data-flow-metadata-priority={priority}
     >
@@ -118,7 +120,11 @@ export function FlowMetadataRailView({
           <MetadataRow label="Source" value={presentation.sources} />
           <MetadataRow label="Type" value={presentation.type} />
           <MetadataRow label="Resolution" value={presentation.resolution} />
-          <MetadataRow label="Compatibility" value={presentation.compatibility} />
+          <MetadataRow
+            label="Compatibility"
+            layout={presentation.compatibility === null ? undefined : 'narrative'}
+            value={presentation.compatibility}
+          />
           <MetadataRow label="Size" priority="secondary" value={presentation.size} />
           <MetadataRow label="Added" priority="secondary" value={presentation.addedDate} />
           <MetadataRow label="Author" priority="secondary" value={presentation.author} />

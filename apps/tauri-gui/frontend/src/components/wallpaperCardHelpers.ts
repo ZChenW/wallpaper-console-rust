@@ -49,7 +49,12 @@ export function editorialActionLabel(
     : 'Select / apply';
 }
 
+function isUserUnsupported(e: WallpaperDTO): boolean {
+  return 'userUnsupported' in e && e.userUnsupported === true;
+}
+
 export function weBadge(e: WallpaperDTO): string | null {
+  if (isUserUnsupported(e)) return 'Unsupported';
   if (e.type === 'we_scene') {
     if (e.backendStatus === 'renderer_limitation') return 'Renderer limitation';
     if (e.backendStatus === 'failed') return 'Scene incompatible';
@@ -64,6 +69,7 @@ export function weBadge(e: WallpaperDTO): string | null {
 
 export function weBadgeClass(e: WallpaperDTO): string {
   if (
+    isUserUnsupported(e) ||
     e.type === 'we_web' ||
     e.backendStatus === 'failed' ||
     e.backendStatus === 'renderer_limitation'
@@ -73,6 +79,9 @@ export function weBadgeClass(e: WallpaperDTO): string {
 }
 
 export function metaLine(e: WallpaperDTO): string {
+  if (isUserUnsupported(e)) {
+    return 'Excluded from Library choices · restore from Unsupported to use again';
+  }
   if (e.type === 'we_scene' || e.type === 'we_web' || e.type === 'unsupported') {
     if (e.type === 'unsupported' && e.unsupportedReason) {
       return e.unsupportedReason;

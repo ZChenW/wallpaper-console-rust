@@ -34,6 +34,7 @@ import OverflowStrip from '../components/OverflowStrip.tsx';
 import {
   DISPLAY_APPLY_DISABLED_REASON,
   resolveLibraryModeSwitchAnchor,
+  userUnsupportedContextAction,
   type ContextAction,
   type LibraryViewModel,
 } from '../components/libraryViewModel.ts';
@@ -484,12 +485,67 @@ export default function SinglePageShell() {
     }
   }, [setCommandFeedback]);
 
+  const restoreUserUnsupported = useCallback(async (entry: LibraryBrowserItemDTO) => {
+    try {
+      const result = await api.userUnsupportedRemove(entry.wallpaperId);
+      if (!result.success) {
+        setCommandFeedback(commandErrorFeedback('Restore to Library', result), 'system');
+        return;
+      }
+      await libraryLifecycle.reloadLibrary();
+      showNotice({
+        channel: 'system',
+        severity: 'success',
+        message: 'Restored to the Library.',
+      });
+    } catch (error) {
+      setCommandFeedback(commandErrorFeedback('Restore to Library', error), 'system');
+    }
+  }, [libraryLifecycle.reloadLibrary, setCommandFeedback, showNotice]);
+
+  const moveToUserUnsupported = useCallback(async (entry: LibraryBrowserItemDTO) => {
+    try {
+      const result = await api.userUnsupportedAdd(entry.wallpaperId);
+      if (!result.success) {
+        setCommandFeedback(commandErrorFeedback('Move to Unsupported', result), 'system');
+        return;
+      }
+      await libraryLifecycle.reloadLibrary();
+      showNotice({
+        channel: 'system',
+        severity: 'success',
+        message: 'Moved to Unsupported. It will be excluded from Library choices.',
+        action: {
+          label: 'Undo',
+          invoke: () => void restoreUserUnsupported(entry),
+        },
+      });
+    } catch (error) {
+      setCommandFeedback(commandErrorFeedback('Move to Unsupported', error), 'system');
+    }
+  }, [libraryLifecycle.reloadLibrary, restoreUserUnsupported, setCommandFeedback, showNotice]);
+
   const buildContextActions = useCallback((entry: LibraryBrowserItemDTO): ContextAction[] => {
     const actions: ContextAction[] = [
       {
         label: entry.favorite ? 'Remove from Favorites' : 'Add to Favorites',
         action: () => void toggleFavorite(entry),
       },
+    ];
+    const unsupportedAction = userUnsupportedContextAction(entry);
+    if (unsupportedAction === 'move') {
+      actions.push({
+        label: 'Move to Unsupported',
+        action: () => void moveToUserUnsupported(entry),
+        danger: true,
+      });
+    } else if (unsupportedAction === 'restore') {
+      actions.push({
+        label: 'Restore to Library',
+        action: () => void restoreUserUnsupported(entry),
+      });
+    }
+    actions.push(
       {
         label: 'Open Location',
         action: () => void openLocation(entry),
@@ -501,7 +557,7 @@ export default function SinglePageShell() {
           openLibraryDetails(entry, returnFocus);
         },
       },
-    ];
+    );
     const limitation = entry.applyReason || entry.unsupportedReason;
     if (limitation) {
       actions.push({
@@ -515,7 +571,15 @@ export default function SinglePageShell() {
       });
     }
     return actions;
-  }, [openLibraryDetails, openLocation, preferences.libraryViewMode, showNotice, toggleFavorite]);
+  }, [
+    moveToUserUnsupported,
+    openLibraryDetails,
+    openLocation,
+    preferences.libraryViewMode,
+    restoreUserUnsupported,
+    showNotice,
+    toggleFavorite,
+  ]);
 
   const chooseRandom = useCallback(async () => {
     const outcome = await browser.chooseRandom();
