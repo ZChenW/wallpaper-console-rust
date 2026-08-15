@@ -1038,7 +1038,7 @@ export default function SinglePageShell() {
       }}
     >
       <header className="single-page-topbar" data-tauri-drag-region="deep">
-        <div className="single-page-brand" aria-label="Wallpaper Console">Wallpaper Console</div>
+        <h1 className="single-page-brand">Wallpaper Console</h1>
         <label className="single-page-search">
           <Search size={16} aria-hidden="true" />
           <input
@@ -1091,6 +1091,7 @@ export default function SinglePageShell() {
 
       <div className="single-page-library-controls">
         <OverflowStrip className="single-page-filters" aria-label="Library filters">
+          <span aria-hidden="true" className="single-page-filters__label">01 / FILTER</span>
           {renderFilterControls()}
         </OverflowStrip>
         <Popover.Root open={filtersOpen} onOpenChange={setFiltersOpen}>
@@ -1120,6 +1121,7 @@ export default function SinglePageShell() {
         />
         {preferences.libraryViewMode === 'grid' ? (
           <span className="single-page-count" aria-live="polite">
+            <span aria-hidden="true" className="single-page-count__prefix">INDEX / </span>
             {browser.totalKnown
               ? `${browser.entries.length} / ${browser.total}`
               : `${browser.entries.length} loaded`}

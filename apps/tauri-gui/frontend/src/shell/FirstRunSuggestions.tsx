@@ -1,5 +1,3 @@
-import type { CSSProperties } from 'react';
-
 export type FirstRunSuggestion =
   | {
     readonly kind: 'directory';
@@ -16,80 +14,6 @@ export interface FirstRunSuggestionsProps {
   readonly onAddDirectory: (path: string) => void;
   readonly onScanWallpaperEngine: () => void;
 }
-
-const sectionStyle: CSSProperties = {
-  display: 'grid',
-  width: 'min(44rem, 100%)',
-  gap: '0.75rem',
-  textAlign: 'start',
-};
-
-const headingStyle: CSSProperties = {
-  margin: 0,
-  fontSize: '0.95rem',
-};
-
-const noteStyle: CSSProperties = {
-  margin: 0,
-  fontSize: '0.78rem',
-  opacity: 0.72,
-};
-
-const listStyle: CSSProperties = {
-  display: 'grid',
-  gap: '0.6rem',
-  margin: 0,
-  padding: 0,
-  listStyle: 'none',
-};
-
-const suggestionStyle: CSSProperties = {
-  display: 'grid',
-  gridTemplateColumns: 'minmax(0, 1fr) auto',
-  alignItems: 'center',
-  gap: '0.6rem 1rem',
-  padding: '0.75rem',
-  border: '1px solid color-mix(in srgb, currentColor 13%, transparent)',
-  borderRadius: '0.65rem',
-  background: 'color-mix(in srgb, CanvasText 3%, Canvas)',
-};
-
-const contentStyle: CSSProperties = {
-  display: 'grid',
-  minWidth: 0,
-  gap: '0.2rem',
-};
-
-const labelStyle: CSSProperties = {
-  fontSize: '0.87rem',
-  fontWeight: 650,
-};
-
-const pathStyle: CSSProperties = {
-  overflowWrap: 'anywhere',
-  font: '0.7rem/1.4 ui-monospace, SFMono-Regular, Consolas, monospace',
-  opacity: 0.7,
-};
-
-const rootsStyle: CSSProperties = {
-  display: 'grid',
-  gap: '0.15rem',
-  margin: '0.2rem 0 0',
-  paddingInlineStart: '1.1rem',
-};
-
-const buttonStyle: CSSProperties = {
-  minHeight: '2.15rem',
-  padding: '0.35rem 0.7rem',
-  border: '1px solid color-mix(in srgb, currentColor 18%, transparent)',
-  borderRadius: '0.5rem',
-  background: 'color-mix(in srgb, AccentColor 14%, transparent)',
-  color: 'inherit',
-  cursor: 'pointer',
-  font: 'inherit',
-  fontSize: '0.78rem',
-  whiteSpace: 'nowrap',
-};
 
 function usableSuggestions(
   suggestions: readonly FirstRunSuggestion[],
@@ -109,25 +33,29 @@ export function FirstRunSuggestions({
   if (visibleSuggestions.length === 0) return null;
 
   return (
-    <section aria-labelledby="first-run-suggestions-title" style={sectionStyle}>
-      <h3 id="first-run-suggestions-title" style={headingStyle}>Suggested sources</h3>
-      <p style={noteStyle}>Nothing is scanned until you confirm a suggestion.</p>
-      <ul aria-label="Detected wallpaper source suggestions" style={listStyle}>
+    <section aria-labelledby="first-run-suggestions-title" className="first-run-suggestions">
+      <h3 className="first-run-suggestions__heading" id="first-run-suggestions-title">
+        Suggested sources
+      </h3>
+      <p className="first-run-suggestions__note">
+        Nothing is scanned until you confirm a suggestion.
+      </p>
+      <ul aria-label="Detected wallpaper source suggestions" className="first-run-suggestions__list">
         {visibleSuggestions.map((suggestion, index) => {
           if (suggestion.kind === 'directory') {
             const label = suggestion.label.trim();
             const path = suggestion.path.trim();
             return (
-              <li key={`directory:${path}`} style={suggestionStyle}>
-                <div style={contentStyle}>
-                  <span style={labelStyle}>{label}</span>
-                  <code style={pathStyle}>{path}</code>
+              <li className="first-run-suggestions__item" key={`directory:${path}`}>
+                <div className="first-run-suggestions__content">
+                  <span className="first-run-suggestions__label">{label}</span>
+                  <code className="first-run-suggestions__path">{path}</code>
                 </div>
                 <button
                   aria-label={`Add ${label} as a wallpaper source`}
+                  className="first-run-suggestions__button"
                   data-first-run-action="add-directory"
                   onClick={() => onAddDirectory(path)}
-                  style={buttonStyle}
                   type="button"
                 >
                   Add {label}
@@ -140,21 +68,28 @@ export function FirstRunSuggestions({
             .map((root) => root.trim())
             .filter(Boolean);
           return (
-            <li key={`wallpaper-engine:${index}`} style={suggestionStyle}>
-              <div style={contentStyle}>
-                <span style={labelStyle}>Wallpaper Engine</span>
-                <span style={noteStyle}>Wallpaper Engine content was detected.</span>
+            <li className="first-run-suggestions__item" key={`wallpaper-engine:${index}`}>
+              <div className="first-run-suggestions__content">
+                <span className="first-run-suggestions__label">Wallpaper Engine</span>
+                <span className="first-run-suggestions__note">
+                  Wallpaper Engine content was detected.
+                </span>
                 {roots.length > 0 ? (
-                  <ul aria-label="Detected Wallpaper Engine roots" style={rootsStyle}>
-                    {roots.map((root) => <li key={root}><code style={pathStyle}>{root}</code></li>)}
+                  <ul
+                    aria-label="Detected Wallpaper Engine roots"
+                    className="first-run-suggestions__roots"
+                  >
+                    {roots.map((root) => (
+                      <li key={root}><code className="first-run-suggestions__path">{root}</code></li>
+                    ))}
                   </ul>
                 ) : null}
               </div>
               <button
                 aria-label="Confirm Wallpaper Engine scan"
+                className="first-run-suggestions__button"
                 data-first-run-action="scan-wallpaper-engine"
                 onClick={onScanWallpaperEngine}
-                style={buttonStyle}
                 type="button"
               >
                 Scan Wallpaper Engine

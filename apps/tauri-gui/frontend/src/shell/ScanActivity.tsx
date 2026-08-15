@@ -85,7 +85,7 @@ export function ScanActivity({ presentation, progress, onCancel, onDismiss }: Sc
           className="scan-activity__progress"
           {...(determinate ?? {})}
         />
-        <span className="scan-activity__meta">
+        <span aria-hidden="true" className="scan-activity__meta">
           Elapsed {formatScanElapsed(presentation.elapsedMs)}
         </span>
       </div>

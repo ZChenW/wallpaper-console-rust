@@ -20,6 +20,7 @@ export interface FlowMetadataRailProps {
   readonly activeQueueName: string | null;
   readonly pendingQueueName: string | null;
   readonly allViewed: boolean;
+  readonly loadingMore?: boolean;
   readonly onApply: (entry: LibraryBrowserItemDTO) => void;
   readonly onFavorite: (entry: LibraryBrowserItemDTO) => void;
   readonly onDetails: (entry: LibraryBrowserItemDTO) => void;
@@ -64,6 +65,7 @@ export function FlowMetadataRailView({
   activeQueueName,
   pendingQueueName,
   allViewed,
+  loadingMore = false,
   onApply,
   onFavorite,
   onDetails,
@@ -155,7 +157,11 @@ export function FlowMetadataRailView({
           </p>
         ) : null}
 
-        {allViewed ? (
+        {loadingMore ? (
+          <p className="flow-metadata-rail__completion" role="status">
+            Loading more…
+          </p>
+        ) : allViewed ? (
           <p className="flow-metadata-rail__completion">
             All {displayedTotal} wallpapers viewed
           </p>
@@ -180,15 +186,15 @@ export function FlowMetadataRailView({
         </button>
         <button
           aria-busy={favoritePending || undefined}
-          aria-disabled={favoritePending || undefined}
           aria-pressed={favorite}
           className="flow-metadata-rail__action"
           data-flow-action="favorite"
+          disabled={favoritePending}
           onClick={(event) => {
             event.stopPropagation();
-            if (favoritePending) return;
             onFavorite(centeredEntry);
           }}
+          title={favoritePending ? 'Saving favorite…' : undefined}
           type="button"
         >
           Favorite{favorite ? ' · Saved' : ''}

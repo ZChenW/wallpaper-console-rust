@@ -1,5 +1,6 @@
 import { memo, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
+import { SearchX } from 'lucide-react';
 import type { LibraryBrowserItemDTO } from '../api/bridge';
 import { emitFeedback } from '../events/appEvents.ts';
 import { recordMetric } from '../perf/metrics';
@@ -15,6 +16,7 @@ import {
   type WallpaperCardSize,
 } from '../utils/layout';
 import ContextMenu from './ContextMenu';
+import LibraryState from './LibraryState.tsx';
 import { WallpaperCard } from './WallpaperCard';
 import {
   libraryEntryApplyAvailable,
@@ -564,14 +566,20 @@ function WallpaperGridImpl({
   const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
 
   if (entries.length === 0) {
-    return <div className="empty-state">{emptyText}</div>;
+    return (
+      <LibraryState
+        description="Try clearing the active filters or changing your search."
+        icon={<SearchX aria-hidden="true" size={28} />}
+        role="status"
+        title={emptyText}
+      />
+    );
   }
 
+  // Roving tabindex: real focus moves between card buttons, so the container
+  // must not also be a tab stop or claim aria-activedescendant.
   return (
     <div
-      aria-activedescendant={entries[activeIndex]
-        ? `wallpaper-grid-option-${entries[activeIndex]!.wallpaperId}`
-        : undefined}
       className={`wallpaper-grid${refreshing ? ' is-refreshing' : ''}`}
       ref={containerRef}
       onKeyDown={handleGridKeyDown}
@@ -580,7 +588,6 @@ function WallpaperGridImpl({
       aria-colcount={colCount}
       aria-rowcount={setSize === undefined ? -1 : Math.ceil(setSize / colCount)}
       role="grid"
-      tabIndex={active ? 0 : -1}
     >
       <div style={{ height: virtualizer.getTotalSize(), position: 'relative' }}>
         {virtualizer.getVirtualItems().map((virtualRow) => {
@@ -644,7 +651,7 @@ function WallpaperGridImpl({
                     isScrolling={isScrolling}
                     thumbnailHeight={gridLayout.thumbnailHeight}
                     onFocus={() => setActiveIndex(entryIndex)}
-                    tabIndex={entryIndex === activeIndex ? 0 : -1}
+                    tabIndex={active && entryIndex === activeIndex ? 0 : -1}
                   />
                 );
               })}
@@ -652,6 +659,12 @@ function WallpaperGridImpl({
           );
         })}
       </div>
+
+      {loadingMore ? (
+        <div className="wallpaper-grid__loading" role="status">
+          Loading more…
+        </div>
+      ) : null}
 
       {contextMenu && contextEntry && (
         <ContextMenu

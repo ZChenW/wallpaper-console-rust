@@ -6,6 +6,7 @@ import { wallpaperCardMetrics, type WallpaperCardSize } from '../utils/layout';
 import {
   displayName,
   cardHoverLabel,
+  cardStateDetail,
   editorialActionLabel,
   formatSize,
   metaLine,
@@ -163,6 +164,10 @@ function WallpaperCardImpl({
   };
 
   const badge = weBadge(entry);
+  const stateDetail = cardStateDetail(entry);
+  const hoverTitle = stateDetail
+    ? `${cardHoverLabel(entry)} — ${stateDetail}`
+    : cardHoverLabel(entry);
   const cardStyle = {
     '--wallpaper-thumbnail-height': `${
       thumbnailHeight ?? wallpaperCardMetrics(cardSize).thumbnailHeight
@@ -195,7 +200,7 @@ function WallpaperCardImpl({
         onFocus={onFocus}
         onKeyDown={handleKeyDown}
         tabIndex={tabIndex}
-        title={cardHoverLabel(entry)}
+        title={hoverTitle}
         type="button"
       >
         <div className="wallpaper-thumb">
@@ -211,6 +216,9 @@ function WallpaperCardImpl({
         <div className="wallpaper-info">
           <span className="wallpaper-name">{displayName(entry)}</span>
           <span className="wallpaper-meta">{metaLine(entry)}</span>
+          {current ? (
+            <span aria-hidden="true" className="wallpaper-current-tag">Current</span>
+          ) : null}
           {ordinal ? (
             <span aria-hidden="true" className="wallpaper-index">{ordinal}</span>
           ) : null}

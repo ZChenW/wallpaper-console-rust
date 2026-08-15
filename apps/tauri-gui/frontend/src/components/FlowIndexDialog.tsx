@@ -143,7 +143,7 @@ export default function FlowIndexDialog({
           aria-label="Loaded wallpaper names"
           className="flow-index-dialog__list"
           ref={scrollRef}
-          role="navigation"
+          role="listbox"
         >
           <div
             className="flow-index-dialog__virtual"
@@ -157,6 +157,7 @@ export default function FlowIndexDialog({
               return (
                 <button
                   aria-current={current ? 'true' : undefined}
+                  aria-selected={selected}
                   className="flow-index-dialog__item"
                   data-active={row.index === activeIndex || undefined}
                   data-current={current || undefined}
@@ -167,6 +168,7 @@ export default function FlowIndexDialog({
                   onClick={() => activate(row.index)}
                   onFocus={() => setActiveIndex(row.index)}
                   ref={virtualizer.measureElement}
+                  role="option"
                   style={{
                     position: 'absolute',
                     insetInline: 0,

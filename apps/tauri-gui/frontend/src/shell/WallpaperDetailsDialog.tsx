@@ -76,10 +76,16 @@ export function WallpaperDetailsDialogView({
         role="dialog"
       >
         <header className="wallpaper-details__header">
-          <h2 className="wallpaper-details__title" id="wallpaper-details-title">{title}</h2>
+          <h2
+            autoFocus={true}
+            className="wallpaper-details__title"
+            id="wallpaper-details-title"
+            tabIndex={-1}
+          >
+            {title}
+          </h2>
           <button
             aria-label="Close wallpaper details"
-            autoFocus={true}
             className="wallpaper-details__close"
             data-icon-button={true}
             onClick={onClose}

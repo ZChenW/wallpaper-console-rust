@@ -131,25 +131,23 @@ export function CompactSettingsPanelView({
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) onClose();
         }}
-        style={{ zIndex: 1100 }}
       >
         <aside
-          aria-label="Settings"
           aria-hidden={unavailableToInteraction ? true : undefined}
+          aria-labelledby="settings-panel-title"
           aria-modal="true"
           className="settings-panel"
           inert={unavailableToInteraction}
           role="dialog"
         >
           <header className="settings-panel__header">
-            <h2>Settings</h2>
+            <h2 autoFocus id="settings-panel-title" tabIndex={-1}>Settings</h2>
             <span
               aria-hidden="true"
               className="settings-panel__drag-region"
               data-tauri-drag-region="deep"
             />
             <button
-              autoFocus
               aria-label="Close settings"
               className="settings-panel__close"
               data-icon-button={true}
@@ -306,11 +304,10 @@ export function CompactSettingsPanelView({
       data-settings-overlay={true}
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
-      style={{ zIndex: 1100 }}
     >
       <aside
-        aria-label="Settings"
         aria-hidden={unavailableToInteraction ? true : undefined}
+        aria-labelledby="settings-panel-title"
         aria-modal="true"
         inert={unavailableToInteraction}
         role="dialog"
@@ -318,14 +315,13 @@ export function CompactSettingsPanelView({
         onKeyDown={(event) => trapDialogFocus(event, event.currentTarget)}
       >
         <header className="settings-panel__header">
-          <h2>Settings</h2>
+          <h2 autoFocus id="settings-panel-title" tabIndex={-1}>Settings</h2>
           <span
             aria-hidden="true"
             className="settings-panel__drag-region"
             data-tauri-drag-region="deep"
           />
           <button
-            autoFocus
             aria-label="Close settings"
             className="settings-panel__close"
             data-icon-button={true}
@@ -677,6 +673,7 @@ export function CompactSettingsPanelView({
                   data-behavior-control={true}
                   disabled={!behaviorReady || lweUnavailable}
                   onChange={updateLweMuted}
+                  role="switch"
                   type="checkbox"
                 />
               </label>
@@ -701,6 +698,7 @@ export function CompactSettingsPanelView({
                   data-behavior-control={true}
                   disabled={!behaviorReady}
                   onChange={updateRestoreOnLogin}
+                  role="switch"
                   type="checkbox"
                 />
               </label>
