@@ -15,6 +15,7 @@ import {
   useVirtualizer,
   type Range,
 } from '@tanstack/react-virtual';
+import { SearchX } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { recordMetric } from '../perf/metrics.ts';
@@ -26,6 +27,7 @@ import ContextMenu from './ContextMenu.tsx';
 import FlowIndexDialog from './FlowIndexDialog.tsx';
 import FlowIndexRail, { type FlowIndexRailEntry } from './FlowIndexRail.tsx';
 import FlowMetadataRail from './FlowMetadataRail.tsx';
+import LibraryState from './LibraryState.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 import { applyFlowHover } from './flowHoverDom.ts';
 import type { FlowMotionKind } from './flowInteractionController.ts';
@@ -1292,7 +1294,14 @@ function WallpaperFlowReady({
     && model.isEntryApplicable(centeredEntry);
 
   if (model.entries.length === 0) {
-    return <div className="empty-state">No wallpapers found</div>;
+    return (
+      <LibraryState
+        description="Try clearing the active filters or changing your search."
+        icon={<SearchX aria-hidden="true" size={28} />}
+        role="status"
+        title="No wallpapers found"
+      />
+    );
   }
 
   return (
@@ -1463,6 +1472,7 @@ function WallpaperFlowReady({
         favorite={centeredEntry?.favorite ?? false}
         favoritePending={Boolean(centeredEntry && model.favoritePendingPaths.has(centeredEntry.path))}
         loadedCount={model.entries.length}
+        loadingMore={model.loadingMore}
         onApply={applyEntry}
         onDetails={(entry) => model.onDetails(
           entry,

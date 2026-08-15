@@ -2,6 +2,7 @@ import {
   memo,
   useEffect,
   useRef,
+  type KeyboardEvent,
   type Ref,
 } from 'react';
 
@@ -34,6 +35,8 @@ export interface FlowIndexRailProps {
 
 interface FlowIndexRailViewProps extends FlowIndexRailProps {
   readonly viewportRef?: Ref<HTMLDivElement>;
+  /** Set by the stateful wrapper; absent when the view is exercised standalone. */
+  readonly listRef?: { current: HTMLOListElement | null };
 }
 
 function progressLabel(
@@ -110,11 +113,60 @@ export function FlowIndexRailView({
   onHover,
   onOpenIndex,
   viewportRef,
+  listRef,
 }: FlowIndexRailViewProps) {
   const centeredPosition = entries.find(({ entry }) => (
     entry.wallpaperId === centeredWallpaperId
   ));
   const centeredOrdinal = centeredPosition ? centeredPosition.index + 1 : null;
+
+  // Roving tabindex: the rail is a single Tab stop; arrows move between entries
+  // and activate them so the preview stream follows.
+  const handleListKeyDown = (event: KeyboardEvent<HTMLOListElement>) => {
+    const key = event.key;
+    if (
+      key !== 'ArrowDown' && key !== 'ArrowUp' && key !== 'Home' && key !== 'End'
+    ) return;
+    if (entries.length === 0) return;
+    const activeId = document.activeElement instanceof HTMLElement
+      ? Number(document.activeElement.dataset.wallpaperId)
+      : Number.NaN;
+    const currentPosition = entries.findIndex(
+      ({ entry }) => entry.wallpaperId === activeId,
+    );
+    let nextPosition: number;
+    switch (key) {
+      case 'ArrowDown':
+        nextPosition = currentPosition < 0
+          ? 0
+          : Math.min(entries.length - 1, currentPosition + 1);
+        break;
+      case 'ArrowUp':
+        nextPosition = currentPosition < 0
+          ? entries.length - 1
+          : Math.max(0, currentPosition - 1);
+        break;
+      case 'Home':
+        nextPosition = 0;
+        break;
+      default:
+        nextPosition = entries.length - 1;
+        break;
+    }
+    const target = entries[nextPosition];
+    if (!target) return;
+    event.preventDefault();
+    event.stopPropagation();
+    onActivate(target.entry);
+    window.requestAnimationFrame(() => {
+      listRef?.current
+        ?.querySelector<HTMLButtonElement>(
+          `button[data-wallpaper-id="${target.entry.wallpaperId}"]`,
+        )
+        ?.focus();
+    });
+  };
+
   return (
     <nav aria-label="Loaded wallpaper index" className="flow-index-rail">
       <header className="flow-index-rail__header">
@@ -141,7 +193,14 @@ export function FlowIndexRailView({
       </header>
 
       <div className="flow-index-rail__viewport" ref={viewportRef}>
-        <ol className="flow-index-rail__list" ref={observeFlowIndexAlignment}>
+        <ol
+          className="flow-index-rail__list"
+          onKeyDown={handleListKeyDown}
+          ref={(list) => {
+            if (listRef) listRef.current = list;
+            return observeFlowIndexAlignment(list);
+          }}
+        >
           {entries.map(({ entry, index, selected, current, favorite }) => {
             const centered = entry.wallpaperId === centeredWallpaperId;
             return (
@@ -162,6 +221,7 @@ export function FlowIndexRailView({
                   onClick={() => onActivate(entry)}
                   onMouseEnter={() => onHover(entry.wallpaperId)}
                   onMouseLeave={() => onHover(null)}
+                  tabIndex={centered ? 0 : -1}
                   type="button"
                 >
                   <span aria-hidden="true" className="flow-index-rail__ordinal">
@@ -183,6 +243,7 @@ export function FlowIndexRailView({
 
 function ObservedFlowIndexRail(props: FlowIndexRailProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLOListElement | null>(null);
   useEffect(() => {
     const viewport = viewportRef.current;
     if (!viewport || !props.onViewportHeightChange) return undefined;
@@ -194,7 +255,7 @@ function ObservedFlowIndexRail(props: FlowIndexRailProps) {
     return () => observer.disconnect();
   }, [props.onViewportHeightChange]);
 
-  return <FlowIndexRailView {...props} viewportRef={viewportRef} />;
+  return <FlowIndexRailView {...props} listRef={listRef} viewportRef={viewportRef} />;
 }
 
 export const FlowIndexRail = memo(ObservedFlowIndexRail);

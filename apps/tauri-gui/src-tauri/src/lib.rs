@@ -173,6 +173,8 @@ pub fn run() {
             commands::scan_steam_workshop,
             commands::favorite_add,
             commands::favorite_remove,
+            commands::user_unsupported_add,
+            commands::user_unsupported_remove,
             commands::favorites_page,
             commands::library_count,
             commands::library_page_gui,

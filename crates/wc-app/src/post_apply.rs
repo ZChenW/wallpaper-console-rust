@@ -54,12 +54,9 @@ fn run_post_apply_hook_inner(
         return Ok(());
     }
 
-    if matches!(
-        ctx.file_type,
-        FileType::WeScene | FileType::WeWeb | FileType::WeApplication
-    ) {
+    if matches!(ctx.file_type, FileType::WeWeb | FileType::WeApplication) {
         log::info!(
-            "post-apply: skipping Wallpaper Engine / unsupported type ({})",
+            "post-apply: skipping unsupported Wallpaper Engine type ({})",
             ctx.file_type.as_str()
         );
         return Ok(());
@@ -134,10 +131,49 @@ fn resolve_still_path(
             Ok(path)
         }
         FileType::Video => extract_video_still(storage, wallpaper_path),
-        FileType::WeScene | FileType::WeWeb | FileType::WeApplication => {
+        FileType::WeScene => resolve_we_scene_preview(wallpaper_path),
+        FileType::WeWeb | FileType::WeApplication => {
             Err("still extraction not supported for this file type".into())
         }
     }
+}
+
+fn resolve_we_scene_preview(project_path: &str) -> Result<PathBuf, String> {
+    let project_dir = Path::new(project_path);
+    let info = wc_scan::read_we_project_info(project_dir).ok_or_else(|| {
+        format!(
+            "Wallpaper Engine scene metadata could not be read: {}",
+            project_dir.display()
+        )
+    })?;
+
+    if info.entry_type != FileType::WeScene {
+        return Err(format!(
+            "Wallpaper Engine project is not a scene: {}",
+            project_dir.display()
+        ));
+    }
+
+    let preview = info.preview_path.ok_or_else(|| {
+        format!(
+            "Wallpaper Engine scene has no safe, readable preview image: {}",
+            project_dir.display()
+        )
+    })?;
+    let entry = wc_scan::make_entry(&preview).ok_or_else(|| {
+        format!(
+            "Wallpaper Engine scene preview is not a supported image: {}",
+            preview
+        )
+    })?;
+    if !matches!(entry.file_type, FileType::Image | FileType::Gif) {
+        return Err(format!(
+            "Wallpaper Engine scene preview is not an image or GIF: {}",
+            preview
+        ));
+    }
+
+    Ok(PathBuf::from(preview))
 }
 
 fn path_cache_key(path: &str) -> String {
@@ -353,17 +389,100 @@ mod tests {
     }
 
     #[test]
-    fn we_scene_is_skipped_even_when_enabled() {
-        let (_tmp, storage) = temp_storage();
+    fn we_scene_runs_hook_with_project_preview() {
+        let (tmp, storage) = temp_storage();
+        let marker = tmp.path().join("marker.txt");
+        let script = tmp.path().join("hook.sh");
+        write_executable_script(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$WCR_STILL\" > '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        let project = tmp.path().join("scene");
+        std::fs::create_dir(&project).unwrap();
+        let preview = project.join("preview.png");
+        std::fs::write(
+            &preview,
+            [
+                0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48,
+                0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x04, 0x00, 0x00,
+                0x00, 0xb5, 0x1c, 0x0c, 0x02, 0x00, 0x00, 0x00, 0x0b, 0x49, 0x44, 0x41, 0x54, 0x78,
+                0xda, 0x63, 0x64, 0xf8, 0x0f, 0x00, 0x01, 0x05, 0x01, 0x01, 0x27, 0x18, 0xe3, 0x66,
+                0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4e, 0x44, 0xae, 0x42, 0x60, 0x82,
+            ],
+        )
+        .unwrap();
+        std::fs::write(
+            project.join("project.json"),
+            r#"{"type":"scene","file":"scene.json","preview":"preview.png"}"#,
+        )
+        .unwrap();
+
         storage.config_set("post_apply_enabled", "on").unwrap();
-        storage.config_set("post_apply_command", "false").unwrap();
+        storage
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
+            .unwrap();
         let ctx = PostApplyContext {
-            wallpaper_path: "/proj".into(),
+            wallpaper_path: project.to_string_lossy().into_owned(),
             backend: Backend::LinuxWallpaperEngine,
             file_type: FileType::WeScene,
             outputs: "*".into(),
         };
         run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap().trim(),
+            preview.canonicalize().unwrap().to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn we_scene_rejects_preview_outside_project() {
+        let (tmp, storage) = temp_storage();
+        let project = tmp.path().join("scene");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(tmp.path().join("outside.png"), b"outside").unwrap();
+        std::fs::write(
+            project.join("project.json"),
+            r#"{"type":"scene","file":"scene.json","preview":"../outside.png"}"#,
+        )
+        .unwrap();
+
+        storage.config_set("post_apply_enabled", "on").unwrap();
+        storage.config_set("post_apply_command", "false").unwrap();
+        let ctx = PostApplyContext {
+            wallpaper_path: project.to_string_lossy().into_owned(),
+            backend: Backend::LinuxWallpaperEngine,
+            file_type: FileType::WeScene,
+            outputs: "*".into(),
+        };
+
+        let err = run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap_err();
+        assert!(
+            err.contains("no safe, readable preview image"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn we_web_and_application_remain_skipped() {
+        let (_tmp, storage) = temp_storage();
+        storage.config_set("post_apply_enabled", "on").unwrap();
+        storage.config_set("post_apply_command", "false").unwrap();
+
+        for file_type in [FileType::WeWeb, FileType::WeApplication] {
+            let ctx = PostApplyContext {
+                wallpaper_path: "/missing-project".into(),
+                backend: Backend::Unsupported,
+                file_type,
+                outputs: "*".into(),
+            };
+            run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+        }
     }
 
     #[test]

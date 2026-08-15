@@ -129,7 +129,9 @@ always expand `~`, so use an absolute path.
 After a successful wallpaper apply, Wallpaper Console can run an external
 command to sync Material You colors (similar to waypaper's
 `post_command = matugen image $wallpaper`). Videos are handled by extracting a
-still frame with `ffmpeg` first; Wallpaper Engine scenes are skipped.
+still frame with `ffmpeg` first. Wallpaper Engine scenes use the safe project
+preview image declared by `project.json`; Web and Application projects are
+skipped.
 
 Enable:
 

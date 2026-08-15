@@ -14,6 +14,7 @@ mod source_config_state;
 mod source_reconcile;
 mod source_refresh_state;
 mod sources;
+mod user_unsupported;
 
 pub use backup::*;
 pub use connection::{invalidate_cached_connections, RUNTIME_BUSY_TIMEOUT_MS};
@@ -34,6 +35,7 @@ pub use source_config_state::*;
 pub use source_reconcile::*;
 pub use source_refresh_state::*;
 pub use sources::*;
+pub use user_unsupported::*;
 
 use crate::sqlite_err;
 use rusqlite::{params, Connection};

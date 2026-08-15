@@ -198,11 +198,10 @@
   display: none;
 }
 
-:root[data-theme="editorial"] .single-page-filters::before {
+:root[data-theme="editorial"] .single-page-filters__label {
   min-width: max-content;
   align-self: center;
   padding-inline-end: 1rem;
-  content: "01 / FILTER";
   color: var(--text);
   font-size: 0.72rem;
   font-weight: 760;
@@ -260,8 +259,7 @@
   letter-spacing: 0.08em;
 }
 
-:root[data-theme="editorial"] .single-page-count::before {
-  content: "INDEX / ";
+:root[data-theme="editorial"] .single-page-count__prefix {
   color: var(--text-muted);
 }
 
@@ -489,7 +487,7 @@
   background: transparent;
   color: var(--text);
   font-family: var(--editorial-mono);
-  font-size: 0.64rem;
+  font-size: 0.7rem;
   letter-spacing: 0.07em;
   text-transform: uppercase;
 }
@@ -574,7 +572,7 @@
 }
 
 :root[data-theme="editorial"] .wallpaper-card:hover {
-  border-color: var(--text);
+  border-color: var(--text-muted);
 }
 
 :root[data-theme="editorial"] .wallpaper-card:is(.selected, .current) {
@@ -583,7 +581,7 @@
 }
 
 :root[data-theme="editorial"] .wallpaper-card.pending {
-  border-color: var(--text);
+  border-color: var(--warning);
   border-style: dashed;
   box-shadow: none;
 }
@@ -691,17 +689,23 @@
   padding-inline-end: 5.25rem;
 }
 
-:root[data-theme="editorial"] .wallpaper-card.current .wallpaper-info::after {
+:root[data-theme="editorial"] .wallpaper-current-tag {
+  display: block;
   position: absolute;
   top: 0.39rem;
   right: 0.45rem;
-  content: "Current";
+  z-index: 1;
   color: currentColor;
   font-size: 0.65rem;
   font-weight: 760;
   letter-spacing: 0.075em;
   line-height: 1.2;
   text-transform: uppercase;
+}
+
+/* The "Current" tag occupies the ordinal corner on current cards. */
+:root[data-theme="editorial"] .wallpaper-card.current .wallpaper-index {
+  display: none;
 }
 
 :root[data-theme="editorial"] .wallpaper-name {
@@ -900,7 +904,11 @@
 
 :root[data-theme="editorial"] .settings-overlay,
 :root[data-theme="editorial"] .source-panel__backdrop {
-  background: rgb(10 10 10 / 72%) !important;
+  background: rgb(10 10 10 / 72%);
+}
+
+:root[data-theme="editorial"] .source-panel__backdrop--layered {
+  background: transparent;
 }
 
 :root[data-theme="editorial"] .wallpaper-details__overlay {
@@ -908,8 +916,8 @@
 }
 
 :root[data-theme="editorial"] :is(.wallpaper-card, .settings-panel, .source-panel, .select-field-content, .context-menu) {
-  border-radius: 0 !important;
-  box-shadow: none !important;
+  border-radius: 0;
+  box-shadow: none;
 }
 
 :root[data-theme="editorial"] :is(.wallpaper-details, .feedback-overlay__card) {
@@ -1083,78 +1091,100 @@
 }
 
 :root[data-theme="editorial"] .source-panel {
-  width: min(42rem, 100%) !important;
+  width: min(42rem, 100%);
   border-inline-start: var(--editorial-rule);
   background: var(--bg);
   color: var(--text);
 }
 
-:root[data-theme="editorial"] .source-panel > header {
-  padding: 1.2rem var(--editorial-gutter) 1rem !important;
-  border-bottom: var(--editorial-rule) !important;
+:root[data-theme="editorial"] .source-panel__header {
+  padding: 1.2rem var(--editorial-gutter) 1rem;
+  border-bottom: var(--editorial-rule);
 }
 
-:root[data-theme="editorial"] .source-panel > header h2 {
-  font-size: clamp(2rem, 4vw, 4.2rem) !important;
-  font-weight: 770 !important;
+:root[data-theme="editorial"] .source-panel__title {
+  font-size: clamp(2rem, 4vw, 4.2rem);
+  font-weight: 770;
   letter-spacing: -0.055em;
   line-height: 0.88;
   text-transform: uppercase;
 }
 
 :root[data-theme="editorial"] .source-panel :is(button, input[type="text"]) {
-  border-radius: 0 !important;
+  border-radius: 0;
 }
 
 :root[data-theme="editorial"] .source-panel__close {
   display: grid;
   place-items: center;
-  border: 1px solid var(--text) !important;
-  border-radius: 0 !important;
+  border: 1px solid var(--text);
+  border-radius: 0;
   line-height: 1;
 }
 
 :root[data-theme="editorial"] .source-panel__close:hover:not(:disabled) {
-  background: var(--text) !important;
-  color: var(--bg) !important;
+  background: var(--text);
+  color: var(--bg);
 }
 
 :root[data-theme="editorial"] .source-panel [data-source-action] {
-  border-color: var(--text) !important;
-  background: transparent !important;
-  color: var(--text) !important;
+  border-color: var(--text);
+  background: transparent;
+  color: var(--text);
 }
 
 :root[data-theme="editorial"] .source-panel [data-source-action]:hover:not(:disabled) {
-  background: var(--text) !important;
-  color: var(--bg) !important;
+  background: var(--text);
+  color: var(--bg);
 }
 
 :root[data-theme="editorial"] .source-panel [data-source-action^="request-remove"],
 :root[data-theme="editorial"] .source-panel [data-source-action^="confirm-remove"] {
-  border-color: var(--danger) !important;
-  color: var(--danger) !important;
+  border-color: var(--danger);
+  color: var(--danger);
 }
 
 :root[data-theme="editorial"] .source-panel [data-source-action^="request-remove"]:hover:not(:disabled),
 :root[data-theme="editorial"] .source-panel [data-source-action^="confirm-remove"]:hover:not(:disabled) {
-  border-color: var(--danger) !important;
-  background: var(--danger) !important;
-  color: var(--bg) !important;
+  border-color: var(--danger);
+  background: var(--danger);
+  color: var(--bg);
 }
 
-:root[data-theme="editorial"] .source-panel [data-source-id] {
-  border-color: var(--text) !important;
-  border-radius: 0 !important;
-  background: var(--panel) !important;
+:root[data-theme="editorial"] .source-panel__source {
+  border-color: var(--text);
+  border-radius: 0;
+  background: var(--panel);
 }
 
-:root[data-theme="editorial"] .source-panel [data-source-availability] {
-  border-radius: 0 !important;
-  font-size: 0.6rem !important;
+:root[data-theme="editorial"] .source-panel__badge {
+  border-radius: 0;
+  font-size: 0.65rem;
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
+}
+
+:root[data-theme="editorial"] .source-panel__status,
+:root[data-theme="editorial"] .source-panel__confirm {
+  border-radius: 0;
+}
+
+:root[data-theme="editorial"] .first-run-suggestions__item {
+  border: 1px solid var(--text);
+  border-radius: 0;
+  background: var(--panel);
+}
+
+:root[data-theme="editorial"] .first-run-suggestions__button {
+  border-color: var(--text);
+  border-radius: 0;
+  background: transparent;
+}
+
+:root[data-theme="editorial"] .first-run-suggestions__button:hover:not(:disabled) {
+  background: var(--text);
+  color: var(--bg);
 }
 
 /* ── Details, empty states, repairs, and feedback ────────────────── */
@@ -1425,11 +1455,6 @@
     grid-row: 3;
   }
 
-  :root[data-theme="editorial"] .single-page-filters::before {
-    padding-inline-end: 0.7rem;
-    content: "01 /";
-  }
-
   :root[data-theme="editorial"] .single-page-library {
     padding-top: 0.72rem;
   }
@@ -1440,7 +1465,7 @@
 
   :root[data-theme="editorial"] .settings-panel,
   :root[data-theme="editorial"] .source-panel {
-    width: 100% !important;
+    width: 100%;
   }
 }
 
@@ -1594,8 +1619,14 @@
 }
 
 @media (hover: none) {
+  /* Touch reveals the action hint through selection state instead of hover. */
   :root[data-theme="editorial"] .wallpaper-card::after {
-    display: none;
+    transition: none;
+  }
+
+  :root[data-theme="editorial"] .wallpaper-card:is(.selected, .current)::after {
+    opacity: 1;
+    transform: translateY(0);
   }
 
   :root[data-theme="editorial"] .wallpaper-card:is(.selected, .current) .wallpaper-thumb img {

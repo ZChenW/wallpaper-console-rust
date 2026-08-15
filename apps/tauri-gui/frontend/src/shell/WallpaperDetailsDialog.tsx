@@ -7,6 +7,7 @@ import { X } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
+import { presentWallpaper } from '../components/wallpaperPresentation.ts';
 import { trapDialogFocus } from './dialogFocus.ts';
 import { nextDetailsPreviewSource } from './wallpaperDetailsPreview.ts';
 
@@ -53,6 +54,7 @@ export function WallpaperDetailsDialogView({
     .map((source) => source.displayName.trim())
     .filter(Boolean)
     .join(', ');
+  const compatibility = presentWallpaper(wallpaper).compatibility;
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
     if (event.key === 'Tab') {
       trapDialogFocus(event, event.currentTarget);
@@ -74,10 +76,16 @@ export function WallpaperDetailsDialogView({
         role="dialog"
       >
         <header className="wallpaper-details__header">
-          <h2 className="wallpaper-details__title" id="wallpaper-details-title">{title}</h2>
+          <h2
+            autoFocus={true}
+            className="wallpaper-details__title"
+            id="wallpaper-details-title"
+            tabIndex={-1}
+          >
+            {title}
+          </h2>
           <button
             aria-label="Close wallpaper details"
-            autoFocus={true}
             className="wallpaper-details__close"
             data-icon-button={true}
             onClick={onClose}
@@ -110,6 +118,18 @@ export function WallpaperDetailsDialogView({
         <dl className="wallpaper-details__metadata">
           <dt className="wallpaper-details__term">Type</dt>
           <dd className="wallpaper-details__value">{wallpaperTypeLabel(wallpaper.type)}</dd>
+
+          {compatibility ? (
+            <>
+              <dt className="wallpaper-details__term">Compatibility</dt>
+              <dd
+                className="wallpaper-details__value"
+                data-wallpaper-details-field="compatibility"
+              >
+                {compatibility}
+              </dd>
+            </>
+          ) : null}
 
           <dt className="wallpaper-details__term">Sources</dt>
           <dd className="wallpaper-details__value">{sources || 'Source information unavailable'}</dd>

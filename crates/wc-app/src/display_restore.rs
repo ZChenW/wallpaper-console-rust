@@ -91,7 +91,16 @@ impl AppService {
             .storage
             .display_state_list()
             .map_err(AppError::from_wc_error)?;
-        let mut steps = build_restore_steps(&previous_rows, known_outputs);
+        let mut steps = Vec::new();
+        for step in build_restore_steps(&previous_rows, known_outputs) {
+            let user_unsupported = self
+                .storage
+                .user_unsupported_contains_path(&step.path)
+                .map_err(AppError::from_wc_error)?;
+            if !user_unsupported {
+                steps.push(step);
+            }
+        }
         if steps.is_empty() {
             return Ok(());
         }

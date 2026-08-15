@@ -20,6 +20,7 @@ export interface FlowMetadataRailProps {
   readonly activeQueueName: string | null;
   readonly pendingQueueName: string | null;
   readonly allViewed: boolean;
+  readonly loadingMore?: boolean;
   readonly onApply: (entry: LibraryBrowserItemDTO) => void;
   readonly onFavorite: (entry: LibraryBrowserItemDTO) => void;
   readonly onDetails: (entry: LibraryBrowserItemDTO) => void;
@@ -27,15 +28,17 @@ export interface FlowMetadataRailProps {
 
 interface MetadataRowProps {
   readonly label: string;
+  readonly layout?: 'narrative';
   readonly value: string | null;
   readonly priority?: 'primary' | 'secondary';
 }
 
-function MetadataRow({ label, value, priority = 'primary' }: MetadataRowProps) {
+function MetadataRow({ label, layout, value, priority = 'primary' }: MetadataRowProps) {
   return (
     <div
       className="flow-metadata-rail__metadata-row"
       data-flow-metadata-field={label.toLowerCase()}
+      data-flow-metadata-layout={layout}
       data-flow-metadata-missing={value === null ? true : undefined}
       data-flow-metadata-priority={priority}
     >
@@ -62,6 +65,7 @@ export function FlowMetadataRailView({
   activeQueueName,
   pendingQueueName,
   allViewed,
+  loadingMore = false,
   onApply,
   onFavorite,
   onDetails,
@@ -118,7 +122,11 @@ export function FlowMetadataRailView({
           <MetadataRow label="Source" value={presentation.sources} />
           <MetadataRow label="Type" value={presentation.type} />
           <MetadataRow label="Resolution" value={presentation.resolution} />
-          <MetadataRow label="Compatibility" value={presentation.compatibility} />
+          <MetadataRow
+            label="Compatibility"
+            layout={presentation.compatibility === null ? undefined : 'narrative'}
+            value={presentation.compatibility}
+          />
           <MetadataRow label="Size" priority="secondary" value={presentation.size} />
           <MetadataRow label="Added" priority="secondary" value={presentation.addedDate} />
           <MetadataRow label="Author" priority="secondary" value={presentation.author} />
@@ -149,7 +157,11 @@ export function FlowMetadataRailView({
           </p>
         ) : null}
 
-        {allViewed ? (
+        {loadingMore ? (
+          <p className="flow-metadata-rail__completion" role="status">
+            Loading more…
+          </p>
+        ) : allViewed ? (
           <p className="flow-metadata-rail__completion">
             All {displayedTotal} wallpapers viewed
           </p>
@@ -174,15 +186,15 @@ export function FlowMetadataRailView({
         </button>
         <button
           aria-busy={favoritePending || undefined}
-          aria-disabled={favoritePending || undefined}
           aria-pressed={favorite}
           className="flow-metadata-rail__action"
           data-flow-action="favorite"
+          disabled={favoritePending}
           onClick={(event) => {
             event.stopPropagation();
-            if (favoritePending) return;
             onFavorite(centeredEntry);
           }}
+          title={favoritePending ? 'Saving favorite…' : undefined}
           type="button"
         >
           Favorite{favorite ? ' · Saved' : ''}

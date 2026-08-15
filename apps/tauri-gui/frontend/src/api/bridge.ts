@@ -131,6 +131,10 @@ export const api = {
     invoke<LibraryPageDTO>('favorites_page', { offset, limit }),
   favoriteAdd: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_add', { path }),
   favoriteRemove: (path: string): Promise<CommandResult> => invoke<CommandResult>('favorite_remove', { path }),
+  userUnsupportedAdd: (wallpaperId: number): Promise<CommandResult> =>
+    invoke<CommandResult>('user_unsupported_add', { wallpaperId }),
+  userUnsupportedRemove: (wallpaperId: number): Promise<CommandResult> =>
+    invoke<CommandResult>('user_unsupported_remove', { wallpaperId }),
 
   sourcesList: (): Promise<SourceDTO[]> => invoke<SourceDTO[]>('sources_list'),
   ...createFirstRunSuggestionApi(),

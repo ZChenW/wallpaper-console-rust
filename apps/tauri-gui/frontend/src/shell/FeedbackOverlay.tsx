@@ -1,4 +1,11 @@
-import type { CSSProperties } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
+import {
+  CheckCircle2,
+  CircleAlert,
+  Info,
+  TriangleAlert,
+  X,
+} from 'lucide-react';
 
 import {
   feedbackCountdownProgress,
@@ -21,6 +28,15 @@ const severityLabels: Readonly<Record<FeedbackSeverity, string>> = {
   info: 'Information',
   warning: 'Warning',
   error: 'Error',
+};
+
+// Severity is carried by an icon as well as color so the distinction survives
+// monochrome vision and the single-hue theme.
+const severityIcons: Readonly<Record<FeedbackSeverity, ReactNode>> = {
+  success: <CheckCircle2 aria-hidden="true" size={14} />,
+  info: <Info aria-hidden="true" size={14} />,
+  warning: <TriangleAlert aria-hidden="true" size={14} />,
+  error: <CircleAlert aria-hidden="true" size={14} />,
 };
 
 function FeedbackCard({
@@ -63,7 +79,7 @@ function FeedbackCard({
     >
       <div className="feedback-overlay__body">
         <span className="feedback-overlay__severity">
-          <span aria-hidden="true">●</span>
+          {severityIcons[notice.severity]}
           {severityLabel}
         </span>
         <button
@@ -72,7 +88,7 @@ function FeedbackCard({
           onClick={() => dispatch({ type: 'dismiss', channel: notice.channel })}
           type="button"
         >
-          <span aria-hidden="true">×</span>
+          <X aria-hidden="true" size={14} />
         </button>
         <p className="feedback-overlay__message">{notice.message}</p>
         {notice.action ? (

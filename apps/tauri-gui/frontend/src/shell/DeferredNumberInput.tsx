@@ -53,7 +53,7 @@ export function DeferredNumberInput({
   return (
     <span className="settings-number-control">
       <input
-        aria-label={ariaLabel}
+        aria-label={unit ? `${ariaLabel} (${unit})` : ariaLabel}
         data-behavior-control={true}
         defaultValue={String(confirmed)}
         disabled={disabled}

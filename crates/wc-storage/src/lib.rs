@@ -271,6 +271,18 @@ impl StorageApi {
         sqlite::sqlite_favorite_remove(&self.cd, path)
     }
 
+    pub fn user_unsupported_add(&self, wallpaper_id: i64) -> Result<bool, WcError> {
+        sqlite::sqlite_user_unsupported_add(&self.cd, wallpaper_id)
+    }
+
+    pub fn user_unsupported_remove(&self, wallpaper_id: i64) -> Result<bool, WcError> {
+        sqlite::sqlite_user_unsupported_remove(&self.cd, wallpaper_id)
+    }
+
+    pub fn user_unsupported_contains_path(&self, path: &str) -> Result<bool, WcError> {
+        sqlite::sqlite_user_unsupported_contains_path(&self.cd, path)
+    }
+
     pub fn current_write(&self, path: &str) -> Result<(), WcError> {
         sqlite::sqlite_state_write(&self.cd, "current", path)
     }

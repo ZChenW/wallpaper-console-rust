@@ -106,6 +106,16 @@ export interface ContextAction {
   readonly visible?: (entry: LibraryBrowserItemDTO) => boolean;
 }
 
+export type UserUnsupportedContextAction = 'move' | 'restore' | null;
+
+/** One visible Unsupported category; only user-marked Scenes are reversible. */
+export function userUnsupportedContextAction(
+  entry: LibraryBrowserItemDTO,
+): UserUnsupportedContextAction {
+  if (entry.type !== 'we_scene') return null;
+  return entry.userUnsupported ? 'restore' : 'move';
+}
+
 /**
  * Shared Library state and semantic intents consumed by layout adapters.
  *

@@ -69,6 +69,7 @@ export function isApplyAvailable(entry: WallpaperDTO): boolean {
 
 /** The direct card gesture, including the one explicit recovery action. */
 export function primaryApplyKind(entry: WallpaperDTO): ApplyRequestKind | null {
+  if ('userUnsupported' in entry && entry.userUnsupported === true) return null;
   if (hasEnabledAction(entry, 'apply')) return 'apply';
   if (hasEnabledAction(entry, 'retry_backend_apply')) return 'retry_backend_apply';
   return null;

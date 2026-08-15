@@ -128,6 +128,7 @@ pub struct LibraryBrowserItem {
     pub wallpaper_id: i64,
     pub entry: WallpaperEntry,
     pub favorite: bool,
+    pub user_unsupported: bool,
     pub author: Option<String>,
     pub added_at: String,
     pub sources: Vec<LibraryBrowserSource>,
@@ -458,6 +459,15 @@ fn browser_type_condition(filter: LibraryBrowserType) -> &'static str {
     }
 }
 
+const USER_UNSUPPORTED_MATCH: &str = "EXISTS (
+         SELECT 1
+         FROM user_unsupported user_excluded
+         WHERE user_excluded.identity_key = CASE
+             WHEN w.workshop_id <> '' THEN 'workshop:' || w.workshop_id
+             ELSE 'path:' || w.path
+         END
+     )";
+
 fn normalized_browser_search(search: &str) -> String {
     search.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -573,15 +583,22 @@ fn decode_browser_cursor(token: &str) -> Result<BrowserCursorV1, WcError> {
 /// basename/title/author/source-name fields.
 fn browser_predicate(query: &LibraryBrowserQuery, use_fts: bool) -> BrowserPredicate {
     let mut params = Vec::new();
-    let mut conditions = vec![
+    let mut conditions = vec![String::from(
         "EXISTS (
              SELECT 1
              FROM wallpaper_sources visible_membership
              WHERE visible_membership.wallpaper_id = w.id
-         )"
-        .to_string(),
-        browser_type_condition(query.type_filter).to_string(),
-    ];
+         )",
+    )];
+    if query.type_filter == LibraryBrowserType::Unsupported {
+        conditions.push(format!(
+            "({} OR {USER_UNSUPPORTED_MATCH})",
+            browser_type_condition(query.type_filter)
+        ));
+    } else {
+        conditions.push(browser_type_condition(query.type_filter).to_string());
+        conditions.push(format!("NOT {USER_UNSUPPORTED_MATCH}"));
+    }
 
     if let Some(source_id) = query.source_id {
         let placeholder = push_browser_param(&mut params, Value::Integer(source_id));
@@ -746,6 +763,7 @@ fn browser_item_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LibraryBro
         wallpaper_id: row.get(13)?,
         entry,
         favorite: row.get(14)?,
+        user_unsupported: row.get(17)?,
         author: if author.is_empty() {
             None
         } else {
@@ -761,7 +779,15 @@ const BROWSER_ITEM_SELECT: &str =
             w.project_type, w.preview_path, w.workshop_id, w.title, w.we_file,
             w.unsupported_reason, w.id,
             EXISTS (SELECT 1 FROM favorites item_favorite WHERE item_favorite.path = w.path),
-            w.author, w.added_at
+            w.author, w.added_at,
+            EXISTS (
+                SELECT 1
+                FROM user_unsupported user_excluded
+                WHERE user_excluded.identity_key = CASE
+                    WHEN w.workshop_id <> '' THEN 'workshop:' || w.workshop_id
+                    ELSE 'path:' || w.path
+                END
+            )
      FROM wallpapers w";
 
 fn hydrate_browser_sources(

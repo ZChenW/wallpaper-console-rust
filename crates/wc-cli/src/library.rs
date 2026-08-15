@@ -57,13 +57,12 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
             Ok(())
         }
         Commands::RandomLibrary => {
-            let entries = library_entries(s)?;
-            if entries.is_empty() {
+            let Some(entry) =
+                random_browser_entry(s, wc_storage::sqlite::LibraryBrowserType::Usable, false)?
+            else {
                 anyhow::bail!("library is empty");
-            }
-            let idx = rand::random::<usize>() % entries.len();
-            let e = &entries[idx];
-            crate::wallpaper::apply_selected(s, e.path.as_ref())?;
+            };
+            crate::wallpaper::apply_selected(s, entry.path.as_ref())?;
             Ok(())
         }
         Commands::LibraryJson {
@@ -91,6 +90,20 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         }
         _ => unreachable!("library::run called with non-library command"),
     }
+}
+
+pub(crate) fn random_browser_entry(
+    storage: &StorageApi,
+    type_filter: wc_storage::sqlite::LibraryBrowserType,
+    favorites_only: bool,
+) -> anyhow::Result<Option<WallpaperEntry>> {
+    let query = wc_storage::sqlite::LibraryBrowserQuery {
+        type_filter,
+        favorites_only,
+        limit: 1,
+        ..Default::default()
+    };
+    Ok(wc_storage::sqlite::browser_library_random(&storage.cd, &query)?.map(|item| item.entry))
 }
 
 fn rescan(s: &StorageApi) -> anyhow::Result<()> {
@@ -298,18 +311,6 @@ fn json_cli_library_page(
         }
         _ => json_library_page(s, source, filter, sort, search, offset, limit),
     }
-}
-
-pub(crate) fn library_paths(
-    s: &StorageApi,
-    filter: Option<wc_core::types::FileType>,
-) -> anyhow::Result<Vec<String>> {
-    let entries = library_entries(s)?;
-    Ok(entries
-        .into_iter()
-        .filter(|e| filter.is_none_or(|f| e.file_type == f))
-        .map(|e| e.path.to_string())
-        .collect())
 }
 
 #[cfg(test)]

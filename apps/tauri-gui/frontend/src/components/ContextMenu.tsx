@@ -105,6 +105,14 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
     return () => document.removeEventListener('mousedown', handler);
   }, [onClose]);
 
+  // The menu is positioned fixed against the viewport, so any scroll strands
+  // it away from its anchor — close instead of chasing the content.
+  useEffect(() => {
+    const handler = () => onClose();
+    window.addEventListener('scroll', handler, true);
+    return () => window.removeEventListener('scroll', handler, true);
+  }, [onClose]);
+
   useEffect(() => () => {
     if (!restoreFocusOnCloseRef.current) return;
     const returnFocus = returnFocusRef.current;

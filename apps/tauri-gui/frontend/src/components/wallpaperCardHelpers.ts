@@ -49,7 +49,12 @@ export function editorialActionLabel(
     : 'Select / apply';
 }
 
+function isUserUnsupported(e: WallpaperDTO): boolean {
+  return 'userUnsupported' in e && e.userUnsupported === true;
+}
+
 export function weBadge(e: WallpaperDTO): string | null {
+  if (isUserUnsupported(e)) return 'Unsupported';
   if (e.type === 'we_scene') {
     if (e.backendStatus === 'renderer_limitation') return 'Renderer limitation';
     if (e.backendStatus === 'failed') return 'Scene incompatible';
@@ -64,6 +69,7 @@ export function weBadge(e: WallpaperDTO): string | null {
 
 export function weBadgeClass(e: WallpaperDTO): string {
   if (
+    isUserUnsupported(e) ||
     e.type === 'we_web' ||
     e.backendStatus === 'failed' ||
     e.backendStatus === 'renderer_limitation'
@@ -72,24 +78,48 @@ export function weBadgeClass(e: WallpaperDTO): string {
   return 'wallpaper-badge';
 }
 
+/**
+ * Short single-line metadata for the card footer. Long explanations of why an
+ * entry cannot be applied belong to `cardStateDetail` (title / details views),
+ * not to this truncated line — the badge already carries the state.
+ */
 export function metaLine(e: WallpaperDTO): string {
+  if (isUserUnsupported(e)) {
+    return 'Excluded from Library choices';
+  }
   if (e.type === 'we_scene' || e.type === 'we_web' || e.type === 'unsupported') {
-    if (e.type === 'unsupported' && e.unsupportedReason) {
-      return e.unsupportedReason;
+    if (e.type === 'unsupported') {
+      return 'Unsupported';
     }
     if (e.type === 'we_web') {
-      return ['Web wallpaper — unsupported', e.workshopId].filter(Boolean).join(' · ');
-    }
-    if (e.type === 'we_scene' && (e.backendStatus === 'failed' || e.backendStatus === 'renderer_limitation')) {
-      if (e.backendStatus === 'renderer_limitation') {
-        return e.backendErrorMessage || 'This scene has renderer limitations with linux-wallpaperengine.';
-      }
-      return e.backendErrorMessage || 'This scene is not compatible with linux-wallpaperengine.';
+      return ['Web wallpaper', e.workshopId].filter(Boolean).join(' · ');
     }
     const kind = 'Wallpaper Engine Scene';
     return [kind, e.workshopId, e.backend].filter(Boolean).join(' · ');
   }
   return `${e.resolution} · ${e.type} · ${formatSize(e.size)}`;
+}
+
+/** Full explanation of an entry's apply limitation, for tooltips and details. */
+export function cardStateDetail(e: WallpaperDTO): string | null {
+  if (isUserUnsupported(e)) {
+    return 'Excluded from Library choices. Restore it from the Unsupported view to use it again.';
+  }
+  if (e.type === 'unsupported') {
+    return e.unsupportedReason ?? 'This wallpaper type is not supported.';
+  }
+  if (e.type === 'we_web') {
+    return 'Wallpaper Engine Web wallpapers can be browsed but not applied.';
+  }
+  if (e.type === 'we_scene' && e.backendStatus === 'renderer_limitation') {
+    return e.backendErrorMessage
+      || 'This scene has renderer limitations with linux-wallpaperengine.';
+  }
+  if (e.type === 'we_scene' && e.backendStatus === 'failed') {
+    return e.backendErrorMessage
+      || 'This scene is not compatible with linux-wallpaperengine.';
+  }
+  return null;
 }
 
 export function formatSize(bytes: number): string {
