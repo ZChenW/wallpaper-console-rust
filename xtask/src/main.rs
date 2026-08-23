@@ -929,7 +929,11 @@ version = \"0.1.0-rc.1\"
             !workflow.contains("--clobber"),
             "published release assets must not be replaced in place"
         );
-        for forbidden in ["releases/download/continuous", "/master/"] {
+        for forbidden in [
+            "releases/download/continuous",
+            "/master/",
+            "gh release delete",
+        ] {
             assert!(
                 !workflow.contains(forbidden),
                 "release workflow must not download mutable packaging input: {forbidden}"
@@ -945,7 +949,13 @@ version = \"0.1.0-rc.1\"
             "releases/download/appimage-toolchain-v1",
             "linuxdeploy-plugin-appimage.AppImage",
             "appimage-runtime-x86_64",
+            "immutable mirror provenance",
             "--runtime-file",
+            "candidate-second.AppImage",
+            "cmp \"${candidate}\" \"${candidate_second}\"",
+            "git cat-file -t",
+            "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ldd",
+            "env -u LD_LIBRARY_PATH ldd",
             "20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1",
             "cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a",
             "c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94",

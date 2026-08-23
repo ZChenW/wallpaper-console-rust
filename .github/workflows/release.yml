@@ -44,7 +44,12 @@ jobs:
               echo "tag ${tag} does not match workspace version ${project_version}" >&2
               exit 1
             }
-            git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null
+            tag_ref="refs/tags/${tag}"
+            [[ "$(git cat-file -t "${tag_ref}")" == "tag" ]] || {
+              echo "release tag must be annotated: ${tag}" >&2
+              exit 1
+            }
+            git rev-parse --verify "${tag_ref}^{commit}" >/dev/null
           else
             version="${project_version}"
             tag="v${project_version}"
@@ -102,6 +107,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # immutable mirror provenance: appimage-toolchain-v1 preserves the exact
+          # upstream linuxdeploy 659c9db build, Tauri plugins, and Type 2 runtime.
           cache="$HOME/.cache/tauri"
           mkdir -p "${cache}"
           fetch_verified() {
@@ -152,6 +159,7 @@ jobs:
           runtime="$HOME/.cache/tauri/appimage-runtime-x86_64"
           produced_runtime="${repack_dir}/runtime-from-tauri-x86_64"
           candidate="${repack_dir}/candidate.AppImage"
+          candidate_second="${repack_dir}/candidate-second.AppImage"
           rm -rf "${repack_dir}"
           mkdir -p "${repack_dir}/tool"
           runtime_size=944632
@@ -174,6 +182,8 @@ jobs:
           appimagetool="${repack_dir}/tool/squashfs-root/appimagetool-prefix/AppRun"
           [[ -x "${appimagetool}" ]] || { echo "Tauri appimagetool is missing" >&2; exit 1; }
           SOURCE_DATE_EPOCH="${source_date_epoch}" "${appimagetool}" --runtime-file "$(realpath "${runtime}")" "$(realpath "${appdir}")" "$(realpath -m "${candidate}")"
+          SOURCE_DATE_EPOCH="${source_date_epoch}" "${appimagetool}" --runtime-file "$(realpath "${runtime}")" "$(realpath "${appdir}")" "$(realpath -m "${candidate_second}")"
+          cmp "${candidate}" "${candidate_second}"
           mv "${candidate}" "${appimage}"
 
       - name: Package release assets
@@ -206,6 +216,11 @@ jobs:
           grep -q 'LD_LIBRARY_PATH' target/appimage-smoke/squashfs-root/AppRun
           grep -q 'WCR_WEBKIT_DISABLE_DMABUF_RENDERER' target/appimage-smoke/squashfs-root/AppRun
           ! grep -q 'GDK_BACKEND=' target/appimage-smoke/squashfs-root/AppRun
+          gui=target/appimage-smoke/squashfs-root/usr/bin/wallpaper-console-tauri
+          host_webkit="$(LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ldd "${gui}" | awk '/libwebkit2gtk-4.1/{print $3; exit}')"
+          [[ "$(readlink -f "${host_webkit}")" == /usr/lib/x86_64-linux-gnu/* ]]
+          bundled_webkit="$(env -u LD_LIBRARY_PATH ldd "${gui}" | awk '/libwebkit2gtk-4.1/{print $3; exit}')"
+          [[ "$(readlink -f "${bundled_webkit}")" == "$(realpath target/appimage-smoke/squashfs-root/usr/lib)/"* ]]
           find target/appimage-smoke/squashfs-root -type f -name '*.desktop' -print -quit | grep -q .
           tar --zstd -xf "dist/wallpaper-console-cli_${{ steps.release.outputs.version }}_x86_64.tar.zst" \
             -C target/cli-smoke
@@ -249,12 +264,8 @@ jobs:
             "wallpaper-console-cli_${RELEASE_VERSION}_x86_64.tar.zst" | sort)"
 
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
-            is_draft="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft)"
-            [[ "${is_draft}" == "true" ]] || {
-              echo "published release ${RELEASE_TAG} already exists; refusing to replace it" >&2
-              exit 1
-            }
-            gh release delete "${RELEASE_TAG}" --yes
+            echo "release ${RELEASE_TAG} already exists; preserve it for investigation" >&2
+            exit 1
           fi
 
           gh release create "${RELEASE_TAG}" \
