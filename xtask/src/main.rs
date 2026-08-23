@@ -962,6 +962,8 @@ version = \"0.1.0-rc.1\"
             "candidate-second.AppImage",
             "cmp \"${candidate}\" \"${candidate_second}\"",
             "git cat-file -t",
+            "verified_tag_ref",
+            "git fetch --force origin",
             "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ldd",
             "env -u LD_LIBRARY_PATH ldd",
             "20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1",

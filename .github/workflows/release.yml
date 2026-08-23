@@ -45,11 +45,17 @@ jobs:
               exit 1
             }
             tag_ref="refs/tags/${tag}"
-            [[ "$(git cat-file -t "${tag_ref}")" == "tag" ]] || {
+            verified_tag_ref="refs/tags/${tag}.annotated"
+            git fetch --force origin "${tag_ref}:${verified_tag_ref}"
+            [[ "$(git cat-file -t "${verified_tag_ref}")" == "tag" ]] || {
               echo "release tag must be annotated: ${tag}" >&2
               exit 1
             }
-            git rev-parse --verify "${tag_ref}^{commit}" >/dev/null
+            tag_commit="$(git rev-parse --verify "${verified_tag_ref}^{commit}")"
+            [[ "${tag_commit}" == "${GITHUB_SHA}" ]] || {
+              echo "tag ${tag} resolves to ${tag_commit}, expected ${GITHUB_SHA}" >&2
+              exit 1
+            }
           else
             version="${project_version}"
             tag="v${project_version}"
