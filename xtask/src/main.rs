@@ -955,6 +955,8 @@ version = \"0.1.0-rc.1\"
             "releases/download/appimage-toolchain-v1",
             "linuxdeploy-plugin-appimage.AppImage",
             "appimage-runtime-x86_64",
+            "linuxdeploy-plugin-appimage-verified.AppImage",
+            "APPIMAGE_PINNED_RUNTIME",
             "immutable mirror provenance",
             "--runtime-file",
             "candidate-second.AppImage",

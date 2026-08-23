@@ -141,6 +141,28 @@ jobs:
             "${cache}/appimage-runtime-x86_64" \
             '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd'
 
+          plugin_original="${cache}/linuxdeploy-plugin-appimage-verified.AppImage"
+          plugin_root="${cache}/linuxdeploy-plugin-appimage-pinned"
+          mv "${cache}/linuxdeploy-plugin-appimage.AppImage" "${plugin_original}"
+          rm -rf "${plugin_root}"
+          mkdir -p "${plugin_root}"
+          (cd "${plugin_root}" && APPIMAGELAUNCHER_DISABLE=1 "${plugin_original}" --appimage-extract >/dev/null)
+          cat > "${plugin_root}/squashfs-root/usr/bin/appimagetool" <<'PINNED_APPIMAGETOOL'
+          #! /bin/bash
+          set -euo pipefail
+          : "${APPIMAGE_PINNED_RUNTIME:?APPIMAGE_PINNED_RUNTIME is required}"
+          this_dir="$(readlink -f "$(dirname "$0")")"
+          exec "$this_dir"/../../appimagetool-prefix/AppRun --runtime-file "$APPIMAGE_PINNED_RUNTIME" "$@"
+          PINNED_APPIMAGETOOL
+          chmod 755 "${plugin_root}/squashfs-root/usr/bin/appimagetool"
+          cat > "${cache}/linuxdeploy-plugin-appimage.AppImage" <<PINNED_PLUGIN
+          #!/bin/sh
+          set -eu
+          export APPIMAGE_PINNED_RUNTIME="${cache}/appimage-runtime-x86_64"
+          exec "${plugin_root}/squashfs-root/AppRun" "\$@"
+          PINNED_PLUGIN
+          chmod 755 "${cache}/linuxdeploy-plugin-appimage.AppImage"
+
       - name: Build AppImage and CLI
         run: |
           cargo tauri build --bundles appimage --ci -- --locked
@@ -158,22 +180,36 @@ jobs:
           appdir="${repack_dir}/AppDir"
           runtime="$HOME/.cache/tauri/appimage-runtime-x86_64"
           produced_runtime="${repack_dir}/runtime-from-tauri-x86_64"
+          normalized_runtime="${repack_dir}/runtime-normalized-x86_64"
           candidate="${repack_dir}/candidate.AppImage"
           candidate_second="${repack_dir}/candidate-second.AppImage"
           rm -rf "${repack_dir}"
           mkdir -p "${repack_dir}/tool"
           runtime_size=944632
           head -c "${runtime_size}" "${appimage}" > "${produced_runtime}"
+          read -r digest_offset_hex digest_size_hex < <(
+            readelf -SW "${runtime}" | awk '$2 == ".digest_md5" {print $5, $6}'
+          )
+          [[ -n "${digest_offset_hex}" && -n "${digest_size_hex}" ]] || {
+            echo "pinned runtime has no .digest_md5 section" >&2
+            exit 1
+          }
+          digest_offset=$((16#${digest_offset_hex}))
+          digest_size=$((16#${digest_size_hex}))
+          cp "${produced_runtime}" "${normalized_runtime}"
+          dd if="${runtime}" of="${normalized_runtime}" bs=1 \
+            skip="${digest_offset}" seek="${digest_offset}" count="${digest_size}" \
+            conv=notrunc status=none
           printf '%s  %s\n' \
             '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd' \
-            "${produced_runtime}" | sha256sum -c -
-          cmp "${runtime}" "${produced_runtime}"
+            "${normalized_runtime}" | sha256sum -c -
+          cmp "${runtime}" "${normalized_runtime}"
           (cd "${repack_dir}" && APPIMAGELAUNCHER_DISABLE=1 "${appimage}" --appimage-extract >/dev/null)
           mv "${repack_dir}/squashfs-root" "${appdir}"
           cargo run --locked -p xtask -- release prepare-appimage --appdir "${appdir}"
           source_date_epoch="$(git log -1 --format=%ct)"
           find "${appdir}" -exec touch -h -d "@${source_date_epoch}" {} +
-          repacker="$HOME/.cache/tauri/linuxdeploy-plugin-appimage.AppImage"
+          repacker="$HOME/.cache/tauri/linuxdeploy-plugin-appimage-verified.AppImage"
           [[ -x "${repacker}" ]] || { echo "Tauri AppImage repacker is missing" >&2; exit 1; }
           printf '%s  %s\n' \
             'e0129b8070e0c7b37151027e46e9fa44fe97ea29e3692705a2c5cff3771d3121' \
