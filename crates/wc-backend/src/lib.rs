@@ -1075,6 +1075,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn apply_wallpaper_lwe_updates_state_without_appending_history() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2217,6 +2218,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn scene_after_video_stops_mpvpaper_before_lwe_without_preview_fallback() {
         use std::os::unix::fs::PermissionsExt;
 
@@ -2316,6 +2318,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn apply_lwe_success_emits_expected_stages() {
         use std::os::unix::fs::PermissionsExt;
 
