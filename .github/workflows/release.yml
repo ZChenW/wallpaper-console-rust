@@ -120,7 +120,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          sha256sum -c dist/SHA256SUMS
+          (cd dist && sha256sum -c SHA256SUMS)
           appimage="$(realpath "dist/wallpaper-console_${{ steps.release.outputs.version }}_x86_64.AppImage")"
           rm -rf target/appimage-smoke target/cli-smoke
           mkdir -p target/appimage-smoke target/cli-smoke

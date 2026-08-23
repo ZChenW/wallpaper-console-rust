@@ -778,7 +778,7 @@ version = \"0.1.0-rc.1\"
             "cargo run --locked -p xtask -- verify all",
             "cargo tauri build --bundles appimage",
             "release package-linux",
-            "sha256sum -c dist/SHA256SUMS",
+            "(cd dist && sha256sum -c SHA256SUMS)",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
             "gh release create",
             "--draft",
