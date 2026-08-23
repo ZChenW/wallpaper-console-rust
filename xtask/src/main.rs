@@ -571,8 +571,20 @@ for directory in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr
     fi
   fi
 done
-if [ -n "$host_library_path" ] && [ -n "$host_webkit_available" ]; then
+if [ "${WCR_APPIMAGE_FORCE_BUNDLED:-0}" != "1" ] && [ -n "$host_library_path" ] && [ -n "$host_webkit_available" ]; then
   export LD_LIBRARY_PATH="$host_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+else
+  bundled_library_path="$APPDIR/usr/lib:$APPDIR/usr/lib/x86_64-linux-gnu"
+  export LD_LIBRARY_PATH="$bundled_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+  export GTK_DATA_PREFIX="$APPDIR"
+  export XDG_DATA_DIRS="$APPDIR/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+  export GSETTINGS_SCHEMA_DIR="$APPDIR/usr/share/glib-2.0/schemas"
+  export GTK_EXE_PREFIX="$APPDIR/usr"
+  export GTK_PATH="$APPDIR/usr/lib/x86_64-linux-gnu/gtk-3.0"
+  export GTK_IM_MODULE_FILE="$APPDIR/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules.cache"
+  export GDK_PIXBUF_MODULE_FILE="$APPDIR/usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache"
+  export GIO_EXTRA_MODULES="$APPDIR/usr/lib/x86_64-linux-gnu/gio/modules"
+  cd "$APPDIR/usr"
 fi
 
 if [ "${WCR_WEBKIT_DISABLE_DMABUF_RENDERER:-0}" = "1" ] && [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER+x}" ]; then
@@ -1118,6 +1130,81 @@ version = \"0.1.0-rc.1\"
     }
 
     #[test]
+    fn bundled_appimage_fallback_initializes_loader_and_runtime_resources() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wallpaper-console-fallback-test-{}-{unique}",
+            std::process::id()
+        ));
+        let appdir = root.join("AppDir");
+        let gui = appdir.join("usr/bin/wallpaper-console-tauri");
+        let outside = root.join("outside");
+        std::fs::create_dir_all(gui.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(appdir.join("usr/lib/x86_64-linux-gnu")).unwrap();
+        std::fs::create_dir_all(appdir.join("usr/share/glib-2.0/schemas")).unwrap();
+        std::fs::create_dir_all(appdir.join("test-host")).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(
+            &gui,
+            b"#!/bin/sh\nprintf '%s\n' \"$PWD\" \"${LD_LIBRARY_PATH:-}\" \"${GSETTINGS_SCHEMA_DIR:-}\" \"${GDK_PIXBUF_MODULE_FILE:-}\" \"${GIO_EXTRA_MODULES:-}\"\n",
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&gui).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&gui, permissions).unwrap();
+        prepare_appimage_appdir(&appdir).unwrap();
+
+        let app_run = appdir.join("AppRun");
+        let output = Command::new(&app_run)
+            .current_dir(&outside)
+            .env("WCR_APPIMAGE_FORCE_BUNDLED", "1")
+            .env("LD_LIBRARY_PATH", "/caller/lib")
+            .env_remove("GSETTINGS_SCHEMA_DIR")
+            .env_remove("GDK_PIXBUF_MODULE_FILE")
+            .env_remove("GIO_EXTRA_MODULES")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let values: Vec<&str> = stdout.lines().collect();
+        assert_eq!(values[0], appdir.join("usr").to_string_lossy());
+        assert_eq!(
+            values[1],
+            format!(
+                "{}/usr/lib:{}/usr/lib/x86_64-linux-gnu:/caller/lib",
+                appdir.display(),
+                appdir.display()
+            )
+        );
+        assert_eq!(
+            values[2],
+            appdir.join("usr/share/glib-2.0/schemas").to_string_lossy()
+        );
+        assert_eq!(
+            values[3],
+            appdir
+                .join("usr/lib/x86_64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache")
+                .to_string_lossy()
+        );
+        assert_eq!(
+            values[4],
+            appdir
+                .join("usr/lib/x86_64-linux-gnu/gio/modules")
+                .to_string_lossy()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn rejects_local_only_and_unknown_suites() {
         for suite in ["drift", "perf", "docs"] {
             let err = parse_verify_args(&args(&["verify", suite])).unwrap_err();
@@ -1464,6 +1551,9 @@ version = \"0.1.0-rc.1\"
             "release package-linux",
             "libwebkit2gtk-4.1.so",
             "grep -q 'LD_LIBRARY_PATH'",
+            "WCR_APPIMAGE_FORCE_BUNDLED=1",
+            "xvfb-run -a target/appimage-smoke/squashfs-root/AppRun",
+            "Unable to spawn a new child process",
             "(cd dist && sha256sum -c SHA256SUMS)",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
             "gh release create",

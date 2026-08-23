@@ -80,6 +80,8 @@ jobs:
             libxdo-dev \
             patchelf \
             wget \
+            xauth \
+            xvfb \
             zstd
 
       - name: Install Node.js
@@ -258,6 +260,25 @@ jobs:
           grep -q 'LD_LIBRARY_PATH' target/appimage-smoke/squashfs-root/AppRun
           grep -q 'WCR_WEBKIT_DISABLE_DMABUF_RENDERER' target/appimage-smoke/squashfs-root/AppRun
           ! grep -q 'GDK_BACKEND=' target/appimage-smoke/squashfs-root/AppRun
+          rm -rf /tmp/wcr-appimage-fallback-smoke
+          mkdir -p /tmp/wcr-appimage-fallback-smoke
+          set +e
+          timeout --kill-after=2s 10s env \
+            WCR_APPIMAGE_FORCE_BUNDLED=1 \
+            GDK_BACKEND=x11 \
+            XDG_CONFIG_HOME=/tmp/wcr-appimage-fallback-smoke \
+            xvfb-run -a target/appimage-smoke/squashfs-root/AppRun \
+            >/tmp/wcr-appimage-fallback-smoke/stdout.log \
+            2>/tmp/wcr-appimage-fallback-smoke/stderr.log
+          fallback_status=$?
+          set -e
+          [[ "${fallback_status}" -eq 124 ]] || {
+            cat /tmp/wcr-appimage-fallback-smoke/stderr.log >&2
+            echo "bundled AppImage fallback exited unexpectedly: ${fallback_status}" >&2
+            exit 1
+          }
+          ! grep -q 'Unable to spawn a new child process' \
+            /tmp/wcr-appimage-fallback-smoke/stderr.log
           gui=target/appimage-smoke/squashfs-root/usr/bin/wallpaper-console-tauri
           host_webkit="$(LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ldd "${gui}" | awk '/libwebkit2gtk-4.1/{print $3; exit}')"
           [[ "$(readlink -f "${host_webkit}")" == /usr/lib/x86_64-linux-gnu/* ]]
