@@ -16,9 +16,6 @@ pub mod scan_worker_snapshot;
 pub mod source_management;
 pub mod sources_maintenance;
 
-#[cfg(test)]
-mod display_discovery_tests;
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

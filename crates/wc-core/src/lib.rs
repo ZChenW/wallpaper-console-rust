@@ -11,6 +11,3 @@ pub mod types;
 pub use config::ConfigDir;
 pub use error::WcError;
 pub use types::{FileType, WallpaperEntry};
-
-#[cfg(test)]
-mod tests;

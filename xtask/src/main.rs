@@ -699,6 +699,22 @@ version = \"0.1.0-rc.1\"
     }
 
     #[test]
+    fn install_minimal_sources_do_not_reference_local_only_modules() {
+        let root = repo_root();
+        for (source, forbidden) in [
+            ("crates/wc-app/src/lib.rs", "mod display_discovery_tests;"),
+            ("crates/wc-backend/src/lib.rs", "mod test_support;"),
+            ("crates/wc-core/src/lib.rs", "mod tests;"),
+        ] {
+            let text = std::fs::read_to_string(root.join(source)).unwrap();
+            assert!(
+                !text.contains(forbidden),
+                "install-minimal source {source} references ignored module {forbidden}"
+            );
+        }
+    }
+
+    #[test]
     fn release_versions_are_aligned() {
         let root = repo_root();
         let expected = project_version(&root).unwrap();

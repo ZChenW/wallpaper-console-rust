@@ -62,6 +62,7 @@ where
 // without spawning real compositor CLIs.
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn discover_connected_outputs_with_mock<E, R>(
     env: E,
     mut run: R,
@@ -86,6 +87,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn run_primary_probe_with_mock<R>(probe: PrimaryProbe, run: &mut R) -> Result<Vec<String>, String>
 where
     R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
@@ -113,6 +115,7 @@ where
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 fn run_awww_probe_with_mock<R>(run: &mut R, failures: &mut Vec<String>) -> Result<Vec<String>, ()>
 where
     R: FnMut(&str, &[&str]) -> Result<ProbeOutput, String>,
@@ -236,6 +239,7 @@ where
 // `run_probe` so tests can verify budget-sharing invariants.
 
 #[cfg(test)]
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
 pub(crate) struct ProbeBudgetRecord {
     pub label: &'static str,
@@ -244,6 +248,7 @@ pub(crate) struct ProbeBudgetRecord {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn discover_with_script_probes_traced<E>(
     env: E,
     primary_script: &str,
