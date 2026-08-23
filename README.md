@@ -112,9 +112,13 @@ supports named Wayland outputs; feh updates the X root wallpaper and therefore
 does not offer named-display targeting.
 
 If the GUI opens to a blank window on a system with WebKitGTK rendering issues,
-start it once with:
+start it once with the matching command:
 
 ```bash
+# AppImage release
+WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.0-rc.2_x86_64.AppImage
+
+# Source installation
 WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 wallpaper-console-gui-rust
 ```
 
