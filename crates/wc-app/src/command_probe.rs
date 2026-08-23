@@ -779,7 +779,7 @@ mod tests {
         // InvalidUtf8 instead of silently lossy-converting.
         let err = run_probe(
             "sh",
-            &["-c", "printf '\\x80\\x81\\x82'"], // invalid UTF-8
+            &["-c", "printf '\\200\\201\\202'"], // invalid UTF-8
             Duration::from_secs(2),
         )
         .unwrap_err();
@@ -796,7 +796,7 @@ mod tests {
         // InvalidUtf8 instead of silently lossy-converting.
         let err = run_probe(
             "sh",
-            &["-c", "printf '\\xff\\xfe' >&2; exit 1"], // invalid UTF-8 on stderr
+            &["-c", "printf '\\377\\376' >&2; exit 1"], // invalid UTF-8 on stderr
             Duration::from_secs(2),
         )
         .unwrap_err();
