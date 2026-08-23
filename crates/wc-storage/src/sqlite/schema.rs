@@ -586,9 +586,33 @@ fn named_index_signature(
     }))
 }
 
+fn historical_migrated_wallpapers_table_sql() -> Result<String, WcError> {
+    let reference = Connection::open_in_memory().map_err(sqlite_err)?;
+    reference
+        .execute_batch(
+            "PRAGMA user_version = 1;
+             CREATE TABLE wallpapers (
+                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                 path       TEXT NOT NULL,
+                 type       TEXT NOT NULL,
+                 ext        TEXT NOT NULL,
+                 backend    TEXT NOT NULL,
+                 size       INTEGER NOT NULL DEFAULT 0,
+                 mtime      INTEGER NOT NULL DEFAULT 0,
+                 resolution TEXT NOT NULL DEFAULT '?x?',
+                 source_id  INTEGER REFERENCES sources(id),
+                 last_seen  TEXT NOT NULL DEFAULT (datetime('now'))
+             );",
+        )
+        .map_err(sqlite_err)?;
+    create_schema(&reference)?;
+    schema_object_sql(&reference, "table", "wallpapers")
+}
+
 fn validate_table_shapes_against_current_schema(conn: &Connection) -> Result<(), WcError> {
     let reference = Connection::open_in_memory().map_err(sqlite_err)?;
     create_schema(&reference)?;
+    let historical_wallpapers_sql = historical_migrated_wallpapers_table_sql()?;
     for table in CURRENT_PERSISTENT_TABLES {
         let expected_columns = table_column_signatures(&reference, table)?;
         let actual_columns = table_column_signatures(conn, table)?;
@@ -626,7 +650,12 @@ fn validate_table_shapes_against_current_schema(conn: &Connection) -> Result<(),
                     &normalize_schema_fragment("added_at TEXT NOT NULL DEFAULT (datetime('now'))"),
                     &normalize_schema_fragment("added_at TEXT NOT NULL DEFAULT ''"),
                 );
-        if actual_table_sql != expected_table_sql && !migrated_wallpapers_sql {
+        let historical_migrated_wallpapers_sql =
+            table == &"wallpapers" && actual_table_sql == historical_wallpapers_sql;
+        if actual_table_sql != expected_table_sql
+            && !migrated_wallpapers_sql
+            && !historical_migrated_wallpapers_sql
+        {
             return Err(WcError::Other(format!(
                 "current schema table {table} definition differs from the current schema"
             )));

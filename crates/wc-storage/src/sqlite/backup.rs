@@ -1256,6 +1256,43 @@ mod tests {
     }
 
     #[test]
+    fn migrated_v1_database_verifies_and_backs_up() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let connection = Connection::open(cd.db_path()).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA user_version = 1;
+                 CREATE TABLE wallpapers (
+                     id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                     path       TEXT NOT NULL,
+                     type       TEXT NOT NULL,
+                     ext        TEXT NOT NULL,
+                     backend    TEXT NOT NULL,
+                     size       INTEGER NOT NULL DEFAULT 0,
+                     mtime      INTEGER NOT NULL DEFAULT 0,
+                     resolution TEXT NOT NULL DEFAULT '?x?',
+                     source_id  INTEGER REFERENCES sources(id),
+                     last_seen  TEXT NOT NULL DEFAULT (datetime('now'))
+                 );",
+            )
+            .unwrap();
+        create_schema(&connection).unwrap();
+        drop(connection);
+
+        let result = verify(&cd).unwrap();
+        assert!(
+            !matches!(result, VerifyResult::Failed(_)),
+            "migrated v1 database should verify: {result:?}"
+        );
+        let backup_path = PathBuf::from(backup(&cd).unwrap());
+        assert!(backup_path.is_file());
+    }
+
+    #[test]
     fn verify_warning_when_config_drifts() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {

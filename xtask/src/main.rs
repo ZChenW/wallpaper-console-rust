@@ -26,6 +26,11 @@ struct ReleasePackageLinuxArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleasePrepareAppImageArgs {
+    appdir: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseAssetNames {
     appimage: String,
     cli_archive: String,
@@ -37,6 +42,7 @@ enum XtaskCommand {
     Help,
     Verify(VerifyArgs),
     ReleasePackageLinux(ReleasePackageLinuxArgs),
+    ReleasePrepareAppImage(ReleasePrepareAppImageArgs),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -120,6 +126,11 @@ fn run() -> Result<(), String> {
             Ok(())
         }
         XtaskCommand::ReleasePackageLinux(args) => package_linux_release(&repo_root(), &args),
+        XtaskCommand::ReleasePrepareAppImage(args) => {
+            let root = repo_root();
+            let appdir = resolve_from(&root, &args.appdir);
+            prepare_appimage_appdir(&appdir)
+        }
     }
 }
 
@@ -144,6 +155,21 @@ fn parse_xtask_command(args: &[String]) -> Result<XtaskCommand, String> {
 }
 
 fn parse_release_args(args: &[String]) -> Result<XtaskCommand, String> {
+    if args.get(1).map(String::as_str) == Some("prepare-appimage") {
+        if args.get(2).map(String::as_str) != Some("--appdir") || args.len() != 4 {
+            return Err(format!(
+                "invalid prepare-appimage arguments
+
+{}",
+                usage()
+            ));
+        }
+        return Ok(XtaskCommand::ReleasePrepareAppImage(
+            ReleasePrepareAppImageArgs {
+                appdir: PathBuf::from(&args[3]),
+            },
+        ));
+    }
     if args.get(1).map(String::as_str) != Some("package-linux") {
         return Err(format!(
             "unknown release command
@@ -217,6 +243,68 @@ fn release_asset_names(version: &str) -> Result<ReleaseAssetNames, String> {
         cli_archive: format!("wallpaper-console-cli_{version}_x86_64.tar.zst"),
         checksums: "SHA256SUMS",
     })
+}
+
+const APPIMAGE_APP_RUN: &str = r#"#!/bin/sh
+set -eu
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+export APPDIR
+
+host_library_path=
+for directory in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib64 /lib; do
+  if [ -d "$directory" ]; then
+    host_library_path="${host_library_path:+$host_library_path:}$directory"
+  fi
+done
+if [ -n "$host_library_path" ]; then
+  export LD_LIBRARY_PATH="$host_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
+
+if [ "${WCR_WEBKIT_DISABLE_DMABUF_RENDERER:-0}" = "1" ] && [ -z "${WEBKIT_DISABLE_DMABUF_RENDERER+x}" ]; then
+  export WEBKIT_DISABLE_DMABUF_RENDERER=1
+fi
+exec "$APPDIR/usr/bin/wallpaper-console-tauri" "$@"
+"#;
+
+fn prepare_appimage_appdir(appdir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if !appdir.is_dir() {
+        return Err(format!("AppDir is missing: {}", appdir.display()));
+    }
+    let gui = appdir.join("usr/bin/wallpaper-console-tauri");
+    if !gui.is_file() {
+        return Err(format!("AppDir GUI binary is missing: {}", gui.display()));
+    }
+
+    let hooks = appdir.join("apprun-hooks");
+    if hooks.exists() {
+        std::fs::remove_dir_all(&hooks)
+            .map_err(|error| format!("failed to remove {}: {error}", hooks.display()))?;
+    }
+    for relative in ["AppRun", "AppRun.wrapped"] {
+        let path = appdir.join(relative);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            std::fs::remove_file(&path)
+                .map_err(|error| format!("failed to remove {}: {error}", path.display()))?;
+        }
+    }
+
+    let app_run = appdir.join("AppRun");
+    std::fs::write(&app_run, APPIMAGE_APP_RUN)
+        .map_err(|error| format!("failed to write {}: {error}", app_run.display()))?;
+    let mut permissions = std::fs::metadata(&app_run)
+        .map_err(|error| format!("failed to stat {}: {error}", app_run.display()))?
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(&app_run, permissions)
+        .map_err(|error| format!("failed to make {} executable: {error}", app_run.display()))?;
+
+    println!(
+        "prepared host-first AppImage AppDir at {}",
+        appdir.display()
+    );
+    Ok(())
 }
 
 fn package_linux_release(repo_root: &Path, args: &ReleasePackageLinuxArgs) -> Result<(), String> {
@@ -453,7 +541,8 @@ fn usage() -> String {
   cargo run -p xtask -- verify rust [--dry-run]
   cargo run -p xtask -- verify frontend [--dry-run]
   cargo run -p xtask -- verify all [--dry-run]
-  cargo run -p xtask -- release package-linux --version <version> --appimage <path> --cli <path> --out <dir>"
+  cargo run -p xtask -- release package-linux --version <version> --appimage <path> --cli <path> --out <dir>
+  cargo run -p xtask -- release prepare-appimage --appdir <path>"
         .to_string()
 }
 
@@ -529,6 +618,22 @@ mod tests {
                 appimage: PathBuf::from("target/app.AppImage"),
                 cli: PathBuf::from("target/wallpaper-console-rust"),
                 out_dir: PathBuf::from("dist"),
+            })
+        );
+    }
+
+    #[test]
+    fn parses_prepare_appimage_command() {
+        assert_eq!(
+            parse_xtask_command(&args(&[
+                "release",
+                "prepare-appimage",
+                "--appdir",
+                "target/AppDir",
+            ]))
+            .unwrap(),
+            XtaskCommand::ReleasePrepareAppImage(ReleasePrepareAppImageArgs {
+                appdir: PathBuf::from("target/AppDir"),
             })
         );
     }
@@ -637,6 +742,58 @@ version = \"0.1.0-rc.1\"
         ] {
             assert!(entries.lines().any(|entry| entry == expected));
         }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn prepares_host_first_appdir_with_bundled_fallback() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "wallpaper-console-appdir-test-{}-{unique}",
+            std::process::id()
+        ));
+        let appdir = root.join("AppDir");
+        let gui = appdir.join("usr/bin/wallpaper-console-tauri");
+        std::fs::create_dir_all(gui.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(appdir.join("usr/lib")).unwrap();
+        std::fs::create_dir_all(appdir.join("usr/share/wallpaper-console")).unwrap();
+        std::fs::create_dir_all(appdir.join("apprun-hooks")).unwrap();
+        std::fs::write(&gui, b"synthetic gui binary").unwrap();
+        std::fs::write(appdir.join("usr/lib/libwebkit2gtk-4.1.so.0"), b"bundled").unwrap();
+        std::fs::write(appdir.join("usr/share/wallpaper-console/keep"), b"resource").unwrap();
+        std::fs::write(appdir.join("AppRun.wrapped"), b"bundled launcher").unwrap();
+        std::fs::write(
+            appdir.join("apprun-hooks/linuxdeploy-plugin-gtk.sh"),
+            b"hook",
+        )
+        .unwrap();
+
+        prepare_appimage_appdir(&appdir).unwrap();
+
+        let app_run = appdir.join("AppRun");
+        let launcher = std::fs::read_to_string(&app_run).unwrap();
+        assert!(launcher.starts_with("#!/bin/sh\n"));
+        assert!(launcher.contains("WCR_WEBKIT_DISABLE_DMABUF_RENDERER"));
+        assert!(launcher.contains("WEBKIT_DISABLE_DMABUF_RENDERER=1"));
+        assert!(launcher.contains(r#"exec "$APPDIR/usr/bin/wallpaper-console-tauri" "$@""#));
+        assert!(!launcher.contains("AppRun.wrapped"));
+        assert!(!launcher.contains("GDK_BACKEND"));
+        assert!(launcher.contains("/usr/lib"));
+        assert!(launcher.contains("LD_LIBRARY_PATH"));
+        assert_ne!(
+            std::fs::metadata(&app_run).unwrap().permissions().mode() & 0o111,
+            0
+        );
+        assert!(appdir.join("usr/lib/libwebkit2gtk-4.1.so.0").is_file());
+        assert!(!appdir.join("AppRun.wrapped").exists());
+        assert!(!appdir.join("apprun-hooks").exists());
+        assert!(appdir.join("usr/share/wallpaper-console/keep").is_file());
 
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -772,12 +929,34 @@ version = \"0.1.0-rc.1\"
             !workflow.contains("--clobber"),
             "published release assets must not be replaced in place"
         );
+        for forbidden in ["releases/download/continuous", "/master/"] {
+            assert!(
+                !workflow.contains(forbidden),
+                "release workflow must not download mutable packaging input: {forbidden}"
+            );
+        }
         for required in [
             "runs-on: ubuntu-22.04",
             "permissions:\n  contents: read",
             "cargo run --locked -p xtask -- verify all",
             "cargo tauri build --bundles appimage",
+            "release prepare-appimage",
+            "Pin Tauri Linux packaging tools",
+            "releases/download/appimage-toolchain-v1",
+            "linuxdeploy-plugin-appimage.AppImage",
+            "appimage-runtime-x86_64",
+            "--runtime-file",
+            "20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1",
+            "cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a",
+            "c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94",
+            "e0129b8070e0c7b37151027e46e9fa44fe97ea29e3692705a2c5cff3771d3121",
+            "439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd",
+            "SOURCE_DATE_EPOCH",
+            "touch -h -d",
+            "--appdir",
             "release package-linux",
+            "libwebkit2gtk-4.1.so",
+            "grep -q 'LD_LIBRARY_PATH'",
             "(cd dist && sha256sum -c SHA256SUMS)",
             "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
             "gh release create",

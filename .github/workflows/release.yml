@@ -98,11 +98,83 @@ jobs:
       - name: Install pinned Tauri CLI
         run: cargo install tauri-cli --version 2.11.2 --locked
 
+      - name: Pin Tauri Linux packaging tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          cache="$HOME/.cache/tauri"
+          mkdir -p "${cache}"
+          fetch_verified() {
+            local url="$1" destination="$2" expected="$3" temporary
+            temporary="${destination}.download"
+            curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+              --output "${temporary}" "${url}"
+            printf '%s  %s\n' "${expected}" "${temporary}" | sha256sum -c -
+            chmod 755 "${temporary}"
+            mv "${temporary}" "${destination}"
+          }
+          fetch_verified \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-x86_64.AppImage' \
+            "${cache}/linuxdeploy-x86_64.AppImage" \
+            '20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'
+          fetch_verified \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-gtk.sh' \
+            "${cache}/linuxdeploy-plugin-gtk.sh" \
+            'cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'
+          fetch_verified \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-gstreamer.sh' \
+            "${cache}/linuxdeploy-plugin-gstreamer.sh" \
+            'c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'
+          fetch_verified \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-appimage.AppImage' \
+            "${cache}/linuxdeploy-plugin-appimage.AppImage" \
+            'e0129b8070e0c7b37151027e46e9fa44fe97ea29e3692705a2c5cff3771d3121'
+          fetch_verified \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/appimage-runtime-x86_64' \
+            "${cache}/appimage-runtime-x86_64" \
+            '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd'
+
       - name: Build AppImage and CLI
         run: |
           cargo tauri build --bundles appimage --ci -- --locked
           cargo build --locked --release --package wc-cli
           target/release/wallpaper-console-rust --help >/dev/null
+
+      - name: Prepare host-first AppImage runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          [[ -n "${appimage}" ]] || { echo "Tauri did not produce an AppImage" >&2; exit 1; }
+          appimage="$(realpath "${appimage}")"
+          repack_dir="target/appimage-repack"
+          appdir="${repack_dir}/AppDir"
+          runtime="$HOME/.cache/tauri/appimage-runtime-x86_64"
+          produced_runtime="${repack_dir}/runtime-from-tauri-x86_64"
+          candidate="${repack_dir}/candidate.AppImage"
+          rm -rf "${repack_dir}"
+          mkdir -p "${repack_dir}/tool"
+          runtime_size=944632
+          head -c "${runtime_size}" "${appimage}" > "${produced_runtime}"
+          printf '%s  %s\n' \
+            '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd' \
+            "${produced_runtime}" | sha256sum -c -
+          cmp "${runtime}" "${produced_runtime}"
+          (cd "${repack_dir}" && APPIMAGELAUNCHER_DISABLE=1 "${appimage}" --appimage-extract >/dev/null)
+          mv "${repack_dir}/squashfs-root" "${appdir}"
+          cargo run --locked -p xtask -- release prepare-appimage --appdir "${appdir}"
+          source_date_epoch="$(git log -1 --format=%ct)"
+          find "${appdir}" -exec touch -h -d "@${source_date_epoch}" {} +
+          repacker="$HOME/.cache/tauri/linuxdeploy-plugin-appimage.AppImage"
+          [[ -x "${repacker}" ]] || { echo "Tauri AppImage repacker is missing" >&2; exit 1; }
+          printf '%s  %s\n' \
+            'e0129b8070e0c7b37151027e46e9fa44fe97ea29e3692705a2c5cff3771d3121' \
+            "${repacker}" | sha256sum -c -
+          (cd "${repack_dir}/tool" && APPIMAGELAUNCHER_DISABLE=1 "${repacker}" --appimage-extract >/dev/null)
+          appimagetool="${repack_dir}/tool/squashfs-root/appimagetool-prefix/AppRun"
+          [[ -x "${appimagetool}" ]] || { echo "Tauri appimagetool is missing" >&2; exit 1; }
+          SOURCE_DATE_EPOCH="${source_date_epoch}" "${appimagetool}" --runtime-file "$(realpath "${runtime}")" "$(realpath "${appdir}")" "$(realpath -m "${candidate}")"
+          mv "${candidate}" "${appimage}"
 
       - name: Package release assets
         shell: bash
@@ -126,6 +198,14 @@ jobs:
           mkdir -p target/appimage-smoke target/cli-smoke
           (cd target/appimage-smoke && "${appimage}" --appimage-extract >/dev/null)
           test -x target/appimage-smoke/squashfs-root/AppRun
+          test -x target/appimage-smoke/squashfs-root/usr/bin/wallpaper-console-tauri
+          find target/appimage-smoke/squashfs-root/usr/lib -maxdepth 1 -name 'libwebkit2gtk-4.1.so*' -print -quit | grep -q .
+          test ! -e target/appimage-smoke/squashfs-root/AppRun.wrapped
+          test ! -d target/appimage-smoke/squashfs-root/apprun-hooks
+          readelf -d target/appimage-smoke/squashfs-root/usr/bin/wallpaper-console-tauri | grep -Fq '$ORIGIN/../lib'
+          grep -q 'LD_LIBRARY_PATH' target/appimage-smoke/squashfs-root/AppRun
+          grep -q 'WCR_WEBKIT_DISABLE_DMABUF_RENDERER' target/appimage-smoke/squashfs-root/AppRun
+          ! grep -q 'GDK_BACKEND=' target/appimage-smoke/squashfs-root/AppRun
           find target/appimage-smoke/squashfs-root -type f -name '*.desktop' -print -quit | grep -q .
           tar --zstd -xf "dist/wallpaper-console-cli_${{ steps.release.outputs.version }}_x86_64.tar.zst" \
             -C target/cli-smoke
