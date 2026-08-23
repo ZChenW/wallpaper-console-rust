@@ -251,12 +251,16 @@ APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 export APPDIR
 
 host_library_path=
+host_webkit_available=
 for directory in /usr/lib/x86_64-linux-gnu /lib/x86_64-linux-gnu /usr/lib64 /usr/lib /lib64 /lib; do
   if [ -d "$directory" ]; then
     host_library_path="${host_library_path:+$host_library_path:}$directory"
+    if [ -e "$directory/libwebkit2gtk-4.1.so.0" ]; then
+      host_webkit_available=1
+    fi
   fi
 done
-if [ -n "$host_library_path" ]; then
+if [ -n "$host_library_path" ] && [ -n "$host_webkit_available" ]; then
   export LD_LIBRARY_PATH="$host_library_path${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 fi
 
@@ -786,6 +790,8 @@ version = \"0.1.0-rc.1\"
         assert!(!launcher.contains("GDK_BACKEND"));
         assert!(launcher.contains("/usr/lib"));
         assert!(launcher.contains("LD_LIBRARY_PATH"));
+        assert!(launcher.contains("host_webkit_available"));
+        assert!(launcher.contains("libwebkit2gtk-4.1.so.0"));
         assert_ne!(
             std::fs::metadata(&app_run).unwrap().permissions().mode() & 0o111,
             0
