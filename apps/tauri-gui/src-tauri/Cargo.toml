@@ -2,9 +2,9 @@
 name = "wallpaper-console-tauri"
 version.workspace = true
 description = "Rust-native Wallpaper Console GUI"
-authors = ["wallpaper-console"]
+authors = ["ZChenW and Wallpaper Console contributors"]
 license.workspace = true
-repository = ""
+repository = "https://github.com/ZChenW/wallpaper-console-rust"
 edition.workspace = true
 rust-version.workspace = true
 

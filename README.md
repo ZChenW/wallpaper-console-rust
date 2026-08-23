@@ -16,7 +16,38 @@ favorites, and apply different wallpapers to connected displays.
 Wallpaper Engine Web projects can be browsed, but live Web wallpapers are not
 currently supported. Scene rendering may differ from Wallpaper Engine.
 
-## Install on Arch Linux
+## Install the Linux release candidate
+
+Download these three files from the
+[latest GitHub release](https://github.com/ZChenW/wallpaper-console-rust/releases):
+
+- `wallpaper-console_0.1.0-rc.1_x86_64.AppImage`
+- `wallpaper-console-cli_0.1.0-rc.1_x86_64.tar.zst`
+- `SHA256SUMS`
+
+Verify both application assets before running them:
+
+```bash
+sha256sum -c SHA256SUMS
+chmod +x wallpaper-console_0.1.0-rc.1_x86_64.AppImage
+./wallpaper-console_0.1.0-rc.1_x86_64.AppImage
+```
+
+The AppImage contains the GUI only. Install the separate CLI bundle for login
+restore, command-line configuration, and terminal library commands:
+
+```bash
+tar --zstd -xf wallpaper-console-cli_0.1.0-rc.1_x86_64.tar.zst
+install -Dm755 \
+  wallpaper-console-cli_0.1.0-rc.1_x86_64/wallpaper-console-rust \
+  "$HOME/.local/bin/wallpaper-console-rust"
+```
+
+This release supports Linux x86_64. External wallpaper renderers are not bundled;
+install the renderer needed for your desktop and wallpaper types as described
+below.
+
+## Build from source on Arch Linux
 
 Install the build requirements:
 
@@ -89,6 +120,12 @@ WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 wallpaper-console-gui-rust
 
 ## Update
 
+The release candidate has no automatic updater. For an AppImage/CLI installation,
+download the newer assets and `SHA256SUMS`, verify them, then replace the old
+files manually.
+
+For a source installation:
+
 ```bash
 cd wallpaper-console-rust
 git pull --ff-only
@@ -97,7 +134,14 @@ git pull --ff-only
 
 ## Uninstall
 
-From the cloned project directory:
+For a release asset installation, delete the AppImage and the optional CLI:
+
+```bash
+rm -f wallpaper-console_0.1.0-rc.1_x86_64.AppImage
+rm -f "$HOME/.local/bin/wallpaper-console-rust"
+```
+
+For a source installation, run this from the cloned project directory:
 
 ```bash
 ./install.sh --uninstall
@@ -152,8 +196,8 @@ Placeholders in `post_apply_command`: `$wallpaper` / `$path`, `$still`,
 `WCR_STILL`, `WCR_BACKEND`, and `WCR_OUTPUTS`.
 
 You need a matugen config (see [`examples/matugen/`](examples/matugen/)), or
-point at an existing template set. For optional kitty/waybar reloads, use
-[`scripts/post-apply-theme.sh`](scripts/post-apply-theme.sh).
+point at an existing template set. Optional kitty or Waybar reloads can be added
+directly to your configured post-apply command.
 
 ## License
 

@@ -2,8 +2,9 @@
 #   git clone … && ./install.sh
 # Keep tests, e2e, mocks, scripts, and planning docs local-only.
 
-# Rust build artifacts
+# Rust and release build artifacts
 target/
+/dist/
 
 # Tauri / frontend build artifacts
 apps/tauri-gui/frontend/node_modules/

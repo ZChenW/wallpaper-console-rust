@@ -1,0 +1,201 @@
+name: Release Linux RC
+
+on:
+  push:
+    tags:
+      - "v*-rc.*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  build-linux-x86_64:
+    name: Build Linux x86_64 release assets
+    runs-on: ubuntu-22.04
+    outputs:
+      tag: ${{ steps.release.outputs.tag }}
+      version: ${{ steps.release.outputs.version }}
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Check out release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Resolve and validate release version
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          project_version="$(grep -A5 '^\[workspace.package\]$' Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)"
+          [[ -n "${project_version}" ]] || { echo "workspace version is missing" >&2; exit 1; }
+          if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            tag="${GITHUB_REF_NAME}"
+            [[ "${tag}" == v*-rc.* ]] || { echo "not an RC tag: ${tag}" >&2; exit 1; }
+            version="${tag#v}"
+            [[ "${version}" == "${project_version}" ]] || {
+              echo "tag ${tag} does not match workspace version ${project_version}" >&2
+              exit 1
+            }
+            git rev-parse --verify "refs/tags/${tag}^{commit}" >/dev/null
+          else
+            version="${project_version}"
+            tag="v${project_version}"
+          fi
+          echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Install Linux build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            build-essential \
+            curl \
+            file \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libwebkit2gtk-4.1-dev \
+            libxdo-dev \
+            patchelf \
+            wget \
+            zstd
+
+      - name: Install Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 22.14.0
+          cache: npm
+          cache-dependency-path: apps/tauri-gui/frontend/package-lock.json
+
+      - name: Install Rust 1.94.1 with verification components
+        uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94.1
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache Rust build outputs
+        uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 # v2.8.2
+
+      - name: Install clean frontend dependencies
+        working-directory: apps/tauri-gui/frontend
+        run: npm ci
+
+      - name: Audit frontend dependencies during manual preflight
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: apps/tauri-gui/frontend
+        run: npm audit --audit-level=high
+
+      - name: Run release verification gate
+        run: cargo run --locked -p xtask -- verify all
+
+      - name: Install pinned Tauri CLI
+        run: cargo install tauri-cli --version 2.11.2 --locked
+
+      - name: Build AppImage and CLI
+        run: |
+          cargo tauri build --bundles appimage --ci -- --locked
+          cargo build --locked --release --package wc-cli
+          target/release/wallpaper-console-rust --help >/dev/null
+
+      - name: Package release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          appimage="$(find target/release/bundle/appimage -maxdepth 1 -type f -name '*.AppImage' -print -quit)"
+          [[ -n "${appimage}" ]] || { echo "Tauri did not produce an AppImage" >&2; exit 1; }
+          cargo run --locked -p xtask -- release package-linux \
+            --version "${{ steps.release.outputs.version }}" \
+            --appimage "${appimage}" \
+            --cli target/release/wallpaper-console-rust \
+            --out dist
+
+      - name: Smoke-test packaged assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha256sum -c dist/SHA256SUMS
+          appimage="$(realpath "dist/wallpaper-console_${{ steps.release.outputs.version }}_x86_64.AppImage")"
+          rm -rf target/appimage-smoke target/cli-smoke
+          mkdir -p target/appimage-smoke target/cli-smoke
+          (cd target/appimage-smoke && "${appimage}" --appimage-extract >/dev/null)
+          test -x target/appimage-smoke/squashfs-root/AppRun
+          find target/appimage-smoke/squashfs-root -type f -name '*.desktop' -print -quit | grep -q .
+          tar --zstd -xf "dist/wallpaper-console-cli_${{ steps.release.outputs.version }}_x86_64.tar.zst" \
+            -C target/cli-smoke
+          "target/cli-smoke/wallpaper-console-cli_${{ steps.release.outputs.version }}_x86_64/wallpaper-console-rust" --help >/dev/null
+          mkdir -p publish
+          cp dist/* RELEASE_NOTES.md publish/
+
+      - name: Upload verified workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wallpaper-console-${{ steps.release.outputs.version }}-linux-x86_64
+          path: publish/
+          if-no-files-found: error
+
+  publish-prerelease:
+    name: Publish verified GitHub pre-release
+    if: github.event_name == 'push'
+    needs: build-linux-x86_64
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - name: Download verified release inputs
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wallpaper-console-${{ needs.build-linux-x86_64.outputs.version }}-linux-x86_64
+          path: release-input
+
+      - name: Publish assets through a verified draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build-linux-x86_64.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build-linux-x86_64.outputs.version }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected_assets="$(printf '%s\n' \
+            "SHA256SUMS" \
+            "wallpaper-console_${RELEASE_VERSION}_x86_64.AppImage" \
+            "wallpaper-console-cli_${RELEASE_VERSION}_x86_64.tar.zst" | sort)"
+
+          if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
+            is_draft="$(gh release view "${RELEASE_TAG}" --json isDraft --jq .isDraft)"
+            [[ "${is_draft}" == "true" ]] || {
+              echo "published release ${RELEASE_TAG} already exists; refusing to replace it" >&2
+              exit 1
+            }
+            gh release delete "${RELEASE_TAG}" --yes
+          fi
+
+          gh release create "${RELEASE_TAG}" \
+            "release-input/wallpaper-console_${RELEASE_VERSION}_x86_64.AppImage" \
+            "release-input/wallpaper-console-cli_${RELEASE_VERSION}_x86_64.tar.zst" \
+            "release-input/SHA256SUMS" \
+            --verify-tag \
+            --draft \
+            --prerelease \
+            --title "Wallpaper Console ${RELEASE_TAG}" \
+            --notes-file release-input/RELEASE_NOTES.md
+
+          actual_assets="$(gh release view "${RELEASE_TAG}" --json assets --jq '[.assets[].name] | sort | join("\n")')"
+          [[ "${actual_assets}" == "${expected_assets}" ]] || {
+            echo "draft release asset set does not match the contract" >&2
+            diff -u <(printf '%s\n' "${expected_assets}") <(printf '%s\n' "${actual_assets}") || true
+            exit 1
+          }
+
+          rm -rf target/release-download
+          mkdir -p target/release-download
+          gh release download "${RELEASE_TAG}" --dir target/release-download
+          (cd target/release-download && sha256sum -c SHA256SUMS)
+          gh release edit "${RELEASE_TAG}" --draft=false --prerelease

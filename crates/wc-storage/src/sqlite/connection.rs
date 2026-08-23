@@ -109,10 +109,11 @@ struct CachedRuntimeConnection {
 /// Exclusive maintenance / schema lock acquisition calls this first so the
 /// same process does not deadlock itself on a cached shared lock.
 pub fn invalidate_cached_connections() {
+    let mut cache = lock_runtime_cache();
+    // Generation and cache contents form one state transition under the same
+    // mutex. A leased connection cannot pass its return check while this
+    // invalidation is in progress and repopulate the idle slot afterward.
     CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
-    let mut cache = RUNTIME_CONNECTION_CACHE
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
     *cache = None;
 }
 
@@ -120,6 +121,19 @@ fn lock_runtime_cache() -> std::sync::MutexGuard<'static, Option<CachedRuntimeCo
     RUNTIME_CONNECTION_CACHE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+fn cache_mismatch_invalidates_generation(
+    cached_generation: u64,
+    cached_db_path: &std::path::Path,
+    cached_schema_version: i64,
+    current_generation: u64,
+    requested_db_path: &std::path::Path,
+    requested_schema_version: i64,
+) -> bool {
+    cached_generation == current_generation
+        && (cached_db_path != requested_db_path
+            || cached_schema_version != requested_schema_version)
 }
 
 #[derive(Debug)]
@@ -157,12 +171,13 @@ impl Drop for RuntimeConnection {
         if !entry.cacheable {
             return;
         }
-        let current = CACHE_GENERATION.load(Ordering::SeqCst);
-        if entry.generation != current {
-            // Invalidated while leased: drop connection + unlock.
+        let mut cache = lock_runtime_cache();
+        if entry.generation != CACHE_GENERATION.load(Ordering::SeqCst) {
+            // Invalidated while leased: drop connection + unlock. This check
+            // must happen while holding the cache mutex so invalidation and
+            // returning an idle connection cannot cross in flight.
             return;
         }
-        let mut cache = lock_runtime_cache();
         if cache.is_none() {
             *cache = Some(entry);
         }
@@ -309,6 +324,20 @@ pub(super) fn open_runtime_connection(
                 && entry.supported_schema_version == supported_schema_version
             {
                 return Ok(runtime_connection(entry));
+            }
+            if cache_mismatch_invalidates_generation(
+                entry.generation,
+                &entry.db_path,
+                entry.supported_schema_version,
+                current,
+                &db_path,
+                supported_schema_version,
+            ) {
+                // Replacing the process-wide idle slot with another database or
+                // schema contract is an invalidation event too. Advance the
+                // generation so an older leased connection cannot race back
+                // into the cache after this mismatched entry is dropped.
+                CACHE_GENERATION.fetch_add(1, Ordering::SeqCst);
             }
             // Path/version/generation mismatch: drop and open fresh below.
         }
@@ -745,6 +774,59 @@ mod tests {
         }
 
         panic!("runtime cache generation did not remain stable long enough to test reuse");
+    }
+
+    #[test]
+    fn concurrent_invalidation_cannot_repopulate_the_idle_cache() {
+        let _lock = CACHE_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let (_tmp, cd) = config_dir();
+        create_probe_db(&cd, "concurrent");
+
+        for _ in 0..200 {
+            invalidate_cached_connections();
+            let connection = open_runtime_connection(&cd, 0).unwrap();
+            std::thread::scope(|scope| {
+                let dropper = scope.spawn(move || drop(connection));
+                let invalidator = scope.spawn(invalidate_cached_connections);
+                dropper.join().unwrap();
+                invalidator.join().unwrap();
+            });
+
+            assert!(
+                lock_runtime_cache().is_none(),
+                "an invalidated lease raced back into the idle cache"
+            );
+        }
+    }
+
+    #[test]
+    fn different_runtime_db_invalidates_current_cache_generation() {
+        let cached_path = PathBuf::from("/tmp/cache-a/wallpapers.db");
+        let requested_path = PathBuf::from("/tmp/cache-b/wallpapers.db");
+        assert!(cache_mismatch_invalidates_generation(
+            7,
+            &cached_path,
+            3,
+            7,
+            &requested_path,
+            3,
+        ));
+        assert!(!cache_mismatch_invalidates_generation(
+            7,
+            &cached_path,
+            3,
+            7,
+            &cached_path,
+            3,
+        ));
+        assert!(!cache_mismatch_invalidates_generation(
+            6,
+            &cached_path,
+            3,
+            7,
+            &requested_path,
+            3,
+        ));
     }
 
     #[test]

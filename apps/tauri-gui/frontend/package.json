@@ -1,7 +1,7 @@
 {
   "name": "wallpaper-console-tauri-gui",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.0-rc.1",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -28,5 +28,8 @@
     "@vitejs/plugin-react": "^4.3.0",
     "typescript": "~5.7.0",
     "vite": "^6.0.0"
+  },
+  "allowScripts": {
+    "esbuild": true
   }
 }
