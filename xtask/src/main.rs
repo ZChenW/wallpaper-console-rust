@@ -76,7 +76,7 @@ const RUST_STEPS: &[Step] = &[
         name: "Rust tests",
         cwd: StepCwd::RepoRoot,
         program: "cargo",
-        args: &["test", "--workspace"],
+        args: &["test", "--workspace", "--", "--test-threads=1"],
     },
 ];
 
@@ -650,6 +650,18 @@ version = \"0.1.0-rc.1\"
                 "suite={suite} err={err}"
             );
         }
+    }
+
+    #[test]
+    fn rust_workspace_tests_are_serialized_for_process_global_state() {
+        let step = RUST_STEPS
+            .iter()
+            .find(|step| step.name == "Rust tests")
+            .expect("Rust test step");
+        assert_eq!(
+            step.args,
+            &["test", "--workspace", "--", "--test-threads=1"]
+        );
     }
 
     #[test]
