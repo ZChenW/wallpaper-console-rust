@@ -1,6 +1,7 @@
 //! xtask — repository verification runner.
 
 use std::env;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
@@ -31,6 +32,21 @@ struct ReleasePrepareAppImageArgs {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseVerifyRemoteTagArgs {
+    tag: String,
+    expected_commit: String,
+    expected_tag_object: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReleaseVerifyAppImageRuntimeArgs {
+    runtime: PathBuf,
+    appimage: PathBuf,
+    runtime_size: usize,
+    expected_sha256: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct ReleaseAssetNames {
     appimage: String,
     cli_archive: String,
@@ -43,6 +59,8 @@ enum XtaskCommand {
     Verify(VerifyArgs),
     ReleasePackageLinux(ReleasePackageLinuxArgs),
     ReleasePrepareAppImage(ReleasePrepareAppImageArgs),
+    ReleaseVerifyRemoteTag(ReleaseVerifyRemoteTagArgs),
+    ReleaseVerifyAppImageRuntime(ReleaseVerifyAppImageRuntimeArgs),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -131,6 +149,16 @@ fn run() -> Result<(), String> {
             let appdir = resolve_from(&root, &args.appdir);
             prepare_appimage_appdir(&appdir)
         }
+        XtaskCommand::ReleaseVerifyRemoteTag(args) => {
+            let current = env::current_dir()
+                .map_err(|error| format!("failed to resolve current directory: {error}"))?;
+            let object = verify_remote_release_tag(&current, &args)?;
+            println!("{object}");
+            Ok(())
+        }
+        XtaskCommand::ReleaseVerifyAppImageRuntime(args) => {
+            verify_appimage_runtime(&repo_root(), &args)
+        }
     }
 }
 
@@ -167,6 +195,70 @@ fn parse_release_args(args: &[String]) -> Result<XtaskCommand, String> {
         return Ok(XtaskCommand::ReleasePrepareAppImage(
             ReleasePrepareAppImageArgs {
                 appdir: PathBuf::from(&args[3]),
+            },
+        ));
+    }
+    if args.get(1).map(String::as_str) == Some("verify-remote-tag") {
+        let mut tag = None;
+        let mut expected_commit = None;
+        let mut expected_tag_object = None;
+        let mut index = 2;
+        while index < args.len() {
+            let flag = args[index].as_str();
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("missing value for {flag}"))?;
+            match flag {
+                "--tag" => tag = Some(value.clone()),
+                "--expected-commit" => expected_commit = Some(value.clone()),
+                "--expected-tag-object" => expected_tag_object = Some(value.clone()),
+                other => return Err(format!("unknown verify-remote-tag option: {other}")),
+            }
+            index += 2;
+        }
+        return Ok(XtaskCommand::ReleaseVerifyRemoteTag(
+            ReleaseVerifyRemoteTagArgs {
+                tag: tag.ok_or_else(|| "missing --tag".to_string())?,
+                expected_commit: expected_commit
+                    .ok_or_else(|| "missing --expected-commit".to_string())?,
+                expected_tag_object,
+            },
+        ));
+    }
+    if args.get(1).map(String::as_str) == Some("verify-appimage-runtime") {
+        let mut runtime = None;
+        let mut appimage = None;
+        let mut runtime_size = None;
+        let mut expected_sha256 = None;
+        let mut index = 2;
+        while index < args.len() {
+            let flag = args[index].as_str();
+            let value = args
+                .get(index + 1)
+                .ok_or_else(|| format!("missing value for {flag}"))?;
+            match flag {
+                "--runtime" => runtime = Some(PathBuf::from(value)),
+                "--appimage" => appimage = Some(PathBuf::from(value)),
+                "--runtime-size" => {
+                    runtime_size = Some(
+                        value
+                            .parse::<usize>()
+                            .map_err(|_| "invalid --runtime-size".to_string())?,
+                    )
+                }
+                "--sha256" => expected_sha256 = Some(value.clone()),
+                other => return Err(format!("unknown verify-appimage-runtime option: {other}")),
+            }
+            index += 2;
+        }
+        return Ok(XtaskCommand::ReleaseVerifyAppImageRuntime(
+            ReleaseVerifyAppImageRuntimeArgs {
+                runtime: runtime.ok_or_else(|| "missing --runtime".to_string())?,
+                appimage: appimage.ok_or_else(|| "missing --appimage".to_string())?,
+                runtime_size: runtime_size
+                    .filter(|size| *size > 0)
+                    .ok_or_else(|| "missing or zero --runtime-size".to_string())?,
+                expected_sha256: expected_sha256.ok_or_else(|| "missing --sha256".to_string())?,
             },
         ));
     }
@@ -219,6 +311,225 @@ fn parse_release_args(args: &[String]) -> Result<XtaskCommand, String> {
     };
     release_asset_names(&args.version)?;
     Ok(XtaskCommand::ReleasePackageLinux(args))
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn git_stdout(repository: &Path, args: &[&str]) -> Result<String, String> {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(repository)
+        .output()
+        .map_err(|error| format!("failed to run git {args:?}: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
+fn verify_remote_release_tag(
+    repository: &Path,
+    args: &ReleaseVerifyRemoteTagArgs,
+) -> Result<String, String> {
+    if !args.tag.starts_with('v')
+        || !args.tag.contains("-rc.")
+        || !args
+            .tag
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
+    {
+        return Err(format!("invalid RC release tag: {}", args.tag));
+    }
+    if !is_lower_hex(&args.expected_commit, 40) {
+        return Err("expected commit must be a full lowercase SHA-1".to_string());
+    }
+    if args
+        .expected_tag_object
+        .as_deref()
+        .is_some_and(|object| !is_lower_hex(object, 40))
+    {
+        return Err("expected tag object must be a full lowercase SHA-1".to_string());
+    }
+
+    let tag_ref = format!("refs/tags/{}", args.tag);
+    let verified_ref = format!("refs/tags/{}.release-verified", args.tag);
+    let _ = Command::new("git")
+        .args(["update-ref", "-d", &verified_ref])
+        .current_dir(repository)
+        .status();
+    let fetch_spec = format!("{tag_ref}:{verified_ref}");
+    git_stdout(repository, &["fetch", "--force", "origin", &fetch_spec])?;
+    if git_stdout(repository, &["cat-file", "-t", &verified_ref])? != "tag" {
+        return Err(format!("release tag must be annotated: {}", args.tag));
+    }
+    let actual_object = git_stdout(repository, &["rev-parse", "--verify", &verified_ref])?;
+    let peeled_ref = format!("{verified_ref}^{{commit}}");
+    let actual_commit = git_stdout(repository, &["rev-parse", "--verify", &peeled_ref])?;
+    if actual_commit != args.expected_commit {
+        return Err(format!(
+            "tag {} resolves to {actual_commit}, expected {}",
+            args.tag, args.expected_commit
+        ));
+    }
+    if let Some(expected_object) = &args.expected_tag_object {
+        if &actual_object != expected_object {
+            return Err(format!(
+                "tag {} object changed from {expected_object} to {actual_object}",
+                args.tag
+            ));
+        }
+    }
+    Ok(actual_object)
+}
+
+fn elf_u16(bytes: &[u8], offset: usize) -> Result<u16, String> {
+    let value = bytes
+        .get(offset..offset + 2)
+        .ok_or_else(|| "ELF header is truncated".to_string())?;
+    Ok(u16::from_le_bytes([value[0], value[1]]))
+}
+
+fn elf_u32(bytes: &[u8], offset: usize) -> Result<u32, String> {
+    let value = bytes
+        .get(offset..offset + 4)
+        .ok_or_else(|| "ELF section header is truncated".to_string())?;
+    Ok(u32::from_le_bytes(value.try_into().unwrap()))
+}
+
+fn elf_u64(bytes: &[u8], offset: usize) -> Result<u64, String> {
+    let value = bytes
+        .get(offset..offset + 8)
+        .ok_or_else(|| "ELF section header is truncated".to_string())?;
+    Ok(u64::from_le_bytes(value.try_into().unwrap()))
+}
+
+fn appimage_digest_range(runtime: &[u8]) -> Result<std::ops::Range<usize>, String> {
+    if runtime.get(..7) != Some(&[0x7f, b'E', b'L', b'F', 2, 1, 1]) {
+        return Err("pinned runtime is not a little-endian ELF64 file".to_string());
+    }
+    let section_offset = usize::try_from(elf_u64(runtime, 0x28)?)
+        .map_err(|_| "ELF section table offset is too large".to_string())?;
+    let section_size = usize::from(elf_u16(runtime, 0x3a)?);
+    let section_count = usize::from(elf_u16(runtime, 0x3c)?);
+    let names_index = usize::from(elf_u16(runtime, 0x3e)?);
+    if section_size < 64 || section_count == 0 || names_index >= section_count {
+        return Err("ELF section table is invalid".to_string());
+    }
+    let section = |index: usize| -> Result<&[u8], String> {
+        let start = section_offset
+            .checked_add(
+                index
+                    .checked_mul(section_size)
+                    .ok_or("ELF section overflow")?,
+            )
+            .ok_or("ELF section overflow")?;
+        let end = start
+            .checked_add(section_size)
+            .ok_or("ELF section overflow")?;
+        runtime
+            .get(start..end)
+            .ok_or_else(|| "ELF section table is truncated".to_string())
+    };
+    let names = section(names_index)?;
+    let names_offset = usize::try_from(elf_u64(names, 24)?)
+        .map_err(|_| "ELF name table offset is too large".to_string())?;
+    let names_size = usize::try_from(elf_u64(names, 32)?)
+        .map_err(|_| "ELF name table size is too large".to_string())?;
+    let names_end = names_offset
+        .checked_add(names_size)
+        .ok_or("ELF name table overflow")?;
+    let names = runtime
+        .get(names_offset..names_end)
+        .ok_or_else(|| "ELF name table is truncated".to_string())?;
+
+    for index in 0..section_count {
+        let header = section(index)?;
+        let name_offset = usize::try_from(elf_u32(header, 0)?)
+            .map_err(|_| "ELF section name offset is too large".to_string())?;
+        let name_bytes = names.get(name_offset..).unwrap_or_default();
+        let name_end = name_bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(name_bytes.len());
+        if &name_bytes[..name_end] == b".digest_md5" {
+            let offset = usize::try_from(elf_u64(header, 24)?)
+                .map_err(|_| "digest section offset is too large".to_string())?;
+            let size = usize::try_from(elf_u64(header, 32)?)
+                .map_err(|_| "digest section size is too large".to_string())?;
+            if size != 16
+                || offset
+                    .checked_add(size)
+                    .is_none_or(|end| end > runtime.len())
+            {
+                return Err("invalid .digest_md5 section bounds".to_string());
+            }
+            return Ok(offset..offset + size);
+        }
+    }
+    Err("pinned runtime has no .digest_md5 section".to_string())
+}
+
+fn verify_appimage_runtime(
+    repo_root: &Path,
+    args: &ReleaseVerifyAppImageRuntimeArgs,
+) -> Result<(), String> {
+    if !is_lower_hex(&args.expected_sha256, 64) {
+        return Err("expected runtime SHA-256 must be lowercase hex".to_string());
+    }
+    let runtime_path = resolve_from(repo_root, &args.runtime);
+    let appimage_path = resolve_from(repo_root, &args.appimage);
+    let runtime = std::fs::read(&runtime_path)
+        .map_err(|error| format!("failed to read {}: {error}", runtime_path.display()))?;
+    if runtime.len() != args.runtime_size {
+        return Err(format!(
+            "pinned runtime size is {}, expected {}",
+            runtime.len(),
+            args.runtime_size
+        ));
+    }
+    let checksum = Command::new("sha256sum")
+        .arg(&runtime_path)
+        .output()
+        .map_err(|error| format!("failed to run sha256sum: {error}"))?;
+    if !checksum.status.success() {
+        return Err("sha256sum failed for pinned runtime".to_string());
+    }
+    let actual_sha256 = String::from_utf8_lossy(&checksum.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if actual_sha256 != args.expected_sha256 {
+        return Err(format!(
+            "pinned runtime SHA-256 is {actual_sha256}, expected {}",
+            args.expected_sha256
+        ));
+    }
+
+    let digest = appimage_digest_range(&runtime)?;
+    let file = std::fs::File::open(&appimage_path)
+        .map_err(|error| format!("failed to open {}: {error}", appimage_path.display()))?;
+    let mut embedded = Vec::with_capacity(args.runtime_size);
+    file.take(args.runtime_size as u64)
+        .read_to_end(&mut embedded)
+        .map_err(|error| format!("failed to read AppImage runtime: {error}"))?;
+    if embedded.len() != args.runtime_size {
+        return Err("AppImage is shorter than its pinned runtime".to_string());
+    }
+    if embedded[..digest.start] != runtime[..digest.start]
+        || embedded[digest.end..] != runtime[digest.end..]
+    {
+        return Err("AppImage runtime differs outside .digest_md5".to_string());
+    }
+    Ok(())
 }
 
 fn release_asset_names(version: &str) -> Result<ReleaseAssetNames, String> {
@@ -546,7 +857,9 @@ fn usage() -> String {
   cargo run -p xtask -- verify frontend [--dry-run]
   cargo run -p xtask -- verify all [--dry-run]
   cargo run -p xtask -- release package-linux --version <version> --appimage <path> --cli <path> --out <dir>
-  cargo run -p xtask -- release prepare-appimage --appdir <path>"
+  cargo run -p xtask -- release prepare-appimage --appdir <path>
+  cargo run -p xtask -- release verify-remote-tag --tag <tag> --expected-commit <sha> [--expected-tag-object <sha>]
+  cargo run -p xtask -- release verify-appimage-runtime --runtime <path> --appimage <path> --runtime-size <bytes> --sha256 <digest>"
         .to_string()
 }
 
@@ -928,6 +1241,175 @@ version = \"0.1.0-rc.1\"
     }
 
     #[test]
+    fn remote_tag_verifier_rejects_lightweight_wrong_and_moved_tags() {
+        fn git(dir: &Path, args: &[&str]) -> String {
+            let output = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("wcr-tag-test-{}-{unique}", std::process::id()));
+        let remote = root.join("remote.git");
+        let source = root.join("source");
+        std::fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "--bare", remote.to_str().unwrap()]);
+        git(&root, &["init", source.to_str().unwrap()]);
+        git(&source, &["config", "user.name", "Release Test"]);
+        git(
+            &source,
+            &["config", "user.email", "release@example.invalid"],
+        );
+        std::fs::write(source.join("payload"), "first\n").unwrap();
+        git(&source, &["add", "payload"]);
+        git(&source, &["commit", "-m", "first"]);
+        let first = git(&source, &["rev-parse", "HEAD"]);
+        git(
+            &source,
+            &["tag", "-a", "v9.9.9-rc.9", "-m", "release", &first],
+        );
+        git(
+            &source,
+            &["remote", "add", "origin", remote.to_str().unwrap()],
+        );
+        git(&source, &["push", "origin", "refs/tags/v9.9.9-rc.9"]);
+        git(&source, &["tag", "-f", "v9.9.9-rc.9", &first]);
+        let base = ReleaseVerifyRemoteTagArgs {
+            tag: "v9.9.9-rc.9".into(),
+            expected_commit: first.clone(),
+            expected_tag_object: None,
+        };
+        let original = verify_remote_release_tag(&source, &base).unwrap();
+
+        std::fs::write(source.join("payload"), "second\n").unwrap();
+        git(&source, &["commit", "-am", "second"]);
+        let second = git(&source, &["rev-parse", "HEAD"]);
+        assert!(verify_remote_release_tag(
+            &source,
+            &ReleaseVerifyRemoteTagArgs {
+                expected_commit: second.clone(),
+                ..base.clone()
+            }
+        )
+        .is_err());
+        git(&source, &["tag", "v9.9.9-rc.8", &first]);
+        git(&source, &["push", "origin", "refs/tags/v9.9.9-rc.8"]);
+        assert!(verify_remote_release_tag(
+            &source,
+            &ReleaseVerifyRemoteTagArgs {
+                tag: "v9.9.9-rc.8".into(),
+                expected_commit: first,
+                expected_tag_object: None,
+            }
+        )
+        .is_err());
+        git(
+            &source,
+            &["tag", "-f", "-a", "v9.9.9-rc.9", "-m", "moved", &second],
+        );
+        git(
+            &source,
+            &["push", "--force", "origin", "refs/tags/v9.9.9-rc.9"],
+        );
+        assert!(verify_remote_release_tag(
+            &source,
+            &ReleaseVerifyRemoteTagArgs {
+                tag: "v9.9.9-rc.9".into(),
+                expected_commit: second,
+                expected_tag_object: Some(original),
+            }
+        )
+        .is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn appimage_runtime_verifier_ignores_only_payload_digest() {
+        fn u16_at(bytes: &mut [u8], offset: usize, value: u16) {
+            bytes[offset..offset + 2].copy_from_slice(&value.to_le_bytes());
+        }
+        fn u32_at(bytes: &mut [u8], offset: usize, value: u32) {
+            bytes[offset..offset + 4].copy_from_slice(&value.to_le_bytes());
+        }
+        fn u64_at(bytes: &mut [u8], offset: usize, value: u64) {
+            bytes[offset..offset + 8].copy_from_slice(&value.to_le_bytes());
+        }
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root =
+            std::env::temp_dir().join(format!("wcr-runtime-test-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let runtime_path = root.join("runtime");
+        let appimage_path = root.join("candidate.AppImage");
+        let mut runtime = vec![0u8; 0x210];
+        runtime[..16]
+            .copy_from_slice(&[0x7f, b'E', b'L', b'F', 2, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+        u16_at(&mut runtime, 0x10, 2);
+        u16_at(&mut runtime, 0x12, 62);
+        u32_at(&mut runtime, 0x14, 1);
+        u64_at(&mut runtime, 0x28, 0x100);
+        u16_at(&mut runtime, 0x34, 64);
+        u16_at(&mut runtime, 0x3a, 64);
+        u16_at(&mut runtime, 0x3c, 3);
+        u16_at(&mut runtime, 0x3e, 1);
+        u32_at(&mut runtime, 0x140, 1);
+        u32_at(&mut runtime, 0x144, 3);
+        u64_at(&mut runtime, 0x158, 0x1c0);
+        u64_at(&mut runtime, 0x160, 23);
+        u32_at(&mut runtime, 0x180, 11);
+        u32_at(&mut runtime, 0x184, 1);
+        u64_at(&mut runtime, 0x198, 0x200);
+        u64_at(&mut runtime, 0x1a0, 16);
+        runtime[0x1c0..0x1d7].copy_from_slice(b"\x00.shstrtab\x00.digest_md5\x00");
+        runtime[0x200..0x210].copy_from_slice(b"original-digest!");
+        std::fs::write(&runtime_path, &runtime).unwrap();
+        let output = Command::new("sha256sum")
+            .arg(&runtime_path)
+            .output()
+            .unwrap();
+        let sha256 = String::from_utf8_lossy(&output.stdout)
+            .split_whitespace()
+            .next()
+            .unwrap()
+            .to_string();
+        let args = ReleaseVerifyAppImageRuntimeArgs {
+            runtime: runtime_path,
+            appimage: appimage_path.clone(),
+            runtime_size: runtime.len(),
+            expected_sha256: sha256,
+        };
+        let mut candidate = runtime.clone();
+        candidate[0x200..0x210].copy_from_slice(b"payload-digest!!");
+        candidate.extend_from_slice(b"squashfs payload");
+        std::fs::write(&appimage_path, &candidate).unwrap();
+        verify_appimage_runtime(Path::new("/"), &args).unwrap();
+        candidate[0xd0] = 1;
+        std::fs::write(&appimage_path, &candidate).unwrap();
+        assert!(verify_appimage_runtime(Path::new("/"), &args).is_err());
+
+        let mut malformed_sections = runtime.clone();
+        u64_at(&mut malformed_sections, 0x28, u64::MAX);
+        assert!(appimage_digest_range(&malformed_sections).is_err());
+        let mut malformed_names = runtime;
+        u64_at(&mut malformed_names, 0x158, u64::MAX);
+        assert!(appimage_digest_range(&malformed_names).is_err());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn release_workflow_builds_and_publishes_expected_assets() {
         let workflow = std::fs::read_to_string(repo_root().join(".github/workflows/release.yml"))
             .expect("release workflow must be tracked");
@@ -964,6 +1446,11 @@ version = \"0.1.0-rc.1\"
             "git cat-file -t",
             "verified_tag_ref",
             "git fetch --force origin",
+            "release verify-remote-tag",
+            "--expected-tag-object",
+            "release verify-appimage-runtime",
+            "tag_object: ${{ steps.release_tag.outputs.tag_object }}",
+            "ref: ${{ needs.build-linux-x86_64.outputs.commit }}",
             "LD_LIBRARY_PATH=/usr/lib/x86_64-linux-gnu ldd",
             "env -u LD_LIBRARY_PATH ldd",
             "20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1",

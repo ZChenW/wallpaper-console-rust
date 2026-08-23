@@ -20,6 +20,8 @@ jobs:
     outputs:
       tag: ${{ steps.release.outputs.tag }}
       version: ${{ steps.release.outputs.version }}
+      commit: ${{ steps.release.outputs.commit }}
+      tag_object: ${{ steps.release_tag.outputs.tag_object }}
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -62,6 +64,7 @@ jobs:
           fi
           echo "tag=${tag}" >> "${GITHUB_OUTPUT}"
           echo "version=${version}" >> "${GITHUB_OUTPUT}"
+          echo "commit=${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
 
       - name: Install Linux build dependencies
         run: |
@@ -90,6 +93,18 @@ jobs:
         uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94.1
         with:
           components: rustfmt, clippy
+
+      - name: Verify immutable annotated release tag
+        if: github.event_name == 'push'
+        id: release_tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag_object="$(cargo run --quiet --locked -p xtask -- \
+            release verify-remote-tag \
+            --tag "${GITHUB_REF_NAME}" \
+            --expected-commit "${GITHUB_SHA}")"
+          echo "tag_object=${tag_object}" >> "${GITHUB_OUTPUT}"
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@401aff9a7a08acb9d27b64936a90db81024cff97 # v2.8.2
@@ -185,31 +200,16 @@ jobs:
           repack_dir="target/appimage-repack"
           appdir="${repack_dir}/AppDir"
           runtime="$HOME/.cache/tauri/appimage-runtime-x86_64"
-          produced_runtime="${repack_dir}/runtime-from-tauri-x86_64"
-          normalized_runtime="${repack_dir}/runtime-normalized-x86_64"
           candidate="${repack_dir}/candidate.AppImage"
           candidate_second="${repack_dir}/candidate-second.AppImage"
           rm -rf "${repack_dir}"
           mkdir -p "${repack_dir}/tool"
-          runtime_size=944632
-          head -c "${runtime_size}" "${appimage}" > "${produced_runtime}"
-          read -r digest_offset_hex digest_size_hex < <(
-            readelf -SW "${runtime}" | awk '$2 == ".digest_md5" {print $5, $6}'
-          )
-          [[ -n "${digest_offset_hex}" && -n "${digest_size_hex}" ]] || {
-            echo "pinned runtime has no .digest_md5 section" >&2
-            exit 1
-          }
-          digest_offset=$((16#${digest_offset_hex}))
-          digest_size=$((16#${digest_size_hex}))
-          cp "${produced_runtime}" "${normalized_runtime}"
-          dd if="${runtime}" of="${normalized_runtime}" bs=1 \
-            skip="${digest_offset}" seek="${digest_offset}" count="${digest_size}" \
-            conv=notrunc status=none
-          printf '%s  %s\n' \
-            '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd' \
-            "${normalized_runtime}" | sha256sum -c -
-          cmp "${runtime}" "${normalized_runtime}"
+          cargo run --quiet --locked -p xtask -- \
+            release verify-appimage-runtime \
+            --runtime "${runtime}" \
+            --appimage "${appimage}" \
+            --runtime-size 944632 \
+            --sha256 439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd
           (cd "${repack_dir}" && APPIMAGELAUNCHER_DISABLE=1 "${appimage}" --appimage-extract >/dev/null)
           mv "${repack_dir}/squashfs-root" "${appdir}"
           cargo run --locked -p xtask -- release prepare-appimage --appdir "${appdir}"
@@ -285,6 +285,16 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out verified release source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ needs.build-linux-x86_64.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install Rust 1.94.1 for provenance verification
+        uses: dtolnay/rust-toolchain@75be91dd2711b583df57c31d0873b4145c89f1d9 # 1.94.1
+
       - name: Download verified release inputs
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
@@ -296,6 +306,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ needs.build-linux-x86_64.outputs.tag }}
           RELEASE_VERSION: ${{ needs.build-linux-x86_64.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.build-linux-x86_64.outputs.commit }}
+          RELEASE_TAG_OBJECT: ${{ needs.build-linux-x86_64.outputs.tag_object }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
@@ -305,6 +317,11 @@ jobs:
             "wallpaper-console_${RELEASE_VERSION}_x86_64.AppImage" \
             "wallpaper-console-cli_${RELEASE_VERSION}_x86_64.tar.zst" | sort)"
 
+          cargo run --quiet --locked -p xtask -- \
+            release verify-remote-tag \
+            --tag "${RELEASE_TAG}" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-tag-object "${RELEASE_TAG_OBJECT}" >/dev/null
           if gh release view "${RELEASE_TAG}" >/dev/null 2>&1; then
             echo "release ${RELEASE_TAG} already exists; preserve it for investigation" >&2
             exit 1
@@ -331,4 +348,9 @@ jobs:
           mkdir -p target/release-download
           gh release download "${RELEASE_TAG}" --dir target/release-download
           (cd target/release-download && sha256sum -c SHA256SUMS)
+          cargo run --quiet --locked -p xtask -- \
+            release verify-remote-tag \
+            --tag "${RELEASE_TAG}" \
+            --expected-commit "${RELEASE_COMMIT}" \
+            --expected-tag-object "${RELEASE_TAG_OBJECT}" >/dev/null
           gh release edit "${RELEASE_TAG}" --draft=false --prerelease
