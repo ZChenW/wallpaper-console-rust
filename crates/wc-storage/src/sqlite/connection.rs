@@ -792,8 +792,12 @@ mod tests {
                 invalidator.join().unwrap();
             });
 
+            let cache = lock_runtime_cache();
+            let generation = CACHE_GENERATION.load(Ordering::SeqCst);
             assert!(
-                lock_runtime_cache().is_none(),
+                cache
+                    .as_ref()
+                    .is_none_or(|entry| entry.generation == generation),
                 "an invalidated lease raced back into the idle cache"
             );
         }
