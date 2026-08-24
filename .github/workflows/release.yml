@@ -22,7 +22,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       commit: ${{ steps.release.outputs.commit }}
       prerelease: ${{ steps.release.outputs.prerelease }}
-      tag_object: ${{ steps.release_tag.outputs.tag_object }}
+      tag_object: ${{ steps.release.outputs.tag_object }}
     env:
       CARGO_TERM_COLOR: always
     steps:
@@ -39,6 +39,7 @@ jobs:
           set -euo pipefail
           project_version="$(grep -A5 '^\[workspace.package\]$' Cargo.toml | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)"
           [[ -n "${project_version}" ]] || { echo "workspace version is missing" >&2; exit 1; }
+          tag_object=
           if [[ "${GITHUB_EVENT_NAME}" == "push" ]]; then
             tag="${GITHUB_REF_NAME}"
             [[ "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] || {
@@ -55,6 +56,11 @@ jobs:
             git fetch --force origin "${tag_ref}:${verified_tag_ref}"
             [[ "$(git cat-file -t "${verified_tag_ref}")" == "tag" ]] || {
               echo "release tag must be annotated: ${tag}" >&2
+              exit 1
+            }
+            tag_object="$(git rev-parse --verify "${verified_tag_ref}")"
+            [[ "${tag_object}" =~ ^[0-9a-f]{40}$ ]] || {
+              echo "release tag object is not a full SHA-1: ${tag_object}" >&2
               exit 1
             }
             tag_commit="$(git rev-parse --verify "${verified_tag_ref}^{commit}")"
@@ -76,6 +82,7 @@ jobs:
             echo "version=${version}"
             echo "commit=${GITHUB_SHA}"
             echo "prerelease=${prerelease}"
+            echo "tag_object=${tag_object}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Install Linux build dependencies
@@ -110,15 +117,14 @@ jobs:
 
       - name: Verify immutable annotated release tag
         if: github.event_name == 'push'
-        id: release_tag
         shell: bash
         run: |
           set -euo pipefail
-          tag_object="$(cargo run --quiet --locked -p xtask -- \
+          cargo run --quiet --locked -p xtask -- \
             release verify-remote-tag \
             --tag "${GITHUB_REF_NAME}" \
-            --expected-commit "${GITHUB_SHA}")"
-          echo "tag_object=${tag_object}" >> "${GITHUB_OUTPUT}"
+            --expected-commit "${GITHUB_SHA}" \
+            --expected-tag-object "${{ steps.release.outputs.tag_object }}" >/dev/null
 
       - name: Cache Rust build outputs
         uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7 # v2.9.2 (Node 24)
@@ -400,3 +406,13 @@ jobs:
             --expected-commit "${RELEASE_COMMIT}" \
             --expected-tag-object "${RELEASE_TAG_OBJECT}" >/dev/null
           gh release edit "${RELEASE_TAG}" --draft=false
+          published_release="$(gh api "repos/${GH_REPO}/releases/tags/${RELEASE_TAG}")"
+          if ! jq -e --argjson prerelease "${RELEASE_PRERELEASE}" '
+            .draft == false and
+            .prerelease == $prerelease and
+            .immutable == true
+          ' <<<"${published_release}" >/dev/null; then
+            echo "published release state does not match the contract" >&2
+            jq '{draft, prerelease, immutable}' <<<"${published_release}" >&2
+            exit 1
+          fi
