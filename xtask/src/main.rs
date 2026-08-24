@@ -335,18 +335,32 @@ fn git_stdout(repository: &Path, args: &[&str]) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
+fn is_release_tag(tag: &str) -> bool {
+    let Some(version) = tag.strip_prefix('v') else {
+        return false;
+    };
+    let (base, rc) = match version.split_once("-rc.") {
+        Some((base, rc)) if !rc.contains("-rc.") => (base, Some(rc)),
+        Some(_) => return false,
+        None => (version, None),
+    };
+    let mut components = base.split('.');
+    let numeric = |component: &str| {
+        !component.is_empty() && component.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    numeric(components.next().unwrap_or_default())
+        && numeric(components.next().unwrap_or_default())
+        && numeric(components.next().unwrap_or_default())
+        && components.next().is_none()
+        && rc.is_none_or(numeric)
+}
+
 fn verify_remote_release_tag(
     repository: &Path,
     args: &ReleaseVerifyRemoteTagArgs,
 ) -> Result<String, String> {
-    if !args.tag.starts_with('v')
-        || !args.tag.contains("-rc.")
-        || !args
-            .tag
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-'))
-    {
-        return Err(format!("invalid RC release tag: {}", args.tag));
+    if !is_release_tag(&args.tag) {
+        return Err(format!("invalid release tag: {}", args.tag));
     }
     if !is_lower_hex(&args.expected_commit, 40) {
         return Err("expected commit must be a full lowercase SHA-1".to_string());
@@ -1364,11 +1378,25 @@ version = \"0.1.0-rc.1\"
         let first = git(&source, &["rev-parse", "HEAD"]);
         git(
             &source,
-            &["tag", "-a", "v9.9.9-rc.9", "-m", "release", &first],
+            &["remote", "add", "origin", remote.to_str().unwrap()],
         );
         git(
             &source,
-            &["remote", "add", "origin", remote.to_str().unwrap()],
+            &["tag", "-a", "v9.9.9", "-m", "stable release", &first],
+        );
+        git(&source, &["push", "origin", "refs/tags/v9.9.9"]);
+        verify_remote_release_tag(
+            &source,
+            &ReleaseVerifyRemoteTagArgs {
+                tag: "v9.9.9".into(),
+                expected_commit: first.clone(),
+                expected_tag_object: None,
+            },
+        )
+        .expect("annotated stable release tag must verify");
+        git(
+            &source,
+            &["tag", "-a", "v9.9.9-rc.9", "-m", "release", &first],
         );
         git(&source, &["push", "origin", "refs/tags/v9.9.9-rc.9"]);
         git(&source, &["tag", "-f", "v9.9.9-rc.9", &first]);
@@ -1504,6 +1532,12 @@ version = \"0.1.0-rc.1\"
             !workflow.contains("--clobber"),
             "published release assets must not be replaced in place"
         );
+        assert!(
+            !workflow
+                .lines()
+                .any(|line| line.trim_start().starts_with("! grep")),
+            "negative grep under set -e does not fail the workflow; use an explicit if"
+        );
         for forbidden in [
             "releases/download/continuous",
             "/master/",
@@ -1555,7 +1589,15 @@ version = \"0.1.0-rc.1\"
             "xvfb-run -a target/appimage-smoke/squashfs-root/AppRun",
             "Unable to spawn a new child process",
             "(cd dist && sha256sum -c SHA256SUMS)",
-            "uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683",
+            "uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+            "uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+            "uses: Swatinem/rust-cache@63fed3e2fecf6f7b51dc6f043341b79ef82a9ae7",
+            "uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+            "- \"v*\"",
+            "prerelease: ${{ steps.release.outputs.prerelease }}",
+            "RELEASE_PRERELEASE",
+            "release_flags=(",
             "gh release create",
             "--draft",
             "gh release download",

@@ -16,30 +16,30 @@ favorites, and apply different wallpapers to connected displays.
 Wallpaper Engine Web projects can be browsed, but live Web wallpapers are not
 currently supported. Scene rendering may differ from Wallpaper Engine.
 
-## Install the Linux release candidate
+## Install the Linux release
 
 Download these three files from the
 [latest GitHub release](https://github.com/ZChenW/wallpaper-console-rust/releases):
 
-- `wallpaper-console_0.1.0-rc.3_x86_64.AppImage`
-- `wallpaper-console-cli_0.1.0-rc.3_x86_64.tar.zst`
+- `wallpaper-console_0.1.0_x86_64.AppImage`
+- `wallpaper-console-cli_0.1.0_x86_64.tar.zst`
 - `SHA256SUMS`
 
 Verify both application assets before running them:
 
 ```bash
 sha256sum -c SHA256SUMS
-chmod +x wallpaper-console_0.1.0-rc.3_x86_64.AppImage
-./wallpaper-console_0.1.0-rc.3_x86_64.AppImage
+chmod +x wallpaper-console_0.1.0_x86_64.AppImage
+./wallpaper-console_0.1.0_x86_64.AppImage
 ```
 
 The AppImage contains the GUI only. Install the separate CLI bundle for login
 restore, command-line configuration, and terminal library commands:
 
 ```bash
-tar --zstd -xf wallpaper-console-cli_0.1.0-rc.3_x86_64.tar.zst
+tar --zstd -xf wallpaper-console-cli_0.1.0_x86_64.tar.zst
 install -Dm755 \
-  wallpaper-console-cli_0.1.0-rc.3_x86_64/wallpaper-console-rust \
+  wallpaper-console-cli_0.1.0_x86_64/wallpaper-console-rust \
   "$HOME/.local/bin/wallpaper-console-rust"
 ```
 
@@ -116,7 +116,7 @@ start it once with the matching command:
 
 ```bash
 # AppImage release
-WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.0-rc.3_x86_64.AppImage
+WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.0_x86_64.AppImage
 
 # Source installation
 WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 wallpaper-console-gui-rust
@@ -124,7 +124,7 @@ WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 wallpaper-console-gui-rust
 
 ## Update
 
-The release candidate has no automatic updater. For an AppImage/CLI installation,
+Wallpaper Console has no automatic updater. For an AppImage/CLI installation,
 download the newer assets and `SHA256SUMS`, verify them, then replace the old
 files manually.
 
@@ -141,7 +141,7 @@ git pull --ff-only
 For a release asset installation, delete the AppImage and the optional CLI:
 
 ```bash
-rm -f wallpaper-console_0.1.0-rc.3_x86_64.AppImage
+rm -f wallpaper-console_0.1.0_x86_64.AppImage
 rm -f "$HOME/.local/bin/wallpaper-console-rust"
 ```
 

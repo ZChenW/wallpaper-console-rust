@@ -4370,7 +4370,7 @@ dependencies = [
 
 [[package]]
 name = "wallpaper-console-tauri"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "camino",
  "fs2",
@@ -4529,7 +4529,7 @@ dependencies = [
 
 [[package]]
 name = "wc-app"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "camino",
  "fs2",
@@ -4547,7 +4547,7 @@ dependencies = [
 
 [[package]]
 name = "wc-backend"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "libc",
  "log",
@@ -4562,7 +4562,7 @@ dependencies = [
 
 [[package]]
 name = "wc-cli"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -4582,7 +4582,7 @@ dependencies = [
 
 [[package]]
 name = "wc-config"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "fs2",
  "tempfile",
@@ -4591,7 +4591,7 @@ dependencies = [
 
 [[package]]
 name = "wc-core"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "camino",
  "serde",
@@ -4601,7 +4601,7 @@ dependencies = [
 
 [[package]]
 name = "wc-preview"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "filetime",
@@ -4615,7 +4615,7 @@ dependencies = [
 
 [[package]]
 name = "wc-scan"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "camino",
@@ -4628,7 +4628,7 @@ dependencies = [
 
 [[package]]
 name = "wc-storage"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 dependencies = [
  "camino",
  "fs2",
@@ -5329,7 +5329,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.1.0-rc.3"
+version = "0.1.0"
 
 [[package]]
 name = "yoke"
