@@ -796,7 +796,8 @@ pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
 fn detect_resolution(path: &str, ftype: wc_core::types::FileType) -> String {
     match ftype {
         wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
-            let args = ["-format", "%wx%h", path, "[0]"];
+            let first_frame = format!("{path}[0]");
+            let args = ["-format", "%wx%h", "--", first_frame.as_str()];
             if let Some(output) = resolution_probe("identify", &args, path) {
                 let s = String::from_utf8_lossy(&output).to_string();
                 if !s.is_empty() && s.contains('x') {
