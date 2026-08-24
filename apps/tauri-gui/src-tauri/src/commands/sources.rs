@@ -14,16 +14,23 @@ pub enum FirstRunSourceSuggestionDto {
     WallpaperEngine { roots: Vec<String> },
 }
 
+enum XdgUserDirResolution {
+    Configured(PathBuf),
+    Disabled,
+    Unavailable,
+}
+
 /// Read a key from the XDG user-dirs.dirs file (e.g. XDG_DOWNLOAD_DIR).
-/// Returns None when the file or key is missing, the value is malformed, or
-/// the directory is disabled (set to "$HOME/"). Relative values resolve
-/// against home.
-fn xdg_user_dir(config_home: Option<&Path>, home: &Path, key: &str) -> Option<PathBuf> {
+/// A value of "$HOME/" explicitly disables the directory; missing or malformed
+/// configuration remains distinguishable so callers may apply a fallback.
+fn xdg_user_dir(config_home: Option<&Path>, home: &Path, key: &str) -> XdgUserDirResolution {
     let config_root = config_home
         .filter(|path| path.is_absolute())
         .map(Path::to_path_buf)
         .unwrap_or_else(|| home.join(".config"));
-    let contents = std::fs::read_to_string(config_root.join("user-dirs.dirs")).ok()?;
+    let Ok(contents) = std::fs::read_to_string(config_root.join("user-dirs.dirs")) else {
+        return XdgUserDirResolution::Unavailable;
+    };
     for line in contents.lines() {
         let line = line.trim();
         let line = line.strip_prefix("export ").unwrap_or(line);
@@ -34,32 +41,37 @@ fn xdg_user_dir(config_home: Option<&Path>, home: &Path, key: &str) -> Option<Pa
             continue;
         };
         let value = raw.trim().trim_matches('"');
-        if value.is_empty() || value == "$HOME" || value == "$HOME/" {
-            // The XDG spec treats a directory set to "$HOME/" as disabled.
-            return None;
+        if value == "$HOME" || value == "$HOME/" {
+            return XdgUserDirResolution::Disabled;
+        }
+        if value.is_empty() {
+            return XdgUserDirResolution::Unavailable;
         }
         if let Some(rest) = value.strip_prefix("$HOME/") {
-            return Some(home.join(rest));
+            return XdgUserDirResolution::Configured(home.join(rest));
         }
         let candidate = PathBuf::from(value);
-        return Some(if candidate.is_absolute() {
+        return XdgUserDirResolution::Configured(if candidate.is_absolute() {
             candidate
         } else {
             home.join(candidate)
         });
     }
-    None
+    XdgUserDirResolution::Unavailable
 }
 
 /// Resolve the downloads directory to suggest: prefer the XDG-configured
-/// download directory, fall back to the literal ~/Downloads. Only existing
-/// directories are offered.
+/// download directory, fall back to the literal ~/Downloads when configuration
+/// is unavailable, and respect an explicit XDG opt-out.
 fn downloads_suggestion_candidate(home: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
-    let xdg = xdg_user_dir(config_home, home, "XDG_DOWNLOAD_DIR");
-    xdg.filter(|path| path.is_dir()).or_else(|| {
-        let literal = home.join("Downloads");
-        literal.is_dir().then_some(literal)
-    })
+    match xdg_user_dir(config_home, home, "XDG_DOWNLOAD_DIR") {
+        XdgUserDirResolution::Configured(path) if path.is_dir() => Some(path),
+        XdgUserDirResolution::Disabled => None,
+        XdgUserDirResolution::Configured(_) | XdgUserDirResolution::Unavailable => {
+            let literal = home.join("Downloads");
+            literal.is_dir().then_some(literal)
+        }
+    }
 }
 
 fn detect_first_run_source_suggestions(
@@ -884,6 +896,22 @@ mod tests {
                 path: downloads.to_string_lossy().into_owned(),
             }]
         );
+    }
+
+    #[test]
+    fn first_run_suggestions_respect_a_disabled_xdg_download_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(home.path().join("Downloads")).unwrap();
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            r#"XDG_DOWNLOAD_DIR="$HOME/"
+"#,
+        )
+        .unwrap();
+
+        assert!(detect_first_run_source_suggestions(home.path(), None).is_empty());
     }
 
     #[test]
