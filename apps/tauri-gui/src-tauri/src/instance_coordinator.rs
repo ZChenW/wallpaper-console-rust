@@ -33,6 +33,8 @@ use wc_core::config::ConfigDir;
 
 const SOCKET_NAME: &str = ".instance.sock";
 const LOCK_NAME: &str = ".instance.lock";
+const UNIX_SOCKET_PATH_MAX_BYTES: usize = 107;
+const RUNTIME_SOCKET_DIR: &str = "wallpaper-console";
 const FOCUS_REQUEST: &[u8] = b"FOCUS\n";
 const FOCUS_ACK: &[u8] = b"OK\n";
 /// Total deadline for secondary connect + write + read (one absolute instant,
@@ -188,6 +190,7 @@ impl PrimarySocket {
     /// Sets mode 0600 so only the owning user can connect.
     pub fn bind(cd: &ConfigDir) -> Result<Self, String> {
         let socket_path = socket_path(cd);
+        prepare_socket_parent(cd, &socket_path)?;
 
         // Inspect any existing inode at the socket path before removing it.
         if let Ok(meta) = std::fs::symlink_metadata(&socket_path) {
@@ -434,7 +437,88 @@ fn lock_path(cd: &ConfigDir) -> PathBuf {
 }
 
 fn socket_path(cd: &ConfigDir) -> PathBuf {
-    cd.path.join(SOCKET_NAME)
+    let direct = cd.path.join(SOCKET_NAME);
+    if socket_path_fits(&direct) {
+        return direct;
+    }
+
+    let file_name = format!("instance-{:016x}.sock", stable_config_path_hash(cd));
+    let runtime_candidate = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .map(|path| path.join(RUNTIME_SOCKET_DIR).join(&file_name));
+    if let Some(candidate) = runtime_candidate.filter(|path| socket_path_fits(path)) {
+        return candidate;
+    }
+
+    let effective_uid = unsafe { libc::geteuid() };
+    PathBuf::from(format!("/tmp/{RUNTIME_SOCKET_DIR}-{effective_uid}")).join(file_name)
+}
+
+fn socket_path_fits(path: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    path.as_os_str().as_bytes().len() <= UNIX_SOCKET_PATH_MAX_BYTES
+}
+
+fn stable_config_path_hash(cd: &ConfigDir) -> u64 {
+    use std::os::unix::ffi::OsStrExt;
+
+    let path = std::fs::canonicalize(&cd.path).unwrap_or_else(|_| cd.path.clone());
+    path.as_os_str()
+        .as_bytes()
+        .iter()
+        .fold(0xcbf29ce484222325_u64, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(0x100000001b3)
+        })
+}
+
+fn prepare_socket_parent(cd: &ConfigDir, socket_path: &std::path::Path) -> Result<(), String> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+    let Some(parent) = socket_path.parent() else {
+        return Err("instance socket has no parent directory".to_string());
+    };
+    if parent == cd.path {
+        return Ok(());
+    }
+
+    match std::fs::create_dir(parent) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => {
+            return Err(format!(
+                "cannot create private instance socket directory {}: {error}",
+                parent.display()
+            ))
+        }
+    }
+
+    let metadata = std::fs::symlink_metadata(parent).map_err(|error| {
+        format!(
+            "cannot inspect private instance socket directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(format!(
+            "private instance socket path is not a directory: {}",
+            parent.display()
+        ));
+    }
+    let effective_uid = unsafe { libc::geteuid() };
+    if metadata.uid() != effective_uid {
+        return Err(format!(
+            "private instance socket directory {} is not owned by uid {effective_uid}",
+            parent.display()
+        ));
+    }
+    std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700)).map_err(|error| {
+        format!(
+            "cannot secure private instance socket directory {}: {error}",
+            parent.display()
+        )
+    })?;
+    Ok(())
 }
 
 // ── Cross-process test entry points ────────────────────────────────────────
@@ -686,6 +770,35 @@ mod tests {
         assert!(focused.load(Ordering::SeqCst));
 
         handle.shutdown(lease);
+    }
+
+    #[test]
+    fn long_config_path_secondary_handshake_receives_ack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("x".repeat(140)),
+        };
+        cd.init().unwrap();
+        assert!(
+            cd.path
+                .join(SOCKET_NAME)
+                .as_os_str()
+                .as_encoded_bytes()
+                .len()
+                > 107,
+            "fixture must exceed Linux sun_path capacity"
+        );
+
+        let lease = claim_instance(&cd).unwrap().unwrap_primary();
+        let primary = PrimarySocket::bind(&cd).unwrap();
+        let fallback_path = primary.socket_path().to_path_buf();
+        let handle = start_accept_loop(primary, Arc::new(|| Ok(())));
+
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(try_focus_primary(&cd), SecondaryOutcome::Ack);
+
+        handle.shutdown(lease);
+        assert!(!fallback_path.exists());
     }
 
     #[test]
