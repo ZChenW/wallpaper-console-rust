@@ -132,6 +132,11 @@ export function CompactSettingsPanelView({
           if (event.target === event.currentTarget) onClose();
         }}
       >
+        <span
+          aria-hidden="true"
+          className="drawer-top-drag-region"
+          data-tauri-drag-region="deep"
+        />
         <aside
           aria-hidden={unavailableToInteraction ? true : undefined}
           aria-labelledby="settings-panel-title"
@@ -305,6 +310,11 @@ export function CompactSettingsPanelView({
       onKeyDown={handleKeyDown}
       onMouseDown={handleBackdropMouseDown}
     >
+      <span
+        aria-hidden="true"
+        className="drawer-top-drag-region"
+        data-tauri-drag-region="deep"
+      />
       <aside
         aria-hidden={unavailableToInteraction ? true : undefined}
         aria-labelledby="settings-panel-title"

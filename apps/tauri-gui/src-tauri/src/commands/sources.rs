@@ -3,7 +3,7 @@ use super::scan::{
     finish_scan_error, finish_scan_success, mark_scan_started, scan_steam_workshop_and_index,
     update_scan_progress, update_scan_stage, with_scan_idle_operation, LiveScanProgress,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use wc_app::source_management::{SavedSourceChange, SourceManagementError, SourceRefreshOutcome};
 use wc_storage::{SourceKind, StorageApi};
 
@@ -14,12 +14,67 @@ pub enum FirstRunSourceSuggestionDto {
     WallpaperEngine { roots: Vec<String> },
 }
 
-fn detect_first_run_source_suggestions(home: &Path) -> Vec<FirstRunSourceSuggestionDto> {
+/// Read a key from the XDG user-dirs.dirs file (e.g. XDG_DOWNLOAD_DIR).
+/// Returns None when the file or key is missing, the value is malformed, or
+/// the directory is disabled (set to "$HOME/"). Relative values resolve
+/// against home.
+fn xdg_user_dir(config_home: Option<&Path>, home: &Path, key: &str) -> Option<PathBuf> {
+    let config_root = config_home
+        .filter(|path| path.is_absolute())
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home.join(".config"));
+    let contents = std::fs::read_to_string(config_root.join("user-dirs.dirs")).ok()?;
+    for line in contents.lines() {
+        let line = line.trim();
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some(raw) = line
+            .strip_prefix(key)
+            .and_then(|rest| rest.strip_prefix('='))
+        else {
+            continue;
+        };
+        let value = raw.trim().trim_matches('"');
+        if value.is_empty() || value == "$HOME" || value == "$HOME/" {
+            // The XDG spec treats a directory set to "$HOME/" as disabled.
+            return None;
+        }
+        if let Some(rest) = value.strip_prefix("$HOME/") {
+            return Some(home.join(rest));
+        }
+        let candidate = PathBuf::from(value);
+        return Some(if candidate.is_absolute() {
+            candidate
+        } else {
+            home.join(candidate)
+        });
+    }
+    None
+}
+
+/// Resolve the downloads directory to suggest: prefer the XDG-configured
+/// download directory, fall back to the literal ~/Downloads. Only existing
+/// directories are offered.
+fn downloads_suggestion_candidate(home: &Path, config_home: Option<&Path>) -> Option<PathBuf> {
+    let xdg = xdg_user_dir(config_home, home, "XDG_DOWNLOAD_DIR");
+    xdg.filter(|path| path.is_dir()).or_else(|| {
+        let literal = home.join("Downloads");
+        literal.is_dir().then_some(literal)
+    })
+}
+
+fn detect_first_run_source_suggestions(
+    home: &Path,
+    config_home: Option<&Path>,
+) -> Vec<FirstRunSourceSuggestionDto> {
     let mut suggestions = Vec::new();
-    let downloads = home.join("Downloads");
-    if downloads.is_dir() {
+    if let Some(downloads) = downloads_suggestion_candidate(home, config_home) {
+        let label = downloads
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "Downloads".to_string());
         suggestions.push(FirstRunSourceSuggestionDto::Directory {
-            label: "Downloads".to_string(),
+            label,
             path: downloads.to_string_lossy().into_owned(),
         });
     }
@@ -225,7 +280,11 @@ pub async fn sources_list() -> Result<Vec<SourceDto>, String> {
 pub async fn first_run_source_suggestions() -> Result<Vec<FirstRunSourceSuggestionDto>, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let home = std::env::var_os("HOME").ok_or_else(|| "HOME is not set.".to_string())?;
-        Ok(detect_first_run_source_suggestions(Path::new(&home)))
+        let config_home = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from);
+        Ok(detect_first_run_source_suggestions(
+            Path::new(&home),
+            config_home.as_deref(),
+        ))
     })
     .await
     .map_err(|error| error.to_string())?
@@ -763,7 +822,7 @@ mod tests {
         let downloads = home.path().join("Downloads");
         std::fs::create_dir_all(&downloads).unwrap();
 
-        let suggestions = detect_first_run_source_suggestions(home.path());
+        let suggestions = detect_first_run_source_suggestions(home.path(), None);
 
         assert_eq!(
             suggestions,
@@ -774,7 +833,82 @@ mod tests {
         );
 
         std::fs::remove_dir(&downloads).unwrap();
-        assert!(detect_first_run_source_suggestions(home.path()).is_empty());
+        assert!(detect_first_run_source_suggestions(home.path(), None).is_empty());
+    }
+
+    #[test]
+    fn first_run_suggestions_prefer_the_xdg_download_directory() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config");
+        let localized_downloads = home.path().join("下载");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&localized_downloads).unwrap();
+        std::fs::create_dir_all(home.path().join("Downloads")).unwrap();
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            r#"XDG_DOWNLOAD_DIR="$HOME/下载"
+"#,
+        )
+        .unwrap();
+
+        let suggestions = detect_first_run_source_suggestions(home.path(), None);
+
+        assert_eq!(
+            suggestions,
+            vec![FirstRunSourceSuggestionDto::Directory {
+                label: "下载".to_string(),
+                path: localized_downloads.to_string_lossy().into_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn first_run_suggestions_honor_xdg_config_home() {
+        let home = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let downloads = home.path().join("wallpapers-inbox");
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(
+            config.path().join("user-dirs.dirs"),
+            r#"export XDG_DOWNLOAD_DIR="$HOME/wallpapers-inbox"
+"#,
+        )
+        .unwrap();
+
+        let suggestions = detect_first_run_source_suggestions(home.path(), Some(config.path()));
+
+        assert_eq!(
+            suggestions,
+            vec![FirstRunSourceSuggestionDto::Directory {
+                label: "wallpapers-inbox".to_string(),
+                path: downloads.to_string_lossy().into_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn first_run_suggestions_fall_back_when_xdg_downloads_is_unavailable() {
+        let home = tempfile::tempdir().unwrap();
+        let config = home.path().join(".config");
+        let downloads = home.path().join("Downloads");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::create_dir_all(&downloads).unwrap();
+        std::fs::write(
+            config.join("user-dirs.dirs"),
+            r#"XDG_DOWNLOAD_DIR="$HOME/missing-downloads"
+"#,
+        )
+        .unwrap();
+
+        let suggestions = detect_first_run_source_suggestions(home.path(), None);
+
+        assert_eq!(
+            suggestions,
+            vec![FirstRunSourceSuggestionDto::Directory {
+                label: "Downloads".to_string(),
+                path: downloads.to_string_lossy().into_owned(),
+            }]
+        );
     }
 
     #[test]
@@ -786,7 +920,7 @@ mod tests {
         std::fs::create_dir_all(&workshop).unwrap();
         let canonical_workshop = std::fs::canonicalize(&workshop).unwrap();
 
-        let suggestions = detect_first_run_source_suggestions(home.path());
+        let suggestions = detect_first_run_source_suggestions(home.path(), None);
 
         assert_eq!(
             suggestions,
@@ -816,7 +950,7 @@ mod tests {
         .unwrap();
         assert!(storage.source_records().unwrap().is_empty());
 
-        let suggestions = detect_first_run_source_suggestions(home.path());
+        let suggestions = detect_first_run_source_suggestions(home.path(), None);
 
         assert_eq!(suggestions.len(), 2);
         assert!(storage.source_records().unwrap().is_empty());

@@ -4,6 +4,12 @@ A Linux wallpaper manager for Wayland and Xorg. Browse local wallpapers and
 supported Wallpaper Engine projects, manage favorites, and apply wallpapers per
 display.
 
+## Screenshots
+
+| Grid | Flow |
+| --- | --- |
+| ![Grid view](assets/screenshots/grid.png) | ![Flow view](assets/screenshots/flow.png) |
+
 ## Features
 
 - Grid and Flow browsing

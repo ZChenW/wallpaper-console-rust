@@ -934,9 +934,6 @@
 }
 
 :root[data-theme="editorial"] .settings-panel__header {
-  position: sticky;
-  top: 0;
-  z-index: 2;
   align-items: end;
   padding: 1.2rem 0 1rem;
   border-bottom: var(--editorial-rule);
@@ -1232,10 +1229,10 @@
 
 :root[data-theme="editorial"] .single-page-empty h2 {
   color: var(--text);
-  font-size: clamp(2rem, 6vw, 5rem);
+  font-size: clamp(1.75rem, 4vw, 3.25rem);
   font-weight: 760;
-  letter-spacing: -0.055em;
-  line-height: 0.9;
+  letter-spacing: -0.045em;
+  line-height: 1;
   text-transform: uppercase;
 }
 

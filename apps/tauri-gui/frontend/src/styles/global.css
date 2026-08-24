@@ -1193,6 +1193,15 @@ select:focus, input:focus { border-color: var(--primary); }
   animation: overlay-fade-in 200ms ease both;
 }
 
+.drawer-top-drag-region {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  right: 0;
+  width: min(30rem, 100%);
+  height: 0.75rem;
+}
+
 .settings-overlay[data-presentation-phase="exiting"] {
   animation: overlay-fade-out 180ms ease both;
   pointer-events: none;
@@ -3491,9 +3500,10 @@ select:focus, input:focus { border-color: var(--primary); }
   min-height: 14rem;
   flex: 1;
   place-content: center;
+  place-content: safe center;
   justify-items: center;
   gap: 0.7rem;
-  padding: 2rem;
+  padding: clamp(1.25rem, 3vw, 2.5rem);
   color: var(--text-muted);
   text-align: center;
 }
@@ -3526,8 +3536,11 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .single-page-first-run {
   align-self: center;
+  flex: 0 1 auto;
   width: min(42rem, 100%);
-  min-height: min(30rem, 100%);
+  max-height: 100%;
+  margin-block: auto;
+  overflow-y: auto;
   border: 1px dashed var(--border-strong);
   border-radius: 1.1rem;
   background: color-mix(in srgb, var(--panel) 78%, transparent);
@@ -3535,7 +3548,7 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .first-run-suggestions {
   display: grid;
-  width: min(44rem, 100%);
+  width: 100%;
   gap: 0.75rem;
   text-align: start;
 }

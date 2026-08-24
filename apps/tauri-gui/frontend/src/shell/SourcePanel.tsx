@@ -520,6 +520,11 @@ export function SourcePanelView({
       data-layered={onBack ? true : undefined}
       onMouseDown={handleBackdropMouseDown}
     >
+      <span
+        aria-hidden="true"
+        className="drawer-top-drag-region"
+        data-tauri-drag-region="deep"
+      />
       <aside
         aria-busy={busy}
         aria-hidden={presentationPhase === 'exiting' ? true : undefined}
