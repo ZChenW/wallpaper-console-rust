@@ -1,26 +1,31 @@
-# Wallpaper Console v0.1.0-rc.2
+# Wallpaper Console v0.1.0-rc.3
 
-This is the second Linux release candidate for Wallpaper Console. It fixes the
-two release-blocking defects found during real-machine validation of rc.1. It is
-intended for early adopters who can report desktop, renderer, and packaging
-compatibility issues before v0.1.0.
+This is the third Linux release candidate for Wallpaper Console. It carries the
+post-rc.2 AppImage fallback and release-provenance corrections through a newly
+built, independently verified artifact. It is intended for early adopters who can
+report desktop, renderer, and packaging compatibility issues before v0.1.0.
 
-## Changes since rc.1
+## Changes since rc.2
 
-- The AppImage now launches through a repository-owned host-first runtime. It uses
-  the target system's coherent GTK/WebKit/EGL stack when available, retains the
-  bundled Ubuntu libraries as a fallback, does not force X11, and maps the
-  documented WebKit DMABUF fallback variable. This fixes the no-window
-  `EGL_BAD_ALLOC` failure reproduced on Arch Linux, niri, and hybrid graphics.
-- Databases upgraded from the original v1 schema now pass `sqlite-verify` and can
-  be backed up. Validation accepts only the exact historical migration shape and
-  continues to reject malformed current schemas.
-- Linux packaging tools and the embedded AppImage runtime are checksum-verified
-  before execution. AppDir timestamps and `SOURCE_DATE_EPOCH` are normalized for
-  reproducible repacking.
+- The AppImage's no-host-WebKit fallback once again initializes its bundled library
+  path, GTK/GSettings data, pixbuf and GIO modules, and the working directory used
+  by WebKit helper processes. Host-first startup remains unchanged when a system
+  WebKitGTK stack is available, and the launcher still does not force X11.
+- The release workflow now starts the real bundled fallback under Xvfb instead of
+  relying only on extraction and loader inspection. A missing WebKit helper or an
+  early launcher failure blocks the release.
+- Annotated release-tag identity is captured from the remote tag object and checked
+  again before draft creation and immediately before publication. Lightweight,
+  moved, or commit-mismatched tags fail closed.
+- AppImage runtime provenance checks are behaviorally covered: the pinned runtime
+  must match byte-for-byte except for the payload-specific ELF `.digest_md5` field,
+  and deterministic double repacking remains mandatory.
+- The strict historical v1-to-v7 database compatibility added in rc.2 is unchanged;
+  migrated databases continue to pass `sqlite-verify` and `sqlite-backup` without
+  weakening malformed-schema rejection.
 
-The published rc.1 assets remain available as historical pre-release artifacts
-and are not replaced by this release.
+The published rc.1 and rc.2 tags and assets remain immutable historical
+pre-release artifacts and are not replaced by this release.
 
 ## Supported platform
 
@@ -33,8 +38,8 @@ baselines. Windows and macOS are not part of this release candidate.
 
 ## Assets
 
-- `wallpaper-console_0.1.0-rc.2_x86_64.AppImage` — GUI application
-- `wallpaper-console-cli_0.1.0-rc.2_x86_64.tar.zst` — separate CLI bundle
+- `wallpaper-console_0.1.0-rc.3_x86_64.AppImage` — GUI application
+- `wallpaper-console-cli_0.1.0-rc.3_x86_64.tar.zst` — separate CLI bundle
 - `SHA256SUMS` — SHA-256 checksums for both assets
 
 The AppImage contains the GUI only. Install the separate CLI bundle when using
@@ -53,8 +58,8 @@ Both application assets must report `OK` before use.
 ## Install the AppImage
 
 ```bash
-chmod +x wallpaper-console_0.1.0-rc.2_x86_64.AppImage
-./wallpaper-console_0.1.0-rc.2_x86_64.AppImage
+chmod +x wallpaper-console_0.1.0-rc.3_x86_64.AppImage
+./wallpaper-console_0.1.0-rc.3_x86_64.AppImage
 ```
 
 The AppImage can be moved anywhere in your home directory. Delete it to remove
@@ -64,9 +69,9 @@ configuration directory.
 ## Install the CLI
 
 ```bash
-tar --zstd -xf wallpaper-console-cli_0.1.0-rc.2_x86_64.tar.zst
+tar --zstd -xf wallpaper-console-cli_0.1.0-rc.3_x86_64.tar.zst
 install -Dm755 \
-  wallpaper-console-cli_0.1.0-rc.2_x86_64/wallpaper-console-rust \
+  wallpaper-console-cli_0.1.0-rc.3_x86_64/wallpaper-console-rust \
   "$HOME/.local/bin/wallpaper-console-rust"
 wallpaper-console-rust --help
 ```
