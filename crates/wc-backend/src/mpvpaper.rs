@@ -2,6 +2,41 @@ use std::process::{Command, Output};
 
 use wc_core::error::WcError;
 
+/// How an mpvpaper process selects outputs (from its argv output parameter).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MpvpaperOutputSelector {
+    Single(String),
+    Wildcard,
+    Multi(Vec<String>),
+    Unparseable,
+}
+
+/// A live mpvpaper process identified by cmdline (no PID persistence).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MpvpaperProcess {
+    pub pid: u32,
+    pub selector: MpvpaperOutputSelector,
+    pub path: String,
+}
+
+impl MpvpaperProcess {
+    /// Build a process row from a raw output selector string (tests / fakes).
+    pub fn for_output(pid: u32, output: &str, path: impl Into<String>) -> Self {
+        Self {
+            pid,
+            selector: classify_selector(output),
+            path: path.into(),
+        }
+    }
+
+    pub fn matches_stop_outputs(&self, outputs: &[String]) -> bool {
+        match &self.selector {
+            MpvpaperOutputSelector::Single(output) => outputs.iter().any(|o| o == output),
+            _ => false,
+        }
+    }
+}
+
 pub(crate) fn build_launch_command(options: &str, output: &str, path: &str) -> Command {
     let mut cmd = Command::new("setsid");
     cmd.args([
@@ -99,6 +134,141 @@ fn cmdline_matches_target(tokens: &[String], output: &str, path: &str) -> bool {
     })
 }
 
+/// Parse launch identity using the same positioning as [`cmdline_matches_target`]:
+/// argv0 is mpvpaper, `-o` is third before `--`, and exactly one path follows `--`.
+pub(crate) fn parse_launch_identity(tokens: &[String]) -> Option<(String, String)> {
+    let argv0 = tokens.first()?;
+    if !crate::process_control::token_is_mpvpaper_program(argv0) {
+        return None;
+    }
+    (3..tokens.len()).find_map(|separator| {
+        if tokens[separator] != "--" {
+            return None;
+        }
+        if tokens.get(separator - 3).is_none_or(|token| token != "-o") {
+            return None;
+        }
+        if separator + 2 != tokens.len() {
+            return None;
+        }
+        let selector = tokens.get(separator - 1)?.clone();
+        let path = tokens.get(separator + 1)?.clone();
+        Some((selector, path))
+    })
+}
+
+pub fn classify_selector(raw: &str) -> MpvpaperOutputSelector {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return MpvpaperOutputSelector::Unparseable;
+    }
+    if trimmed == "*" || trimmed.eq_ignore_ascii_case("ALL") {
+        return MpvpaperOutputSelector::Wildcard;
+    }
+    let parts: Vec<String> = trimmed
+        .split_whitespace()
+        .map(str::to_string)
+        .collect();
+    match parts.as_slice() {
+        [] => MpvpaperOutputSelector::Unparseable,
+        [single] => MpvpaperOutputSelector::Single(single.clone()),
+        multi => MpvpaperOutputSelector::Multi(multi.to_vec()),
+    }
+}
+
+fn process_from_cmdline(pid: u32, tokens: Option<Vec<String>>) -> Option<MpvpaperProcess> {
+    let tokens = tokens?;
+    match parse_launch_identity(&tokens) {
+        Some((raw, path)) => Some(MpvpaperProcess {
+            pid,
+            selector: classify_selector(&raw),
+            path,
+        }),
+        None => Some(MpvpaperProcess {
+            pid,
+            selector: MpvpaperOutputSelector::Unparseable,
+            path: String::new(),
+        }),
+    }
+}
+
+fn running_processes_with<F>(
+    pids: &[u32],
+    mut read_cmdline: F,
+) -> Vec<MpvpaperProcess>
+where
+    F: FnMut(u32) -> Option<Vec<String>>,
+{
+    pids.iter()
+        .copied()
+        .filter_map(|pid| process_from_cmdline(pid, read_cmdline(pid)))
+        .collect()
+}
+
+pub(crate) fn running_processes() -> Result<Vec<MpvpaperProcess>, WcError> {
+    Ok(running_processes_with(&running_pids()?, read_mpvpaper_cmdline))
+}
+
+/// PIDs whose selectors cannot be safely targeted by a partial named stop.
+pub(crate) fn scoped_stop_blockers(processes: &[MpvpaperProcess]) -> Vec<u32> {
+    processes
+        .iter()
+        .filter(|process| {
+            matches!(
+                process.selector,
+                MpvpaperOutputSelector::Wildcard
+                    | MpvpaperOutputSelector::Multi(_)
+                    | MpvpaperOutputSelector::Unparseable
+            )
+        })
+        .map(|process| process.pid)
+        .collect()
+}
+
+fn pids_matching_single_outputs_with<F>(
+    processes: &[MpvpaperProcess],
+    outputs: &[String],
+    mut reverify: F,
+) -> Vec<u32>
+where
+    F: FnMut(u32, &str) -> bool,
+{
+    processes
+        .iter()
+        .filter_map(|process| match &process.selector {
+            MpvpaperOutputSelector::Single(output) if outputs.iter().any(|o| o == output) => {
+                reverify(process.pid, output).then_some(process.pid)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn reverify_single_output(pid: u32, expected_output: &str) -> bool {
+    if !crate::process_control::pid_looks_like_mpvpaper(pid as i32) {
+        return false;
+    }
+    let Some(tokens) = read_mpvpaper_cmdline(pid) else {
+        return false;
+    };
+    match parse_launch_identity(&tokens) {
+        Some((raw, _)) => matches!(
+            classify_selector(&raw),
+            MpvpaperOutputSelector::Single(output) if output == expected_output
+        ),
+        None => false,
+    }
+}
+
+pub(crate) fn stop_outputs(outputs: &[String]) -> Result<(), WcError> {
+    let processes = running_processes()?;
+    let target_pids = pids_matching_single_outputs_with(&processes, outputs, reverify_single_output);
+    for pid in target_pids {
+        crate::process_control::kill_pid_gracefully(pid);
+    }
+    Ok(())
+}
+
 fn pids_started_after_matching_target_with<F>(
     current_pids: &[u32],
     previous_pids: &[u32],
@@ -182,6 +352,18 @@ pub(crate) fn normalize_mpvpaper_options(raw: &str) -> &str {
 mod tests {
     use super::*;
 
+    fn standard_tokens(output: &str, path: &str) -> Vec<String> {
+        vec![
+            "/usr/bin/mpvpaper".to_string(),
+            "--fork".to_string(),
+            "-o".to_string(),
+            "--loop-file=inf --panscan=1.0".to_string(),
+            output.to_string(),
+            "--".to_string(),
+            path.to_string(),
+        ]
+    }
+
     #[test]
     fn mpvpaper_pid_parser_returns_all_pids_for_success_status() {
         assert_eq!(
@@ -218,15 +400,7 @@ mod tests {
 
     #[test]
     fn failed_launch_cleanup_targets_only_new_renderer_for_exact_output_and_path() {
-        let target = vec![
-            "/usr/bin/mpvpaper".to_string(),
-            "--fork".to_string(),
-            "-o".to_string(),
-            "--loop-file=inf --panscan=1.0".to_string(),
-            "eDP-1".to_string(),
-            "--".to_string(),
-            "/walls/target.mp4".to_string(),
-        ];
+        let target = standard_tokens("eDP-1", "/walls/target.mp4");
         let other_output = {
             let mut tokens = target.clone();
             tokens[4] = "HDMI-A-1".to_string();
@@ -254,6 +428,122 @@ mod tests {
             vec![20],
             "new renderers for another output or path must not be selected"
         );
+    }
+
+    #[test]
+    fn parse_launch_identity_reads_standard_argv() {
+        let tokens = standard_tokens("eDP-1", "/walls/a.mp4");
+        assert_eq!(
+            parse_launch_identity(&tokens),
+            Some(("eDP-1".into(), "/walls/a.mp4".into()))
+        );
+    }
+
+    #[test]
+    fn parse_launch_identity_accepts_path_with_spaces() {
+        let tokens = standard_tokens("DP-8", "/walls/my video.mp4");
+        assert_eq!(
+            parse_launch_identity(&tokens),
+            Some(("DP-8".into(), "/walls/my video.mp4".into()))
+        );
+    }
+
+    #[test]
+    fn parse_launch_identity_rejects_missing_separator() {
+        let tokens = vec![
+            "mpvpaper".into(),
+            "--fork".into(),
+            "-o".into(),
+            "opts".into(),
+            "eDP-1".into(),
+            "/walls/a.mp4".into(),
+        ];
+        assert_eq!(parse_launch_identity(&tokens), None);
+    }
+
+    #[test]
+    fn classify_selector_covers_single_wildcard_multi_and_empty() {
+        assert_eq!(
+            classify_selector("eDP-1"),
+            MpvpaperOutputSelector::Single("eDP-1".into())
+        );
+        assert_eq!(classify_selector("*"), MpvpaperOutputSelector::Wildcard);
+        assert_eq!(classify_selector("ALL"), MpvpaperOutputSelector::Wildcard);
+        assert_eq!(classify_selector("all"), MpvpaperOutputSelector::Wildcard);
+        assert_eq!(
+            classify_selector("eDP-1 DP-8"),
+            MpvpaperOutputSelector::Multi(vec!["eDP-1".into(), "DP-8".into()])
+        );
+        assert_eq!(classify_selector("  "), MpvpaperOutputSelector::Unparseable);
+    }
+
+    #[test]
+    fn scoped_stop_blockers_lists_unsafe_selectors() {
+        let processes = vec![
+            MpvpaperProcess {
+                pid: 1,
+                selector: MpvpaperOutputSelector::Single("eDP-1".into()),
+                path: "/a".into(),
+            },
+            MpvpaperProcess {
+                pid: 2,
+                selector: MpvpaperOutputSelector::Wildcard,
+                path: "/b".into(),
+            },
+            MpvpaperProcess {
+                pid: 3,
+                selector: MpvpaperOutputSelector::Multi(vec!["eDP-1".into(), "DP-8".into()]),
+                path: "/c".into(),
+            },
+            MpvpaperProcess {
+                pid: 4,
+                selector: MpvpaperOutputSelector::Unparseable,
+                path: String::new(),
+            },
+        ];
+        assert_eq!(scoped_stop_blockers(&processes), vec![2, 3, 4]);
+    }
+
+    #[test]
+    fn stop_outputs_selection_kills_only_matching_singles() {
+        let processes = vec![
+            MpvpaperProcess {
+                pid: 10,
+                selector: MpvpaperOutputSelector::Single("eDP-1".into()),
+                path: "/a".into(),
+            },
+            MpvpaperProcess {
+                pid: 20,
+                selector: MpvpaperOutputSelector::Single("DP-8".into()),
+                path: "/b".into(),
+            },
+            MpvpaperProcess {
+                pid: 30,
+                selector: MpvpaperOutputSelector::Wildcard,
+                path: "/c".into(),
+            },
+        ];
+        let killed = pids_matching_single_outputs_with(
+            &processes,
+            &["eDP-1".into()],
+            |pid, output| pid == 10 && output == "eDP-1",
+        );
+        assert_eq!(killed, vec![10]);
+    }
+
+    #[test]
+    fn running_processes_marks_unparseable_when_identity_missing() {
+        let processes = running_processes_with(&[7, 8], |pid| match pid {
+            7 => Some(standard_tokens("eDP-1", "/walls/a.mp4")),
+            8 => Some(vec!["mpvpaper".into(), "weird".into()]),
+            _ => None,
+        });
+        assert_eq!(processes.len(), 2);
+        assert_eq!(
+            processes[0].selector,
+            MpvpaperOutputSelector::Single("eDP-1".into())
+        );
+        assert_eq!(processes[1].selector, MpvpaperOutputSelector::Unparseable);
     }
 
     #[test]

@@ -1,9 +1,10 @@
 //! Typed backend capability declarations.
 //!
-//! Facts come from installed CLI help/behavior and from current stop/apply
-//! implementation limits. Automated tests must not launch desktop renderers.
-//! Cross-output runtime coexistence remains unverified on this host (only
-//! eDP-1 connected), so the model marks coexistence as unknown until proven.
+//! Facts come from installed CLI help/behavior, current stop/apply
+//! implementation limits, and live runtime probes. Automated tests must not
+//! launch desktop renderers. mpvpaper per-output multi-instance coexistence is
+//! runtime-verified on this host (mpvpaper 1.9, eDP-1 + DP-8 in parallel);
+//! cross-backend coexistence still stays unknown until proven.
 
 use wc_core::types::Backend;
 
@@ -12,6 +13,8 @@ use wc_core::types::Backend;
 pub enum Evidence {
     /// Observed from installed CLI help or documented CLI behavior.
     CliVerified,
+    /// Observed on a live runtime session with real outputs and processes.
+    RuntimeVerified,
     /// Derived from wallpaper-console's current command/stop paths.
     ImplementationLimit,
     /// Plausible from CLI shape but not proven on a multi-output runtime.
@@ -254,16 +257,17 @@ mod tests {
         assert_eq!(cap.all_displays, AllDisplaysTargeting::OneProcessPerOutput);
         assert_eq!(
             cap.multi_instance,
-            MultiInstanceSupport::SeparateProcessesUnverified
+            MultiInstanceSupport::SeparateProcessesVerified
         );
-        assert_eq!(cap.multi_instance_evidence, Evidence::Unverified);
-        assert_eq!(cap.stop_scope, StopScope::AllMatchingProcesses);
+        assert_eq!(cap.multi_instance_evidence, Evidence::RuntimeVerified);
+        assert_eq!(cap.stop_scope, StopScope::TrackedProcessPerOutput);
+        assert_eq!(cap.stop_scope_evidence, Evidence::RuntimeVerified);
         assert_eq!(
             cap.same_target_replacement,
             SameTargetReplacement::StopThenApply
         );
         assert!(cap.requires_stop_before_same_target_apply());
-        assert!(cap.stop_may_affect_non_target_outputs());
+        assert!(!cap.stop_may_affect_non_target_outputs());
         assert_eq!(
             cap.cross_output_coexistence,
             CrossOutputCoexistence::Unknown

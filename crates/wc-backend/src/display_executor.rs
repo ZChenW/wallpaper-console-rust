@@ -31,9 +31,11 @@ pub struct DisplayExecContext<'a> {
 pub enum DisplayExecAction {
     /// Stop the backend for the given scope.
     ///
-    /// Current stop implementations are process/daemon-wide. A named scope that
-    /// covers fewer than all known connected outputs is rejected (never silently
-    /// broadened to a global stop).
+    /// Global stops (AllDisplays, or Named covering every known connected
+    /// output) use process/daemon-wide APIs. Partial Named stops are allowed
+    /// only when the backend supports output-scoped stop
+    /// (`StopScope::TrackedProcessPerOutput`); otherwise they are rejected
+    /// rather than silently broadened.
     Stop {
         backend: Backend,
         scope: ExecutionScope,
@@ -140,7 +142,22 @@ pub fn execute_display_actions(
     for (action, prepared) in actions.iter().zip(&mut prepared) {
         match action {
             DisplayExecAction::Stop { backend, scope } => {
-                if let Err(error) = stop_backend(s, *backend, runtime) {
+                let execution = match classify_stop_scope(*backend, scope, ctx.known_outputs) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        return Err(DisplayExecFailure {
+                            report,
+                            error,
+                            uncertain_stop: Some(Box::new(CompletedStop {
+                                backend: *backend,
+                                scope: scope.clone(),
+                                destructive: true,
+                            })),
+                            cleanup_uncertain: true,
+                        });
+                    }
+                };
+                if let Err(error) = stop_backend(s, *backend, &execution, runtime) {
                     return Err(DisplayExecFailure {
                         report,
                         error,
@@ -167,6 +184,16 @@ pub fn execute_display_actions(
                     let mut cleanup_uncertain = false;
                     match failure.cleanup {
                         driver::CleanupOutcome::NotRequired => {}
+                        driver::CleanupOutcome::VerifiedTargetedStop { backend, outputs } => {
+                            let scope = ExecutionScope::named(outputs).unwrap_or(
+                                ExecutionScope::AllDisplays,
+                            );
+                            report.record_stop(CompletedStop {
+                                backend,
+                                scope,
+                                destructive: true,
+                            });
+                        }
                         driver::CleanupOutcome::VerifiedGlobalStop(backend) => {
                             report.record_stop(CompletedStop {
                                 backend,
@@ -230,14 +257,38 @@ fn prepare_display_actions(
     let mut preceding_stop = false;
     for action in actions {
         match action {
-            DisplayExecAction::Stop { scope, .. } => {
-                if let Err(error) = validate_stop_scope(scope, ctx.known_outputs) {
-                    return Err(DisplayExecFailure {
-                        report: DisplayExecReport::default(),
-                        error,
-                        uncertain_stop: None,
-                        cleanup_uncertain: false,
-                    });
+            DisplayExecAction::Stop { backend, scope } => {
+                let execution = match classify_stop_scope(*backend, scope, ctx.known_outputs) {
+                    Ok(execution) => execution,
+                    Err(error) => {
+                        return Err(DisplayExecFailure {
+                            report: DisplayExecReport::default(),
+                            error,
+                            uncertain_stop: None,
+                            cleanup_uncertain: false,
+                        });
+                    }
+                };
+                if matches!(execution, StopExecution::Scoped(_)) {
+                    let Some(backend_driver) = driver::driver_for(*backend) else {
+                        return Err(DisplayExecFailure {
+                            report: DisplayExecReport::default(),
+                            error: WcError::Other(format!(
+                                "no driver registered for backend {}",
+                                backend.as_str()
+                            )),
+                            uncertain_stop: None,
+                            cleanup_uncertain: false,
+                        });
+                    };
+                    if let Err(error) = backend_driver.preflight_stop(scope, runtime) {
+                        return Err(DisplayExecFailure {
+                            report: DisplayExecReport::default(),
+                            error,
+                            uncertain_stop: None,
+                            cleanup_uncertain: false,
+                        });
+                    }
                 }
                 preceding_stop = true;
                 prepared.push(None);
@@ -284,20 +335,42 @@ fn prepare_display_actions(
     Ok(prepared)
 }
 
-/// Named stop is only executable when it covers every known connected output.
-/// AllDisplays stops are always allowed. Never broaden a partial named stop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum StopExecution {
+    Global,
+    Scoped(Vec<String>),
+}
+
+/// Validate that a stop scope is executable for `backend`.
+///
+/// Named scopes covering every known output are accepted as global. Partial
+/// named scopes are accepted only when the backend supports output-scoped stop.
 pub fn validate_stop_scope(
+    backend: Backend,
     scope: &ExecutionScope,
     known_outputs: &[String],
 ) -> Result<(), WcError> {
+    classify_stop_scope(backend, scope, known_outputs).map(|_| ())
+}
+
+fn classify_stop_scope(
+    backend: Backend,
+    scope: &ExecutionScope,
+    known_outputs: &[String],
+) -> Result<StopExecution, WcError> {
     scope.validate()?;
     match scope {
-        ExecutionScope::AllDisplays => Ok(()),
+        ExecutionScope::AllDisplays => Ok(StopExecution::Global),
         ExecutionScope::Named(outputs) => {
             let known: HashSet<&str> = known_outputs.iter().map(String::as_str).collect();
             let named: HashSet<&str> = outputs.iter().map(String::as_str).collect();
             if named == known && !known.is_empty() {
-                Ok(())
+                return Ok(StopExecution::Global);
+            }
+            let supports_scoped = crate::driver::driver_for(backend)
+                .is_some_and(|driver| driver.supports_output_scoped_stop());
+            if supports_scoped {
+                Ok(StopExecution::Scoped(outputs.clone()))
             } else {
                 Err(WcError::Other(format!(
                     "named stop scope {:?} covers fewer than all known connected outputs {:?}; \
@@ -312,11 +385,20 @@ pub fn validate_stop_scope(
 fn stop_backend(
     s: &StorageApi,
     backend: Backend,
+    execution: &StopExecution,
     runtime: &mut dyn BackendRuntime,
 ) -> Result<(), WcError> {
-    match crate::driver::driver_for(backend) {
-        Some(driver) => driver.stop_checked(runtime, Some(s)),
-        None => Ok(()),
+    let Some(driver) = crate::driver::driver_for(backend) else {
+        return Ok(());
+    };
+    match execution {
+        StopExecution::Global => driver.stop_checked(runtime, Some(s)),
+        StopExecution::Scoped(outputs) => {
+            let scope = ExecutionScope::named(outputs.clone()).map_err(|error| {
+                WcError::Other(format!("invalid scoped stop outputs: {error}"))
+            })?;
+            driver.stop_scoped_checked(runtime, Some(s), &scope)
+        }
     }
 }
 
@@ -324,7 +406,7 @@ fn stop_backend(
 mod tests {
     use super::*;
     use crate::apply_stage::NoopReporter;
-    use crate::runtime::{AwwwReadiness, ProcessIo};
+    use crate::runtime::{AwwwReadiness, MpvpaperOutputSelector, MpvpaperProcess, ProcessIo};
     use crate::test_support::FakeRuntime;
     use std::process::Command;
     use wc_core::config::ConfigDir;
@@ -495,7 +577,7 @@ mod tests {
         let err = execute_display_actions(
             &s,
             &[DisplayExecAction::Stop {
-                backend: Backend::Mpvpaper,
+                backend: Backend::Awww,
                 scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
             }],
             &ctx(&known),
@@ -505,7 +587,7 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.error.to_string().contains("refusing to broaden"));
-        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_awww_count, 0);
         assert!(!err.after_destructive_stop());
     }
 
@@ -734,6 +816,11 @@ mod tests {
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
             }
+            fn mpvpaper_processes(
+                &mut self,
+            ) -> Result<Vec<crate::runtime::MpvpaperProcess>, WcError> {
+                self.inner.mpvpaper_processes()
+            }
             fn wait_for_mpvpaper_ready(
                 &mut self,
                 previous_pids: &[u32],
@@ -765,6 +852,9 @@ mod tests {
             }
             fn stop_mpvpaper(&mut self) {
                 self.inner.stop_mpvpaper();
+            }
+            fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+                self.inner.stop_mpvpaper_outputs(outputs)
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -819,7 +909,7 @@ mod tests {
     }
 
     #[test]
-    fn mpvpaper_readiness_failure_reports_implicit_global_cleanup_stop() {
+    fn mpvpaper_readiness_failure_runs_targeted_cleanup_without_global_stop() {
         let (_tmp, s) = temp_storage();
         let video = _tmp.path().join("v.mp4");
         std::fs::write(&video, b"mp4").unwrap();
@@ -842,6 +932,11 @@ mod tests {
             }
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
+            }
+            fn mpvpaper_processes(
+                &mut self,
+            ) -> Result<Vec<crate::runtime::MpvpaperProcess>, WcError> {
+                self.inner.mpvpaper_processes()
             }
             fn wait_for_mpvpaper_ready(
                 &mut self,
@@ -877,6 +972,9 @@ mod tests {
             }
             fn stop_mpvpaper(&mut self) {
                 self.inner.stop_mpvpaper();
+            }
+            fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+                self.inner.stop_mpvpaper_outputs(outputs)
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -926,14 +1024,28 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(rt.inner.stop_mpvpaper_count, 1);
+        assert_eq!(rt.inner.stop_mpvpaper_count, 0);
+        assert_eq!(rt.inner.failed_mpvpaper_launch_cleanup_count, 1);
         assert_eq!(err.report.completed_applies.len(), 1);
+        let mpvpaper_stops: Vec<_> = err
+            .report
+            .completed_stops
+            .iter()
+            .filter(|stop| stop.backend == Backend::Mpvpaper)
+            .collect();
+        assert_eq!(
+            mpvpaper_stops.len(),
+            1,
+            "readiness cleanup must record one named mpvpaper stop: {:?}",
+            err.report.completed_stops
+        );
+        assert_eq!(
+            mpvpaper_stops[0].scope,
+            ExecutionScope::named(vec!["HDMI-1".into()]).unwrap()
+        );
         assert!(
-            err.report
-                .completed_stops
-                .iter()
-                .any(|stop| { stop.backend == Backend::Mpvpaper && stop.destructive }),
-            "implicit mpvpaper cleanup must be reported for reconcile: {:?}",
+            !matches!(mpvpaper_stops[0].scope, ExecutionScope::AllDisplays),
+            "targeted cleanup must not report a global mpvpaper stop: {:?}",
             err.report.completed_stops
         );
     }
@@ -961,6 +1073,11 @@ mod tests {
             }
             fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
                 self.inner.mpvpaper_pids()
+            }
+            fn mpvpaper_processes(
+                &mut self,
+            ) -> Result<Vec<crate::runtime::MpvpaperProcess>, WcError> {
+                self.inner.mpvpaper_processes()
             }
             fn wait_for_mpvpaper_ready(
                 &mut self,
@@ -995,6 +1112,9 @@ mod tests {
                 self.stop_checked_calls += 1;
                 // Force driver stop_checked's pid probe to fail immediately.
                 self.inner.mpvpaper_pids_error = Some("mpvpaper still running after stop".into());
+            }
+            fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+                self.inner.stop_mpvpaper_outputs(outputs)
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -1072,7 +1192,19 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.error.to_string().contains("not ready"));
-        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
+        let mpvpaper_stops: Vec<_> = err
+            .report
+            .completed_stops
+            .iter()
+            .filter(|stop| stop.backend == Backend::Mpvpaper)
+            .collect();
+        assert_eq!(mpvpaper_stops.len(), 1);
+        assert_eq!(
+            mpvpaper_stops[0].scope,
+            ExecutionScope::named(vec!["eDP-1".into()]).unwrap()
+        );
     }
 
     #[test]
@@ -1191,5 +1323,195 @@ mod tests {
             .position(|s| *s == apply_stage::ApplyStage::WaitRendererAlive)
             .unwrap();
         assert!(start < wait, "StartLwe must precede WaitRendererAlive");
+    }
+
+    #[test]
+    fn mpvpaper_partial_named_stop_runs_scoped_stop_only() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime {
+            mpvpaper_process_table: vec![
+                MpvpaperProcess::for_output(10, "eDP-1", "/a.mp4"),
+                MpvpaperProcess::for_output(20, "HDMI-1", "/b.mp4"),
+            ],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let report = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_mpvpaper_outputs_calls, vec![vec!["eDP-1".to_string()]]);
+        assert_eq!(report.completed_stops.len(), 1);
+        assert_eq!(
+            report.completed_stops[0].scope,
+            ExecutionScope::named(vec!["eDP-1".into()]).unwrap()
+        );
+        assert!(
+            rt.mpvpaper_process_table
+                .iter()
+                .any(|process| process.pid == 20
+                    && process.selector
+                        == MpvpaperOutputSelector::Single("HDMI-1".into())),
+            "sibling process must remain: {:?}",
+            rt.mpvpaper_process_table
+        );
+    }
+
+    #[test]
+    fn mpvpaper_partial_named_stop_refused_when_wildcard_process_exists() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime {
+            mpvpaper_process_table: vec![
+                MpvpaperProcess::for_output(10, "eDP-1", "/a.mp4"),
+                MpvpaperProcess::for_output(99, "*", "/wild.mp4"),
+            ],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.error.to_string().contains("own multiple/all outputs"));
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
+        assert!(err.report.events.is_empty());
+        assert!(!err.after_destructive_stop());
+        assert_eq!(rt.mpvpaper_process_table.len(), 2);
+    }
+
+    #[test]
+    fn mpvpaper_partial_named_stop_refused_when_multi_output_process_exists() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime {
+            mpvpaper_process_table: vec![
+                MpvpaperProcess::for_output(10, "eDP-1", "/a.mp4"),
+                MpvpaperProcess::for_output(99, "eDP-1 HDMI-1", "/multi.mp4"),
+            ],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.error.to_string().contains("own multiple/all outputs"));
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
+        assert!(!err.after_destructive_stop());
+        assert_eq!(rt.mpvpaper_process_table.len(), 2);
+    }
+
+    #[test]
+    fn mpvpaper_partial_named_stop_refused_when_unparseable_process_exists() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime {
+            mpvpaper_process_table: vec![
+                MpvpaperProcess::for_output(10, "eDP-1", "/a.mp4"),
+                MpvpaperProcess {
+                    pid: 99,
+                    selector: MpvpaperOutputSelector::Unparseable,
+                    path: "/mystery.mp4".into(),
+                },
+            ],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.error.to_string().contains("own multiple/all outputs"));
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
+        assert!(!err.after_destructive_stop());
+        assert_eq!(rt.mpvpaper_process_table.len(), 2);
+    }
+
+    #[test]
+    fn full_coverage_named_stop_still_global() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime {
+            mpvpaper_process_table: vec![
+                MpvpaperProcess::for_output(10, "eDP-1", "/a.mp4"),
+                MpvpaperProcess::for_output(20, "HDMI-1", "/b.mp4"),
+            ],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Mpvpaper,
+                scope: ExecutionScope::named(known.clone()).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap();
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
+    }
+
+    #[test]
+    fn awww_partial_named_stop_still_rejected() {
+        let (_tmp, s) = temp_storage();
+        let known = vec!["eDP-1".into(), "HDMI-1".into()];
+        let mut rt = FakeRuntime::default();
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Awww,
+                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(err.error.to_string().contains("refusing to broaden"));
+        assert_eq!(rt.stop_awww_count, 0);
     }
 }

@@ -796,6 +796,31 @@ mod tests {
     }
 
     #[test]
+    fn accepts_mpvpaper_all_displays_with_real_capability_one_apply_per_output() {
+        let plan = plan_display_apply(&req(
+            DisplayTarget::AllDisplays,
+            Backend::Mpvpaper,
+            dual_outputs(),
+            vec![],
+        ))
+        .expect("runtime-verified mpvpaper multi-instance must plan All Displays");
+        assert_eq!(
+            plan.actions,
+            vec![
+                PlannedAction::Apply {
+                    backend: Backend::Mpvpaper,
+                    outputs: vec![edp()],
+                },
+                PlannedAction::Apply {
+                    backend: Backend::Mpvpaper,
+                    outputs: vec![hdmi()],
+                },
+            ],
+            "exactly two Apply actions, one output each"
+        );
+    }
+
+    #[test]
     fn rejects_all_displays_without_known_outputs() {
         let err = plan_display_apply(&req(
             DisplayTarget::AllDisplays,
@@ -809,22 +834,29 @@ mod tests {
 
     #[test]
     fn rejects_mpvpaper_all_displays_when_multi_instance_unverified() {
-        let err = plan_display_apply(&req(
-            DisplayTarget::AllDisplays,
-            Backend::Mpvpaper,
-            dual_outputs(),
-            vec![],
-        ))
+        let mut capability = capability_for(Backend::Mpvpaper).expect("mpvpaper");
+        capability.multi_instance = MultiInstanceSupport::SeparateProcessesUnverified;
+        capability.multi_instance_evidence = Evidence::Unverified;
+
+        let err = plan_display_apply_with_capability(
+            &req(
+                DisplayTarget::AllDisplays,
+                Backend::Mpvpaper,
+                dual_outputs(),
+                vec![RunningAssignment {
+                    output: edp(),
+                    backend: Backend::Awww,
+                }],
+            ),
+            capability,
+        )
         .unwrap_err();
-        match err {
-            RejectionReason::ReliesOnUnknownCoexistence { explanation } => {
-                assert!(
-                    explanation.contains("mpvpaper"),
-                    "explanation={explanation}"
-                );
+        assert_eq!(
+            err,
+            RejectionReason::ReliesOnUnknownCoexistence {
+                explanation: "mpvpaper All Displays needs one process per output, but multi-instance coexistence is unverified".into(),
             }
-            other => panic!("expected ReliesOnUnknownCoexistence, got {other:?}"),
-        }
+        );
     }
 
     #[test]
@@ -878,8 +910,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_mpvpaper_named_output_when_other_output_also_uses_mpvpaper() {
-        let err = plan_display_apply(&req(
+    fn accepts_mpvpaper_named_output_when_other_output_also_uses_mpvpaper() {
+        let plan = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
             Backend::Mpvpaper,
             dual_outputs(),
@@ -888,13 +920,74 @@ mod tests {
                 backend: Backend::Mpvpaper,
             }],
         ))
+        .expect("tracked per-output mpvpaper may leave another output alone");
+        assert_eq!(
+            plan.actions,
+            vec![PlannedAction::Apply {
+                backend: Backend::Mpvpaper,
+                outputs: vec![edp()],
+            }]
+        );
+    }
+
+    #[test]
+    fn injected_all_matching_mpvpaper_still_rejects_named_when_sibling_uses_mpvpaper() {
+        let mut capability = capability_for(Backend::Mpvpaper).expect("mpvpaper");
+        capability.stop_scope = StopScope::AllMatchingProcesses;
+        capability.stop_scope_evidence = Evidence::ImplementationLimit;
+
+        let err = plan_display_apply_with_capability(
+            &req(
+                DisplayTarget::Output(edp()),
+                Backend::Mpvpaper,
+                dual_outputs(),
+                vec![RunningAssignment {
+                    output: hdmi(),
+                    backend: Backend::Mpvpaper,
+                }],
+            ),
+            capability,
+        )
         .unwrap_err();
         assert_eq!(
             err,
             RejectionReason::StopWouldAffectNonTarget {
                 non_target: hdmi(),
-                explanation: "mpvpaper stop is process-wide and would affect HDMI-1".into(),
+                explanation: "mpvpaper stop would affect HDMI-1".into(),
             }
+        );
+    }
+
+    #[test]
+    fn mpvpaper_same_target_replacement_with_sibling_emits_stop_then_apply() {
+        let plan = plan_display_apply(&req(
+            DisplayTarget::Output(edp()),
+            Backend::Mpvpaper,
+            dual_outputs(),
+            vec![
+                RunningAssignment {
+                    output: edp(),
+                    backend: Backend::Mpvpaper,
+                },
+                RunningAssignment {
+                    output: hdmi(),
+                    backend: Backend::Mpvpaper,
+                },
+            ],
+        ))
+        .expect("same-target mpvpaper replacement remains StopThenApply");
+        assert_eq!(
+            plan.actions,
+            vec![
+                PlannedAction::Stop {
+                    backend: Backend::Mpvpaper,
+                    outputs: vec![edp()],
+                },
+                PlannedAction::Apply {
+                    backend: Backend::Mpvpaper,
+                    outputs: vec![edp()],
+                },
+            ]
         );
     }
 
@@ -1043,7 +1136,7 @@ mod tests {
     }
 
     #[test]
-    fn cross_backend_replacement_rejects_when_stop_would_hit_non_target() {
+    fn cross_backend_replacement_rejects_when_coexistence_unknown() {
         let err = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
             Backend::Awww,
@@ -1062,9 +1155,37 @@ mod tests {
         .unwrap_err();
         assert_eq!(
             err,
+            RejectionReason::ReliesOnUnknownCoexistence {
+                explanation:
+                    "applying awww to eDP-1 while mpvpaper runs on HDMI-1 relies on unknown cross-output coexistence"
+                        .into(),
+            }
+        );
+    }
+
+    #[test]
+    fn cross_backend_replacement_rejects_when_stop_would_hit_non_target() {
+        let err = plan_display_apply(&req(
+            DisplayTarget::Output(edp()),
+            Backend::Awww,
+            dual_outputs(),
+            vec![
+                RunningAssignment {
+                    output: edp(),
+                    backend: Backend::Swaybg,
+                },
+                RunningAssignment {
+                    output: hdmi(),
+                    backend: Backend::Swaybg,
+                },
+            ],
+        ))
+        .unwrap_err();
+        assert_eq!(
+            err,
             RejectionReason::StopWouldAffectNonTarget {
                 non_target: hdmi(),
-                explanation: "mpvpaper stop is process-wide and would affect HDMI-1".into(),
+                explanation: "swaybg stop is process-wide and would affect HDMI-1".into(),
             }
         );
     }
@@ -1268,20 +1389,6 @@ mod tests {
                 ),
                 RejectionReason::ReliesOnUnknownCoexistence {
                     explanation: "applying linux-wallpaperengine to eDP-1 while awww runs on HDMI-1 relies on unknown cross-output coexistence".into(),
-                },
-            ),
-            (
-                req(
-                    DisplayTarget::AllDisplays,
-                    Backend::Mpvpaper,
-                    dual_outputs(),
-                    vec![RunningAssignment {
-                        output: edp(),
-                        backend: Backend::Awww,
-                    }],
-                ),
-                RejectionReason::ReliesOnUnknownCoexistence {
-                    explanation: "mpvpaper All Displays needs one process per output, but multi-instance coexistence is unverified".into(),
                 },
             ),
         ];

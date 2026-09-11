@@ -36,12 +36,13 @@ pub(crate) mod test_support {
     use wc_core::types::Backend;
     use wc_storage::StorageApi;
 
-    use crate::runtime::{AwwwReadiness, BackendRuntime, ProcessIo};
+    use crate::runtime::{AwwwReadiness, BackendRuntime, MpvpaperOutputSelector, MpvpaperProcess, ProcessIo};
 
     pub(crate) struct FakeRuntime {
         pub missing_backend: Option<Backend>,
         pub stop_awww_count: usize,
         pub stop_mpvpaper_count: usize,
+        pub stop_mpvpaper_outputs_calls: Vec<Vec<String>>,
         pub stop_swaybg_count: usize,
         pub stop_lwe_count: usize,
         pub command_output_count: usize,
@@ -55,7 +56,9 @@ pub(crate) mod test_support {
         pub command_status_args: Vec<Vec<String>>,
         pub awww_readiness_sequence: RefCell<Vec<AwwwReadiness>>,
         pub running_mpvpaper_pids: Vec<u32>,
+        pub mpvpaper_process_table: Vec<MpvpaperProcess>,
         pub mpvpaper_pids_error: Option<String>,
+        pub mpvpaper_processes_error: Option<String>,
         pub mpvpaper_pids_count: usize,
         pub mpvpaper_readiness_error: Option<String>,
         pub mpvpaper_wait_count: usize,
@@ -89,6 +92,7 @@ pub(crate) mod test_support {
                 missing_backend: None,
                 stop_awww_count: 0,
                 stop_mpvpaper_count: 0,
+                stop_mpvpaper_outputs_calls: Vec::new(),
                 stop_swaybg_count: 0,
                 stop_lwe_count: 0,
                 command_output_count: 0,
@@ -102,7 +106,9 @@ pub(crate) mod test_support {
                 command_status_args: Vec::new(),
                 awww_readiness_sequence: RefCell::new(Vec::new()),
                 running_mpvpaper_pids: Vec::new(),
+                mpvpaper_process_table: Vec::new(),
                 mpvpaper_pids_error: None,
+                mpvpaper_processes_error: None,
                 mpvpaper_pids_count: 0,
                 mpvpaper_readiness_error: None,
                 mpvpaper_wait_count: 0,
@@ -126,6 +132,18 @@ pub(crate) mod test_support {
                 swaybg_pid_running_checks: Vec::new(),
                 awww_stop_verify_pending: false,
             }
+        }
+    }
+
+    impl FakeRuntime {
+        fn all_mpvpaper_pids(&self) -> Vec<u32> {
+            let mut pids = self.running_mpvpaper_pids.clone();
+            for process in &self.mpvpaper_process_table {
+                if !pids.contains(&process.pid) {
+                    pids.push(process.pid);
+                }
+            }
+            pids
         }
     }
 
@@ -182,8 +200,26 @@ pub(crate) mod test_support {
             self.mpvpaper_pids_count += 1;
             match &self.mpvpaper_pids_error {
                 Some(message) => Err(WcError::Other(message.clone())),
-                None => Ok(self.running_mpvpaper_pids.clone()),
+                None => Ok(self.all_mpvpaper_pids()),
             }
+        }
+
+        fn mpvpaper_processes(&mut self) -> Result<Vec<MpvpaperProcess>, WcError> {
+            if let Some(message) = &self.mpvpaper_processes_error {
+                return Err(WcError::Other(message.clone()));
+            }
+            if !self.mpvpaper_process_table.is_empty() {
+                return Ok(self.mpvpaper_process_table.clone());
+            }
+            Ok(self
+                .running_mpvpaper_pids
+                .iter()
+                .map(|pid| MpvpaperProcess {
+                    pid: *pid,
+                    selector: MpvpaperOutputSelector::Unparseable,
+                    path: String::new(),
+                })
+                .collect())
         }
 
         fn wait_for_mpvpaper_ready(
@@ -299,7 +335,23 @@ pub(crate) mod test_support {
                 }
             } else {
                 self.running_mpvpaper_pids.clear();
+                self.mpvpaper_process_table.clear();
             }
+        }
+
+        fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+            self.stop_mpvpaper_outputs_calls.push(outputs.to_vec());
+            let mut removed = Vec::new();
+            self.mpvpaper_process_table.retain(|process| {
+                let remove = process.matches_stop_outputs(outputs);
+                if remove {
+                    removed.push(process.pid);
+                }
+                !remove
+            });
+            self.running_mpvpaper_pids
+                .retain(|pid| !removed.contains(pid));
+            Ok(())
         }
 
         fn stop_swaybg(&mut self) {
@@ -343,6 +395,7 @@ pub use display_executor::{
     DisplayExecReport,
 };
 pub use restore::restore_clean;
+pub use runtime::{MpvpaperOutputSelector, MpvpaperProcess};
 pub use target_commands::ExecutionScope;
 
 use awww::stop_awww;
@@ -1674,7 +1727,8 @@ mod tests {
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
         assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![202]]);
-        assert_eq!(rt.stop_mpvpaper_count, 2);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
     }
 
     #[test]
@@ -1756,7 +1810,8 @@ mod tests {
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![505]);
-        assert_eq!(rt.stop_mpvpaper_count, 2);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
     }
 
     #[test]
@@ -1796,7 +1851,8 @@ mod tests {
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_pid_running_checks, vec![707]);
-        assert_eq!(rt.stop_mpvpaper_count, 2);
+        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
     }
 
     #[test]

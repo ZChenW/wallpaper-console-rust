@@ -3,6 +3,8 @@ use std::process::{Command, Output};
 use wc_core::error::WcError;
 use wc_storage::StorageApi;
 
+pub use crate::mpvpaper::{classify_selector, MpvpaperOutputSelector, MpvpaperProcess};
+
 const APPLY_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(65);
 const LAUNCH_COMMAND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 const AWWW_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -33,6 +35,12 @@ pub trait ProcessIo {
         command: &mut Command,
     ) -> Result<std::process::ExitStatus, WcError>;
     fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError>;
+    /// Live mpvpaper processes with cmdline-derived output selectors.
+    fn mpvpaper_processes(&mut self) -> Result<Vec<MpvpaperProcess>, WcError> {
+        Err(WcError::Other(
+            "mpvpaper process inspection is unavailable for this runtime".into(),
+        ))
+    }
     fn wait_for_mpvpaper_ready(
         &mut self,
         previous_pids: &[u32],
@@ -94,6 +102,9 @@ pub trait BackendRuntime: ProcessIo {
     }
     fn stop_awww(&mut self);
     fn stop_mpvpaper(&mut self);
+    /// Kill only mpvpaper processes whose argv output is a Single match in `outputs`.
+    /// Fails closed when process inspection cannot complete.
+    fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError>;
     fn stop_swaybg(&mut self) {}
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
     /// Apply LWE to explicit outputs (readiness + handoff included).
@@ -212,21 +223,65 @@ where
     P: FnMut() -> Result<Vec<u32>, WcError>,
     S: FnMut(std::time::Duration),
 {
+    poll_until_pids_absent(
+        &mut probe,
+        &mut sleep,
+        |pids| format!("mpvpaper still running after stop: pids={pids:?}"),
+    )
+}
+
+fn remaining_single_output_pids(processes: &[MpvpaperProcess], outputs: &[String]) -> Vec<u32> {
+    processes
+        .iter()
+        .filter_map(|process| match &process.selector {
+            MpvpaperOutputSelector::Single(output) if outputs.iter().any(|o| o == output) => {
+                Some(process.pid)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn wait_for_mpvpaper_outputs_stopped_with<P, S>(
+    outputs: &[String],
+    mut probe: P,
+    mut sleep: S,
+) -> Result<(), WcError>
+where
+    P: FnMut() -> Result<Vec<MpvpaperProcess>, WcError>,
+    S: FnMut(std::time::Duration),
+{
+    let outputs = outputs.to_vec();
+    poll_until_pids_absent(
+        &mut || Ok(remaining_single_output_pids(&probe()?, &outputs)),
+        &mut sleep,
+        |pids| format!("mpvpaper still running on {outputs:?}: pids={pids:?}"),
+    )
+}
+
+/// Shared stop-wait loop used by global and scoped mpvpaper stop verification.
+fn poll_until_pids_absent<P, S, M>(
+    probe_remaining: &mut P,
+    sleep: &mut S,
+    timeout_message: M,
+) -> Result<(), WcError>
+where
+    P: FnMut() -> Result<Vec<u32>, WcError>,
+    S: FnMut(std::time::Duration),
+    M: FnOnce(Vec<u32>) -> String,
+{
+    let mut last = Vec::new();
     for poll in 0..=40 {
-        let pids = probe()?;
-        if pids.is_empty() {
+        last = probe_remaining()?;
+        if last.is_empty() {
             return Ok(());
         }
         if poll == 40 {
-            return Err(WcError::Other(format!(
-                "mpvpaper still running after stop: pids={pids:?}"
-            )));
+            return Err(WcError::Other(timeout_message(last)));
         }
         sleep(std::time::Duration::from_millis(50));
     }
-    Err(WcError::Other(
-        "mpvpaper still running after stop: readiness poll exhausted".into(),
-    ))
+    Err(WcError::Other(timeout_message(last)))
 }
 
 pub(crate) fn wait_for_swaybg_ready_with<P, M, S>(
@@ -298,6 +353,10 @@ impl ProcessIo for SystemBackendRuntime {
 
     fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
         crate::mpvpaper::running_pids()
+    }
+
+    fn mpvpaper_processes(&mut self) -> Result<Vec<MpvpaperProcess>, WcError> {
+        crate::mpvpaper::running_processes()
     }
 
     fn wait_for_mpvpaper_ready(
@@ -405,6 +464,10 @@ impl BackendRuntime for SystemBackendRuntime {
         crate::mpvpaper::stop_mpvpaper();
     }
 
+    fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+        crate::mpvpaper::stop_outputs(outputs)
+    }
+
     fn stop_swaybg(&mut self) {
         crate::swaybg::stop_swaybg();
     }
@@ -431,10 +494,19 @@ mod tests {
     use wc_core::error::WcError;
 
     use super::{
-        new_mpvpaper_pid_for_target, wait_for_mpvpaper_ready_with, wait_for_mpvpaper_stopped_with,
-        wait_for_swaybg_ready_with,
+        new_mpvpaper_pid_for_target, wait_for_mpvpaper_outputs_stopped_with,
+        wait_for_mpvpaper_ready_with, wait_for_mpvpaper_stopped_with, wait_for_swaybg_ready_with,
+        MpvpaperOutputSelector, MpvpaperProcess,
     };
     use crate::target_commands::ExecutionScope;
+
+    fn sample_process(pid: u32, output: &str) -> MpvpaperProcess {
+        MpvpaperProcess {
+            pid,
+            selector: MpvpaperOutputSelector::Single(output.into()),
+            path: "/walls/a.mp4".into(),
+        }
+    }
 
     #[test]
     fn mpvpaper_stop_waits_for_a_process_to_exit() {
@@ -449,6 +521,67 @@ mod tests {
         .unwrap();
 
         assert_eq!(sleeps, vec![Duration::from_millis(50)]);
+    }
+
+    #[test]
+    fn scoped_mpvpaper_stop_succeeds_when_target_outputs_already_clear() {
+        let mut probes: VecDeque<Result<Vec<MpvpaperProcess>, WcError>> =
+            VecDeque::from([Ok(vec![sample_process(99, "DP-8")])]);
+        let mut sleeps = Vec::new();
+
+        wait_for_mpvpaper_outputs_stopped_with(
+            &["eDP-1".into()],
+            || probes.pop_front().expect("unexpected extra process probe"),
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+
+        assert!(sleeps.is_empty());
+    }
+
+    #[test]
+    fn scoped_mpvpaper_stop_waits_until_target_output_clears() {
+        let mut probes: VecDeque<Result<Vec<MpvpaperProcess>, WcError>> = VecDeque::from([
+            Ok(vec![
+                sample_process(41, "eDP-1"),
+                sample_process(99, "DP-8"),
+            ]),
+            Ok(vec![sample_process(99, "DP-8")]),
+        ]);
+        let mut sleeps = Vec::new();
+
+        wait_for_mpvpaper_outputs_stopped_with(
+            &["eDP-1".into()],
+            || probes.pop_front().expect("unexpected extra process probe"),
+            |duration| sleeps.push(duration),
+        )
+        .unwrap();
+
+        assert_eq!(sleeps, vec![Duration::from_millis(50)]);
+    }
+
+    #[test]
+    fn scoped_mpvpaper_stop_reports_remaining_target_pids_after_timeout() {
+        let mut probe_count = 0;
+        let mut sleeps = Vec::new();
+
+        let error = wait_for_mpvpaper_outputs_stopped_with(
+            &["eDP-1".into()],
+            || {
+                probe_count += 1;
+                Ok(vec![
+                    sample_process(41, "eDP-1"),
+                    sample_process(99, "DP-8"),
+                ])
+            },
+            |duration| sleeps.push(duration),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("pids=[41]"));
+        assert!(!error.to_string().contains("99"));
+        assert_eq!(probe_count, 41);
+        assert_eq!(sleeps, vec![Duration::from_millis(50); 40]);
     }
 
     #[test]

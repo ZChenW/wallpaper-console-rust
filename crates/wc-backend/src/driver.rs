@@ -29,8 +29,9 @@ use crate::capability::{
 };
 use crate::mpvpaper::normalize_mpvpaper_options;
 use crate::runtime::{
-    build_awww_daemon_command, wait_for_awww_socket_ready, wait_for_mpvpaper_stopped_with,
-    wait_for_swaybg_stopped_with, AwwwReadiness, BackendRuntime, ProcessIo,
+    build_awww_daemon_command, wait_for_awww_socket_ready, wait_for_mpvpaper_outputs_stopped_with,
+    wait_for_mpvpaper_stopped_with, wait_for_swaybg_stopped_with, AwwwReadiness, BackendRuntime,
+    ProcessIo,
 };
 use crate::target_commands::{
     build_awww_img_command_for_scope, build_awww_instant_command_for_scope,
@@ -71,6 +72,37 @@ pub(crate) trait BackendDriver: Send + Sync {
         runtime: &mut dyn BackendRuntime,
         storage: Option<&StorageApi>,
     ) -> Result<(), WcError>;
+
+    /// Fail-closed checks before a scoped stop begins (no kill yet).
+    fn preflight_stop(
+        &self,
+        _scope: &ExecutionScope,
+        _runtime: &mut dyn BackendRuntime,
+    ) -> Result<(), WcError> {
+        Ok(())
+    }
+
+    /// Stop according to an execution scope.
+    ///
+    /// Default: AllDisplays → [`stop_checked`]; Named → unsupported error.
+    fn stop_scoped_checked(
+        &self,
+        runtime: &mut dyn BackendRuntime,
+        storage: Option<&StorageApi>,
+        scope: &ExecutionScope,
+    ) -> Result<(), WcError> {
+        match scope {
+            ExecutionScope::AllDisplays => self.stop_checked(runtime, storage),
+            ExecutionScope::Named(_) => Err(WcError::Other(format!(
+                "{} does not support output-scoped stop",
+                self.backend().as_str()
+            ))),
+        }
+    }
+
+    fn supports_output_scoped_stop(&self) -> bool {
+        self.capability().stop_scope == StopScope::TrackedProcessPerOutput
+    }
 }
 
 pub(crate) struct PrepareApplyRequest<'a> {
@@ -142,9 +174,14 @@ impl PreparedApply {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum CleanupOutcome {
     NotRequired,
+    /// Targeted cleanup removed renderer ownership for the listed outputs only.
+    VerifiedTargetedStop {
+        backend: Backend,
+        outputs: Vec<String>,
+    },
     VerifiedGlobalStop(Backend),
     UncertainGlobalStop(Backend),
     UncertainTarget,
@@ -530,15 +567,32 @@ fn execute_mpvpaper(
     let _ = status;
     let pid = match runtime.wait_for_mpvpaper_ready(previous_pids, output, &path) {
         Ok(pid) => pid,
-        Err(error) => return Err(cleanup_started_mpvpaper(runtime, error)),
+        Err(error) => {
+            return Err(cleanup_started_mpvpaper(
+                runtime,
+                previous_pids,
+                output,
+                &path,
+                error,
+            ))
+        }
     };
     match runtime.mpvpaper_pid_running(pid) {
         Ok(true) => Ok(()),
         Ok(false) => Err(cleanup_started_mpvpaper(
             runtime,
+            previous_pids,
+            output,
+            &path,
             WcError::Other("mpvpaper renderer exited before startup settled".into()),
         )),
-        Err(error) => Err(cleanup_started_mpvpaper(runtime, error)),
+        Err(error) => Err(cleanup_started_mpvpaper(
+            runtime,
+            previous_pids,
+            output,
+            &path,
+            error,
+        )),
     }
 }
 
@@ -563,18 +617,24 @@ fn cleanup_failed_mpvpaper_start(
 
 fn cleanup_started_mpvpaper(
     runtime: &mut dyn BackendRuntime,
+    previous_pids: &[u32],
+    output: &str,
+    path: &str,
     original_error: WcError,
 ) -> DriverApplyFailure {
-    match MPVPAPER_DRIVER.stop_checked(runtime, None) {
+    match runtime.cleanup_failed_mpvpaper_launch(previous_pids, output, path) {
         Ok(()) => DriverApplyFailure {
             error: original_error,
-            cleanup: CleanupOutcome::VerifiedGlobalStop(Backend::Mpvpaper),
+            cleanup: CleanupOutcome::VerifiedTargetedStop {
+                backend: Backend::Mpvpaper,
+                outputs: vec![output.to_string()],
+            },
         },
         Err(cleanup_error) => DriverApplyFailure {
             error: WcError::Other(format!(
                 "{original_error}; mpvpaper cleanup could not be verified: {cleanup_error}"
             )),
-            cleanup: CleanupOutcome::UncertainGlobalStop(Backend::Mpvpaper),
+            cleanup: CleanupOutcome::UncertainTarget,
         },
     }
 }
@@ -799,10 +859,14 @@ impl BackendDriver for MpvpaperDriver {
             output_target_evidence: Evidence::CliVerified,
             all_displays: AllDisplaysTargeting::OneProcessPerOutput,
             all_displays_evidence: Evidence::CliVerified,
-            stop_scope: StopScope::AllMatchingProcesses,
-            stop_scope_evidence: Evidence::ImplementationLimit,
-            multi_instance: MultiInstanceSupport::SeparateProcessesUnverified,
-            multi_instance_evidence: Evidence::Unverified,
+            // Scoped stop kills only processes whose argv output equals the target;
+            // wildcard/multi-output processes block scoped stop at preflight.
+            stop_scope: StopScope::TrackedProcessPerOutput,
+            stop_scope_evidence: Evidence::RuntimeVerified,
+            // Runtime-verified on mpvpaper 1.9: two named-output processes
+            // (eDP-1 + DP-8) played in parallel; stopping one left the other advancing.
+            multi_instance: MultiInstanceSupport::SeparateProcessesVerified,
+            multi_instance_evidence: Evidence::RuntimeVerified,
             // One process per output: replacing without Stop would leave a stale process.
             same_target_replacement: SameTargetReplacement::StopThenApply,
             same_target_replacement_evidence: Evidence::ImplementationLimit,
@@ -855,6 +919,44 @@ impl BackendDriver for MpvpaperDriver {
     ) -> Result<(), WcError> {
         self.stop(runtime, None);
         wait_for_mpvpaper_stopped_with(|| runtime.mpvpaper_pids(), std::thread::sleep)
+    }
+
+    fn preflight_stop(
+        &self,
+        scope: &ExecutionScope,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<(), WcError> {
+        let ExecutionScope::Named(outputs) = scope else {
+            return Ok(());
+        };
+        let processes = runtime.mpvpaper_processes()?;
+        let blockers = crate::mpvpaper::scoped_stop_blockers(&processes);
+        if blockers.is_empty() {
+            return Ok(());
+        }
+        Err(WcError::Other(format!(
+            "mpvpaper process(es) {blockers:?} own multiple/all outputs; cannot stop only \
+             {outputs:?}. Apply to All Displays or stop backends first"
+        )))
+    }
+
+    fn stop_scoped_checked(
+        &self,
+        runtime: &mut dyn BackendRuntime,
+        storage: Option<&StorageApi>,
+        scope: &ExecutionScope,
+    ) -> Result<(), WcError> {
+        match scope {
+            ExecutionScope::AllDisplays => self.stop_checked(runtime, storage),
+            ExecutionScope::Named(outputs) => {
+                runtime.stop_mpvpaper_outputs(outputs)?;
+                wait_for_mpvpaper_outputs_stopped_with(
+                    outputs,
+                    || runtime.mpvpaper_processes(),
+                    std::thread::sleep,
+                )
+            }
+        }
     }
 }
 

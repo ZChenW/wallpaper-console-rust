@@ -241,8 +241,12 @@ impl AppService {
                 }
                 Err(failure) => {
                     merge_exec_reports(&mut report, failure.exec.clone());
+                    let mut exec_failure = display_exec_failure_from_transition(failure);
+                    // Reconcile all progress, including the initial global stop
+                    // and successfully restored outputs from earlier steps.
+                    exec_failure.report = report;
                     return Err(self.handle_exec_failure(
-                        display_exec_failure_from_transition(failure),
+                        exec_failure,
                         &previous_rows,
                         known_outputs,
                         None,
@@ -480,7 +484,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
     use wc_backend::apply_stage::NoopReporter;
-    use wc_backend::runtime::{AwwwReadiness, ProcessIo};
+    use wc_backend::runtime::{AwwwReadiness, MpvpaperProcess, ProcessIo};
     use wc_core::config::ConfigDir;
     use wc_core::error::WcError;
 
@@ -489,6 +493,7 @@ mod tests {
         missing_backend: Option<Backend>,
         stop_awww_count: usize,
         stop_mpvpaper_count: usize,
+        stop_mpvpaper_outputs_calls: Vec<Vec<String>>,
         stop_lwe_count: usize,
         stop_awww_error: Option<String>,
         stop_mpvpaper_error: Option<String>,
@@ -497,8 +502,10 @@ mod tests {
         command_output_args: Vec<Vec<String>>,
         command_status_args: Vec<Vec<String>>,
         fail_after_n_status: Option<usize>,
+        mpvpaper_events: Vec<String>,
         mpvpaper_ready_pid: Option<u32>,
         running_mpvpaper_pids: Vec<u32>,
+        mpvpaper_process_table: Vec<MpvpaperProcess>,
         awww_readiness_sequence: RefCell<Vec<AwwwReadiness>>,
         lwe_apply_calls: usize,
         lwe_apply_error: Option<String>,
@@ -537,6 +544,12 @@ mod tests {
                     .map(|a| a.to_string_lossy().to_string())
                     .collect(),
             );
+            let args = self.command_status_args.last().unwrap();
+            if args.iter().any(|arg| arg == "mpvpaper") {
+                let separator = args.iter().position(|arg| arg == "--").unwrap();
+                self.mpvpaper_events
+                    .push(format!("apply:{}", args[separator - 1]));
+            }
             if let Some(limit) = self.fail_after_n_status {
                 if self.command_status_args.len() > limit {
                     self.command_status_success = false;
@@ -556,7 +569,17 @@ mod tests {
             if let Some(message) = &self.mpvpaper_pids_error {
                 return Err(WcError::Other(message.clone()));
             }
-            Ok(self.running_mpvpaper_pids.clone())
+            let mut pids = self.running_mpvpaper_pids.clone();
+            for process in &self.mpvpaper_process_table {
+                if !pids.contains(&process.pid) {
+                    pids.push(process.pid);
+                }
+            }
+            Ok(pids)
+        }
+
+        fn mpvpaper_processes(&mut self) -> Result<Vec<MpvpaperProcess>, WcError> {
+            Ok(self.mpvpaper_process_table.clone())
         }
 
         fn wait_for_mpvpaper_ready(
@@ -580,6 +603,8 @@ mod tests {
         ) -> Result<(), WcError> {
             self.running_mpvpaper_pids
                 .retain(|pid| previous_pids.contains(pid));
+            self.mpvpaper_process_table
+                .retain(|process| previous_pids.contains(&process.pid));
             Ok(())
         }
 
@@ -623,11 +648,30 @@ mod tests {
 
         fn stop_mpvpaper(&mut self) {
             self.stop_mpvpaper_count += 1;
+            self.mpvpaper_events.push("stop".into());
             if let Some(message) = &self.stop_mpvpaper_error {
                 self.mpvpaper_pids_error = Some(message.clone());
             } else {
                 self.running_mpvpaper_pids.clear();
+                self.mpvpaper_process_table.clear();
             }
+        }
+
+        fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+            self.stop_mpvpaper_outputs_calls.push(outputs.to_vec());
+            self.mpvpaper_events
+                .push(format!("stop-outputs:[{}]", outputs.join(",")));
+            let mut removed = Vec::new();
+            self.mpvpaper_process_table.retain(|process| {
+                let remove = process.matches_stop_outputs(outputs);
+                if remove {
+                    removed.push(process.pid);
+                }
+                !remove
+            });
+            self.running_mpvpaper_pids
+                .retain(|pid| !removed.contains(pid));
+            Ok(())
         }
 
         fn stop_lwe(&mut self, _s: Option<&wc_storage::StorageApi>) {
@@ -738,6 +782,116 @@ mod tests {
         assert_eq!(rt.stop_mpvpaper_count, 1);
         assert_eq!(rt.stop_lwe_count, 1);
         assert_eq!(rt.lwe_apply_calls, 0);
+    }
+
+    fn dual_video_service() -> (tempfile::TempDir, AppService, std::path::PathBuf) {
+        let (tmp, service) = temp_service();
+        let video = write_video(tmp.path(), "dual.mp4");
+        service
+            .storage_for_tests()
+            .config_set("video_backend", "mpvpaper")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &video.to_string_lossy(),
+                "mpvpaper",
+            )
+            .unwrap();
+        (tmp, service, video)
+    }
+
+    #[test]
+    fn dual_video_restore_restarts_once_and_applies_each_named_output() {
+        let (_tmp, service, video) = dual_video_service();
+        let outputs = ["eDP-1".into(), "HDMI-1".into()];
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        // Repeated restore clears the renderer set once per restore, with no
+        // stop between launching the first and second screen.
+        for round in 1..=2 {
+            service
+                .restore_displays_with_runtime(
+                    &outputs,
+                    &mut runtime,
+                    &mut NoopReporter,
+                    DisplayRestoreRuntimeOpts::default(),
+                )
+                .unwrap();
+            assert_eq!(runtime.stop_mpvpaper_count, round);
+            assert_eq!(runtime.command_status_args.len(), round * 2);
+            assert_eq!(
+                runtime.mpvpaper_events,
+                ["stop", "apply:eDP-1", "apply:HDMI-1"].repeat(round)
+            );
+            let rows = service.storage_for_tests().display_state_list().unwrap();
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
+            assert_eq!(rows[0].wallpaper_path, video.to_string_lossy());
+            assert_eq!(rows[0].backend, "mpvpaper");
+        }
+    }
+
+    #[test]
+    fn dual_video_restore_second_launch_failure_removes_stopped_output_state() {
+        let (_tmp, service, video) = dual_video_service();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            fail_after_n_status: Some(1),
+            ..Default::default()
+        };
+        let err = service
+            .restore_displays_with_runtime(
+                &["eDP-1".into(), "HDMI-1".into()],
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap_err();
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "failed output must not retain stopped state: {rows:?}"
+        );
+        assert_eq!(rows[0].target, DisplayStateTarget::Output("eDP-1".into()));
+        assert_eq!(rows[0].wallpaper_path, video.to_string_lossy());
+        assert_eq!(rows[0].backend, "mpvpaper");
+        assert_eq!(err.code, "display_apply_failed_after_stop");
+        assert_eq!(
+            runtime.mpvpaper_events,
+            ["stop", "apply:eDP-1", "apply:HDMI-1"]
+        );
+    }
+
+    #[test]
+    fn dual_video_restore_first_launch_failure_clears_stopped_state() {
+        let (_tmp, service, _video) = dual_video_service();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: false,
+            ..Default::default()
+        };
+        let err = service
+            .restore_displays_with_runtime(
+                &["eDP-1".into(), "HDMI-1".into()],
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap_err();
+        let rows = service.storage_for_tests().display_state_list().unwrap();
+        assert!(
+            rows.is_empty(),
+            "stopped renderers must not remain saved as live: {rows:?}"
+        );
+        assert_eq!(err.code, "display_apply_failed_after_stop");
+        assert_eq!(runtime.mpvpaper_events, ["stop", "apply:eDP-1"]);
     }
 
     #[test]
@@ -1313,6 +1467,101 @@ mod tests {
                 .as_deref(),
             Some("awww"),
             "failed reconciliation transaction must preserve the legacy backend"
+        );
+    }
+
+    #[test]
+    fn per_output_dual_video_rows_restore_without_scoped_stop() {
+        let (tmp, service) = temp_service();
+        let a = write_video(tmp.path(), "a.mp4");
+        let b = write_video(tmp.path(), "b.mp4");
+        service
+            .storage_for_tests()
+            .display_state_replace_all(&[
+                (
+                    DisplayStateTarget::Output("eDP-1".into()),
+                    a.to_string_lossy().into(),
+                    "mpvpaper".into(),
+                ),
+                (
+                    DisplayStateTarget::Output("HDMI-1".into()),
+                    b.to_string_lossy().into(),
+                    "mpvpaper".into(),
+                ),
+            ])
+            .unwrap();
+
+        let mut runtime = FakeRuntime {
+            command_status_success: true,
+            mpvpaper_ready_pid: Some(3),
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into(), "HDMI-1".into()],
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert_eq!(runtime.stop_mpvpaper_count, 1);
+        assert!(runtime.stop_mpvpaper_outputs_calls.is_empty());
+        assert_eq!(runtime.mpvpaper_events[0], "stop");
+        let applies: Vec<_> = runtime.mpvpaper_events[1..].to_vec();
+        assert_eq!(applies.len(), 2);
+        assert!(applies.contains(&"apply:eDP-1".to_string()));
+        assert!(applies.contains(&"apply:HDMI-1".to_string()));
+    }
+
+    #[test]
+    fn all_displays_plus_named_override_restore_uses_scoped_stop_for_override() {
+        let (tmp, service) = temp_service();
+        let base = write_video(tmp.path(), "base.mp4");
+        let override_video = write_video(tmp.path(), "override.mp4");
+        service
+            .storage_for_tests()
+            .display_state_replace_all(&[
+                (
+                    DisplayStateTarget::AllDisplays,
+                    base.to_string_lossy().into(),
+                    "mpvpaper".into(),
+                ),
+                (
+                    DisplayStateTarget::Output("HDMI-1".into()),
+                    override_video.to_string_lossy().into(),
+                    "mpvpaper".into(),
+                ),
+            ])
+            .unwrap();
+
+        let mut runtime = FakeRuntime {
+            command_status_success: true,
+            mpvpaper_ready_pid: Some(3),
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into(), "HDMI-1".into()],
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        assert_eq!(
+            runtime.mpvpaper_events,
+            [
+                "stop",
+                "apply:eDP-1",
+                "apply:HDMI-1",
+                "stop-outputs:[HDMI-1]",
+                "apply:HDMI-1",
+            ]
+        );
+        assert_eq!(
+            runtime.stop_mpvpaper_outputs_calls,
+            vec![vec!["HDMI-1".to_string()]]
         );
     }
 }
