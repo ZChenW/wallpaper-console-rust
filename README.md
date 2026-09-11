@@ -109,3 +109,7 @@ Settings and the wallpaper library are preserved when uninstalling.
 ## License
 
 [MIT](LICENSE)
+
+### Library keyboard controls
+
+In Grid, Enter or Space selects and applies the focused wallpaper. In Flow, Enter or Space selects the FlowAnchor first; pressing again applies it. Ctrl/Meta+Enter applies directly in Flow. Moving through Flow does not change Selected. Both views support the Context Menu key and Shift+F10 for wallpaper actions.
