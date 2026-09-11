@@ -36,6 +36,8 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("post_apply_enabled", "off"),
     ("post_apply_command", "matugen image \"$still\""),
     ("post_apply_timeout_secs", "30"),
+    ("post_apply_theme_source", "last_applied"),
+    ("post_apply_on_restore", "on"),
 ];
 
 /// Default config key-value pairs (populated on first run).
@@ -117,6 +119,10 @@ impl ConfigDir {
     pub fn theme_stills_cache_dir(&self) -> PathBuf {
         self.path.join("cache").join("theme-stills")
     }
+
+    pub fn theme_state_path(&self) -> PathBuf {
+        self.path.join("theme-state.json")
+    }
 }
 
 #[cfg(test)]
@@ -147,7 +153,7 @@ mod tests {
         let unique = keys.iter().collect::<std::collections::HashSet<_>>();
         assert_eq!(keys.len(), unique.len());
         assert_eq!(keys.first().copied(), Some("gif_backend"));
-        assert_eq!(keys.last().copied(), Some("post_apply_timeout_secs"));
+        assert_eq!(keys.last().copied(), Some("post_apply_on_restore"));
     }
 
     #[test]
@@ -169,6 +175,10 @@ mod tests {
             cd.theme_stills_cache_dir(),
             PathBuf::from("/tmp/wc-test/cache/theme-stills")
         );
+        assert_eq!(
+            cd.theme_state_path(),
+            PathBuf::from("/tmp/wc-test/theme-state.json")
+        );
     }
 
     #[test]
@@ -185,6 +195,14 @@ mod tests {
         assert_eq!(
             defaults.get("post_apply_timeout_secs").map(String::as_str),
             Some("30")
+        );
+        assert_eq!(
+            defaults.get("post_apply_theme_source").map(String::as_str),
+            Some("last_applied")
+        );
+        assert_eq!(
+            defaults.get("post_apply_on_restore").map(String::as_str),
+            Some("on")
         );
     }
 

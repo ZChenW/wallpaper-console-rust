@@ -1,4 +1,5 @@
-//! Post-apply theme hook: resolve a still image, then run an external command.
+//! Post-apply theme hook: publish per-output theme state, resolve stills, run
+//! an optional external command.
 //!
 //! Failures are logged and never fail the wallpaper apply itself.
 
@@ -8,41 +9,102 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use serde_json::json;
 use wc_core::types::{Backend, FileType};
 use wc_storage::StorageApi;
 
-/// Context for one successful apply that may trigger the post-apply hook.
+use crate::theme_source::ThemeSourcePolicy;
+
+/// One connected output's wallpaper + still for theme generation.
+#[derive(Debug, Clone)]
+pub struct OutputThemeEntry {
+    pub output: String,
+    pub wallpaper: String,
+    pub backend: String,
+    pub file_type: String,
+    /// Filled during publish; callers may leave this `None`.
+    pub still: Option<String>,
+}
+
+/// Context for one successful apply/restore that may publish theme state and
+/// trigger the post-apply hook.
 #[derive(Debug, Clone)]
 pub struct PostApplyContext {
+    /// Theme-source wallpaper (compat / WCR_WALLPAPER).
     pub wallpaper_path: String,
     pub backend: Backend,
     pub file_type: FileType,
+    /// Changed outputs joined (compat WCR_OUTPUTS / WCR_OUTPUT).
     pub outputs: String,
+    pub changed_outputs: Vec<String>,
+    pub theme_source_output: Option<String>,
+    pub per_output: Vec<OutputThemeEntry>,
 }
 
-/// Run the configured post-apply hook. Never returns an error to callers;
-/// wallpaper apply has already succeeded.
-pub fn run_post_apply_hook(storage: &StorageApi, ctx: &PostApplyContext) {
-    if let Err(err) = run_post_apply_hook_inner(storage, ctx, None) {
+/// Always write `theme-state.json` when `per_output` is non-empty, then run the
+/// external hook only if enabled. Never returns an error to callers.
+pub fn publish_theme_and_run_hook(storage: &StorageApi, ctx: &PostApplyContext) {
+    if let Err(err) = publish_theme_and_run_hook_inner(storage, ctx, None) {
         log::warn!("post-apply hook skipped or failed: {err}");
     }
 }
 
-/// Test seam: optional still-path override bypasses ffmpeg (and video cache).
+/// Backward-compatible alias for [`publish_theme_and_run_hook`].
+pub fn run_post_apply_hook(storage: &StorageApi, ctx: &PostApplyContext) {
+    publish_theme_and_run_hook(storage, ctx);
+}
+
+/// Test seam: optional still-path override bypasses ffmpeg (and video cache)
+/// for the theme-source wallpaper only. Per-output stills still resolve unless
+/// overridden entries are pre-filled.
 #[cfg(test)]
 pub(crate) fn run_post_apply_hook_with_still_override(
     storage: &StorageApi,
     ctx: &PostApplyContext,
     still_override: Option<PathBuf>,
 ) -> Result<(), String> {
-    run_post_apply_hook_inner(storage, ctx, still_override)
+    publish_theme_and_run_hook_inner(storage, ctx, still_override)
 }
 
-fn run_post_apply_hook_inner(
+fn publish_theme_and_run_hook_inner(
     storage: &StorageApi,
     ctx: &PostApplyContext,
     still_override: Option<PathBuf>,
 ) -> Result<(), String> {
+    let policy_raw = storage.config_get("post_apply_theme_source", "last_applied");
+    let policy = ThemeSourcePolicy::parse(&policy_raw);
+
+    let mut resolved_entries = ctx.per_output.clone();
+    for entry in &mut resolved_entries {
+        if entry.still.is_some() {
+            continue;
+        }
+        let file_type = file_type_from_str(&entry.file_type);
+        match resolve_still_path(storage, &entry.wallpaper, file_type) {
+            Ok(path) => entry.still = Some(path.to_string_lossy().into_owned()),
+            Err(err) => {
+                log::warn!(
+                    "post-apply: still resolve failed for {}: {err}",
+                    entry.output
+                );
+                entry.still = None;
+            }
+        }
+    }
+
+    let manifest_path = if !resolved_entries.is_empty() {
+        let path = write_theme_state_manifest(
+            storage,
+            &ctx.changed_outputs,
+            ctx.theme_source_output.as_deref(),
+            &policy,
+            &resolved_entries,
+        )?;
+        Some(path)
+    } else {
+        None
+    };
+
     let enabled = storage.config_get("post_apply_enabled", "off");
     if enabled != "on" {
         return Ok(());
@@ -62,17 +124,32 @@ fn run_post_apply_hook_inner(
         return Ok(());
     }
 
-    let still = match still_override {
-        Some(path) => path,
-        None => resolve_still_path(storage, &ctx.wallpaper_path, ctx.file_type)?,
-    };
+    let theme_source_still = resolve_theme_source_still(
+        storage,
+        ctx,
+        &resolved_entries,
+        still_override.as_deref(),
+    )?;
 
     let wallpaper = ctx.wallpaper_path.as_str();
-    let still_s = still.to_string_lossy();
+    let still_s = theme_source_still.to_string_lossy();
     let backend = ctx.backend.as_str();
     let outputs = ctx.outputs.as_str();
+    let manifest_s = manifest_path
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let theme_source = ctx.theme_source_output.as_deref().unwrap_or("");
 
-    let expanded = expand_post_apply_command(command, wallpaper, &still_s, backend, outputs);
+    let expanded = expand_post_apply_command(
+        command,
+        wallpaper,
+        &still_s,
+        backend,
+        outputs,
+        &manifest_s,
+        theme_source,
+    );
     let timeout_secs: u64 = storage
         .config_get("post_apply_timeout_secs", "30")
         .parse()
@@ -81,32 +158,115 @@ fn run_post_apply_hook_inner(
         .unwrap_or(30);
 
     log::info!("post-apply: running `{expanded}` (timeout {timeout_secs}s)");
-    run_command_with_timeout(
-        &expanded,
-        &[
-            ("WCR_WALLPAPER", wallpaper),
-            ("WCR_STILL", still_s.as_ref()),
-            ("WCR_BACKEND", backend),
-            ("WCR_OUTPUTS", outputs),
-        ],
-        Duration::from_secs(timeout_secs),
-    )
+
+    let mut env: Vec<(&str, String)> = vec![
+        ("WCR_WALLPAPER", wallpaper.to_string()),
+        ("WCR_STILL", still_s.into_owned()),
+        ("WCR_BACKEND", backend.to_string()),
+        ("WCR_OUTPUTS", outputs.to_string()),
+        ("WCR_OUTPUT", outputs.to_string()),
+    ];
+    if !manifest_s.is_empty() {
+        env.push(("WCR_THEME_MANIFEST", manifest_s.clone()));
+    }
+    if !theme_source.is_empty() {
+        env.push(("WCR_THEME_SOURCE_OUTPUT", theme_source.to_string()));
+    }
+
+    let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
+    run_command_with_timeout(&expanded, &env_refs, Duration::from_secs(timeout_secs))
 }
 
-/// Expand `$wallpaper` / `$path` / `$still` / `$backend` / `$outputs` in the
-/// command template. Longer names are replaced before shorter ones so
-/// `$wallpaper` is not partially eaten by `$path`.
+fn resolve_theme_source_still(
+    storage: &StorageApi,
+    ctx: &PostApplyContext,
+    resolved_entries: &[OutputThemeEntry],
+    still_override: Option<&Path>,
+) -> Result<PathBuf, String> {
+    if let Some(path) = still_override {
+        return Ok(path.to_path_buf());
+    }
+
+    if let Some(name) = ctx.theme_source_output.as_deref() {
+        if let Some(entry) = resolved_entries.iter().find(|e| e.output == name) {
+            if let Some(still) = entry.still.as_ref() {
+                return Ok(PathBuf::from(still));
+            }
+            return Err(format!(
+                "theme-source still missing for output {name}; skipping hook"
+            ));
+        }
+    }
+
+    // Legacy / empty per_output: resolve from theme-source wallpaper fields.
+    resolve_still_path(storage, &ctx.wallpaper_path, ctx.file_type)
+}
+
+fn write_theme_state_manifest(
+    storage: &StorageApi,
+    changed_outputs: &[String],
+    theme_source_output: Option<&str>,
+    policy: &ThemeSourcePolicy,
+    entries: &[OutputThemeEntry],
+) -> Result<PathBuf, String> {
+    let path = storage.cd.theme_state_path();
+    let mut outputs = serde_json::Map::new();
+    for entry in entries {
+        outputs.insert(
+            entry.output.clone(),
+            json!({
+                "wallpaper": entry.wallpaper,
+                "still": entry.still,
+                "backend": entry.backend,
+                "file_type": entry.file_type,
+            }),
+        );
+    }
+
+    let doc = json!({
+        "version": 1,
+        "changed_outputs": changed_outputs,
+        "theme_source_output": theme_source_output,
+        "theme_source_policy": policy.as_config_str(),
+        "outputs": outputs,
+    });
+
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    std::fs::create_dir_all(parent)
+        .map_err(|e| format!("failed to create config dir for theme-state: {e}"))?;
+
+    let tmp = path.with_extension(format!(
+        "tmp.{}.json",
+        std::process::id()
+    ));
+    let body = serde_json::to_vec_pretty(&doc)
+        .map_err(|e| format!("failed to serialize theme-state: {e}"))?;
+    std::fs::write(&tmp, body).map_err(|e| format!("failed to write theme-state tmp: {e}"))?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(format!("failed to finalize theme-state: {e}"));
+    }
+    Ok(path)
+}
+
+/// Expand `$wallpaper` / `$path` / `$still` / `$backend` / `$outputs` /
+/// `$manifest` / `$theme_source` in the command template. Longer names are
+/// replaced before shorter ones so `$wallpaper` is not partially eaten by
+/// `$path`.
 pub fn expand_post_apply_command(
     template: &str,
     wallpaper: &str,
     still: &str,
     backend: &str,
     outputs: &str,
+    manifest: &str,
+    theme_source: &str,
 ) -> String {
     let mut out = template.to_string();
-    // Replace longer placeholders first.
     for (needle, value) in [
         ("$wallpaper", wallpaper),
+        ("$theme_source", theme_source),
+        ("$manifest", manifest),
         ("$backend", backend),
         ("$outputs", outputs),
         ("$still", still),
@@ -115,6 +275,24 @@ pub fn expand_post_apply_command(
         out = out.replace(needle, value);
     }
     out
+}
+
+pub(crate) fn file_type_from_str(raw: &str) -> FileType {
+    match raw {
+        "image" => FileType::Image,
+        "gif" => FileType::Gif,
+        "video" => FileType::Video,
+        "we_scene" => FileType::WeScene,
+        "we_web" => FileType::WeWeb,
+        "unsupported" | "we_application" => FileType::WeApplication,
+        _ => FileType::Image,
+    }
+}
+
+pub(crate) fn detect_file_type_string(wallpaper_path: &str) -> String {
+    wc_scan::make_entry(wallpaper_path)
+        .map(|entry| entry.file_type.as_str().to_string())
+        .unwrap_or_else(|| "image".to_string())
 }
 
 fn resolve_still_path(
@@ -332,18 +510,36 @@ mod tests {
         (tmp, storage)
     }
 
+    fn basic_ctx(wallpaper: String, backend: Backend, file_type: FileType, outputs: &str) -> PostApplyContext {
+        PostApplyContext {
+            wallpaper_path: wallpaper,
+            backend,
+            file_type,
+            outputs: outputs.into(),
+            changed_outputs: outputs
+                .split(',')
+                .filter(|s| !s.is_empty() && *s != "*")
+                .map(str::to_string)
+                .collect(),
+            theme_source_output: None,
+            per_output: vec![],
+        }
+    }
+
     #[test]
     fn expand_replaces_all_placeholders() {
         let expanded = expand_post_apply_command(
-            r#"echo $wallpaper $path $still $backend $outputs"#,
+            r#"echo $wallpaper $path $still $backend $outputs $manifest $theme_source"#,
             "/walls/a.png",
             "/cache/a.jpg",
             "awww",
             "eDP-1",
+            "/cfg/theme-state.json",
+            "eDP-1",
         );
         assert_eq!(
             expanded,
-            r#"echo /walls/a.png /walls/a.png /cache/a.jpg awww eDP-1"#
+            r#"echo /walls/a.png /walls/a.png /cache/a.jpg awww eDP-1 /cfg/theme-state.json eDP-1"#
         );
     }
 
@@ -356,6 +552,8 @@ mod tests {
             "/s.jpg",
             "awww",
             "*",
+            "",
+            "",
         );
         assert_eq!(expanded, "matugen image /w/p.png");
     }
@@ -365,13 +563,96 @@ mod tests {
         let (_tmp, storage) = temp_storage();
         storage.config_set("post_apply_enabled", "off").unwrap();
         storage.config_set("post_apply_command", "false").unwrap();
+        let ctx = basic_ctx("/nope.png".into(), Backend::Awww, FileType::Image, "*");
+        run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+    }
+
+    #[test]
+    fn disabled_hook_still_writes_manifest_when_per_output_present() {
+        let (tmp, storage) = temp_storage();
+        storage.config_set("post_apply_enabled", "off").unwrap();
+        storage.config_set("post_apply_command", "false").unwrap();
+
+        let wall_a = tmp.path().join("a.png");
+        let wall_b = tmp.path().join("b.png");
+        std::fs::write(&wall_a, b"a").unwrap();
+        std::fs::write(&wall_b, b"b").unwrap();
+
         let ctx = PostApplyContext {
-            wallpaper_path: "/nope.png".into(),
+            wallpaper_path: wall_a.to_string_lossy().into_owned(),
             backend: Backend::Awww,
             file_type: FileType::Image,
-            outputs: "*".into(),
+            outputs: "DP-8".into(),
+            changed_outputs: vec!["DP-8".into()],
+            theme_source_output: Some("DP-8".into()),
+            per_output: vec![
+                OutputThemeEntry {
+                    output: "DP-8".into(),
+                    wallpaper: wall_a.to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+                OutputThemeEntry {
+                    output: "eDP-1".into(),
+                    wallpaper: wall_b.to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+            ],
         };
         run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+
+        let manifest = storage.cd.theme_state_path();
+        assert!(manifest.is_file());
+        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+        assert_eq!(doc["version"], 1);
+        assert_eq!(doc["theme_source_output"], "DP-8");
+        assert!(doc["outputs"]["DP-8"]["still"].as_str().is_some());
+        assert!(doc["outputs"]["eDP-1"]["still"].as_str().is_some());
+    }
+
+    #[test]
+    fn still_failure_on_one_output_still_writes_manifest() {
+        let (tmp, storage) = temp_storage();
+        storage.config_set("post_apply_enabled", "off").unwrap();
+
+        let wall_ok = tmp.path().join("ok.png");
+        std::fs::write(&wall_ok, b"ok").unwrap();
+
+        let ctx = PostApplyContext {
+            wallpaper_path: wall_ok.to_string_lossy().into_owned(),
+            backend: Backend::Awww,
+            file_type: FileType::Image,
+            outputs: "DP-8".into(),
+            changed_outputs: vec!["DP-8".into()],
+            theme_source_output: Some("DP-8".into()),
+            per_output: vec![
+                OutputThemeEntry {
+                    output: "DP-8".into(),
+                    wallpaper: wall_ok.to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+                OutputThemeEntry {
+                    output: "eDP-1".into(),
+                    wallpaper: tmp.path().join("missing.png").to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+            ],
+        };
+        run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+
+        let doc: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(storage.cd.theme_state_path()).unwrap(),
+        )
+        .unwrap();
+        assert!(doc["outputs"]["DP-8"]["still"].as_str().is_some());
+        assert!(doc["outputs"]["eDP-1"]["still"].is_null());
     }
 
     #[test]
@@ -379,12 +660,7 @@ mod tests {
         let (_tmp, storage) = temp_storage();
         storage.config_set("post_apply_enabled", "on").unwrap();
         storage.config_set("post_apply_command", "   ").unwrap();
-        let ctx = PostApplyContext {
-            wallpaper_path: "/nope.png".into(),
-            backend: Backend::Awww,
-            file_type: FileType::Image,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx("/nope.png".into(), Backend::Awww, FileType::Image, "*");
         run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
     }
 
@@ -426,12 +702,12 @@ mod tests {
         storage
             .config_set("post_apply_command", &format!("\"{}\"", script.display()))
             .unwrap();
-        let ctx = PostApplyContext {
-            wallpaper_path: project.to_string_lossy().into_owned(),
-            backend: Backend::LinuxWallpaperEngine,
-            file_type: FileType::WeScene,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx(
+            project.to_string_lossy().into_owned(),
+            Backend::LinuxWallpaperEngine,
+            FileType::WeScene,
+            "*",
+        );
         run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
 
         assert_eq!(
@@ -454,12 +730,12 @@ mod tests {
 
         storage.config_set("post_apply_enabled", "on").unwrap();
         storage.config_set("post_apply_command", "false").unwrap();
-        let ctx = PostApplyContext {
-            wallpaper_path: project.to_string_lossy().into_owned(),
-            backend: Backend::LinuxWallpaperEngine,
-            file_type: FileType::WeScene,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx(
+            project.to_string_lossy().into_owned(),
+            Backend::LinuxWallpaperEngine,
+            FileType::WeScene,
+            "*",
+        );
 
         let err = run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap_err();
         assert!(
@@ -475,12 +751,12 @@ mod tests {
         storage.config_set("post_apply_command", "false").unwrap();
 
         for file_type in [FileType::WeWeb, FileType::WeApplication] {
-            let ctx = PostApplyContext {
-                wallpaper_path: "/missing-project".into(),
-                backend: Backend::Unsupported,
+            let ctx = basic_ctx(
+                "/missing-project".into(),
+                Backend::Unsupported,
                 file_type,
-                outputs: "*".into(),
-            };
+                "*",
+            );
             run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
         }
     }
@@ -493,7 +769,7 @@ mod tests {
         write_executable_script(
             &script,
             &format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$WCR_WALLPAPER\" \"$WCR_STILL\" \"$WCR_BACKEND\" \"$WCR_OUTPUTS\" > '{}'\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$WCR_WALLPAPER\" \"$WCR_STILL\" \"$WCR_BACKEND\" \"$WCR_OUTPUTS\" \"$WCR_THEME_MANIFEST\" \"$WCR_THEME_SOURCE_OUTPUT\" > '{}'\n",
                 marker.display()
             ),
         )
@@ -509,11 +785,30 @@ mod tests {
             .config_set("post_apply_command", &format!("\"{}\"", script.display()))
             .unwrap();
 
+        let wall_s = wall.to_string_lossy().into_owned();
         let ctx = PostApplyContext {
-            wallpaper_path: wall.to_string_lossy().into_owned(),
+            wallpaper_path: wall_s.clone(),
             backend: Backend::Awww,
             file_type: FileType::Image,
             outputs: "eDP-1,HDMI-A-1".into(),
+            changed_outputs: vec!["eDP-1".into(), "HDMI-A-1".into()],
+            theme_source_output: Some("HDMI-A-1".into()),
+            per_output: vec![
+                OutputThemeEntry {
+                    output: "eDP-1".into(),
+                    wallpaper: wall_s.clone(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+                OutputThemeEntry {
+                    output: "HDMI-A-1".into(),
+                    wallpaper: wall_s.clone(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+            ],
         };
         run_post_apply_hook_with_still_override(&storage, &ctx, Some(still.clone())).unwrap();
 
@@ -523,6 +818,63 @@ mod tests {
         assert_eq!(lines[1], still.to_string_lossy());
         assert_eq!(lines[2], "awww");
         assert_eq!(lines[3], "eDP-1,HDMI-A-1");
+        assert_eq!(lines[4], storage.cd.theme_state_path().to_string_lossy());
+        assert_eq!(lines[5], "HDMI-A-1");
+    }
+
+    #[test]
+    fn last_applied_preserves_wcr_still_from_theme_source_entry() {
+        let (tmp, storage) = temp_storage();
+        let marker = tmp.path().join("marker.txt");
+        let script = tmp.path().join("hook.sh");
+        write_executable_script(
+            &script,
+            &format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$WCR_STILL\" > '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        let wall_a = tmp.path().join("a.png");
+        let wall_b = tmp.path().join("b.png");
+        std::fs::write(&wall_a, b"a").unwrap();
+        std::fs::write(&wall_b, b"b").unwrap();
+
+        storage.config_set("post_apply_enabled", "on").unwrap();
+        storage
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
+            .unwrap();
+
+        let ctx = PostApplyContext {
+            wallpaper_path: wall_b.to_string_lossy().into_owned(),
+            backend: Backend::Awww,
+            file_type: FileType::Image,
+            outputs: "DP-8".into(),
+            changed_outputs: vec!["eDP-1".into(), "DP-8".into()],
+            theme_source_output: Some("DP-8".into()),
+            per_output: vec![
+                OutputThemeEntry {
+                    output: "eDP-1".into(),
+                    wallpaper: wall_a.to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+                OutputThemeEntry {
+                    output: "DP-8".into(),
+                    wallpaper: wall_b.to_string_lossy().into_owned(),
+                    backend: "awww".into(),
+                    file_type: "image".into(),
+                    still: None,
+                },
+            ],
+        };
+        run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
+        assert_eq!(
+            std::fs::read_to_string(marker).unwrap().trim(),
+            wall_b.to_string_lossy()
+        );
     }
 
     #[test]
@@ -534,12 +886,12 @@ mod tests {
         storage.config_set("post_apply_enabled", "on").unwrap();
         storage.config_set("post_apply_command", "false").unwrap();
 
-        let ctx = PostApplyContext {
-            wallpaper_path: still.to_string_lossy().into_owned(),
-            backend: Backend::Awww,
-            file_type: FileType::Image,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx(
+            still.to_string_lossy().into_owned(),
+            Backend::Awww,
+            FileType::Image,
+            "*",
+        );
         let err = run_post_apply_hook_with_still_override(&storage, &ctx, Some(still)).unwrap_err();
         assert!(
             err.contains("exited"),
@@ -571,12 +923,12 @@ mod tests {
             .unwrap();
         storage.config_set("post_apply_timeout_secs", "1").unwrap();
 
-        let ctx = PostApplyContext {
-            wallpaper_path: still.to_string_lossy().into_owned(),
-            backend: Backend::Awww,
-            file_type: FileType::Image,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx(
+            still.to_string_lossy().into_owned(),
+            Backend::Awww,
+            FileType::Image,
+            "*",
+        );
         let err = run_post_apply_hook_with_still_override(&storage, &ctx, Some(still)).unwrap_err();
         assert!(
             err.contains("timed out"),
@@ -591,12 +943,12 @@ mod tests {
         std::fs::write(&still, b"fake").unwrap();
         storage.config_set("post_apply_enabled", "on").unwrap();
         storage.config_set("post_apply_command", "false").unwrap();
-        let ctx = PostApplyContext {
-            wallpaper_path: still.to_string_lossy().into_owned(),
-            backend: Backend::Awww,
-            file_type: FileType::Image,
-            outputs: "*".into(),
-        };
+        let ctx = basic_ctx(
+            still.to_string_lossy().into_owned(),
+            Backend::Awww,
+            FileType::Image,
+            "*",
+        );
         // Must not panic even when the command fails.
         run_post_apply_hook(&storage, &ctx);
     }

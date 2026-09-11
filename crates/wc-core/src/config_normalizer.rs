@@ -49,6 +49,26 @@ pub fn normalize_lwe_target_mode(raw: &str) -> &'static str {
     }
 }
 
+/// Normalize `post_apply_theme_source`: `last_applied` | `focused` | `output:<name>`.
+pub fn normalize_post_apply_theme_source(raw: &str) -> String {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return "last_applied".to_string();
+    }
+    match trimmed {
+        "last_applied" | "focused" => trimmed.to_string(),
+        other if other.starts_with("output:") => {
+            let name = other["output:".len()..].trim();
+            if name.is_empty() {
+                "last_applied".to_string()
+            } else {
+                format!("output:{name}")
+            }
+        }
+        _ => "last_applied".to_string(),
+    }
+}
+
 pub fn normalize_config_value(key: &str, value: &str) -> String {
     match key {
         "storage_backend" => "sqlite".to_string(),
@@ -70,6 +90,10 @@ pub fn normalize_config_value(key: &str, value: &str) -> String {
         "post_apply_enabled" => on_off(value, "off"),
 
         "post_apply_timeout_secs" => clamp_i32_string(value, 1, 600, 30),
+
+        "post_apply_theme_source" => normalize_post_apply_theme_source(value),
+
+        "post_apply_on_restore" => on_off(value, "on"),
 
         "linux_wallpaperengine_scaling" => normalize_lwe_scaling(value).to_string(),
 
@@ -338,6 +362,42 @@ mod tests {
         assert_eq!(
             normalize_config_value("post_apply_timeout_secs", "bad"),
             "30"
+        );
+
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "last_applied"),
+            "last_applied"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "focused"),
+            "focused"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "output:DP-8"),
+            "output:DP-8"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "output:  eDP-1  "),
+            "output:eDP-1"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "output:"),
+            "last_applied"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", ""),
+            "last_applied"
+        );
+        assert_eq!(
+            normalize_config_value("post_apply_theme_source", "bogus"),
+            "last_applied"
+        );
+
+        assert_eq!(normalize_config_value("post_apply_on_restore", "on"), "on");
+        assert_eq!(normalize_config_value("post_apply_on_restore", "off"), "off");
+        assert_eq!(
+            normalize_config_value("post_apply_on_restore", "yes"),
+            "on"
         );
     }
 

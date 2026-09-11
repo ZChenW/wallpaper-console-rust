@@ -32,6 +32,19 @@ export function normalizeConfigValue(key: string, value: string): string {
   if (key === 'post_apply_timeout_secs') {
     return clampIntString(value, 1, 600, 30);
   }
+  if (key === 'post_apply_theme_source') {
+    const trimmed = value.trim();
+    if (!trimmed) return 'last_applied';
+    if (trimmed === 'last_applied' || trimmed === 'focused') return trimmed;
+    if (trimmed.startsWith('output:')) {
+      const name = trimmed.slice('output:'.length).trim();
+      return name ? `output:${name}` : 'last_applied';
+    }
+    return 'last_applied';
+  }
+  if (key === 'post_apply_on_restore') {
+    return value === 'off' ? 'off' : 'on';
+  }
   if (key === 'awww_transition_duration') {
     const trimmed = value.trim();
     const parsed = Number.parseFloat(trimmed);

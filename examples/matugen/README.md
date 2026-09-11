@@ -32,6 +32,9 @@ wallpaper-console-rust config-set post_apply_command "$PWD/scripts/post-apply-th
 If you already have another matugen tree, point `~/.config/matugen` at that
 instead of copying these examples.
 
+For multi-monitor focus-follow (pregenerate on apply, swap palettes on focus
+without matugen), see `examples/theme-focus-follow/`.
+
 ## Targets
 
 | Template | Output |

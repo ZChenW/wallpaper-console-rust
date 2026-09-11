@@ -22,8 +22,9 @@ use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
 use crate::display_apply::{
-    display_exec_failure_from_transition, reconcile_display_state_from_report,
-    rejection_to_app_error, to_exec_action, transition_scope_for_target,
+    build_post_apply_context, display_exec_failure_from_transition, parse_backend,
+    reconcile_display_state_from_report, rejection_to_app_error, to_exec_action,
+    transition_scope_for_target,
 };
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
@@ -271,7 +272,43 @@ impl AppService {
                 before_state_commit,
             ));
         }
+
+        if self.storage.config_get("post_apply_on_restore", "on") == "on" {
+            self.publish_theme_after_restore(&restored_state, known_outputs);
+        }
         Ok(())
+    }
+
+    fn publish_theme_after_restore(
+        &self,
+        restored_state: &[(DisplayStateTarget, String, String)],
+        known_outputs: &[String],
+    ) {
+        let changed_outputs = known_outputs.to_vec();
+        let (fallback_wallpaper, fallback_backend_str) = restored_state
+            .iter()
+            .find_map(|(target, path, backend)| match target {
+                DisplayStateTarget::AllDisplays => Some((path.clone(), backend.clone())),
+                DisplayStateTarget::Output(name) if known_outputs.iter().any(|o| o == name) => {
+                    Some((path.clone(), backend.clone()))
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| (String::new(), "awww".into()));
+        let fallback_backend = parse_backend(&fallback_backend_str).unwrap_or(Backend::Awww);
+        let fallback_file_type = crate::post_apply::file_type_from_str(
+            &crate::post_apply::detect_file_type_string(&fallback_wallpaper),
+        );
+        let ctx = build_post_apply_context(
+            &self.storage,
+            restored_state,
+            known_outputs,
+            &changed_outputs,
+            &fallback_wallpaper,
+            fallback_backend,
+            fallback_file_type,
+        );
+        crate::post_apply::publish_theme_and_run_hook(&self.storage, &ctx);
     }
 
     fn reconcile_restore_commit_failure(
@@ -1563,5 +1600,182 @@ mod tests {
             runtime.stop_mpvpaper_outputs_calls,
             vec![vec!["HDMI-1".to_string()]]
         );
+    }
+
+    fn write_executable_script(path: &std::path::Path, body: &str) -> std::io::Result<()> {
+        use std::io::Write;
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(body.as_bytes())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = file.metadata()?.permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms)?;
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn successful_restore_runs_post_apply_hook_when_enabled() {
+        let (tmp, service) = temp_service();
+        let img = write_image(tmp.path(), "restore-theme.jpg");
+        let marker = tmp.path().join("hook-ran.txt");
+        let script = tmp.path().join("hook.sh");
+        write_executable_script(
+            &script,
+            &format!(
+                "#!/bin/sh\necho ran >> '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &img.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_enabled", "on")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_on_restore", "on")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
+            .unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut rt,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        let body = std::fs::read_to_string(&marker).unwrap();
+        assert_eq!(body.lines().count(), 1, "hook should run once: {body}");
+        assert!(service.storage_for_tests().cd.theme_state_path().is_file());
+    }
+
+    #[test]
+    fn failed_restore_does_not_run_post_apply_hook() {
+        let (tmp, service) = temp_service();
+        let img = write_image(tmp.path(), "restore-fail.jpg");
+        let marker = tmp.path().join("hook-ran.txt");
+        let script = tmp.path().join("hook.sh");
+        write_executable_script(
+            &script,
+            &format!(
+                "#!/bin/sh\necho ran >> '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &img.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_enabled", "on")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_on_restore", "on")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
+            .unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: false,
+            command_status_success: true,
+            ..Default::default()
+        };
+        let err = service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut rt,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap_err();
+        assert!(!err.code.is_empty());
+        assert!(
+            !marker.exists(),
+            "hook must not run on restore failure"
+        );
+    }
+
+    #[test]
+    fn restore_skips_hook_when_post_apply_on_restore_off() {
+        let (tmp, service) = temp_service();
+        let img = write_image(tmp.path(), "restore-skip.jpg");
+        let marker = tmp.path().join("hook-ran.txt");
+        let script = tmp.path().join("hook.sh");
+        write_executable_script(
+            &script,
+            &format!(
+                "#!/bin/sh\necho ran >> '{}'\n",
+                marker.display()
+            ),
+        )
+        .unwrap();
+
+        service
+            .storage_for_tests()
+            .display_state_upsert(
+                &DisplayStateTarget::AllDisplays,
+                &img.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_enabled", "on")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_on_restore", "off")
+            .unwrap();
+        service
+            .storage_for_tests()
+            .config_set("post_apply_command", &format!("\"{}\"", script.display()))
+            .unwrap();
+
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into()],
+                &mut rt,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+        assert!(!marker.exists());
     }
 }

@@ -42,6 +42,8 @@ const WRITABLE_CONFIG_KEYS: &[&str] = &[
     "post_apply_enabled",
     "post_apply_command",
     "post_apply_timeout_secs",
+    "post_apply_theme_source",
+    "post_apply_on_restore",
 ];
 
 fn config_key_writable_from_gui(key: &str) -> bool {
@@ -431,6 +433,8 @@ mod tests {
             validate_writable_config_set("post_apply_command", "matugen image \"$still\"").is_ok()
         );
         assert!(validate_writable_config_set("post_apply_timeout_secs", "30").is_ok());
+        assert!(validate_writable_config_set("post_apply_theme_source", "focused").is_ok());
+        assert!(validate_writable_config_set("post_apply_on_restore", "off").is_ok());
         assert!(validate_writable_config_set("linux_wallpaperengine_path", "auto").is_ok());
     }
 

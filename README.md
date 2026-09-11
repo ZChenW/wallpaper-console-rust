@@ -86,6 +86,13 @@ wallpaper-console-rust config-set post_apply_enabled on
 Its default command is `matugen image "$still"`. Configure
 `post_apply_command` to integrate another theme tool.
 
+For multi-monitor **focus-follow** (precompute palettes on apply, swap on
+focus with no matugen), see `examples/theme-focus-follow/`. WC always writes
+`theme-state.json` on successful apply when per-output data is available;
+set `post_apply_theme_source` to `last_applied`, `focused`, or `output:<name>`,
+and optionally `post_apply_on_restore on` (default) so restore republishes
+themes.
+
 ## Troubleshooting
 
 If the GUI opens as a blank window because of WebKitGTK rendering issues, try:

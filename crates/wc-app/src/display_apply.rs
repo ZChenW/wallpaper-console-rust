@@ -276,15 +276,16 @@ impl AppService {
                 {
                     let _ = wc_storage::we_compat::clear_failure(path);
                 }
-                crate::post_apply::run_post_apply_hook(
+                let post_apply_ctx = build_post_apply_context(
                     &self.storage,
-                    &crate::post_apply::PostApplyContext {
-                        wallpaper_path: apply_target.resolved_path.clone(),
-                        backend: apply_target.backend,
-                        file_type: apply_target.file_type,
-                        outputs: applied_outputs.join(","),
-                    },
+                    &intended,
+                    known_outputs,
+                    &applied_outputs,
+                    &apply_target.resolved_path,
+                    apply_target.backend,
+                    apply_target.file_type,
                 );
+                crate::post_apply::publish_theme_and_run_hook(&self.storage, &post_apply_ctx);
                 Ok(DisplayApplyExecutionResult {
                     request_id: request.request_id,
                     input_path: apply_target.input_path,
@@ -697,6 +698,103 @@ pub(crate) fn running_from_display_state(
 /// Compute the display_state rows to persist after a successful apply.
 ///
 /// Disconnected (unknown) output rows from `previous` are preserved.
+/// Build post-apply / theme-manifest context from intended display rows.
+pub(crate) fn build_post_apply_context(
+    storage: &wc_storage::StorageApi,
+    intended: &[(DisplayStateTarget, String, String)],
+    known_outputs: &[String],
+    changed_outputs: &[String],
+    fallback_wallpaper: &str,
+    fallback_backend: Backend,
+    fallback_file_type: FileType,
+) -> crate::post_apply::PostApplyContext {
+    let per_output = per_output_theme_entries(intended, known_outputs);
+    let policy_raw = storage.config_get("post_apply_theme_source", "last_applied");
+    let policy = crate::theme_source::ThemeSourcePolicy::parse(&policy_raw);
+    let focused = if matches!(policy, crate::theme_source::ThemeSourcePolicy::Focused) {
+        crate::theme_source::probe_focused_output()
+    } else {
+        None
+    };
+    let theme_source_output = crate::theme_source::select_theme_source(
+        &policy,
+        changed_outputs,
+        known_outputs,
+        focused.as_deref(),
+    );
+
+    let (wallpaper_path, backend, file_type) = theme_source_output
+        .as_ref()
+        .and_then(|name| {
+            per_output.iter().find(|entry| &entry.output == name).map(|entry| {
+                (
+                    entry.wallpaper.clone(),
+                    parse_backend(&entry.backend).unwrap_or(fallback_backend),
+                    crate::post_apply::file_type_from_str(&entry.file_type),
+                )
+            })
+        })
+        .unwrap_or_else(|| {
+            (
+                fallback_wallpaper.to_string(),
+                fallback_backend,
+                fallback_file_type,
+            )
+        });
+
+    crate::post_apply::PostApplyContext {
+        wallpaper_path,
+        backend,
+        file_type,
+        outputs: changed_outputs.join(","),
+        changed_outputs: changed_outputs.to_vec(),
+        theme_source_output,
+        per_output,
+    }
+}
+
+fn per_output_theme_entries(
+    intended: &[(DisplayStateTarget, String, String)],
+    known_outputs: &[String],
+) -> Vec<crate::post_apply::OutputThemeEntry> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<String, (String, String)> = HashMap::new();
+
+    if let Some((_, path, backend)) = intended
+        .iter()
+        .find(|(target, _, _)| matches!(target, DisplayStateTarget::AllDisplays))
+    {
+        for output in known_outputs {
+            map.insert(output.clone(), (path.clone(), backend.clone()));
+        }
+    }
+
+    for (target, path, backend) in intended {
+        let DisplayStateTarget::Output(name) = target else {
+            continue;
+        };
+        if !known_outputs.iter().any(|known| known == name) {
+            continue;
+        }
+        map.insert(name.clone(), (path.clone(), backend.clone()));
+    }
+
+    known_outputs
+        .iter()
+        .filter_map(|output| {
+            let (wallpaper, backend) = map.get(output)?;
+            Some(crate::post_apply::OutputThemeEntry {
+                output: output.clone(),
+                wallpaper: wallpaper.clone(),
+                backend: backend.clone(),
+                file_type: crate::post_apply::detect_file_type_string(wallpaper),
+                still: None,
+            })
+        })
+        .collect()
+}
+
 pub(crate) fn intended_display_state(
     previous: &[DisplayStateRow],
     known_outputs: &[String],
@@ -2427,5 +2525,49 @@ mod tests {
             rows[0].0,
             DisplayStateTarget::Output("HDMI-1".into())
         );
+    }
+
+    #[test]
+    fn successful_apply_writes_theme_state_manifest_for_known_outputs() {
+        let (tmp, service) = temp_service();
+        let image = write_image(tmp.path(), "theme.jpg");
+        service
+            .storage_for_tests()
+            .config_set("post_apply_enabled", "off")
+            .unwrap();
+
+        let request = crate::ApplyRequest {
+            kind: crate::ApplyRequestKind::Apply,
+            path: image.to_string_lossy().to_string(),
+            request_id: Some("theme-manifest".into()),
+        };
+        let mut rt = FakeRuntime {
+            command_output_success: true,
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        service
+            .execute_apply_request_to_display_with_runtime(
+                request,
+                DisplayTarget::AllDisplays,
+                &["eDP-1".into(), "DP-8".into()],
+                &mut rt,
+                &mut reporter,
+                DisplayApplyRuntimeOpts::default(),
+            )
+            .unwrap();
+
+        let manifest = service.storage_for_tests().cd.theme_state_path();
+        assert!(manifest.is_file(), "expected theme-state.json at {manifest:?}");
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&manifest).unwrap()).unwrap();
+        assert_eq!(doc["version"], 1);
+        assert_eq!(doc["theme_source_policy"], "last_applied");
+        assert!(doc["outputs"]["eDP-1"]["wallpaper"]
+            .as_str()
+            .unwrap()
+            .ends_with("theme.jpg"));
+        assert!(doc["outputs"]["DP-8"]["still"].as_str().is_some());
+        assert_eq!(doc["theme_source_output"], "DP-8");
     }
 }
