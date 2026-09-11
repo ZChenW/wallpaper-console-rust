@@ -17,7 +17,6 @@
   --source-card-background: #ffffff;
   --text: #0a0a0a;
   --text-muted: #555551;
-  --text-soft: #787873;
   --border: #a9a9a3;
   --border-strong: #0a0a0a;
   --border-subtle: #d2d2cc;
@@ -750,8 +749,9 @@
   width: 1.7rem;
   height: 1.7rem;
   border: 1px solid var(--text);
-  border-radius: 0;
-  background: var(--bg);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--bg) 72%, transparent);
+  backdrop-filter: blur(4px);
   color: var(--text);
   font-size: 0.95rem;
   transition:
@@ -1319,11 +1319,6 @@
   box-shadow: 0 0 0 2px var(--bg);
 }
 
-:root[data-theme="editorial"] .settings-behavior-card .settings-behavior-help[data-help-dismissed="false"]:focus-visible {
-  outline: none;
-  box-shadow: none;
-}
-
 :root[data-theme="editorial"] .wallpaper-card .wallpaper-card__primary:focus-visible {
   outline: none;
   box-shadow: none;
@@ -1678,7 +1673,6 @@
     --source-card-background: Canvas;
     --text: CanvasText;
     --text-muted: CanvasText;
-    --text-soft: CanvasText;
     --border: ButtonText;
     --border-strong: ButtonText;
     --border-subtle: ButtonText;

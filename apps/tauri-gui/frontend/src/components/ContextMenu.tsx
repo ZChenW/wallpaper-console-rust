@@ -1,4 +1,4 @@
-import { useEffect, useRef, type KeyboardEvent } from 'react';
+import { useEffect, useLayoutEffect, useRef, type KeyboardEvent } from 'react';
 import { emitFeedback } from '../events/appEvents';
 import type { ContextAction } from './libraryViewModel.ts';
 
@@ -110,7 +110,11 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
   useEffect(() => {
     const handler = () => onClose();
     window.addEventListener('scroll', handler, true);
-    return () => window.removeEventListener('scroll', handler, true);
+    window.addEventListener('blur', handler);
+    return () => {
+      window.removeEventListener('scroll', handler, true);
+      window.removeEventListener('blur', handler);
+    };
   }, [onClose]);
 
   useEffect(() => () => {
@@ -125,7 +129,7 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
     if (!focusMovedOutside) returnFocus.focus();
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const menu = ref.current;
     if (!menu) return undefined;
 
@@ -143,7 +147,12 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
       menu.style.top = `${top}px`;
     };
 
+    // Clamp before paint, then focus. autoFocus alone is unreliable when the
+    // first paint sits mostly off-screen near a viewport edge.
     placeWithinViewport();
+    if (!menu.contains(document.activeElement)) {
+      menu.querySelector<HTMLButtonElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    }
     window.addEventListener('resize', placeWithinViewport);
     return () => window.removeEventListener('resize', placeWithinViewport);
   }, [actions, x, y]);

@@ -22,8 +22,8 @@ export default function LibraryState({
   return (
     <section
       className={['single-page-empty', 'library-state', className].filter(Boolean).join(' ')}
-      role={role}
     >
+      {role ? <span className="sr-only" role={role}>{title}</span> : null}
       <span aria-hidden="true" className="library-state__icon">{icon}</span>
       <h2>{title}</h2>
       <p className="library-state__description">{description}</p>

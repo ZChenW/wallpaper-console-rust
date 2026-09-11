@@ -211,6 +211,7 @@ export default function WallpaperPreviewMedia({
     return (
       <>
         <video
+          aria-hidden="true"
           autoPlay
           className={className}
           data-enhanced-preview="video"
@@ -224,7 +225,9 @@ export default function WallpaperPreviewMedia({
           ref={setVideoRef}
           src={activeVideoSource ?? undefined}
         />
-        {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
+        {enhancedError && !thumbnail ? (
+          <span aria-label="Preview unavailable" className="wallpaper-thumb-error" title="Preview unavailable">!</span>
+        ) : null}
       </>
     );
   }
@@ -286,7 +289,9 @@ export default function WallpaperPreviewMedia({
             src={safeFileSrc(pendingImagePath)}
           />
         ) : null}
-        {enhancedError && !thumbnail ? <span className="wallpaper-preview-status" role="status">Preview unavailable</span> : null}
+        {enhancedError && !thumbnail ? (
+          <span aria-label="Preview unavailable" className="wallpaper-thumb-error" title="Preview unavailable">!</span>
+        ) : null}
       </>
     );
   }
@@ -296,9 +301,7 @@ export default function WallpaperPreviewMedia({
       className={`wallpaper-thumb-placeholder${className ? ` ${className}` : ''}`}
     >
       <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
-      {enhancedError ? (
-        <span className="wallpaper-preview-status" role="status">Preview unavailable</span>
-      ) : thumbnailFailure || thumbnailLoadFailed ? (
+      {enhancedError || thumbnailFailure || thumbnailLoadFailed ? (
         <span
           aria-label="Preview unavailable"
           className="wallpaper-thumb-error"

@@ -1,3 +1,5 @@
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
+import { useAbortExitWhenReducedMotion } from '../hooks/useAbortExitWhenReducedMotion.ts';
 import {
   useCallback,
   useEffect,
@@ -695,6 +697,7 @@ export function SourcePanel({
   const [removeCandidateId, setRemoveCandidateId] = useState<number | null>(null);
   const [renameEditor, setRenameEditor] = useState<RenameEditor | null>(null);
 
+  const reducedMotion = useReducedMotion();
   const [prevOpen, setPrevOpen] = useState(open);
   const [shouldRender, setShouldRender] = useState(open);
   const [presentationPhase, setPresentationPhase] = useState<SourcePanelPresentationPhase>('open');
@@ -721,8 +724,6 @@ export function SourcePanel({
       const transition = transitionSourcePanelVisibility(visibility.current, false);
       visibility.current = transition.next;
 
-      const reducedMotion = typeof window !== 'undefined'
-        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
 
       setPresentationPhase('exiting');
       if (reducedMotion) {
@@ -735,6 +736,8 @@ export function SourcePanel({
       }
     }
   }
+
+  useAbortExitWhenReducedMotion(open, reducedMotion, exitTimerRef, setShouldRender);
 
   useEffect(() => () => {
     if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);

@@ -20,3 +20,9 @@ export async function measureAsync<T>(name: string, fn: () => Promise<T>): Promi
 export function getRecentMetrics(): Metric[] {
   return [...metrics];
 }
+
+export function libraryMetricsEnabled(): boolean {
+  if (import.meta.env?.DEV) return true;
+  try { return localStorage.getItem('wc.debug.metrics') === 'on'; }
+  catch { return false; }
+}

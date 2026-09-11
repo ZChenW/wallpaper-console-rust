@@ -67,7 +67,10 @@ export function WallpaperDetailsDialogView({
   };
 
   return (
-    <div className="wallpaper-details__overlay">
+    <div
+      className="wallpaper-details__overlay"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
       <section
         aria-labelledby="wallpaper-details-title"
         aria-modal="true"

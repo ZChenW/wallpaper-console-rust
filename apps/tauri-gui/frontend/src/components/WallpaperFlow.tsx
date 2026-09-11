@@ -1,3 +1,4 @@
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 import {
   memo,
   useCallback,
@@ -18,7 +19,7 @@ import {
 import { SearchX } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
-import { recordMetric } from '../perf/metrics.ts';
+import { libraryMetricsEnabled, recordMetric } from '../perf/metrics.ts';
 import { resolveCardPointerInteraction } from '../shell/cardInteraction.ts';
 import type { ApplyGesture } from '../shell/shellPreferences.ts';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
@@ -189,21 +190,6 @@ function isRenderedFlowItemCentered(
     - (streamBounds.top + streamBounds.height / 2);
   const tolerance = Math.max(3, Math.min(18, optionBounds.height * 0.035));
   return Math.abs(signedDelta) <= tolerance;
-}
-
-function useReducedMotion(): boolean {
-  const [reduced, setReduced] = useState(() => (
-    typeof window !== 'undefined'
-      && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true
-  ));
-  useEffect(() => {
-    const query = window.matchMedia?.('(prefers-reduced-motion: reduce)');
-    if (!query) return undefined;
-    const update = () => setReduced(query.matches);
-    query.addEventListener?.('change', update);
-    return () => query.removeEventListener?.('change', update);
-  }, []);
-  return reduced;
 }
 
 function WallpaperFlowReady({
@@ -1076,8 +1062,8 @@ function WallpaperFlowReady({
     virtualizer.range?.startIndex,
   ]);
 
+  const [shouldSample] = useState(libraryMetricsEnabled);
   useEffect(() => {
-    const shouldSample = import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
     if (!shouldSample) return undefined;
     const sample = () => {
       recordMetric('library.flow.renderedItems', virtualizer.getVirtualItems().length);
@@ -1086,7 +1072,7 @@ function WallpaperFlowReady({
     sample();
     const timer = window.setInterval(sample, FLOW_METRICS_SAMPLE_MS);
     return () => window.clearInterval(timer);
-  }, [centeredIndex, interactionController, virtualizer]);
+  }, [centeredIndex, interactionController, shouldSample, virtualizer]);
 
   useEffect(() => () => {
     clearResizeReanchorTimer();
@@ -1185,8 +1171,9 @@ function WallpaperFlowReady({
     const index = model.entries.findIndex((candidate) => candidate.wallpaperId === entry.wallpaperId);
     if (index >= 0) centerAtIndex(index);
     streamRef.current?.focus({ preventScroll: true });
+    model.onSelect(entry);
     setContextMenu({ entry, x, y });
-  }, [centerAtIndex, markUserInteraction, model.entries]);
+  }, [centerAtIndex, markUserInteraction, model.entries, model.onSelect]);
 
   const handleFlowKey = useCallback((event: FlowKeyEvent): boolean => {
     const activeIndex = interactionController.activeIndex(centeredIndex);
@@ -1338,6 +1325,7 @@ function WallpaperFlowReady({
         onWheel={handleWheel}
         ref={streamRef}
         role="listbox"
+        aria-multiselectable={false}
         tabIndex={0}
       >
         <div

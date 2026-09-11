@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { WallpaperDTO } from '../api/bridge';
 import { isRevisionChangedError } from '../api/types.ts';
 
@@ -44,7 +44,9 @@ export function mergePagedWallpaperItems<T extends WallpaperDTO = WallpaperDTO>(
   append: boolean,
 ): T[] {
   const items = incoming ?? [];
-  return append ? [...previous, ...items] : items;
+  if (!append) return items;
+  // Empty responses should not invalidate every consumer of the loaded list.
+  return items.length === 0 ? previous : previous.concat(items);
 }
 
 export function resolveRequestKind(append: boolean, hasLoadedOnce: boolean): RequestKind {
@@ -318,11 +320,6 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     setAutomaticAppendPaused(false);
   }, [loadPage]);
 
-  const entryByPath = useMemo(
-    () => new Map(entries.map((entry) => [entry.path, entry])),
-    [entries],
-  );
-
   const loading = initialLoading || refreshing;
 
   return {
@@ -350,6 +347,5 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     loadMore,
     requestMoreIfNeeded,
     appendMore,
-    entryByPath,
   };
 }

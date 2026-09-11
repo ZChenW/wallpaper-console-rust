@@ -28,6 +28,7 @@ import type {
 } from '../api/types.ts';
 import { commandErrorFeedback, commandResultMessage } from '../api/feedback.ts';
 import LibraryViewport from '../components/LibraryViewport.tsx';
+import LibraryResultAnnouncement from './LibraryResultAnnouncement.tsx';
 import LibraryState from '../components/LibraryState.tsx';
 import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
 import OverflowStrip from '../components/OverflowStrip.tsx';
@@ -1028,10 +1029,13 @@ export default function SinglePageShell() {
       }${feedbackVisible ? ' has-feedback' : ''}`}
       onContextMenu={(event) => {
         const target = event.target;
-        if (
-          target instanceof Element
-          && target.closest('input, textarea, [contenteditable="true"]')
-        ) {
+        if (!(target instanceof Element)) return;
+        if (target.closest('[data-allow-context-menu], input, textarea, [contenteditable="true"]')) {
+          return;
+        }
+        // Suppress the browser menu only on library surfaces; details, notices,
+        // and other chrome keep native copy/inspect.
+        if (!target.closest('.library-viewport, .wallpaper-card, .flow-preview-item')) {
           return;
         }
         event.preventDefault();
@@ -1090,7 +1094,7 @@ export default function SinglePageShell() {
       </header>
 
       <div className="single-page-library-controls">
-        <OverflowStrip className="single-page-filters" aria-label="Library filters">
+        <OverflowStrip className="single-page-filters" role="toolbar" aria-label="Library filters">
           <span aria-hidden="true" className="single-page-filters__label">01 / FILTER</span>
           {renderFilterControls()}
         </OverflowStrip>
@@ -1120,7 +1124,7 @@ export default function SinglePageShell() {
           value={preferences.libraryViewMode}
         />
         {preferences.libraryViewMode === 'grid' ? (
-          <span className="single-page-count" aria-live="polite">
+          <span className="single-page-count">
             <span aria-hidden="true" className="single-page-count__prefix">INDEX / </span>
             {browser.totalKnown
               ? `${browser.entries.length} / ${browser.total}`
@@ -1129,6 +1133,12 @@ export default function SinglePageShell() {
         ) : null}
       </div>
 
+      <LibraryResultAnnouncement
+        criteriaKey={browser.criteriaKey}
+        totalKnown={browser.totalKnown}
+        total={browser.total}
+        pending={browser.criteriaReplacementPending || browser.loading}
+      />
       <main className="single-page-library">
         {catalog.errors.displays || catalog.errors.displayState ? (
           <div className="single-page-discovery-error" role="alert">

@@ -14,7 +14,8 @@ export default function LibraryRepairPrompt({
   if (!fault) return null;
 
   return (
-    <section aria-label="Library repair" className="library-repair-prompt" role="alert">
+    <section aria-label="Library repair" className="library-repair-prompt">
+      <span className="sr-only" role="alert">{fault.message}</span>
       <strong>{fault.message}</strong>
       <p>Wallpaper files will not be deleted. Repair rebuilds the library index.</p>
       <div className="library-repair-prompt__actions">

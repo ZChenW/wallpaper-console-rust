@@ -1,3 +1,4 @@
+import { isContextMenuKey } from './keyboardInteraction.ts';
 import type { ApplyGesture } from './shellPreferences.ts';
 
 export interface CardPointerInteractionInput {
@@ -68,7 +69,7 @@ export function resolveCardKeyboardInteraction(
   if (input.key === 'Enter' || input.key === ' ') {
     return { select: true, apply: input.canApply, contextMenu: false };
   }
-  if (input.key === 'ContextMenu' || (input.key === 'F10' && input.shiftKey)) {
+  if (isContextMenuKey(input.key, input.shiftKey)) {
     return { select: false, apply: false, contextMenu: true };
   }
   return { select: false, apply: false, contextMenu: false };

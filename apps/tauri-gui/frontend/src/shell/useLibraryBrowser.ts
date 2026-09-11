@@ -260,6 +260,7 @@ export function useLibraryBrowser({
 
   return {
     ...pages,
+    criteriaKey,
     total: exactTotal
       && exactTotal.criteriaKey === criteriaKey
       && exactTotal.revision === pages.revision

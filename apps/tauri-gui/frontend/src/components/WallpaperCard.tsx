@@ -1,3 +1,5 @@
+import { Heart } from 'lucide-react';
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 import { memo, useState, type CSSProperties } from 'react';
 import type { LibraryBrowserItemDTO } from '../api/bridge';
 import { isApplyAvailable } from '../domain/applyActions';
@@ -80,8 +82,7 @@ function WallpaperCardImpl({
   onFocus,
 }: CardProps) {
   const [hovered, setHovered] = useState(false);
-  const reducedMotion = typeof window !== 'undefined'
-    && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
+  const reducedMotion = useReducedMotion();
   const animatedPreview = animatedPreviewPath(
     entry,
     hovered,
@@ -187,6 +188,7 @@ function WallpaperCardImpl({
       data-wallpaper-id={entry.wallpaperId}
       data-wallpaper-path={entry.path}
       data-wallpaper-position={posInSet}
+      aria-selected={selected}
       aria-colindex={columnIndex}
       role="gridcell"
     >
@@ -226,6 +228,7 @@ function WallpaperCardImpl({
       </button>
       <button
         aria-label={entry.favorite ? 'Remove favorite' : 'Add favorite'}
+        aria-pressed={entry.favorite}
         className={`wallpaper-favorite-button${entry.favorite ? ' is-favorite' : ''}`}
         data-card-control
         disabled={favoritePending}
@@ -236,7 +239,7 @@ function WallpaperCardImpl({
           onToggleFavorite(entry);
         }}
       >
-        {entry.favorite ? '♥' : '♡'}
+        <Heart aria-hidden="true" size={16} fill={entry.favorite ? 'currentColor' : 'none'} />
       </button>
       {stateDescription ? (
         <span className="wallpaper-card__state" id={stateDescriptionId}>

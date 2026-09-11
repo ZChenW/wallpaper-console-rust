@@ -1,3 +1,4 @@
+import { isContextMenuKey } from '../shell/keyboardInteraction.ts';
 export interface FlowKeyInput {
   readonly key: string;
   readonly currentIndex: number;
@@ -171,6 +172,10 @@ export function resolveFlowKey(input: FlowKeyInput): FlowKeyResolution | null {
   });
   const pageStep = positiveInteger(input.pageStep, 1);
 
+  if (isContextMenuKey(input.key, input.shiftKey)) {
+    return { type: 'context', index: clampFlowIndex(input.currentIndex, input.itemCount) ?? 0 };
+  }
+
   switch (input.key) {
     case 'ArrowUp':
       return navigate(input.currentIndex - 1);
@@ -189,6 +194,7 @@ export function resolveFlowKey(input: FlowKeyInput): FlowKeyResolution | null {
           && input.loadingMore !== true
           && input.endLoadRequestAllowed === true,
       );
+    case ' ':
     case 'Enter': {
       const index = clampFlowIndex(input.currentIndex, input.itemCount) ?? 0;
       return input.ctrlKey === true
@@ -196,13 +202,6 @@ export function resolveFlowKey(input: FlowKeyInput): FlowKeyResolution | null {
         || input.selectedIndex === index
         ? { type: 'apply', index }
         : { type: 'select', index };
-    }
-    case 'F10': {
-      if (input.shiftKey !== true) return null;
-      return {
-        type: 'context',
-        index: clampFlowIndex(input.currentIndex, input.itemCount) ?? 0,
-      };
     }
     default:
       return null;

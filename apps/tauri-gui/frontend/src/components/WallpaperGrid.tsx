@@ -1,9 +1,8 @@
 import { memo, useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { SearchX } from 'lucide-react';
 import type { LibraryBrowserItemDTO } from '../api/bridge';
 import { emitFeedback } from '../events/appEvents.ts';
-import { recordMetric } from '../perf/metrics';
+import { libraryMetricsEnabled, recordMetric } from '../perf/metrics';
 import type { ApplyGesture } from '../shell/shellPreferences';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext';
 import {
@@ -16,7 +15,6 @@ import {
   type WallpaperCardSize,
 } from '../utils/layout';
 import ContextMenu from './ContextMenu';
-import LibraryState from './LibraryState.tsx';
 import { WallpaperCard } from './WallpaperCard';
 import {
   libraryEntryApplyAvailable,
@@ -37,6 +35,13 @@ import {
   wallpaperOrdinal,
 } from './wallpaperGridHelpers';
 
+function findEntryByPath(entries: readonly LibraryBrowserItemDTO[], path: string) {
+  for (let index = entries.length - 1; index >= 0; index--) {
+    if (entries[index].path === path) return entries[index];
+  }
+  return null;
+}
+
 interface Props {
   entries: readonly LibraryBrowserItemDTO[];
   setSize?: number;
@@ -44,7 +49,6 @@ interface Props {
   onSelect?: (entry: LibraryBrowserItemDTO) => void;
   onToggleFavorite: (entry: LibraryBrowserItemDTO) => void;
   applying: boolean;
-  emptyText?: string;
   contextActions?: ContextAction[];
   buildContextActions?: (entry: LibraryBrowserItemDTO) => ContextAction[];
   active?: boolean;
@@ -95,7 +99,6 @@ function WallpaperGridImpl({
   onSelect,
   onToggleFavorite,
   applying,
-  emptyText = 'No wallpapers found',
   contextActions = [],
   buildContextActions,
   active = true,
@@ -377,8 +380,7 @@ function WallpaperGridImpl({
     });
   }, [colCount, entries, gridLayout.rowHeight, resetKey]);
 
-  const shouldSampleGridMetrics =
-    import.meta.env.DEV || localStorage.getItem('wc.debug.metrics') === 'on';
+  const [shouldSampleGridMetrics] = useState(libraryMetricsEnabled);
 
   useEffect(() => {
     if (!active) return;
@@ -400,7 +402,7 @@ function WallpaperGridImpl({
     sampleGridMetrics();
     const id = window.setInterval(sampleGridMetrics, METRICS_SAMPLE_MS);
     return () => window.clearInterval(id);
-  }, [active, virtualizer]);
+  }, [active, shouldSampleGridMetrics, virtualizer]);
 
   useEffect(() => {
     if (!active) return;
@@ -455,12 +457,16 @@ function WallpaperGridImpl({
 
   const handleContextMenu = useCallback((e: React.MouseEvent, path: string) => {
     e.preventDefault();
+    const entry = findEntryByPath(entriesRef.current, path);
+    if (entry) onSelect?.(entry);
     setContextMenu({ x: e.clientX, y: e.clientY, path });
-  }, []);
+  }, [onSelect]);
 
   const handleKeyboardContextMenu = useCallback((path: string, x: number, y: number) => {
+    const entry = findEntryByPath(entriesRef.current, path);
+    if (entry) onSelect?.(entry);
     setContextMenu({ x, y, path });
-  }, []);
+  }, [onSelect]);
 
   const focusGridIndex = useCallback((index: number) => {
     const entry = entriesRef.current[index];
@@ -559,22 +565,12 @@ function WallpaperGridImpl({
     onSelect,
   ]);
 
-  const entryByPath = useMemo(() => new Map(entries.map((entry) => [entry.path, entry])), [entries]);
-
-  const findEntry = (path: string): LibraryBrowserItemDTO | undefined => entryByPath.get(path);
-
-  const contextEntry = contextMenu ? findEntry(contextMenu.path) : null;
-
-  if (entries.length === 0) {
-    return (
-      <LibraryState
-        description="Try clearing the active filters or changing your search."
-        icon={<SearchX aria-hidden="true" size={28} />}
-        role="status"
-        title={emptyText}
-      />
-    );
-  }
+  const contextEntry = useMemo(() => {
+    if (!contextMenu) return null;
+    // Lookup is only needed while a menu is open. Preserve the old Map's
+    // last-match behavior without rebuilding a full index on every append.
+    return findEntryByPath(entries, contextMenu.path);
+  }, [contextMenu, entries]);
 
   // Roving tabindex: real focus moves between card buttons, so the container
   // must not also be a tab stop or claim aria-activedescendant.

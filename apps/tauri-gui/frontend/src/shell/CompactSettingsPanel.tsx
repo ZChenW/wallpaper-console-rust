@@ -1,3 +1,6 @@
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
+import { useAbortExitWhenReducedMotion } from '../hooks/useAbortExitWhenReducedMotion.ts';
+import BehaviorHelp from './BehaviorHelp.tsx';
 import { useCallback, useEffect, useRef, useState, type ChangeEvent, type KeyboardEvent, type MouseEvent } from 'react';
 import { ChevronRight, FolderCog, X } from 'lucide-react';
 
@@ -47,52 +50,6 @@ function errorMessage(error: Error): string {
   return error.message.trim() || 'Unknown configuration error';
 }
 
-function BehaviorHelp({
-  id,
-  label,
-  text,
-}: {
-  readonly id: string;
-  readonly label: string;
-  readonly text: string;
-}) {
-  return (
-    <span className="settings-behavior-help-wrap">
-      <button
-        aria-describedby={id}
-        aria-label={label}
-        className="settings-behavior-help"
-        data-behavior-help={label}
-        data-help-dismissed="false"
-        onBlur={(event) => {
-          event.currentTarget.dataset.helpDismissed = 'false';
-        }}
-        onKeyDown={(event) => {
-          if (
-            event.key !== 'Escape'
-            || event.currentTarget.dataset.helpDismissed === 'true'
-          ) return;
-          event.preventDefault();
-          event.stopPropagation();
-          event.currentTarget.dataset.helpDismissed = 'true';
-        }}
-        onMouseEnter={(event) => {
-          event.currentTarget.dataset.helpDismissed = 'false';
-        }}
-        onMouseLeave={(event) => {
-          event.currentTarget.dataset.helpDismissed = 'true';
-        }}
-        type="button"
-      >
-        <span aria-hidden="true">?</span>
-      </button>
-      <span className="settings-behavior-tooltip" id={id} role="tooltip">
-        {text}
-      </span>
-    </span>
-  );
-}
-
 export function lockBodyScroll(body: { style: { overflow: string } }): () => void {
   const previousOverflow = body.style.overflow;
   body.style.overflow = 'hidden';
@@ -128,6 +85,11 @@ export function CompactSettingsPanelView({
         data-obscured={obscured}
         data-presentation-phase={presentationPhase}
         data-settings-overlay={true}
+        onKeyDown={(event) => {
+          if (unavailableToInteraction || event.key !== 'Escape' || event.defaultPrevented) return;
+          event.preventDefault();
+          onClose();
+        }}
         onMouseDown={(event) => {
           if (event.target === event.currentTarget) onClose();
         }}
@@ -144,6 +106,7 @@ export function CompactSettingsPanelView({
           className="settings-panel"
           inert={unavailableToInteraction}
           role="dialog"
+          onKeyDown={(event) => trapDialogFocus(event, event.currentTarget)}
         >
           <header className="settings-panel__header">
             <h2 autoFocus id="settings-panel-title" tabIndex={-1}>Settings</h2>
@@ -776,6 +739,7 @@ export function CompactSettingsPanelView({
 }
 
 export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
+  const reducedMotion = useReducedMotion();
   const [prevOpen, setPrevOpen] = useState(props.open);
   const [shouldRender, setShouldRender] = useState(props.open);
   const [presentationPhase, setPresentationPhase] = useState<'open' | 'exiting'>('open');
@@ -793,8 +757,6 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       setPresentationPhase('open');
     } else {
       setPresentationPhase('exiting');
-      const reducedMotion = typeof window !== 'undefined'
-        && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches === true;
 
       if (reducedMotion) {
         setShouldRender(false);
@@ -806,6 +768,8 @@ export default function CompactSettingsPanel(props: CompactSettingsPanelProps) {
       }
     }
   }
+
+  useAbortExitWhenReducedMotion(props.open, reducedMotion, exitTimerRef, setShouldRender);
 
   // Clean up exit timer on unmount.
   useEffect(() => () => {
