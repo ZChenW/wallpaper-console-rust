@@ -149,7 +149,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # immutable mirror provenance: appimage-toolchain-v1 preserves the exact
+          # immutable mirror provenance: appimage-toolchain-v2 preserves the exact
           # upstream linuxdeploy 659c9db build, Tauri plugins, and Type 2 runtime.
           cache="$HOME/.cache/tauri"
           mkdir -p "${cache}"
@@ -163,23 +163,23 @@ jobs:
             mv "${temporary}" "${destination}"
           }
           fetch_verified \
-            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-x86_64.AppImage' \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v2/linuxdeploy-x86_64.AppImage' \
             "${cache}/linuxdeploy-x86_64.AppImage" \
             '20eebde3c18ae2e44279bd624fc72482503aece216d5d77f10932235342f71c1'
           fetch_verified \
-            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-gtk.sh' \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v2/linuxdeploy-plugin-gtk.sh' \
             "${cache}/linuxdeploy-plugin-gtk.sh" \
             'cb379f9b0733e9ad9f8bd78f8c2fa038aef2478523bb7d4c8e64ff6a1ea3501a'
           fetch_verified \
-            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-gstreamer.sh' \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v2/linuxdeploy-plugin-gstreamer.sh' \
             "${cache}/linuxdeploy-plugin-gstreamer.sh" \
             'c107b49d84edbffc6ab226ed1007e0626a4f7aa2c3a36b7782bef62351d49e94'
           fetch_verified \
-            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/linuxdeploy-plugin-appimage.AppImage' \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v2/linuxdeploy-plugin-appimage.AppImage' \
             "${cache}/linuxdeploy-plugin-appimage.AppImage" \
             'e0129b8070e0c7b37151027e46e9fa44fe97ea29e3692705a2c5cff3771d3121'
           fetch_verified \
-            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v1/appimage-runtime-x86_64' \
+            'https://github.com/ZChenW/wallpaper-console-rust/releases/download/appimage-toolchain-v2/appimage-runtime-x86_64' \
             "${cache}/appimage-runtime-x86_64" \
             '439731bfc9b4620ad11802ad5a3c22707f24f3a49de09461ec937ce6e35dd5cd'
 

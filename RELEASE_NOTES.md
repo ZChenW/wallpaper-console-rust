@@ -1,9 +1,9 @@
-# Wallpaper Console v0.1.4
+# Wallpaper Console v0.1.5
 
 Linux x86_64 follow-up to v0.1.0 focused on dual-display reliability and safer
 cross-backend wallpaper apply.
 
-Tags `v0.1.1`–`v0.1.3` were pushed but never published (lockfile, ignored test modules, CI ffmpeg); this release carries the intended content.
+Tags `v0.1.1`–`v0.1.4` were pushed but never published (lockfile, ignored test modules, CI ffmpeg, missing AppImage toolchain mirror); this release carries the intended content.
 
 ## Changes since v0.1.0
 
@@ -35,8 +35,8 @@ baselines. Windows and macOS are not part of this release.
 
 ## Assets
 
-- `wallpaper-console_0.1.4_x86_64.AppImage` — GUI application
-- `wallpaper-console-cli_0.1.4_x86_64.tar.zst` — separate CLI bundle
+- `wallpaper-console_0.1.5_x86_64.AppImage` — GUI application
+- `wallpaper-console-cli_0.1.5_x86_64.tar.zst` — separate CLI bundle
 - `SHA256SUMS` — SHA-256 checksums for both assets
 
 The AppImage contains the GUI only. Install the separate CLI bundle when using
@@ -55,8 +55,8 @@ Both application assets must report `OK` before use.
 ## Install the AppImage
 
 ```bash
-chmod +x wallpaper-console_0.1.4_x86_64.AppImage
-./wallpaper-console_0.1.4_x86_64.AppImage
+chmod +x wallpaper-console_0.1.5_x86_64.AppImage
+./wallpaper-console_0.1.5_x86_64.AppImage
 ```
 
 The AppImage can be moved anywhere in your home directory. Delete it to remove
@@ -66,9 +66,9 @@ configuration directory.
 ## Install the CLI
 
 ```bash
-tar --zstd -xf wallpaper-console-cli_0.1.4_x86_64.tar.zst
+tar --zstd -xf wallpaper-console-cli_0.1.5_x86_64.tar.zst
 install -Dm755 \
-  wallpaper-console-cli_0.1.4_x86_64/wallpaper-console-rust \
+  wallpaper-console-cli_0.1.5_x86_64/wallpaper-console-rust \
   "$HOME/.local/bin/wallpaper-console-rust"
 wallpaper-console-rust --help
 ```

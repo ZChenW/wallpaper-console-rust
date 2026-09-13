@@ -281,7 +281,7 @@ mod tests {
             "cargo tauri build --bundles appimage",
             "release prepare-appimage",
             "Pin Tauri Linux packaging tools",
-            "releases/download/appimage-toolchain-v1",
+            "releases/download/appimage-toolchain-v2",
             "linuxdeploy-plugin-appimage.AppImage",
             "appimage-runtime-x86_64",
             "linuxdeploy-plugin-appimage-verified.AppImage",
