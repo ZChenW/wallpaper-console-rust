@@ -14,6 +14,8 @@ pub mod capability;
 pub mod display_executor;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
+mod lwe_process;
+mod mpvpaper_media;
 pub mod process_control;
 pub mod runtime;
 pub mod runtime_observation;
@@ -21,6 +23,7 @@ pub mod target_commands;
 pub mod visual_handoff;
 
 pub(crate) mod driver;
+pub use driver::preflight_awww_transparency;
 #[cfg(test)]
 pub(crate) mod test_support {
     //! Shared FakeRuntime for wc-backend unit tests.
@@ -36,10 +39,14 @@ pub(crate) mod test_support {
     use wc_core::types::Backend;
     use wc_storage::StorageApi;
 
-    use crate::runtime::{AwwwReadiness, BackendRuntime, MpvpaperOutputSelector, MpvpaperProcess, ProcessIo};
+    use crate::runtime::{
+        AwwwReadiness, BackendRuntime, MpvpaperOutputSelector, MpvpaperProcess, ProcessIo,
+    };
 
     pub(crate) struct FakeRuntime {
         pub missing_backend: Option<Backend>,
+        pub awww_version: Option<String>,
+        pub stop_awww_query_failed: bool,
         pub stop_awww_count: usize,
         pub stop_mpvpaper_count: usize,
         pub stop_mpvpaper_outputs_calls: Vec<Vec<String>>,
@@ -84,12 +91,22 @@ pub(crate) mod test_support {
         pub swaybg_pid_running_checks: Vec<u32>,
         /// One-shot: next `awww_socket_ready` answers stop_checked, then clears.
         pub awww_stop_verify_pending: bool,
+        /// awww surfaces currently displaying an image: (output, path).
+        pub awww_displayed: Vec<(String, String)>,
+        /// Extra renderer processes surfaced by `renderer_command_lines`.
+        pub extra_command_lines: Vec<Vec<String>>,
+        /// Outputs covered by a fake linux-wallpaperengine process.
+        pub lwe_outputs: Vec<String>,
+        /// When set, renderer process inspection fails.
+        pub process_scan_error: Option<String>,
     }
 
     impl Default for FakeRuntime {
         fn default() -> Self {
             Self {
                 missing_backend: None,
+                awww_version: None,
+                stop_awww_query_failed: false,
                 stop_awww_count: 0,
                 stop_mpvpaper_count: 0,
                 stop_mpvpaper_outputs_calls: Vec::new(),
@@ -131,6 +148,10 @@ pub(crate) mod test_support {
                 swaybg_wait_count: 0,
                 swaybg_pid_running_checks: Vec::new(),
                 awww_stop_verify_pending: false,
+                awww_displayed: Vec::new(),
+                extra_command_lines: Vec::new(),
+                lwe_outputs: Vec::new(),
+                process_scan_error: None,
             }
         }
     }
@@ -145,9 +166,122 @@ pub(crate) mod test_support {
             }
             pids
         }
+
+        /// Query evidence: displayed images, with the latest `clear` outputs
+        /// reported as transparent (matching daemon behavior after release).
+        fn awww_query_payload(&self) -> String {
+            let mut entries: Vec<serde_json::Value> = self
+                .awww_displayed
+                .iter()
+                .map(
+                    |(name, path)| serde_json::json!({"name": name, "displaying": {"image": path}}),
+                )
+                .collect();
+            if let Some(names) = self
+                .command_output_args
+                .iter()
+                .rev()
+                .find(|args| args.first().is_some_and(|arg| arg == "clear"))
+                .and_then(|args| args.get(2))
+            {
+                for name in names.split(',') {
+                    entries.retain(|entry| entry["name"].as_str() != Some(name));
+                    entries.push(serde_json::json!({"name": name, "displaying": {"color": "#0"}}));
+                }
+            }
+            serde_json::json!({"awww-daemon": entries}).to_string()
+        }
     }
 
     impl ProcessIo for FakeRuntime {
+        fn awww_environment(
+            &mut self,
+            _inspect_daemons: bool,
+        ) -> Result<crate::runtime::AwwwEnvironment, WcError> {
+            Ok(crate::runtime::AwwwEnvironment {
+                niri_socket_present: true,
+                version: Some(
+                    self.awww_version
+                        .clone()
+                        .unwrap_or_else(|| "awww 0.12.0".into()),
+                ),
+                daemon_commands: Vec::new(),
+            })
+        }
+
+        fn awww_query_json(&mut self) -> Result<String, WcError> {
+            Ok(self.awww_query_payload())
+        }
+
+        fn renderer_command_lines(
+            &mut self,
+        ) -> Result<Vec<crate::runtime_observation::ProcessCommandLine>, WcError> {
+            if let Some(message) = &self.process_scan_error {
+                return Err(WcError::Other(message.clone()));
+            }
+            let mut lines = Vec::new();
+            if !self.awww_displayed.is_empty() {
+                lines.push(crate::runtime_observation::ProcessCommandLine {
+                    pid: 50,
+                    argv: vec![
+                        "awww-daemon".into(),
+                        "--no-cache".into(),
+                        "--format".into(),
+                        "argb".into(),
+                    ],
+                });
+            }
+            for process in &self.mpvpaper_process_table {
+                let selector = match &process.selector {
+                    MpvpaperOutputSelector::Single(output) => output.clone(),
+                    MpvpaperOutputSelector::Wildcard => "*".to_string(),
+                    MpvpaperOutputSelector::Multi(outputs) => outputs.join(" "),
+                    MpvpaperOutputSelector::Unparseable => String::new(),
+                };
+                lines.push(crate::runtime_observation::ProcessCommandLine {
+                    pid: process.pid,
+                    argv: vec![
+                        "mpvpaper".into(),
+                        selector,
+                        "--".into(),
+                        process.path.clone(),
+                    ],
+                });
+            }
+            for pid in &self.running_mpvpaper_pids {
+                if !self
+                    .mpvpaper_process_table
+                    .iter()
+                    .any(|process| process.pid == *pid)
+                {
+                    // A pid without cmdline evidence reads as ambiguous.
+                    lines.push(crate::runtime_observation::ProcessCommandLine {
+                        pid: *pid,
+                        argv: vec!["mpvpaper".into()],
+                    });
+                }
+            }
+            if !self.lwe_outputs.is_empty() {
+                let mut argv = vec!["linux-wallpaperengine".to_string()];
+                for output in &self.lwe_outputs {
+                    argv.extend([
+                        "--screen-root".to_string(),
+                        output.clone(),
+                        "--bg".to_string(),
+                        "wc-lwe".to_string(),
+                    ]);
+                }
+                lines.push(crate::runtime_observation::ProcessCommandLine { pid: 900, argv });
+            }
+            for (index, argv) in self.extra_command_lines.iter().enumerate() {
+                lines.push(crate::runtime_observation::ProcessCommandLine {
+                    pid: 1000 + index as u32,
+                    argv: argv.clone(),
+                });
+            }
+            Ok(lines)
+        }
+
         fn command_output(
             &mut self,
             command: &mut Command,
@@ -166,9 +300,13 @@ pub(crate) mod test_support {
             } else {
                 "false"
             };
-            Command::new(program)
+            let mut result = Command::new(program)
                 .output()
-                .map_err(|e| WcError::Other(format!("fake command failed: {e}")))
+                .map_err(|e| WcError::Other(format!("fake command failed: {e}")))?;
+            if command.get_args().next().is_some_and(|arg| arg == "query") {
+                result.stdout = self.awww_query_payload().into_bytes();
+            }
+            Ok(result)
         }
 
         fn command_status(
@@ -292,7 +430,11 @@ pub(crate) mod test_support {
         fn awww_socket_ready(&mut self) -> AwwwReadiness {
             if self.awww_stop_verify_pending {
                 self.awww_stop_verify_pending = false;
-                return if self.stop_awww_error.is_some() {
+                return if self.stop_awww_query_failed {
+                    AwwwReadiness::SocketPresentQueryFailed {
+                        stderr: "query unavailable".into(),
+                    }
+                } else if self.stop_awww_error.is_some() {
                     AwwwReadiness::Ready
                 } else {
                     AwwwReadiness::SocketMissing
@@ -325,6 +467,10 @@ pub(crate) mod test_support {
         fn stop_awww(&mut self) {
             self.stop_awww_count += 1;
             self.awww_stop_verify_pending = true;
+            if self.stop_awww_error.is_none() && !self.stop_awww_query_failed {
+                // A stopped daemon no longer displays any surface.
+                self.awww_displayed.clear();
+            }
         }
 
         fn stop_mpvpaper(&mut self) {
@@ -387,7 +533,6 @@ mod restore;
 mod swaybg;
 
 pub use apply_transition::{
-    execute_apply_transition, plan_apply_transition, preflight_apply_transition,
     ApplyTransitionFailure, ApplyTransitionPlan, ApplyTransitionReport, ApplyTransitionRequest,
 };
 pub use display_executor::{
@@ -398,20 +543,67 @@ pub use restore::restore_clean;
 pub use runtime::{MpvpaperOutputSelector, MpvpaperProcess};
 pub use target_commands::ExecutionScope;
 
-use awww::stop_awww;
 use debug_log::{write_apply_stage_timings, write_debug_handoff_log};
 
 /// Stop all wallpaper backends.
 pub fn stop_all_backends(s: Option<&StorageApi>) -> Result<(), WcError> {
-    linux_wallpaperengine::stop(s);
-    mpvpaper::stop_mpvpaper();
-    swaybg::stop_swaybg();
-    stop_awww();
-    // Fallback cleanup: kill residual scene renderer processes that may not have been
-    // recorded in config (e.g. setsid forked and parent PID was recorded, or a crash
-    // left the process behind).
-    linux_wallpaperengine::stop_tracked_processes();
-    Ok(())
+    stop_all_backends_with_runtime(s, &mut runtime::SystemBackendRuntime)
+}
+
+/// Shared global Stop path for CLI/GUI. Attempt every backend even when one
+/// stop fails, then verify that no persistent renderer remains. Saved restore
+/// preferences are untouched; callers clear legacy runtime state only on success.
+pub fn stop_all_backends_with_runtime(
+    s: Option<&StorageApi>,
+    runtime: &mut dyn runtime::BackendRuntime,
+) -> Result<(), WcError> {
+    let mut failures = Vec::new();
+    for backend in [
+        Backend::LinuxWallpaperEngine,
+        Backend::Mpvpaper,
+        Backend::Swaybg,
+        Backend::Awww,
+    ] {
+        if let Err(error) = driver::driver_for(backend)
+            .expect("persistent backend has a driver")
+            .stop_checked(runtime, s)
+        {
+            failures.push(format!("{}: {error}", backend.as_str()));
+        }
+    }
+    // In particular, a cleared LWE tracking PID or missing awww socket does
+    // not prove that an untracked renderer/daemon process has exited.
+    match runtime.renderer_command_lines() {
+        Err(error) => failures.push(format!("cannot verify renderer process exit: {error}")),
+        Ok(processes) => {
+            for process in processes {
+                let Some(binary) = process.argv.first().and_then(|name| {
+                    std::path::Path::new(name)
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                }) else {
+                    continue;
+                };
+                if matches!(
+                    binary,
+                    "linux-wallpaperengine" | "mpvpaper" | "swaybg" | "awww-daemon"
+                ) {
+                    failures.push(format!(
+                        "{binary} process {} remains after Stop",
+                        process.pid
+                    ));
+                }
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        Err(WcError::Other(format!(
+            "Cannot verify all wallpaper backends stopped: {}",
+            failures.join("; ")
+        )))
+    }
 }
 
 /// Backend name constant used for LWE state tracking.
@@ -571,6 +763,7 @@ pub(crate) fn apply_wallpaper_with_runtime(
                             &driver::PrepareApplyRequest {
                                 path: fallback,
                                 scope: &ExecutionScope::AllDisplays,
+                                stopped_backends: &[],
                                 after_stop: true,
                                 clear_state_hint: false,
                                 request_id,
@@ -875,6 +1068,72 @@ mod tests {
         wc_config::write_config_value(&cd.path, "storage_backend", "sqlite").unwrap();
         let s = StorageApi::new(cd);
         (tmp, s)
+    }
+
+    #[test]
+    fn global_stop_rejects_surviving_untracked_renderers() {
+        for binary in ["linux-wallpaperengine", "awww-daemon", "mpvpaper", "swaybg"] {
+            let mut rt = FakeRuntime {
+                extra_command_lines: vec![vec![format!("/usr/bin/{binary}")]],
+                ..Default::default()
+            };
+            let err = stop_all_backends_with_runtime(None, &mut rt).unwrap_err();
+            assert!(err.to_string().contains(binary), "{err}");
+            assert_eq!(
+                (
+                    rt.stop_lwe_count,
+                    rt.stop_mpvpaper_count,
+                    rt.stop_swaybg_count,
+                    rt.stop_awww_count
+                ),
+                (1, 1, 1, 1)
+            );
+        }
+    }
+
+    #[test]
+    fn global_stop_rejects_unreadable_process_state() {
+        let mut rt = FakeRuntime {
+            process_scan_error: Some("injected process read failure".into()),
+            ..Default::default()
+        };
+        let err = stop_all_backends_with_runtime(None, &mut rt).unwrap_err();
+        assert!(err.to_string().contains("injected process read failure"));
+    }
+
+    #[test]
+    fn global_stop_reports_probe_failure_and_attempts_every_backend() {
+        let mut rt = FakeRuntime {
+            stop_awww_query_failed: true,
+            ..Default::default()
+        };
+        let err = stop_all_backends_with_runtime(None, &mut rt).unwrap_err();
+        assert!(err.to_string().contains("awww"));
+        assert_eq!(
+            (
+                rt.stop_lwe_count,
+                rt.stop_mpvpaper_count,
+                rt.stop_swaybg_count,
+                rt.stop_awww_count
+            ),
+            (1, 1, 1, 1)
+        );
+    }
+
+    #[test]
+    fn global_stop_verifies_absence_without_deleting_restore_preferences() {
+        let (_tmp, storage) = temp_storage();
+        storage
+            .display_state_upsert(
+                &wc_storage::sqlite::DisplayStateTarget::Output("eDP-1".into()),
+                "/walls/scene",
+                "linux-wallpaperengine",
+            )
+            .unwrap();
+        let before = storage.display_state_list().unwrap();
+        let mut rt = FakeRuntime::default();
+        stop_all_backends_with_runtime(Some(&storage), &mut rt).unwrap();
+        assert_eq!(storage.display_state_list().unwrap(), before);
     }
 
     #[test]
@@ -1726,7 +1985,11 @@ mod tests {
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
-        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![202]]);
+        assert_eq!(
+            rt.mpvpaper_wait_previous_pids,
+            vec![Vec::<u32>::new()],
+            "baseline is re-read at launch time, after the pre-stop cleared old renderers"
+        );
         assert_eq!(rt.stop_mpvpaper_count, 1);
         assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
     }
@@ -1765,7 +2028,11 @@ mod tests {
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("mpvpaper"));
         assert_eq!(history_rows(&s), history_before);
         assert_eq!(rt.mpvpaper_wait_count, 1);
-        assert_eq!(rt.mpvpaper_wait_previous_pids, vec![vec![303]]);
+        assert_eq!(
+            rt.mpvpaper_wait_previous_pids,
+            vec![Vec::<u32>::new()],
+            "baseline is re-read at launch time, after the pre-stop cleared old renderers"
+        );
         assert_eq!(
             rt.mpvpaper_wait_targets,
             vec![("*".to_string(), next.to_string_lossy().into_owned())]

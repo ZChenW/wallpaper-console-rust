@@ -30,6 +30,11 @@ pub(crate) enum Commands {
     Inspect {
         path: String,
     },
+    /// Keep previously playing niri output assignments alive across output re-enabling.
+    WatchDisplays {
+        #[arg(long)]
+        config_dir: String,
+    },
     Stop,
     Status,
     Restore,

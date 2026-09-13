@@ -1,0 +1,14 @@
+[Unit]
+Description=Wallpaper Console cached theme follows display focus
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+# Render with: python3 theme-palette.py install-service
+ExecStart=@PYTHON@ -B @SCRIPT@ follow
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

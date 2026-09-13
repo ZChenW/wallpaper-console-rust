@@ -344,6 +344,7 @@ export interface WallpaperConsoleApi {
   configGetMany(keys: string[]): Promise<Record<string, string>>;
   configSet(key: string, value: string): Promise<CommandResult>;
   behaviorSettingsGet(): Promise<BehaviorSettingsSnapshotDTO>;
+  reapplyMpvpaper(): Promise<MpvpaperReapplyResultDTO>;
   behaviorSettingsUpdate(
     expectedRevision: string,
     patch: BehaviorSettingsPatchDTO,
@@ -371,6 +372,11 @@ export interface WallpaperConsoleApi {
   libraryReady(): Promise<void>;
   revealMainWindow(): Promise<void>;
   exportDiagnostics(): Promise<CommandResult>;
+}
+
+export interface MpvpaperReapplyResultDTO {
+  readonly appliedOutputs: readonly string[];
+  readonly failures: readonly { readonly output: string; readonly message: string }[];
 }
 
 export type ImageRendererDTO = 'awww' | 'mpvpaper' | 'swaybg' | 'feh';

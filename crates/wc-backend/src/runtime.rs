@@ -16,6 +16,14 @@ pub enum AwwwReadiness {
     SocketPresentQueryFailed { stderr: String },
 }
 
+/// Observed host facts; the driver decides whether transparent release is supported.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwwwEnvironment {
+    pub niri_socket_present: bool,
+    pub version: Option<String>,
+    pub daemon_commands: Vec<Vec<String>>,
+}
+
 pub fn awww_socket_path() -> Result<std::path::PathBuf, WcError> {
     let xdg = std::env::var("XDG_RUNTIME_DIR").map_err(|_| {
         WcError::Other("XDG_RUNTIME_DIR is not set; cannot locate awww-daemon socket".into())
@@ -29,6 +37,10 @@ pub fn awww_socket_path() -> Result<std::path::PathBuf, WcError> {
 /// Prefer this surface for new orchestration. Stop / apply policy belongs on
 /// [`crate::driver::BackendDriver`]; see domain term **ProcessIo**.
 pub trait ProcessIo {
+    /// Prepare media before any destructive stop. Fakes explicitly model success.
+    fn prepare_mpvpaper_options(&mut self, options: &str, _path: &str) -> Result<String, WcError> {
+        Ok(options.to_string())
+    }
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError>;
     fn command_status(
         &mut self,
@@ -85,12 +97,42 @@ pub trait ProcessIo {
         ))
     }
     fn awww_socket_ready(&mut self) -> AwwwReadiness;
+    /// Command lines of the current user's processes, for renderer ownership
+    /// observation. Fails closed: implementations that cannot inspect report
+    /// an error rather than an empty list.
+    fn renderer_command_lines(
+        &mut self,
+    ) -> Result<Vec<crate::runtime_observation::ProcessCommandLine>, WcError> {
+        Err(WcError::Other(
+            "renderer process inspection is unavailable for this runtime".into(),
+        ))
+    }
+    fn awww_process_running(&mut self) -> bool {
+        false
+    }
+    fn awww_environment(&mut self, _inspect_daemons: bool) -> Result<AwwwEnvironment, WcError> {
+        Err(WcError::Other(
+            "awww environment inspection is unavailable for this runtime".into(),
+        ))
+    }
+    fn awww_query_json(&mut self) -> Result<String, WcError> {
+        let result = self.command_output(Command::new("awww").args(["query", "--json"]))?;
+        if !result.status.success() {
+            return Err(WcError::Other(
+                "awww query failed during output release".into(),
+            ));
+        }
+        String::from_utf8(result.stdout).map_err(|error| WcError::Other(error.to_string()))
+    }
 }
 
 /// Testable backend seam: [`ProcessIo`] plus stop/apply hooks for fakes and legacy.
 ///
 /// Checked stops and awww daemon/clear policy live on drivers, not this trait.
 pub trait BackendRuntime: ProcessIo {
+    fn supports_output_recovery(&self) -> bool {
+        false
+    }
     /// Preflight external renderer availability before any destructive handoff.
     /// Test runtimes default to available; the system runtime probes PATH.
     fn ensure_backend_available(
@@ -107,6 +149,11 @@ pub trait BackendRuntime: ProcessIo {
     fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError>;
     fn stop_swaybg(&mut self) {}
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
+    fn stop_lwe_outputs(&mut self, _outputs: &[String]) -> Result<(), WcError> {
+        Err(WcError::Other(
+            "LWE output-scoped stop is unavailable for this runtime".into(),
+        ))
+    }
     /// Apply LWE to explicit outputs (readiness + handoff included).
     ///
     /// System runtime delegates to the real implementation. Fakes must not
@@ -123,7 +170,7 @@ pub struct SystemBackendRuntime;
 
 pub(crate) fn build_awww_daemon_command() -> Command {
     let mut cmd = Command::new("setsid");
-    cmd.args(["-f", "awww-daemon", "--no-cache"])
+    cmd.args(["-f", "awww-daemon", "--no-cache", "--format", "argb"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
@@ -223,11 +270,9 @@ where
     P: FnMut() -> Result<Vec<u32>, WcError>,
     S: FnMut(std::time::Duration),
 {
-    poll_until_pids_absent(
-        &mut probe,
-        &mut sleep,
-        |pids| format!("mpvpaper still running after stop: pids={pids:?}"),
-    )
+    poll_until_pids_absent(&mut probe, &mut sleep, |pids| {
+        format!("mpvpaper still running after stop: pids={pids:?}")
+    })
 }
 
 fn remaining_single_output_pids(processes: &[MpvpaperProcess], outputs: &[String]) -> Vec<u32> {
@@ -340,6 +385,50 @@ where
 }
 
 impl ProcessIo for SystemBackendRuntime {
+    fn prepare_mpvpaper_options(&mut self, options: &str, path: &str) -> Result<String, WcError> {
+        crate::mpvpaper_media::prepare_options(options, path)
+    }
+    fn awww_process_running(&mut self) -> bool {
+        crate::awww::is_awww_daemon_running(&crate::current_process_user())
+    }
+    fn awww_environment(&mut self, inspect_daemons: bool) -> Result<AwwwEnvironment, WcError> {
+        use crate::runtime_observation::{RuntimeObservationIo, SystemRuntimeObservationIo};
+        let version = crate::deadline_command::output(
+            Command::new("awww").arg("--version"),
+            AWWW_QUERY_TIMEOUT,
+        )?;
+        let daemon_commands = if inspect_daemons {
+            SystemRuntimeObservationIo
+                .current_user_process_command_lines()
+                .map_err(WcError::Other)?
+                .into_iter()
+                .map(|p| p.argv)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        Ok(AwwwEnvironment {
+            niri_socket_present: std::env::var_os("NIRI_SOCKET").is_some(),
+            version: version
+                .status
+                .success()
+                .then(|| String::from_utf8_lossy(&version.stdout).trim().to_owned()),
+            daemon_commands,
+        })
+    }
+    fn awww_query_json(&mut self) -> Result<String, WcError> {
+        let result = crate::deadline_command::output(
+            Command::new("awww").args(["query", "--json"]),
+            AWWW_QUERY_TIMEOUT,
+        )?;
+        if !result.status.success() {
+            return Err(WcError::Other(
+                "awww query failed during output release".into(),
+            ));
+        }
+        String::from_utf8(result.stdout).map_err(|error| WcError::Other(error.to_string()))
+    }
+
     fn command_output(&mut self, command: &mut Command) -> Result<Output, WcError> {
         crate::deadline_command::output(command, APPLY_COMMAND_TIMEOUT)
     }
@@ -353,6 +442,13 @@ impl ProcessIo for SystemBackendRuntime {
 
     fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, WcError> {
         crate::mpvpaper::running_pids()
+    }
+
+    fn renderer_command_lines(
+        &mut self,
+    ) -> Result<Vec<crate::runtime_observation::ProcessCommandLine>, WcError> {
+        crate::runtime_observation::read_current_user_process_command_lines()
+            .map_err(WcError::Other)
     }
 
     fn mpvpaper_processes(&mut self) -> Result<Vec<MpvpaperProcess>, WcError> {
@@ -370,7 +466,10 @@ impl ProcessIo for SystemBackendRuntime {
             output,
             path,
             || self.mpvpaper_pids(),
-            crate::mpvpaper::pid_matches_target,
+            |pid, output, path| {
+                crate::mpvpaper::pid_matches_target(pid, output, path)
+                    && crate::mpvpaper_media::media_ready(pid, path)
+            },
             std::thread::sleep,
         )
     }
@@ -445,6 +544,9 @@ impl ProcessIo for SystemBackendRuntime {
 }
 
 impl BackendRuntime for SystemBackendRuntime {
+    fn supports_output_recovery(&self) -> bool {
+        true
+    }
     fn ensure_backend_available(
         &mut self,
         backend: wc_core::types::Backend,
@@ -474,6 +576,10 @@ impl BackendRuntime for SystemBackendRuntime {
 
     fn stop_lwe(&mut self, s: Option<&StorageApi>) {
         crate::linux_wallpaperengine::stop(s);
+    }
+
+    fn stop_lwe_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+        crate::lwe_process::stop_outputs(outputs)
     }
 
     fn apply_lwe_to_outputs(

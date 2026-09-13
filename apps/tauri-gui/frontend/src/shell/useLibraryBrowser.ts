@@ -10,7 +10,6 @@ import type {
 } from '../api/types.ts';
 import {
   usePagedWallpapers,
-  type WallpaperPageDTO,
 } from '../hooks/usePagedWallpapers.ts';
 import { DEFAULT_LIBRARY_PAGE_SIZE } from './libraryQueryState.ts';
 import type {
@@ -157,7 +156,6 @@ export function useLibraryBrowser({
     sort,
     normalizedSearch(debouncedSearch),
   ]);
-  const [resolvedCriteriaKey, setResolvedCriteriaKey] = useState<string | null>(null);
 
   const criteria = useCallback((): LibraryBrowserCriteria => ({
     sourceFilter: sourceId === null
@@ -175,42 +173,21 @@ export function useLibraryBrowser({
     ),
     [browserApi, criteria],
   );
-  const [exactTotal, setExactTotal] = useState<{
-    criteriaKey: string;
-    revision: number;
-    total: number;
-  } | null>(null);
-  const totalRequestKeyRef = useRef<string | null>(null);
-  const totalRequestSeq = useRef(0);
-  const markCriteriaResolved = useCallback((page: WallpaperPageDTO<LibraryBrowserItemDTO>) => {
-    setResolvedCriteriaKey(criteriaKey);
-    const requestKey = `${criteriaKey}:${page.revision}`;
-    if (totalRequestKeyRef.current === requestKey) return;
-    totalRequestKeyRef.current = requestKey;
-    const requestId = ++totalRequestSeq.current;
-    void browserApi.libraryBrowserTotal(
+  const loadTotal = useCallback(
+    (revision: number) => browserApi.libraryBrowserTotal(
       createLibraryBrowserQuery(criteria(), null, pageSize),
-      page.revision,
-    ).then((result) => {
-      if (requestId !== totalRequestSeq.current || result.revision !== page.revision) return;
-      setExactTotal({ criteriaKey, revision: result.revision, total: result.total });
-    }, () => {
-      if (requestId === totalRequestSeq.current) totalRequestKeyRef.current = null;
-    });
-  }, [browserApi, criteria, criteriaKey, pageSize]);
+      revision,
+    ),
+    [browserApi, criteria, pageSize],
+  );
 
   const pages = usePagedWallpapers<LibraryBrowserItemDTO>({
     pageSize,
     loadPage,
     refreshEvent,
-    onPage: markCriteriaResolved,
+    queryKey: criteriaKey,
+    loadTotal,
   });
-
-  useEffect(() => {
-    totalRequestSeq.current += 1;
-    totalRequestKeyRef.current = null;
-    setExactTotal(null);
-  }, [criteriaKey]);
 
   const [randomPending, setRandomPending] = useState(false);
   const [randomError, setRandomError] = useState<string | null>(null);
@@ -261,23 +238,23 @@ export function useLibraryBrowser({
   return {
     ...pages,
     criteriaKey,
-    total: exactTotal
-      && exactTotal.criteriaKey === criteriaKey
-      && exactTotal.revision === pages.revision
-      ? exactTotal.total
+    total: pages.exactTotal != null
+      && pages.resolvedQueryKey === criteriaKey
+      && pages.revision !== null
+      ? pages.exactTotal
       : pages.entries.length,
     totalKnown: Boolean(
-      exactTotal
-      && exactTotal.criteriaKey === criteriaKey
-      && exactTotal.revision === pages.revision,
+      pages.exactTotal != null
+      && pages.resolvedQueryKey === criteriaKey
+      && pages.revision !== null,
     ),
     emptyConfirmed: isCurrentQueryEmpty(
       pages.emptyConfirmed,
-      resolvedCriteriaKey,
+      pages.resolvedQueryKey,
       criteriaKey,
     ),
     criteriaReplacementPending: isLibraryCriteriaPending(
-      resolvedCriteriaKey,
+      pages.resolvedQueryKey,
       criteriaKey,
       search,
       debouncedSearch,

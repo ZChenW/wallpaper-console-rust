@@ -662,6 +662,10 @@ select:focus, input:focus { border-color: var(--primary); }
   grid-column: 1;
 }
 
+.shell-notifications[data-settings-open="true"] {
+  z-index: calc(var(--z-settings-overlay) + 1);
+}
+
 .shell-notifications > .feedback-overlay {
   grid-column: 2;
   justify-self: end;
@@ -2001,7 +2005,7 @@ select:focus, input:focus { border-color: var(--primary); }
   cursor: not-allowed;
 }
 
-.settings-options-reset {
+.settings-options-apply {
   min-height: 2.05rem;
   padding-inline: 0.65rem;
   white-space: nowrap;
@@ -2069,9 +2073,6 @@ select:focus, input:focus { border-color: var(--primary); }
     width: 100%;
   }
 
-  .settings-options-control {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 
 .single-page-checkbox input {

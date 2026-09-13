@@ -394,11 +394,11 @@ mod tests {
         );
 
         assert_eq!(normalize_config_value("post_apply_on_restore", "on"), "on");
-        assert_eq!(normalize_config_value("post_apply_on_restore", "off"), "off");
         assert_eq!(
-            normalize_config_value("post_apply_on_restore", "yes"),
-            "on"
+            normalize_config_value("post_apply_on_restore", "off"),
+            "off"
         );
+        assert_eq!(normalize_config_value("post_apply_on_restore", "yes"), "on");
     }
 
     #[test]

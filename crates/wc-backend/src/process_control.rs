@@ -152,6 +152,9 @@ pub(crate) fn kill_lwe_process_group(pid: i32) {
 
 /// Send SIGTERM then SIGKILL to a single PID.
 pub(crate) fn kill_pid_gracefully(pid: u32) {
+    let Some(identity) = read_proc_cmdline_tokens(pid as i32) else {
+        return;
+    };
     let pid_str = pid.to_string();
     let _ = Command::new("kill")
         .args(["-TERM", &pid_str])
@@ -159,11 +162,20 @@ pub(crate) fn kill_pid_gracefully(pid: u32) {
         .stderr(Stdio::null())
         .status();
     std::thread::sleep(Duration::from_millis(80));
+    if read_proc_cmdline_tokens(pid as i32).as_ref() != Some(&identity) {
+        return;
+    }
     let _ = Command::new("kill")
         .args(["-KILL", &pid_str])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
+    if identity
+        .first()
+        .is_some_and(|p| token_is_mpvpaper_program(p))
+    {
+        crate::mpvpaper_media::cleanup_socket(&identity);
+    }
 }
 
 #[cfg(unix)]

@@ -517,6 +517,8 @@ pub(crate) fn stop_wallpapers_with<F>(
 where
     F: FnOnce(Option<&StorageApi>) -> Result<(), wc_core::error::WcError>,
 {
+    let _guard = wc_app::output_recovery::RendererMutationGuard::acquire(s)?;
+    wc_app::output_recovery::disarm(s)?;
     stop_backends(Some(s))?;
     s.runtime_state_clear()
 }
@@ -847,6 +849,37 @@ mod tests {
             })
             .is_err()
         );
+    }
+
+    #[test]
+    fn stop_wallpapers_verification_failure_preserves_state_and_preferences() {
+        let (_tmp, storage) = storage_with_mode("sqlite");
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage
+            .display_state_upsert(
+                &wc_storage::sqlite::DisplayStateTarget::Output("eDP-1".into()),
+                "/walls/scene",
+                "linux-wallpaperengine",
+            )
+            .unwrap();
+        let before = storage.display_state_list().unwrap();
+        let err = stop_wallpapers_with(&storage, |_| {
+            Err(wc_core::error::WcError::Other(
+                "renderer still running".into(),
+            ))
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("renderer still running"));
+        assert_eq!(
+            storage.current_read().unwrap().as_deref(),
+            Some("/walls/current.jpg")
+        );
+        assert_eq!(
+            storage.last_backend_read().unwrap().as_deref(),
+            Some("awww")
+        );
+        assert_eq!(storage.display_state_list().unwrap(), before);
     }
 
     #[test]

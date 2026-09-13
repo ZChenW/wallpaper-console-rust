@@ -3,6 +3,7 @@ import type {
   ApplyRequestDTO,
   BehaviorSettingsPatchDTO,
   BehaviorSettingsSnapshotDTO,
+  MpvpaperReapplyResultDTO,
   CommandResult,
   DisplayListDTO,
   DisplayStateDTO,
@@ -151,6 +152,8 @@ export const api = {
   configSet: (key: string, value: string): Promise<CommandResult> => invoke<CommandResult>('config_set', { key, value }),
   behaviorSettingsGet: (): Promise<BehaviorSettingsSnapshotDTO> =>
     invoke<BehaviorSettingsSnapshotDTO>('behavior_settings_get'),
+  reapplyMpvpaper: (): Promise<MpvpaperReapplyResultDTO> =>
+    invoke<MpvpaperReapplyResultDTO>('reapply_mpvpaper'),
   behaviorSettingsUpdate: (
     expectedRevision: string,
     patch: BehaviorSettingsPatchDTO,

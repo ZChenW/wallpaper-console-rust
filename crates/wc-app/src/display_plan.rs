@@ -2,7 +2,8 @@
 //!
 //! Validates a requested display target against backend capabilities and the
 //! current running assignment map. Does not execute backends, touch storage,
-//! or expand a named output into All Displays.
+//! or expand a named Apply into All Displays. Backend-wide replacement stops
+//! are explicit and require that no non-target assignment uses that backend.
 
 use wc_backend::capability::{
     apply_output_groups, capability_for, AllDisplaysTargeting, BackendCapability,
@@ -38,6 +39,9 @@ pub struct DisplayApplyRequest {
 /// One planned step. Execution is intentionally out of scope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlannedAction {
+    /// Stop all processes for a backend whose assignments are confined to the
+    /// replacement target. This does not expand the following Apply scope.
+    StopBackend { backend: Backend },
     /// Stop `backend` on the listed outputs before a replacement Apply.
     Stop {
         backend: Backend,
@@ -284,7 +288,8 @@ fn plan_named_output(
 
     for other in &others {
         if other.backend != request.backend {
-            if !capability.cross_output_coexistence_verified() {
+            if !wc_backend::capability::verified_cross_backend_pair(request.backend, other.backend)
+            {
                 return Err(RejectionReason::ReliesOnUnknownCoexistence {
                     explanation: format!(
                         "applying {} to {} while {} runs on {} relies on unknown cross-output coexistence",
@@ -393,6 +398,9 @@ fn same_target_stop(
                 ),
             });
         }
+        return Ok(PlannedAction::StopBackend {
+            backend: current.backend,
+        });
     }
 
     Ok(PlannedAction::Stop {
@@ -419,6 +427,9 @@ fn explicit_replacement_stop(
                 ),
             });
         }
+        return Ok(PlannedAction::StopBackend {
+            backend: current.backend,
+        });
     }
 
     Ok(PlannedAction::Stop {
@@ -519,6 +530,105 @@ mod tests {
             known_outputs,
             running,
         }
+    }
+
+    fn assert_verified_pair_replaces_only_target(
+        pairs: &[(Backend, Backend)],
+        expect_label: &str,
+    ) {
+        for &(before, after) in pairs {
+            let plan = plan_display_apply(&req(
+                DisplayTarget::Output(edp()),
+                after,
+                dual_outputs(),
+                vec![
+                    RunningAssignment {
+                        output: edp(),
+                        backend: before,
+                    },
+                    RunningAssignment {
+                        output: hdmi(),
+                        backend: before,
+                    },
+                ],
+            ))
+            .unwrap_or_else(|err| panic!("{expect_label}: before={before:?} after={after:?}: {err:?}"));
+            assert_eq!(
+                plan.actions,
+                vec![
+                    PlannedAction::Stop {
+                        backend: before,
+                        outputs: vec![edp()]
+                    },
+                    PlannedAction::Apply {
+                        backend: after,
+                        outputs: vec![edp()]
+                    }
+                ],
+                "{expect_label}: before={before:?} after={after:?}"
+            );
+        }
+    }
+
+    fn assert_apply_only_when_sibling_uses(target: Backend, sibling: Backend) {
+        let plan = plan_display_apply(&req(
+            DisplayTarget::Output(edp()),
+            target,
+            dual_outputs(),
+            vec![RunningAssignment {
+                output: hdmi(),
+                backend: sibling,
+            }],
+        ))
+        .unwrap_or_else(|err| {
+            panic!("verified cross-backend sibling: target={target:?} sibling={sibling:?}: {err:?}")
+        });
+        assert_eq!(
+            plan.actions,
+            vec![PlannedAction::Apply {
+                backend: target,
+                outputs: vec![edp()],
+            }],
+            "target={target:?} sibling={sibling:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_image_video_replaces_only_the_target_in_both_directions() {
+        assert_verified_pair_replaces_only_target(
+            &[
+                (Backend::Awww, Backend::Mpvpaper),
+                (Backend::Mpvpaper, Backend::Awww),
+            ],
+            "verified awww/mpvpaper pair",
+        );
+    }
+
+    #[test]
+    fn mixed_lwe_mpvpaper_replaces_only_the_target_in_both_directions() {
+        assert_verified_pair_replaces_only_target(
+            &[
+                (Backend::Mpvpaper, Backend::LinuxWallpaperEngine),
+                (Backend::LinuxWallpaperEngine, Backend::Mpvpaper),
+            ],
+            "verified lwe/mpvpaper pair",
+        );
+    }
+
+    #[test]
+    fn accepts_lwe_when_sibling_uses_mpvpaper() {
+        assert_apply_only_when_sibling_uses(
+            Backend::LinuxWallpaperEngine,
+            Backend::Mpvpaper,
+        );
+    }
+
+    #[test]
+    fn accepts_mpvpaper_when_sibling_uses_lwe() {
+        assert_apply_only_when_sibling_uses(
+            Backend::Mpvpaper,
+            Backend::LinuxWallpaperEngine,
+        );
     }
 
     #[test]
@@ -730,20 +840,23 @@ mod tests {
     }
 
     #[test]
-    fn accepts_explicit_all_displays_for_lwe_single_process_multi_output() {
+    fn accepts_explicit_all_displays_for_lwe_independent_processes() {
         let plan = plan_display_apply(&req(
             DisplayTarget::AllDisplays,
             Backend::LinuxWallpaperEngine,
             dual_outputs(),
             vec![],
         ))
-        .expect("LWE CLI supports repeated screen-root pairs");
+        .expect("LWE uses one independent process per output");
         assert_eq!(
             plan.actions,
-            vec![PlannedAction::Apply {
-                backend: Backend::LinuxWallpaperEngine,
-                outputs: dual_outputs(),
-            }]
+            dual_outputs()
+                .into_iter()
+                .map(|output| PlannedAction::Apply {
+                    backend: Backend::LinuxWallpaperEngine,
+                    outputs: vec![output],
+                })
+                .collect::<Vec<_>>()
         );
     }
 
@@ -867,7 +980,7 @@ mod tests {
             dual_outputs(),
             vec![RunningAssignment {
                 output: hdmi(),
-                backend: Backend::Mpvpaper,
+                backend: Backend::Swaybg,
             }],
         ))
         .unwrap_err();
@@ -992,8 +1105,8 @@ mod tests {
     }
 
     #[test]
-    fn rejects_lwe_named_output_when_other_output_uses_lwe_shared_process() {
-        let err = plan_display_apply(&req(
+    fn accepts_lwe_named_output_when_sibling_uses_independent_lwe() {
+        let plan = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
             Backend::LinuxWallpaperEngine,
             dual_outputs(),
@@ -1002,15 +1115,13 @@ mod tests {
                 backend: Backend::LinuxWallpaperEngine,
             }],
         ))
-        .unwrap_err();
+        .expect("independent sibling renderer must be preserved");
         assert_eq!(
-            err,
-            RejectionReason::WouldAffectNonTargetDisplay {
-                non_target: hdmi(),
-                explanation:
-                    "linux-wallpaperengine uses a shared process; changing eDP-1 would disturb HDMI-1"
-                        .into(),
-            }
+            plan.actions,
+            vec![PlannedAction::Apply {
+                backend: Backend::LinuxWallpaperEngine,
+                outputs: vec![edp()],
+            }]
         );
     }
 
@@ -1084,7 +1195,7 @@ mod tests {
     }
 
     #[test]
-    fn lwe_same_target_replacement_uses_managed_handoff_apply_only() {
+    fn lwe_same_target_replacement_stops_only_target_before_apply() {
         let plan = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
             Backend::LinuxWallpaperEngine,
@@ -1094,17 +1205,23 @@ mod tests {
                 backend: Backend::LinuxWallpaperEngine,
             }],
         ))
-        .expect("LWE managed handoff is apply-only at plan level");
+        .expect("LWE stops the targeted renderer before replacement");
         assert_eq!(
             plan.actions,
-            vec![PlannedAction::Apply {
-                backend: Backend::LinuxWallpaperEngine,
-                outputs: vec![edp()],
-            }]
+            vec![
+                PlannedAction::Stop {
+                    backend: Backend::LinuxWallpaperEngine,
+                    outputs: vec![edp()],
+                },
+                PlannedAction::Apply {
+                    backend: Backend::LinuxWallpaperEngine,
+                    outputs: vec![edp()],
+                }
+            ]
         );
         assert_eq!(
             plan.capability.same_target_replacement,
-            SameTargetReplacement::ManagedHandoff
+            SameTargetReplacement::StopThenApply
         );
     }
 
@@ -1148,7 +1265,7 @@ mod tests {
                 },
                 RunningAssignment {
                     output: hdmi(),
-                    backend: Backend::Mpvpaper,
+                    backend: Backend::Swaybg,
                 },
             ],
         ))
@@ -1157,7 +1274,7 @@ mod tests {
             err,
             RejectionReason::ReliesOnUnknownCoexistence {
                 explanation:
-                    "applying awww to eDP-1 while mpvpaper runs on HDMI-1 relies on unknown cross-output coexistence"
+                    "applying awww to eDP-1 while swaybg runs on HDMI-1 relies on unknown cross-output coexistence"
                         .into(),
             }
         );
@@ -1370,11 +1487,11 @@ mod tests {
                     dual_outputs(),
                     vec![RunningAssignment {
                         output: hdmi(),
-                        backend: Backend::Awww,
+                        backend: Backend::Swaybg,
                     }],
                 ),
                 RejectionReason::ReliesOnUnknownCoexistence {
-                    explanation: "applying mpvpaper to eDP-1 while awww runs on HDMI-1 relies on unknown cross-output coexistence".into(),
+                    explanation: "applying mpvpaper to eDP-1 while swaybg runs on HDMI-1 relies on unknown cross-output coexistence".into(),
                 },
             ),
             (

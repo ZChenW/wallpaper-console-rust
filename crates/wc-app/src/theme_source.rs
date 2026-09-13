@@ -237,12 +237,7 @@ mod tests {
         let known = vec!["eDP-1".into(), "DP-8".into()];
         let changed = vec!["eDP-1".into()];
         assert_eq!(
-            select_theme_source(
-                &ThemeSourcePolicy::Focused,
-                &changed,
-                &known,
-                Some("DP-8")
-            ),
+            select_theme_source(&ThemeSourcePolicy::Focused, &changed, &known, Some("DP-8")),
             Some("DP-8".into())
         );
     }

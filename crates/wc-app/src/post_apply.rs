@@ -11,6 +11,7 @@ use std::time::Duration;
 
 use serde_json::json;
 use wc_core::types::{Backend, FileType};
+use wc_storage::sqlite::DisplayStateTarget;
 use wc_storage::StorageApi;
 
 use crate::theme_source::ThemeSourcePolicy;
@@ -39,6 +40,158 @@ pub struct PostApplyContext {
     pub changed_outputs: Vec<String>,
     pub theme_source_output: Option<String>,
     pub per_output: Vec<OutputThemeEntry>,
+}
+
+/// The just-applied wallpaper, when publishing after Apply.
+pub struct AppliedThemeSource<'a> {
+    pub wallpaper: &'a str,
+    pub backend: Backend,
+    pub file_type: FileType,
+}
+
+/// Everything the theme publisher needs to build a [`PostApplyContext`].
+/// Per-output derivation, theme-source policy and fallback selection stay
+/// inside this module; Apply/Restore callers only supply raw facts.
+pub struct ThemePublishRequest<'a> {
+    /// Intended display rows: target, wallpaper path, backend string.
+    pub intended: &'a [(DisplayStateTarget, String, String)],
+    pub known_outputs: &'a [String],
+    pub changed_outputs: &'a [String],
+    /// `Some` after Apply (the just-applied target); `None` after Restore,
+    /// where the fallback is derived from the first connected `intended` row.
+    pub applied: Option<AppliedThemeSource<'a>>,
+}
+
+/// Build the publish context from intended display rows.
+pub fn build_theme_context(
+    storage: &StorageApi,
+    request: &ThemePublishRequest<'_>,
+) -> PostApplyContext {
+    let per_output = per_output_theme_entries(request.intended, request.known_outputs);
+    let policy_raw = storage.config_get("post_apply_theme_source", "last_applied");
+    let policy = ThemeSourcePolicy::parse(&policy_raw);
+    let focused = if matches!(policy, ThemeSourcePolicy::Focused) {
+        crate::theme_source::probe_focused_output()
+    } else {
+        None
+    };
+    let theme_source_output = crate::theme_source::select_theme_source(
+        &policy,
+        request.changed_outputs,
+        request.known_outputs,
+        focused.as_deref(),
+    );
+
+    let (fallback_wallpaper, fallback_backend, fallback_file_type) = match &request.applied {
+        Some(applied) => (
+            applied.wallpaper.to_string(),
+            applied.backend,
+            applied.file_type,
+        ),
+        None => restore_fallback_theme_source(request.intended, request.known_outputs),
+    };
+
+    let (wallpaper_path, backend, file_type) = theme_source_output
+        .as_ref()
+        .and_then(|name| {
+            per_output
+                .iter()
+                .find(|entry| &entry.output == name)
+                .map(|entry| {
+                    (
+                        entry.wallpaper.clone(),
+                        parse_state_backend(&entry.backend).unwrap_or(fallback_backend),
+                        file_type_from_str(&entry.file_type),
+                    )
+                })
+        })
+        .unwrap_or((fallback_wallpaper, fallback_backend, fallback_file_type));
+
+    PostApplyContext {
+        wallpaper_path,
+        backend,
+        file_type,
+        outputs: request.changed_outputs.join(","),
+        changed_outputs: request.changed_outputs.to_vec(),
+        theme_source_output,
+        per_output,
+    }
+}
+
+/// Restore has no just-applied target; fall back to the first connected
+/// intended row so the theme source still points at a real wallpaper.
+fn restore_fallback_theme_source(
+    intended: &[(DisplayStateTarget, String, String)],
+    known_outputs: &[String],
+) -> (String, Backend, FileType) {
+    let (wallpaper, backend_str) = intended
+        .iter()
+        .find_map(|(target, path, backend)| match target {
+            DisplayStateTarget::AllDisplays => Some((path.clone(), backend.clone())),
+            DisplayStateTarget::Output(name) if known_outputs.iter().any(|o| o == name) => {
+                Some((path.clone(), backend.clone()))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| (String::new(), Backend::Awww.as_str().to_string()));
+    let backend = parse_state_backend(&backend_str).unwrap_or(Backend::Awww);
+    let file_type = file_type_from_str(&detect_file_type_string(&wallpaper));
+    (wallpaper, backend, file_type)
+}
+
+/// Parse a persisted display-state backend string; unknown values are not
+/// renderable and yield `None` so callers can fall back.
+pub(crate) fn parse_state_backend(raw: &str) -> Option<Backend> {
+    Some(match raw {
+        "awww" => Backend::Awww,
+        "mpvpaper" => Backend::Mpvpaper,
+        "swaybg" => Backend::Swaybg,
+        "feh" => Backend::Feh,
+        "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
+        _ => return None,
+    })
+}
+
+fn per_output_theme_entries(
+    intended: &[(DisplayStateTarget, String, String)],
+    known_outputs: &[String],
+) -> Vec<OutputThemeEntry> {
+    use std::collections::HashMap;
+
+    let mut map: HashMap<String, (String, String)> = HashMap::new();
+
+    if let Some((_, path, backend)) = intended
+        .iter()
+        .find(|(target, _, _)| matches!(target, DisplayStateTarget::AllDisplays))
+    {
+        for output in known_outputs {
+            map.insert(output.clone(), (path.clone(), backend.clone()));
+        }
+    }
+
+    for (target, path, backend) in intended {
+        let DisplayStateTarget::Output(name) = target else {
+            continue;
+        };
+        if !known_outputs.iter().any(|known| known == name) {
+            continue;
+        }
+        map.insert(name.clone(), (path.clone(), backend.clone()));
+    }
+
+    known_outputs
+        .iter()
+        .filter_map(|output| {
+            let (wallpaper, backend) = map.get(output)?;
+            Some(OutputThemeEntry {
+                output: output.clone(),
+                wallpaper: wallpaper.clone(),
+                backend: backend.clone(),
+                file_type: detect_file_type_string(wallpaper),
+                still: None,
+            })
+        })
+        .collect()
 }
 
 /// Always write `theme-state.json` when `per_output` is non-empty, then run the
@@ -124,12 +277,8 @@ fn publish_theme_and_run_hook_inner(
         return Ok(());
     }
 
-    let theme_source_still = resolve_theme_source_still(
-        storage,
-        ctx,
-        &resolved_entries,
-        still_override.as_deref(),
-    )?;
+    let theme_source_still =
+        resolve_theme_source_still(storage, ctx, &resolved_entries, still_override.as_deref())?;
 
     let wallpaper = ctx.wallpaper_path.as_str();
     let still_s = theme_source_still.to_string_lossy();
@@ -235,10 +384,7 @@ fn write_theme_state_manifest(
     std::fs::create_dir_all(parent)
         .map_err(|e| format!("failed to create config dir for theme-state: {e}"))?;
 
-    let tmp = path.with_extension(format!(
-        "tmp.{}.json",
-        std::process::id()
-    ));
+    let tmp = path.with_extension(format!("tmp.{}.json", std::process::id()));
     let body = serde_json::to_vec_pretty(&doc)
         .map_err(|e| format!("failed to serialize theme-state: {e}"))?;
     std::fs::write(&tmp, body).map_err(|e| format!("failed to write theme-state tmp: {e}"))?;
@@ -510,7 +656,12 @@ mod tests {
         (tmp, storage)
     }
 
-    fn basic_ctx(wallpaper: String, backend: Backend, file_type: FileType, outputs: &str) -> PostApplyContext {
+    fn basic_ctx(
+        wallpaper: String,
+        backend: Backend,
+        file_type: FileType,
+        outputs: &str,
+    ) -> PostApplyContext {
         PostApplyContext {
             wallpaper_path: wallpaper,
             backend,
@@ -524,6 +675,133 @@ mod tests {
             theme_source_output: None,
             per_output: vec![],
         }
+    }
+
+    fn output_row(output: &str, path: &str, backend: &str) -> (DisplayStateTarget, String, String) {
+        (
+            DisplayStateTarget::Output(output.to_string()),
+            path.to_string(),
+            backend.to_string(),
+        )
+    }
+
+    #[test]
+    fn build_theme_context_derives_per_output_and_last_applied_source() {
+        let (tmp, storage) = temp_storage();
+        let image = tmp.path().join("a.png");
+        let video = tmp.path().join("b.mp4");
+        std::fs::write(&image, b"png").unwrap();
+        std::fs::write(&video, b"mp4").unwrap();
+        let image = image.to_string_lossy().into_owned();
+        let video = video.to_string_lossy().into_owned();
+        let known = vec!["eDP-1".to_string(), "DP-8".to_string()];
+        let intended = vec![
+            output_row("eDP-1", &image, "awww"),
+            output_row("DP-8", &video, "mpvpaper"),
+        ];
+        let changed = vec!["DP-8".to_string()];
+        let ctx = build_theme_context(
+            &storage,
+            &ThemePublishRequest {
+                intended: &intended,
+                known_outputs: &known,
+                changed_outputs: &changed,
+                applied: Some(AppliedThemeSource {
+                    wallpaper: &video,
+                    backend: Backend::Mpvpaper,
+                    file_type: FileType::Video,
+                }),
+            },
+        );
+        assert_eq!(ctx.per_output.len(), 2);
+        assert_eq!(ctx.theme_source_output.as_deref(), Some("DP-8"));
+        assert_eq!(ctx.wallpaper_path, video);
+        assert_eq!(ctx.backend, Backend::Mpvpaper);
+        assert_eq!(ctx.file_type, FileType::Video);
+        assert_eq!(ctx.outputs, "DP-8");
+    }
+
+    #[test]
+    fn build_theme_context_restore_excludes_disconnected_outputs() {
+        let (_tmp, storage) = temp_storage();
+        let known = vec!["eDP-1".to_string()];
+        let intended = vec![
+            output_row("DP-8", "/walls/off.png", "awww"),
+            output_row("eDP-1", "/walls/on.png", "awww"),
+        ];
+        let ctx = build_theme_context(
+            &storage,
+            &ThemePublishRequest {
+                intended: &intended,
+                known_outputs: &known,
+                changed_outputs: &known,
+                applied: None,
+            },
+        );
+        assert_eq!(ctx.per_output.len(), 1);
+        assert_eq!(ctx.per_output[0].output, "eDP-1");
+        assert_eq!(ctx.wallpaper_path, "/walls/on.png");
+        assert_eq!(ctx.backend, Backend::Awww);
+    }
+
+    #[test]
+    fn build_theme_context_without_known_outputs_uses_applied_fallback() {
+        let (_tmp, storage) = temp_storage();
+        let intended = vec![output_row("eDP-1", "/walls/a.png", "awww")];
+        let ctx = build_theme_context(
+            &storage,
+            &ThemePublishRequest {
+                intended: &intended,
+                known_outputs: &[],
+                changed_outputs: &[],
+                applied: Some(AppliedThemeSource {
+                    wallpaper: "/walls/new.mp4",
+                    backend: Backend::Mpvpaper,
+                    file_type: FileType::Video,
+                }),
+            },
+        );
+        assert!(ctx.per_output.is_empty());
+        assert_eq!(ctx.theme_source_output, None);
+        assert_eq!(ctx.wallpaper_path, "/walls/new.mp4");
+        assert_eq!(ctx.backend, Backend::Mpvpaper);
+    }
+
+    #[test]
+    fn build_theme_context_restore_without_known_outputs_uses_first_intended_row() {
+        let (_tmp, storage) = temp_storage();
+        let intended = vec![(
+            DisplayStateTarget::AllDisplays,
+            "/walls/all.png".to_string(),
+            "awww".to_string(),
+        )];
+        let ctx = build_theme_context(
+            &storage,
+            &ThemePublishRequest {
+                intended: &intended,
+                known_outputs: &[],
+                changed_outputs: &[],
+                applied: None,
+            },
+        );
+        assert_eq!(ctx.wallpaper_path, "/walls/all.png");
+        assert_eq!(ctx.backend, Backend::Awww);
+        assert_eq!(ctx.file_type, FileType::Image);
+    }
+
+    #[test]
+    fn parse_state_backend_roundtrips_renderable_backends() {
+        for backend in [
+            Backend::Awww,
+            Backend::Mpvpaper,
+            Backend::Swaybg,
+            Backend::Feh,
+            Backend::LinuxWallpaperEngine,
+        ] {
+            assert_eq!(parse_state_backend(backend.as_str()), Some(backend));
+        }
+        assert_eq!(parse_state_backend("unsupported"), None);
+        assert_eq!(parse_state_backend(""), None);
     }
 
     #[test]
@@ -606,7 +884,8 @@ mod tests {
 
         let manifest = storage.cd.theme_state_path();
         assert!(manifest.is_file());
-        let doc: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(manifest).unwrap()).unwrap();
         assert_eq!(doc["version"], 1);
         assert_eq!(doc["theme_source_output"], "DP-8");
         assert!(doc["outputs"]["DP-8"]["still"].as_str().is_some());
@@ -638,7 +917,11 @@ mod tests {
                 },
                 OutputThemeEntry {
                     output: "eDP-1".into(),
-                    wallpaper: tmp.path().join("missing.png").to_string_lossy().into_owned(),
+                    wallpaper: tmp
+                        .path()
+                        .join("missing.png")
+                        .to_string_lossy()
+                        .into_owned(),
                     backend: "awww".into(),
                     file_type: "image".into(),
                     still: None,
@@ -647,10 +930,9 @@ mod tests {
         };
         run_post_apply_hook_with_still_override(&storage, &ctx, None).unwrap();
 
-        let doc: serde_json::Value = serde_json::from_str(
-            &std::fs::read_to_string(storage.cd.theme_state_path()).unwrap(),
-        )
-        .unwrap();
+        let doc: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(storage.cd.theme_state_path()).unwrap())
+                .unwrap();
         assert!(doc["outputs"]["DP-8"]["still"].as_str().is_some());
         assert!(doc["outputs"]["eDP-1"]["still"].is_null());
     }

@@ -1,3 +1,4 @@
+import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
 import {
   useCallback,
   useEffect,
@@ -268,6 +269,13 @@ export default function SinglePageShell() {
     setApplyFeedback,
   });
   const currentWallpaper = runtimeWallpaper.current.wallpaper;
+  const { applying: mpvpaperApplying, apply: applyMpvpaperOptions } = useMpvpaperReapply({
+    saveOptions: behavior.saveMpvpaperOptions,
+    reapply: api.reapplyMpvpaper,
+    refreshCurrent: runtimeWallpaper.current.refresh,
+    wallpaperApplying: runtimeWallpaper.apply.applying,
+    setFeedback: setSystemFeedback,
+  });
   const currentPath = runtimeWallpaper.current.path;
   const applyActionToDisplay = runtimeWallpaper.apply.applyActionToDisplay;
   const applyToDisplay = runtimeWallpaper.apply.applyToDisplay;
@@ -1185,6 +1193,9 @@ export default function SinglePageShell() {
         updatePreferences={updatePreferences}
         behaviorSettings={behavior.settings}
         updateBehaviorSettings={behavior.updateSettings}
+        onApplyMpvpaperOptions={(options) => { void applyMpvpaperOptions(options); }}
+        mpvpaperApplying={mpvpaperApplying}
+        wallpaperApplying={runtimeWallpaper.apply.applying}
         behaviorReady={behavior.ready}
         loadError={behavior.loadError}
         saveError={behavior.saveError}
@@ -1232,7 +1243,7 @@ export default function SinglePageShell() {
         wallpaper={detailsEntry}
         onClose={closeDetails}
       />
-      <div className="shell-notifications">
+      <div className="shell-notifications" data-settings-open={settingsOpen}>
         <ScanActivity
           presentation={scan.presentation}
           progress={scan.progress}

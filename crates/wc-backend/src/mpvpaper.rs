@@ -106,7 +106,11 @@ pub(crate) fn stop_mpvpaper() {
         Ok(pids) => {
             for pid in pids {
                 if crate::process_control::pid_looks_like_mpvpaper(pid as i32) {
+                    let argv = crate::process_control::read_proc_cmdline_tokens(pid as i32);
                     crate::process_control::kill_pid_gracefully(pid);
+                    if let Some(argv) = argv {
+                        crate::mpvpaper_media::cleanup_socket(&argv);
+                    }
                 }
             }
         }
@@ -165,10 +169,7 @@ pub fn classify_selector(raw: &str) -> MpvpaperOutputSelector {
     if trimmed == "*" || trimmed.eq_ignore_ascii_case("ALL") {
         return MpvpaperOutputSelector::Wildcard;
     }
-    let parts: Vec<String> = trimmed
-        .split_whitespace()
-        .map(str::to_string)
-        .collect();
+    let parts: Vec<String> = trimmed.split_whitespace().map(str::to_string).collect();
     match parts.as_slice() {
         [] => MpvpaperOutputSelector::Unparseable,
         [single] => MpvpaperOutputSelector::Single(single.clone()),
@@ -192,10 +193,7 @@ fn process_from_cmdline(pid: u32, tokens: Option<Vec<String>>) -> Option<Mpvpape
     }
 }
 
-fn running_processes_with<F>(
-    pids: &[u32],
-    mut read_cmdline: F,
-) -> Vec<MpvpaperProcess>
+fn running_processes_with<F>(pids: &[u32], mut read_cmdline: F) -> Vec<MpvpaperProcess>
 where
     F: FnMut(u32) -> Option<Vec<String>>,
 {
@@ -206,7 +204,10 @@ where
 }
 
 pub(crate) fn running_processes() -> Result<Vec<MpvpaperProcess>, WcError> {
-    Ok(running_processes_with(&running_pids()?, read_mpvpaper_cmdline))
+    Ok(running_processes_with(
+        &running_pids()?,
+        read_mpvpaper_cmdline,
+    ))
 }
 
 /// PIDs whose selectors cannot be safely targeted by a partial named stop.
@@ -262,7 +263,8 @@ fn reverify_single_output(pid: u32, expected_output: &str) -> bool {
 
 pub(crate) fn stop_outputs(outputs: &[String]) -> Result<(), WcError> {
     let processes = running_processes()?;
-    let target_pids = pids_matching_single_outputs_with(&processes, outputs, reverify_single_output);
+    let target_pids =
+        pids_matching_single_outputs_with(&processes, outputs, reverify_single_output);
     for pid in target_pids {
         crate::process_control::kill_pid_gracefully(pid);
     }
@@ -523,11 +525,10 @@ mod tests {
                 path: "/c".into(),
             },
         ];
-        let killed = pids_matching_single_outputs_with(
-            &processes,
-            &["eDP-1".into()],
-            |pid, output| pid == 10 && output == "eDP-1",
-        );
+        let killed =
+            pids_matching_single_outputs_with(&processes, &["eDP-1".into()], |pid, output| {
+                pid == 10 && output == "eDP-1"
+            });
         assert_eq!(killed, vec![10]);
     }
 

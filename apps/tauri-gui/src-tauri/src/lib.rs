@@ -160,6 +160,7 @@ pub fn run() {
             commands::config_set,
             commands::behavior_settings_get,
             commands::behavior_settings_update,
+            commands::reapply_mpvpaper,
             commands::sources_list,
             commands::first_run_source_suggestions,
             commands::source_add,

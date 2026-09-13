@@ -10,6 +10,21 @@ use wc_storage::StorageApi;
 
 const PID_CONFIG_KEY: &str = "linux_wallpaperengine_pid";
 
+/// The most recently launched output's log (or the legacy shared renderer log).
+pub fn last_log_path(s: &StorageApi) -> PathBuf {
+    let name = s.config_get("lwe_last_log_name", "linux-wallpaperengine-last.log");
+    if name.starts_with("linux-wallpaperengine-")
+        && name.ends_with(".log")
+        && Path::new(&name)
+            .file_name()
+            .is_some_and(|file| file == name.as_str())
+    {
+        s.cd.path.join(name)
+    } else {
+        s.cd.path.join("linux-wallpaperengine-last.log")
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct LinuxWallpaperEngineConfig {
     pub enabled: bool,
@@ -147,20 +162,20 @@ pub fn apply(s: &StorageApi, project: LinuxWallpaperEngineProject) -> Result<(),
         }
         _ => target_args.push(wallpaper_id),
     }
-    apply_with_target_args(s, &config, target_args)
+    apply_with_target_args(s, &config, target_args, None)
 }
 
-/// Apply a scene to explicit outputs using repeated `--screen-root` / `--bg` pairs.
+/// Apply one independent scene renderer to one explicit output.
 ///
-/// Used by display-aware apply. The same wallpaper id is paired with every output.
+/// All Displays is expanded by the planner into one invocation per output.
 pub fn apply_to_outputs(
     s: &StorageApi,
     project: LinuxWallpaperEngineProject,
     outputs: &[String],
 ) -> Result<(), WcError> {
-    if outputs.is_empty() {
+    if outputs.len() != 1 {
         return Err(WcError::Other(
-            "linux-wallpaperengine apply_to_outputs requires at least one output".into(),
+            "linux-wallpaperengine apply_to_outputs requires exactly one output".into(),
         ));
     }
     let config = LinuxWallpaperEngineConfig::from_storage(s);
@@ -169,18 +184,26 @@ pub fn apply_to_outputs(
         .clone()
         .unwrap_or_else(|| project.project_path.clone());
     let target_args = crate::target_commands::build_lwe_screen_root_args(outputs, &wallpaper_id)?;
-    apply_with_target_args(s, &config, target_args)
+    apply_with_target_args(s, &config, target_args, Some(outputs))
 }
 
 fn apply_with_target_args(
     s: &StorageApi,
     config: &LinuxWallpaperEngineConfig,
     target_args: Vec<String>,
+    outputs: Option<&[String]>,
 ) -> Result<(), WcError> {
     if !config.enabled {
         return Err(WcError::Other("linux-wallpaperengine is disabled".into()));
     }
     let binary = resolve_binary(config)?;
+    // Scoped execution never uses legacy global PID cleanup. Preparation and
+    // execution both reject shared/ambiguous ownership before any mutation.
+    if let Some(outputs) = outputs {
+        if !crate::lwe_process::inspect_targets(outputs)?.is_empty() {
+            return Err(WcError::Other("linux-wallpaperengine target is still occupied; a scoped Stop is required before Apply".into()));
+        }
+    }
     let mut args = target_args;
     if config.scaling != "default" {
         args.push("--scaling".into());
@@ -201,11 +224,21 @@ fn apply_with_target_args(
     // Save old PID before starting new process.
     // If the new LWE process fails to start, we keep the old wallpaper running.
     let old_pid_str = s.config_get(PID_CONFIG_KEY, "");
-    let old_pid: Option<i32> = old_pid_str.parse().ok().filter(|&p| p > 0);
+    let old_pid: Option<i32> = old_pid_str
+        .parse()
+        .ok()
+        .filter(|&p| p > 0 && outputs.is_none());
 
     // Write stdout/stderr to a log file instead of Stdio::piped() which
     // can deadlock if nobody drains the pipe on a long-running process.
-    let log_path = s.cd.path.join("linux-wallpaperengine-last.log");
+    let log_name = outputs
+        .map(|outputs| {
+            let key: String = outputs[0].bytes().map(|b| format!("{b:02x}")).collect();
+            format!("linux-wallpaperengine-{key}.log")
+        })
+        .unwrap_or_else(|| "linux-wallpaperengine-last.log".into());
+    let _ = s.config_set("lwe_last_log_name", &log_name);
+    let log_path = s.cd.path.join(log_name);
     let log_file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(true)
@@ -229,8 +262,14 @@ fn apply_with_target_args(
         "lwe_last_target_config",
         &format!(
             "target_mode={} target={} scaling={} fps={} muted={} volume={}",
-            config.target_mode,
-            config.target,
+            if outputs.is_some() {
+                "screen-root"
+            } else {
+                &config.target_mode
+            },
+            outputs
+                .map(|outputs| outputs[0].as_str())
+                .unwrap_or(&config.target),
             config.scaling,
             config.fps,
             config.muted,
@@ -238,8 +277,21 @@ fn apply_with_target_args(
         ),
     );
 
-    let mut child = Command::new("setsid")
-        .arg(&binary)
+    let mut command = if outputs.is_some() {
+        let mut command = Command::new(&binary);
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // Canonical argv0 makes configured binary paths inspectable, too.
+            command.arg0("linux-wallpaperengine").process_group(0);
+        }
+        command
+    } else {
+        let mut command = Command::new("setsid");
+        command.arg(&binary);
+        command
+    };
+    let mut child = command
         .args(&args)
         .stdin(Stdio::null())
         .stdout(stdout)
@@ -278,7 +330,9 @@ fn apply_with_target_args(
     // Clean up any stale LWE processes that aren't the new one.
     // This handles cases where old_pid was stale/missing but residual
     // linux-wallpaperengine processes are still running.
-    crate::process_control::cleanup_stale_lwe_processes_except(child.id(), old_pid);
+    if outputs.is_none() {
+        crate::process_control::cleanup_stale_lwe_processes_except(child.id(), old_pid);
+    }
 
     // Clear all diagnostics on success.
     let _ = s.config_set("lwe_last_command_line", "");
@@ -286,7 +340,13 @@ fn apply_with_target_args(
     let _ = s.config_set("lwe_last_stderr", "");
     let _ = s.config_set("lwe_last_exit_status", "");
 
-    publish_spawned_renderer(child, |pid| s.config_set(PID_CONFIG_KEY, &pid.to_string()))
+    if outputs.is_some() {
+        // Like mpvpaper, independent renderers are tracked by live argv identity.
+        crate::process_control::detach_and_reap_child(child, "wc-lwe-reaper");
+        Ok(())
+    } else {
+        publish_spawned_renderer(child, |pid| s.config_set(PID_CONFIG_KEY, &pid.to_string()))
+    }
 }
 
 fn publish_spawned_renderer(
@@ -702,7 +762,7 @@ mod tests {
         .unwrap();
         let project = project_from_path(&scene.to_string_lossy()).unwrap();
         let err = apply_to_outputs(&s, project, &[]).unwrap_err();
-        assert!(err.to_string().contains("at least one output"));
+        assert!(err.to_string().contains("exactly one output"));
     }
 
     #[cfg(unix)]

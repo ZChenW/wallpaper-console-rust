@@ -55,6 +55,7 @@ export interface RuntimeWallpaperCoordinatorResult {
     readonly wallpaper: CurrentWallpaperState;
     readonly path: string | null;
     readonly observationReady: boolean;
+    readonly refresh: () => Promise<void>;
   };
   readonly apply: {
     readonly applying: boolean;
@@ -180,11 +181,18 @@ export function useRuntimeWallpaperCoordinator({
     ? currentWallpaper.wallpaperPath
     : null;
 
+  const refreshCurrent = useCallback(async () => {
+    setRuntimeObservationReady(false);
+    dispatchRuntimeSession({ type: 'runtimeInvalidated' });
+    await runtimeObservationController.current?.invalidateAndRefresh();
+  }, []);
+
   const current = useMemo(() => ({
     wallpaper: currentWallpaper,
     path: currentPath,
     observationReady: runtimeObservationReady,
-  }), [currentPath, currentWallpaper, runtimeObservationReady]);
+    refresh: refreshCurrent,
+  }), [currentPath, currentWallpaper, runtimeObservationReady, refreshCurrent]);
   const apply = useMemo(() => ({
     applying: applyQueue.applying,
     activePath: applyQueue.activePath ?? null,

@@ -16,6 +16,14 @@ export type WallpaperPageLoader<T extends WallpaperDTO = WallpaperDTO> = (
 
 export type RequestKind = 'initial' | 'refresh' | 'append';
 
+/** Exact count for one resolved revision. */
+export interface PagedTotalDTO {
+  revision: number;
+  total: number;
+}
+
+export type PagedTotalLoader = (revision: number) => Promise<PagedTotalDTO>;
+
 export interface LoadingState {
   initialLoading: boolean;
   refreshing: boolean;
@@ -34,6 +42,16 @@ interface UsePagedWallpapersOptions<T extends WallpaperDTO = WallpaperDTO> {
   loadPage: WallpaperPageLoader<T>;
   refreshEvent?: string;
   onPage?: (page: WallpaperPageDTO<T>) => void;
+  /**
+   * Query identity. A change resets pages, cursors and the exact total, and
+   * the next resolved page re-marks it via `resolvedQueryKey`.
+   */
+  queryKey?: string;
+  /**
+   * Exact-count loader owned by the hook: fetched once per query+revision,
+   * late responses for a superseded query or revision are dropped.
+   */
+  loadTotal?: PagedTotalLoader;
 }
 
 const CONFIRM_EMPTY_DELAY_MS = 400;
@@ -118,12 +136,18 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   loadPage,
   refreshEvent,
   onPage,
+  queryKey,
+  loadTotal,
 }: UsePagedWallpapersOptions<T>) {
   const [entries, setEntries] = useState<T[]>([]);
   const [total, setTotal] = useState<number | null>(null);
   const [revision, setRevision] = useState<number | null>(null);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const revisionRef = useRef<number | null>(null);
+  const [exactTotal, setExactTotal] = useState<number | null>(null);
+  const [resolvedQueryKey, setResolvedQueryKey] = useState<string | null>(null);
+  const totalRequestKeyRef = useRef<string | null>(null);
+  const totalRequestSeq = useRef(0);
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
   const [initialLoading, setInitialLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -185,8 +209,32 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       setLoadError(false);
       setLoadErrorDetail(null);
       onPage?.(page);
+      const previousRevision = revisionRef.current;
       setRevision(page.revision);
       revisionRef.current = page.revision;
+      if (queryKey !== undefined) setResolvedQueryKey(queryKey);
+      if (loadTotal && queryKey !== undefined) {
+        // A new revision invalidates the previous exact count until the
+        // replacement total arrives.
+        if (previousRevision !== null && previousRevision !== page.revision) {
+          setExactTotal(null);
+        }
+        const totalRequestKey = `${queryKey}:${page.revision}`;
+        if (totalRequestKeyRef.current !== totalRequestKey) {
+          totalRequestKeyRef.current = totalRequestKey;
+          const totalRequestId = ++totalRequestSeq.current;
+          void loadTotal(page.revision).then((result) => {
+            if (totalRequestId !== totalRequestSeq.current) return;
+            if (result.revision !== page.revision) return;
+            if (revisionRef.current !== page.revision) return;
+            setExactTotal(result.total);
+          }, () => {
+            if (totalRequestId === totalRequestSeq.current) {
+              totalRequestKeyRef.current = null;
+            }
+          });
+        }
+      }
       const appendOutcome = append ? {
         kind: 'success' as const,
         itemCount: page.items?.length ?? 0,
@@ -264,7 +312,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
         }
       }
     }
-  }, [loadPage, onPage, pageSize, clearConfirmEmptyTimer]);
+  }, [loadPage, loadTotal, onPage, pageSize, queryKey, clearConfirmEmptyTimer]);
 
   const reload = useCallback(() => {
     setAutomaticAppendPaused(false);
@@ -311,6 +359,9 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
   useEffect(() => {
     consecutiveZeroCountRef.current = 0;
     revisionRef.current = null;
+    totalRequestSeq.current += 1;
+    totalRequestKeyRef.current = null;
+    setExactTotal(null);
     setRevision(null);
     setNextCursor(null);
     setTotal(null);
@@ -318,7 +369,7 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     setLoadError(false);
     setLoadErrorDetail(null);
     setAutomaticAppendPaused(false);
-  }, [loadPage]);
+  }, [loadPage, queryKey]);
 
   const loading = initialLoading || refreshing;
 
@@ -328,6 +379,8 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
     total,
     revision,
     nextCursor,
+    exactTotal,
+    resolvedQueryKey,
     hasMore,
     canAppend,
     canAutoAppend,

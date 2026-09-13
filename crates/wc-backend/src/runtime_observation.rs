@@ -18,6 +18,9 @@ pub struct ProcessCommandLine {
 }
 
 pub trait RuntimeObservationIo {
+    fn mpvpaper_media_loaded(&self, _process: &ProcessCommandLine, _path: &str) -> bool {
+        true
+    }
     fn awww_query_json(&self) -> Result<String, String>;
     fn current_user_process_command_lines(&self) -> Result<Vec<ProcessCommandLine>, String>;
 }
@@ -33,6 +36,9 @@ fn awww_query_arguments() -> [&'static str; 3] {
 }
 
 impl RuntimeObservationIo for SystemRuntimeObservationIo {
+    fn mpvpaper_media_loaded(&self, process: &ProcessCommandLine, path: &str) -> bool {
+        crate::mpvpaper_media::media_ready(process.pid, path)
+    }
     fn awww_query_json(&self) -> Result<String, String> {
         let mut command = Command::new("awww");
         command
@@ -166,6 +172,9 @@ pub fn observe_runtime_wallpapers_with(
 ) -> Vec<RuntimeWallpaperObservation> {
     let expected = expected_assignments(connected_outputs, persisted);
     let awww = match io.awww_query_json() {
+        Ok(raw) if raw.trim().is_empty() => {
+            AwwwEvidence::Unavailable("awww returned no namespace evidence".into())
+        }
         Ok(raw) => match parse_awww_query_json(&raw) {
             Ok(evidence) => AwwwEvidence::Ready(evidence),
             Err(error) => AwwwEvidence::Ambiguous(error),
@@ -178,6 +187,26 @@ pub fn observe_runtime_wallpapers_with(
             .iter()
             .any(|process| program_is(&process.argv, "awww-daemon"))
     });
+    let awww = if processes.as_ref().is_ok_and(|processes| {
+        processes.iter().any(|process| {
+            program_is(&process.argv, "awww-daemon")
+                && !crate::awww::alpha_format_supported(&process.argv)
+        })
+    }) {
+        match awww {
+            AwwwEvidence::Ready(mut entries) => {
+                for entry in entries.values_mut() {
+                    if matches!(entry, AwwwOutputEvidence::Transparent) {
+                        *entry = AwwwOutputEvidence::Color;
+                    }
+                }
+                AwwwEvidence::Ready(entries)
+            }
+            other => other,
+        }
+    } else {
+        awww
+    };
     let mpvpaper = processes
         .as_ref()
         .map(|processes| collect_mpvpaper_evidence(processes, connected_outputs));
@@ -227,14 +256,24 @@ pub fn observe_runtime_wallpapers_with(
                                     reason: None,
                                 }
                             }
-                            Some(AwwwOutputEvidence::Color) => {
+                            Some(AwwwOutputEvidence::Color | AwwwOutputEvidence::Transparent) => {
                                 unknown(output, "awww is displaying a color instead of an image.")
                             }
                             _ => unknown(output, "awww did not confirm the saved wallpaper path."),
                         }
                     }
                     wc_core::types::Backend::Mpvpaper => {
-                        observe_mpvpaper(output, saved.wallpaper_path, &mpvpaper)
+                        let observation = observe_mpvpaper(output, saved.wallpaper_path, &mpvpaper);
+                        if observation.status == RuntimeObservationStatus::Confirmed {
+                            let loaded = processes.as_ref().is_ok_and(|processes| processes.iter().any(|process| {
+                                program_is(&process.argv, "mpvpaper")
+                                    && parse_mpvpaper_command_line(&process.argv)
+                                    .is_some_and(|(selector, path)| path == saved.wallpaper_path && mpvpaper_selected_outputs(selector, connected_outputs).is_some_and(|outputs| outputs.contains(output)))
+                                    && io.mpvpaper_media_loaded(process, saved.wallpaper_path)
+                            }));
+                            if !loaded { return unknown(output, "mpv did not confirm loaded video frames for the saved wallpaper."); }
+                        }
+                        observation
                     }
                     wc_core::types::Backend::Swaybg => {
                         observe_swaybg(output, saved.wallpaper_path, &swaybg)
@@ -291,14 +330,14 @@ fn runtime_ambiguity_reason(
     }
     if lwe
         .as_ref()
-        .is_ok_and(|evidence| evidence.malformed_process || evidence.process_count > 1)
+        .is_ok_and(|evidence| evidence.malformed_process)
     {
         return Some("Running linux-wallpaperengine processes have ambiguous ownership.".into());
     }
 
     let renderer_count = usize::from(matches!(
         awww,
-        AwwwEvidence::Ready(evidence) if evidence.contains_key(output)
+        AwwwEvidence::Ready(evidence) if evidence.get(output).is_some_and(|entry| !matches!(entry, AwwwOutputEvidence::Transparent))
     )) + usize::from(
         mpvpaper
             .as_ref()
@@ -440,6 +479,7 @@ enum AwwwEvidence {
 enum AwwwOutputEvidence {
     Image(String),
     Color,
+    Transparent,
 }
 
 #[derive(Debug, Default)]
@@ -554,23 +594,37 @@ fn parse_mpvpaper_command_line(argv: &[String]) -> Option<(&str, &str)> {
 }
 
 fn decode_proc_cmdline(raw: &[u8]) -> Result<Vec<String>, String> {
+    // Unix permits arbitrary bytes in arguments. Unrelated programs must not
+    // make renderer observation fail just because they opened such a filename.
+    // Renderer arguments remain strict because they determine output ownership.
+    let program = raw.split(|byte| *byte == 0).next().unwrap_or_default();
+    let basename = program
+        .rsplit(|byte| *byte == b'/')
+        .next()
+        .unwrap_or_default();
+    let renderer = matches!(
+        basename,
+        b"mpvpaper" | b"awww-daemon" | b"swaybg" | b"linux-wallpaperengine"
+    );
     let mut arguments = Vec::new();
     let mut fields = raw.split(|byte| *byte == 0).peekable();
     while let Some(field) = fields.next() {
         if field.is_empty() && fields.peek().is_none() {
             break;
         }
-        arguments.push(
-            std::str::from_utf8(field)
-                .map_err(|error| format!("process command line is not UTF-8: {error}"))?
-                .to_string(),
-        );
+        arguments.push(match std::str::from_utf8(field) {
+            Ok(argument) => argument.to_string(),
+            Err(error) if renderer => {
+                return Err(format!("process command line is not UTF-8: {error}"));
+            }
+            Err(_) => String::from_utf8_lossy(field).into_owned(),
+        });
     }
     Ok(arguments)
 }
 
 #[cfg(unix)]
-fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, String> {
+pub(crate) fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, String> {
     use std::os::unix::fs::MetadataExt;
 
     let current_uid = std::fs::metadata("/proc/self")
@@ -621,14 +675,257 @@ fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, 
 }
 
 #[cfg(not(unix))]
-fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, String> {
+pub(crate) fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, String> {
     Err("runtime renderer process inspection is supported only on Unix".into())
+}
+
+// ── Live output ownership (apply planning input) ───────────────────────────
+//
+// Persisted display_state rows are restore preferences, not proof of a running
+// renderer. Apply planning instead uses this live snapshot, which separates
+// "confirmed occupied" from "confirmed vacant" from "cannot tell". An
+// observation failure is never read as an empty desktop.
+
+/// Ownership of one connected output, derived from live evidence only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum OutputOwnership {
+    /// Exactly one backend verifiably owns a surface/process on this output.
+    Occupied(wc_core::types::Backend),
+    /// No known renderer owns this output.
+    Vacant,
+    /// Evidence is missing or contradictory; ownership cannot be determined.
+    Uncertain(String),
+}
+
+/// One bounded, consistent observation pass over all connected outputs.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct OutputOwnershipSnapshot {
+    /// One entry per connected output, in input order.
+    pub outputs: Vec<(String, OutputOwnership)>,
+    /// Backends with any live evidence, including ambiguous evidence. An
+    /// all-displays replacement retires these even when per-output ownership
+    /// could not be resolved.
+    pub implicated_backends: Vec<wc_core::types::Backend>,
+    /// The renderer set itself could not be enumerated. Even a global
+    /// replacement cannot establish a complete retirement plan from this scan.
+    pub process_inspection_error: Option<String>,
+}
+
+/// Observe which backend owns each connected output via one socket probe, at
+/// most one awww query, and one process scan.
+pub fn observe_output_ownership(
+    connected_outputs: &[String],
+    runtime: &mut dyn crate::runtime::ProcessIo,
+) -> OutputOwnershipSnapshot {
+    use wc_core::types::Backend;
+
+    let mut claims: HashMap<String, Vec<Backend>> = HashMap::new();
+    let mut uncertainty: Vec<String> = Vec::new();
+    let mut implicated: Vec<Backend> = Vec::new();
+    let mut implicate = |backend: Backend| {
+        if !implicated.contains(&backend) {
+            implicated.push(backend);
+        }
+    };
+
+    let (processes, process_inspection_error) = match runtime.renderer_command_lines() {
+        Ok(processes) => (processes, None),
+        Err(error) => {
+            let reason = format!("renderer process inspection failed: {error}");
+            uncertainty.push(reason.clone());
+            (Vec::new(), Some(reason))
+        }
+    };
+    let process_scan_failed = process_inspection_error.is_some();
+
+    // awww surfaces (shared daemon, per-output evidence).
+    match runtime.awww_socket_ready() {
+        crate::runtime::AwwwReadiness::SocketMissing => {
+            if processes
+                .iter()
+                .any(|process| program_is(&process.argv, "awww-daemon"))
+            {
+                implicate(Backend::Awww);
+                uncertainty.push(
+                    "awww-daemon is running but its default socket is missing; output ownership cannot be verified"
+                        .into(),
+                );
+            }
+        }
+        crate::runtime::AwwwReadiness::SocketPresentQueryFailed { stderr } => {
+            implicate(Backend::Awww);
+            uncertainty.push(format!(
+                "awww socket is present but its query failed: {stderr}"
+            ));
+        }
+        crate::runtime::AwwwReadiness::Ready => match runtime.awww_query_json() {
+            Err(error) => {
+                implicate(Backend::Awww);
+                uncertainty.push(format!("awww runtime query failed: {error}"));
+            }
+            Ok(raw) => match parse_awww_query_json(&raw) {
+                Err(error) => {
+                    implicate(Backend::Awww);
+                    uncertainty.push(format!("awww runtime evidence is ambiguous: {error}"));
+                }
+                Ok(mut entries) => {
+                    // Without an alpha-capable daemon a "transparent" surface is
+                    // actually opaque and still owns the output.
+                    let opaque_daemon = processes.iter().any(|process| {
+                        program_is(&process.argv, "awww-daemon")
+                            && !crate::awww::alpha_format_supported(&process.argv)
+                    });
+                    if opaque_daemon {
+                        for entry in entries.values_mut() {
+                            if matches!(entry, AwwwOutputEvidence::Transparent) {
+                                *entry = AwwwOutputEvidence::Color;
+                            }
+                        }
+                    }
+                    for (output, evidence) in entries {
+                        if !connected_outputs.contains(&output) {
+                            continue;
+                        }
+                        match evidence {
+                            AwwwOutputEvidence::Image(_) | AwwwOutputEvidence::Color => {
+                                implicate(Backend::Awww);
+                                claims.entry(output).or_default().push(Backend::Awww);
+                            }
+                            AwwwOutputEvidence::Transparent => {}
+                        }
+                    }
+                }
+            },
+        },
+    }
+
+    if !process_scan_failed {
+        // mpvpaper: argv selector decides coverage; wildcards/multi-output
+        // processes claim every output they cover, never a "safe single".
+        for process in &processes {
+            if !program_is(&process.argv, "mpvpaper") {
+                continue;
+            }
+            implicate(Backend::Mpvpaper);
+            let Some((selector, _path)) = parse_mpvpaper_command_line(&process.argv) else {
+                uncertainty.push(format!(
+                    "mpvpaper process {} has an ambiguous command line",
+                    process.pid
+                ));
+                continue;
+            };
+            match crate::mpvpaper::classify_selector(selector) {
+                crate::mpvpaper::MpvpaperOutputSelector::Single(output) => {
+                    if connected_outputs.contains(&output) {
+                        claims.entry(output).or_default().push(Backend::Mpvpaper);
+                    }
+                }
+                crate::mpvpaper::MpvpaperOutputSelector::Wildcard => {
+                    for output in connected_outputs {
+                        claims
+                            .entry(output.clone())
+                            .or_default()
+                            .push(Backend::Mpvpaper);
+                    }
+                }
+                crate::mpvpaper::MpvpaperOutputSelector::Multi(outputs) => {
+                    let mut claimed = false;
+                    for output in outputs {
+                        if connected_outputs.contains(&output) {
+                            claims.entry(output).or_default().push(Backend::Mpvpaper);
+                            claimed = true;
+                        }
+                    }
+                    if !claimed {
+                        uncertainty.push(format!(
+                            "mpvpaper process {} covers no known output; its selector is ambiguous",
+                            process.pid
+                        ));
+                    }
+                }
+                crate::mpvpaper::MpvpaperOutputSelector::Unparseable => {
+                    uncertainty.push(format!(
+                        "mpvpaper process {} has an unparseable output selector",
+                        process.pid
+                    ));
+                }
+            }
+        }
+
+        for process in &processes {
+            if !program_is(&process.argv, "swaybg") {
+                continue;
+            }
+            implicate(Backend::Swaybg);
+            match parse_swaybg_command_line(&process.argv, connected_outputs) {
+                Some(assignments) => {
+                    for (output, _path) in assignments {
+                        claims.entry(output).or_default().push(Backend::Swaybg);
+                    }
+                }
+                None => uncertainty.push(format!(
+                    "swaybg process {} has an ambiguous command line",
+                    process.pid
+                )),
+            }
+        }
+
+        for process in processes
+            .iter()
+            .filter(|process| program_is(&process.argv, "linux-wallpaperengine"))
+        {
+            implicate(Backend::LinuxWallpaperEngine);
+            match parse_lwe_command_line(&process.argv) {
+                Some(assignments) => {
+                    for (output, _) in assignments {
+                        if connected_outputs.iter().any(|known| known == output) {
+                            let owners = claims.entry(output.to_string()).or_default();
+                            if owners.contains(&Backend::LinuxWallpaperEngine) {
+                                uncertainty.push(format!("multiple linux-wallpaperengine assignments claim output {output}"));
+                            }
+                            owners.push(Backend::LinuxWallpaperEngine);
+                        }
+                    }
+                }
+                None => uncertainty.push(format!(
+                    "linux-wallpaperengine process {} has an ambiguous command line",
+                    process.pid
+                )),
+            }
+        }
+    }
+
+    let outputs = connected_outputs
+        .iter()
+        .map(|output| {
+            let ownership = if !uncertainty.is_empty() {
+                OutputOwnership::Uncertain(uncertainty.join("; "))
+            } else {
+                let mut owners = claims.get(output).cloned().unwrap_or_default();
+                owners.sort_by_key(|backend| backend.as_str());
+                owners.dedup();
+                match owners.as_slice() {
+                    [] => OutputOwnership::Vacant,
+                    [backend] => OutputOwnership::Occupied(*backend),
+                    _ => OutputOwnership::Uncertain(format!(
+                        "conflicting renderer processes claim output {output}"
+                    )),
+                }
+            };
+            (output.clone(), ownership)
+        })
+        .collect();
+
+    OutputOwnershipSnapshot {
+        outputs,
+        implicated_backends: implicated,
+        process_inspection_error,
+    }
 }
 
 #[derive(Debug, Default)]
 struct LweEvidence {
     by_output: HashMap<String, Vec<String>>,
-    process_count: usize,
     malformed_process: bool,
 }
 
@@ -638,7 +935,6 @@ fn collect_lwe_evidence(processes: &[ProcessCommandLine]) -> LweEvidence {
         if !program_is(&process.argv, "linux-wallpaperengine") {
             continue;
         }
-        evidence.process_count += 1;
         match parse_lwe_command_line(&process.argv) {
             Some(assignments) => {
                 for (output, renderer_id) in assignments {
@@ -655,7 +951,7 @@ fn collect_lwe_evidence(processes: &[ProcessCommandLine]) -> LweEvidence {
     evidence
 }
 
-fn parse_lwe_command_line(argv: &[String]) -> Option<Vec<(&str, &str)>> {
+pub(crate) fn parse_lwe_command_line(argv: &[String]) -> Option<Vec<(&str, &str)>> {
     let mut assignments = Vec::new();
     let mut index = 1;
     while index < argv.len() {
@@ -684,7 +980,39 @@ fn parse_lwe_command_line(argv: &[String]) -> Option<Vec<(&str, &str)>> {
             }
             index += 4;
         } else {
-            index += 1;
+            match argv[index].as_str() {
+                "--scaling"
+                | "--clamp"
+                | "--layer"
+                | "--fps"
+                | "-f"
+                | "--volume"
+                | "-v"
+                | "--assets-dir"
+                | "--screenshot"
+                | "--screenshot-delay"
+                | "--fullscreen-pause-ignore-appid"
+                | "--set-property"
+                | "--property"
+                | "--render-debug" => {
+                    argv.get(index + 1)?;
+                    index += 2;
+                }
+                "--silent"
+                | "-s"
+                | "--noautomute"
+                | "--no-audio-processing"
+                | "--no-fullscreen-pause"
+                | "--fullscreen-pause-only-active"
+                | "--disable-particles"
+                | "--disable-mouse"
+                | "--disable-parallax"
+                | "--list-properties"
+                | "-l"
+                | "--dump-structure"
+                | "-z" => index += 1,
+                _ => return None,
+            }
         }
     }
     (!assignments.is_empty()).then_some(assignments)
@@ -701,12 +1029,6 @@ fn observe_lwe(
             return unknown(output, &format!("process inspection failed: {error}"));
         }
     };
-    if evidence.process_count > 1 {
-        return unknown(
-            output,
-            "Multiple linux-wallpaperengine processes make ownership ambiguous.",
-        );
-    }
     if evidence.malformed_process {
         return unknown(
             output,
@@ -807,6 +1129,14 @@ fn parse_awww_query_json(raw: &str) -> Result<HashMap<String, AwwwOutputEvidence
                 .filter(|value| !value.trim().is_empty());
             let output_evidence = match (image, displaying.contains_key("color")) {
                 (Some(path), false) => AwwwOutputEvidence::Image(path.to_string()),
+                (None, true)
+                    if displaying
+                        .get("color")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(crate::awww::is_transparent_color) =>
+                {
+                    AwwwOutputEvidence::Transparent
+                }
                 (None, true) => AwwwOutputEvidence::Color,
                 _ => {
                     return Err(format!("awww output {name} has ambiguous display evidence"));
@@ -855,6 +1185,15 @@ mod tests {
                 "/walls/night sky.mp4"
             ]
         );
+    }
+
+    #[test]
+    fn unrelated_non_utf8_arguments_do_not_poison_renderer_observation() {
+        let argv = decode_proc_cmdline(b"/usr/bin/python3\0script.py\0filename-\xff\0").unwrap();
+        assert_eq!(argv[0], "/usr/bin/python3");
+        assert_eq!(argv.len(), 3);
+        assert!(argv[2].starts_with("filename-"));
+        assert!(decode_proc_cmdline(b"/usr/bin/mpvpaper\0eDP-\xff\0--\0/a.mp4\0").is_err());
     }
 
     #[test]
@@ -944,5 +1283,270 @@ mod tests {
             !std::path::Path::new("/proc").join(pid.trim()).exists(),
             "the timed-out child must be killed and reaped"
         );
+    }
+
+    mod ownership {
+        use crate::runtime::AwwwReadiness;
+        use crate::runtime_observation::{observe_output_ownership, OutputOwnership};
+        use crate::test_support::FakeRuntime;
+        use wc_core::types::Backend;
+
+        fn dual() -> Vec<String> {
+            vec!["eDP-1".to_string(), "DP-8".to_string()]
+        }
+
+        fn ownership_of<'a>(
+            snapshot: &'a crate::runtime_observation::OutputOwnershipSnapshot,
+            output: &str,
+        ) -> &'a OutputOwnership {
+            &snapshot
+                .outputs
+                .iter()
+                .find(|(name, _)| name == output)
+                .unwrap_or_else(|| panic!("missing output {output}"))
+                .1
+        }
+
+        #[test]
+        fn live_daemon_without_default_socket_is_uncertain_not_vacant() {
+            let mut rt = FakeRuntime {
+                extra_command_lines: vec![vec![
+                    "awww-daemon".into(),
+                    "--namespace".into(),
+                    "custom".into(),
+                ]],
+                awww_readiness_sequence: std::cell::RefCell::new(vec![
+                    AwwwReadiness::SocketMissing,
+                ]),
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert!(
+                    matches!(ownership_of(&snapshot, &output), OutputOwnership::Uncertain(reason) if reason.contains("socket"))
+                );
+            }
+            assert_eq!(snapshot.implicated_backends, [Backend::Awww]);
+        }
+
+        #[test]
+        fn vacant_desktop_after_stop_despite_saved_preferences() {
+            // Nothing running: saved rows are irrelevant to observation.
+            let mut rt = FakeRuntime::default();
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert_eq!(ownership_of(&snapshot, "eDP-1"), &OutputOwnership::Vacant);
+            assert_eq!(ownership_of(&snapshot, "DP-8"), &OutputOwnership::Vacant);
+            assert!(snapshot.implicated_backends.is_empty());
+        }
+
+        #[test]
+        fn live_renderers_are_occupied_even_without_saved_rows() {
+            let mut rt = FakeRuntime {
+                awww_displayed: vec![("eDP-1".into(), "/walls/a.jpg".into())],
+                mpvpaper_process_table: vec![crate::runtime::MpvpaperProcess::for_output(
+                    42,
+                    "DP-8",
+                    "/walls/b.mp4",
+                )],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert_eq!(
+                ownership_of(&snapshot, "eDP-1"),
+                &OutputOwnership::Occupied(Backend::Awww)
+            );
+            assert_eq!(
+                ownership_of(&snapshot, "DP-8"),
+                &OutputOwnership::Occupied(Backend::Mpvpaper)
+            );
+        }
+
+        #[test]
+        fn wildcard_mpvpaper_occupies_every_connected_output() {
+            let mut rt = FakeRuntime {
+                mpvpaper_process_table: vec![crate::runtime::MpvpaperProcess::for_output(
+                    9,
+                    "*",
+                    "/walls/all.mp4",
+                )],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert_eq!(
+                    ownership_of(&snapshot, &output),
+                    &OutputOwnership::Occupied(Backend::Mpvpaper)
+                );
+            }
+        }
+
+        #[test]
+        fn unparseable_mpvpaper_makes_ownership_uncertain_not_vacant() {
+            let mut rt = FakeRuntime {
+                mpvpaper_process_table: vec![crate::runtime::MpvpaperProcess {
+                    pid: 9,
+                    selector: crate::runtime::MpvpaperOutputSelector::Unparseable,
+                    path: "/walls/x.mp4".into(),
+                }],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert!(
+                    matches!(
+                        ownership_of(&snapshot, &output),
+                        OutputOwnership::Uncertain(_)
+                    ),
+                    "unparseable selector must not read as vacant"
+                );
+            }
+            assert!(snapshot.implicated_backends.contains(&Backend::Mpvpaper));
+        }
+
+        #[test]
+        fn awww_socket_present_query_failed_is_uncertain_not_vacant() {
+            let mut rt = FakeRuntime {
+                awww_readiness_sequence: std::cell::RefCell::new(vec![
+                    AwwwReadiness::SocketPresentQueryFailed {
+                        stderr: "timeout".into(),
+                    },
+                ]),
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert!(matches!(
+                    ownership_of(&snapshot, &output),
+                    OutputOwnership::Uncertain(_)
+                ));
+            }
+            assert!(snapshot.implicated_backends.contains(&Backend::Awww));
+        }
+
+        #[test]
+        fn process_scan_failure_is_uncertain_for_every_output() {
+            let mut rt = FakeRuntime {
+                process_scan_error: Some("proc unreadable".into()),
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert!(matches!(
+                    ownership_of(&snapshot, &output),
+                    OutputOwnership::Uncertain(_)
+                ));
+            }
+        }
+
+        #[test]
+        fn conflicting_renderers_on_one_output_are_uncertain() {
+            let mut rt = FakeRuntime {
+                awww_displayed: vec![("eDP-1".into(), "/walls/a.jpg".into())],
+                mpvpaper_process_table: vec![crate::runtime::MpvpaperProcess::for_output(
+                    42,
+                    "eDP-1",
+                    "/walls/b.mp4",
+                )],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert!(matches!(
+                ownership_of(&snapshot, "eDP-1"),
+                OutputOwnership::Uncertain(_)
+            ));
+            assert_eq!(ownership_of(&snapshot, "DP-8"), &OutputOwnership::Vacant);
+        }
+
+        #[test]
+        fn transparent_release_frees_output_only_with_alpha_daemon() {
+            // Alpha-capable daemon: transparent surface means released.
+            let mut rt = FakeRuntime {
+                extra_command_lines: vec![vec![
+                    "awww-daemon".into(),
+                    "--no-cache".into(),
+                    "--format".into(),
+                    "argb".into(),
+                ]],
+                command_output_args: vec![vec![
+                    "clear".into(),
+                    "--outputs".into(),
+                    "eDP-1".into(),
+                    "00000000".into(),
+                ]],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert_eq!(
+                ownership_of(&snapshot, "eDP-1"),
+                &OutputOwnership::Vacant,
+                "transparent surface on an alpha daemon is released"
+            );
+
+            // Opaque daemon: the same "transparent" color displays as black.
+            let mut rt = FakeRuntime {
+                extra_command_lines: vec![vec!["awww-daemon".into()]],
+                command_output_args: vec![vec![
+                    "clear".into(),
+                    "--outputs".into(),
+                    "eDP-1".into(),
+                    "00000000".into(),
+                ]],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert_eq!(
+                ownership_of(&snapshot, "eDP-1"),
+                &OutputOwnership::Occupied(Backend::Awww),
+                "without alpha the surface is opaque and still owns the output"
+            );
+        }
+
+        #[test]
+        fn independent_lwe_processes_claim_only_their_own_outputs() {
+            let mut rt = FakeRuntime {
+                extra_command_lines: dual()
+                    .iter()
+                    .map(|output| {
+                        vec![
+                            "linux-wallpaperengine".into(),
+                            "--screen-root".into(),
+                            output.clone(),
+                            "--bg".into(),
+                            "42".into(),
+                        ]
+                    })
+                    .collect(),
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert_eq!(
+                    ownership_of(&snapshot, &output),
+                    &OutputOwnership::Occupied(Backend::LinuxWallpaperEngine)
+                );
+            }
+            rt.extra_command_lines
+                .push(rt.extra_command_lines[0].clone());
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            assert!(matches!(
+                ownership_of(&snapshot, "eDP-1"),
+                OutputOwnership::Uncertain(_)
+            ));
+        }
+
+        #[test]
+        fn lwe_shared_process_claims_each_listed_output() {
+            let mut rt = FakeRuntime {
+                lwe_outputs: vec!["eDP-1".into(), "DP-8".into()],
+                ..Default::default()
+            };
+            let snapshot = observe_output_ownership(&dual(), &mut rt);
+            for output in dual() {
+                assert_eq!(
+                    ownership_of(&snapshot, &output),
+                    &OutputOwnership::Occupied(Backend::LinuxWallpaperEngine)
+                );
+            }
+        }
     }
 }

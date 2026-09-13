@@ -54,8 +54,6 @@ pub enum DisplayExecAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisplayExecReport {
     pub events: Vec<CompletedEvent>,
-    pub completed_stops: Vec<CompletedStop>,
-    pub completed_applies: Vec<CompletedApply>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -65,26 +63,44 @@ pub enum CompletedEvent {
 }
 
 impl DisplayExecReport {
-    fn record_stop(&mut self, stop: CompletedStop) {
-        self.events.push(CompletedEvent::Stop(stop.clone()));
-        self.completed_stops.push(stop);
+    pub fn record_stop(&mut self, stop: CompletedStop) {
+        self.events.push(CompletedEvent::Stop(stop));
     }
-
     fn record_apply(&mut self, apply: CompletedApply) {
-        self.events.push(CompletedEvent::Apply(apply.clone()));
-        self.completed_applies.push(apply);
+        self.events.push(CompletedEvent::Apply(apply));
+    }
+    pub fn completed_stops(&self) -> impl Iterator<Item = &CompletedStop> {
+        self.events.iter().filter_map(|event| match event {
+            CompletedEvent::Stop(stop) => Some(stop),
+            _ => None,
+        })
+    }
+    pub fn completed_applies(&self) -> impl Iterator<Item = &CompletedApply> {
+        self.events.iter().filter_map(|event| match event {
+            CompletedEvent::Apply(apply) => Some(apply),
+            _ => None,
+        })
     }
     pub fn had_destructive_stop(&self) -> bool {
-        !self.completed_stops.is_empty()
+        self.completed_stops().any(|stop| stop.destructive)
     }
-
     pub fn stopped_backends(&self) -> Vec<Backend> {
-        self.completed_stops
-            .iter()
-            .map(|stop| stop.backend)
-            .collect()
+        self.completed_stops().map(|stop| stop.backend).collect()
+    }
+    pub(crate) fn append(&mut self, other: Self) {
+        self.events.extend(other.events);
     }
 }
+
+pub(crate) enum PreparedDisplayAction {
+    Stop {
+        backend: Backend,
+        scope: ExecutionScope,
+        execution: StopExecution,
+    },
+    Apply(Box<driver::PreparedApply>),
+}
+pub(crate) type PreparedDisplayActions = Vec<PreparedDisplayAction>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedStop {
@@ -136,33 +152,47 @@ pub fn execute_display_actions(
     reporter: &mut dyn ApplyStageReporter,
     request_id: Option<&str>,
 ) -> Result<DisplayExecReport, DisplayExecFailure> {
-    let mut prepared = prepare_display_actions(s, actions, ctx, runtime, request_id)?;
+    let prepared = prepare_display_actions(s, actions, ctx, runtime, request_id, &mut Vec::new())?;
+    execute_prepared_display_actions(s, prepared, runtime, reporter, request_id)
+}
 
+#[allow(clippy::result_large_err)]
+pub(crate) fn execute_prepared_display_actions(
+    s: &StorageApi,
+    prepared: PreparedDisplayActions,
+    runtime: &mut dyn BackendRuntime,
+    reporter: &mut dyn ApplyStageReporter,
+    request_id: Option<&str>,
+) -> Result<DisplayExecReport, DisplayExecFailure> {
     let mut report = DisplayExecReport::default();
-    for (action, prepared) in actions.iter().zip(&mut prepared) {
+    for action in prepared {
         match action {
-            DisplayExecAction::Stop { backend, scope } => {
-                let execution = match classify_stop_scope(*backend, scope, ctx.known_outputs) {
-                    Ok(execution) => execution,
-                    Err(error) => {
-                        return Err(DisplayExecFailure {
-                            report,
-                            error,
-                            uncertain_stop: Some(Box::new(CompletedStop {
-                                backend: *backend,
-                                scope: scope.clone(),
-                                destructive: true,
-                            })),
-                            cleanup_uncertain: true,
-                        });
+            PreparedDisplayAction::Stop {
+                backend,
+                scope,
+                execution,
+            } => {
+                // Prepared scopes are stable; live selectors/daemon facts are not.
+                if let StopExecution::Scoped(outputs) = &execution {
+                    if let Some(driver) = driver::driver_for(backend) {
+                        if let Err(error) =
+                            driver.preflight_stop(&ExecutionScope::Named(outputs.clone()), runtime)
+                        {
+                            return Err(DisplayExecFailure {
+                                report,
+                                error,
+                                uncertain_stop: None,
+                                cleanup_uncertain: false,
+                            });
+                        }
                     }
-                };
-                if let Err(error) = stop_backend(s, *backend, &execution, runtime) {
+                }
+                if let Err(error) = stop_backend(s, backend, &execution, runtime) {
                     return Err(DisplayExecFailure {
                         report,
                         error,
                         uncertain_stop: Some(Box::new(CompletedStop {
-                            backend: *backend,
+                            backend,
                             scope: scope.clone(),
                             destructive: true,
                         })),
@@ -170,24 +200,20 @@ pub fn execute_display_actions(
                     });
                 }
                 report.record_stop(CompletedStop {
-                    backend: *backend,
+                    backend,
                     scope: scope.clone(),
                     destructive: true,
                 });
             }
-            DisplayExecAction::Apply { .. } => {
-                let operation = prepared
-                    .as_mut()
-                    .expect("apply actions are prepared before execution");
+            PreparedDisplayAction::Apply(mut operation) => {
                 if let Err(failure) = operation.execute(s, runtime, reporter) {
                     let mut uncertain_stop = None;
                     let mut cleanup_uncertain = false;
                     match failure.cleanup {
                         driver::CleanupOutcome::NotRequired => {}
                         driver::CleanupOutcome::VerifiedTargetedStop { backend, outputs } => {
-                            let scope = ExecutionScope::named(outputs).unwrap_or(
-                                ExecutionScope::AllDisplays,
-                            );
+                            let scope = ExecutionScope::named(outputs)
+                                .unwrap_or(ExecutionScope::AllDisplays);
                             report.record_stop(CompletedStop {
                                 backend,
                                 scope,
@@ -232,27 +258,15 @@ pub fn execute_display_actions(
     Ok(report)
 }
 
-/// Validate and prepare a full action list without starting or stopping a
-/// renderer. Restore uses this before its global clean-slate Stop.
 #[allow(clippy::result_large_err)]
-pub fn preflight_display_actions(
+pub(crate) fn prepare_display_actions(
     s: &StorageApi,
     actions: &[DisplayExecAction],
     ctx: &DisplayExecContext<'_>,
     runtime: &mut dyn BackendRuntime,
     request_id: Option<&str>,
-) -> Result<(), DisplayExecFailure> {
-    prepare_display_actions(s, actions, ctx, runtime, request_id).map(|_| ())
-}
-
-#[allow(clippy::result_large_err)]
-fn prepare_display_actions(
-    s: &StorageApi,
-    actions: &[DisplayExecAction],
-    ctx: &DisplayExecContext<'_>,
-    runtime: &mut dyn BackendRuntime,
-    request_id: Option<&str>,
-) -> Result<Vec<Option<driver::PreparedApply>>, DisplayExecFailure> {
+    stopped_backends: &mut Vec<Backend>,
+) -> Result<PreparedDisplayActions, DisplayExecFailure> {
     let mut prepared = Vec::with_capacity(actions.len());
     let mut preceding_stop = false;
     for action in actions {
@@ -269,7 +283,9 @@ fn prepare_display_actions(
                         });
                     }
                 };
-                if matches!(execution, StopExecution::Scoped(_)) {
+                if matches!(execution, StopExecution::Scoped(_))
+                    && !stopped_backends.contains(backend)
+                {
                     let Some(backend_driver) = driver::driver_for(*backend) else {
                         return Err(DisplayExecFailure {
                             report: DisplayExecReport::default(),
@@ -290,8 +306,15 @@ fn prepare_display_actions(
                         });
                     }
                 }
+                if matches!(execution, StopExecution::Global) {
+                    stopped_backends.push(*backend);
+                }
                 preceding_stop = true;
-                prepared.push(None);
+                prepared.push(PreparedDisplayAction::Stop {
+                    backend: *backend,
+                    scope: scope.clone(),
+                    execution,
+                });
             }
             DisplayExecAction::Apply {
                 backend,
@@ -313,6 +336,7 @@ fn prepare_display_actions(
                         path,
                         scope,
                         after_stop: *use_instant || preceding_stop,
+                        stopped_backends,
                         clear_state_hint: false,
                         request_id,
                     },
@@ -328,7 +352,7 @@ fn prepare_display_actions(
                         });
                     }
                 };
-                prepared.push(Some(operation));
+                prepared.push(PreparedDisplayAction::Apply(Box::new(operation)));
             }
         }
     }
@@ -336,7 +360,7 @@ fn prepare_display_actions(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum StopExecution {
+pub(crate) enum StopExecution {
     Global,
     Scoped(Vec<String>),
 }
@@ -394,9 +418,8 @@ fn stop_backend(
     match execution {
         StopExecution::Global => driver.stop_checked(runtime, Some(s)),
         StopExecution::Scoped(outputs) => {
-            let scope = ExecutionScope::named(outputs.clone()).map_err(|error| {
-                WcError::Other(format!("invalid scoped stop outputs: {error}"))
-            })?;
+            let scope = ExecutionScope::named(outputs.clone())
+                .map_err(|error| WcError::Other(format!("invalid scoped stop outputs: {error}")))?;
             driver.stop_scoped_checked(runtime, Some(s), &scope)
         }
     }
@@ -429,6 +452,122 @@ mod tests {
     }
 
     #[test]
+    fn failed_new_daemon_release_cleans_up_and_never_kills_sibling_video() {
+        for query_failed in [false, true] {
+            let (tmp, storage) = temp_storage();
+            let image = tmp.path().join("image.png");
+            std::fs::write(&image, b"image").unwrap();
+            let known = vec!["eDP-1".into(), "DP-8".into()];
+            let mut runtime = FakeRuntime {
+                command_status_success: true,
+                command_output_success: false,
+                stop_awww_query_failed: query_failed,
+                awww_readiness_sequence: std::cell::RefCell::new(vec![
+                    AwwwReadiness::SocketMissing,
+                    AwwwReadiness::SocketMissing,
+                    AwwwReadiness::Ready,
+                ]),
+                mpvpaper_process_table: vec![MpvpaperProcess {
+                    pid: 42,
+                    path: "/video.mp4".into(),
+                    selector: MpvpaperOutputSelector::Single("DP-8".into()),
+                }],
+                ..Default::default()
+            };
+            let failure = execute_display_actions(
+                &storage,
+                &[DisplayExecAction::Apply {
+                    backend: Backend::Awww,
+                    path: image.to_string_lossy().into(),
+                    scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
+                    use_instant: true,
+                }],
+                &ctx(&known),
+                &mut runtime,
+                &mut NoopReporter,
+                None,
+            )
+            .unwrap_err();
+            assert_eq!(runtime.stop_awww_count, 1);
+            assert_eq!(runtime.stop_mpvpaper_count, 0);
+            assert!(runtime.stop_mpvpaper_outputs_calls.is_empty());
+            assert_eq!(failure.cleanup_uncertain, query_failed);
+        }
+    }
+
+    #[test]
+    fn global_retirement_does_not_require_mixed_environment() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("video.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let known = vec!["eDP-1".into(), "DP-8".into()];
+        let mut runtime = FakeRuntime {
+            awww_version: Some("awww 0.11.0".into()),
+            ..Default::default()
+        };
+        let apply = DisplayExecAction::Apply {
+            backend: Backend::Mpvpaper,
+            path: video.to_string_lossy().into(),
+            scope: ExecutionScope::named(vec!["DP-8".into()]).unwrap(),
+            use_instant: true,
+        };
+        assert!(prepare_display_actions(
+            &storage,
+            &[apply.clone()],
+            &ctx(&known),
+            &mut runtime,
+            None,
+            &mut Vec::new()
+        )
+        .is_err());
+        prepare_display_actions(
+            &storage,
+            &[
+                DisplayExecAction::Stop {
+                    backend: Backend::Awww,
+                    scope: ExecutionScope::AllDisplays,
+                },
+                apply,
+            ],
+            &ctx(&known),
+            &mut runtime,
+            None,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(runtime.stop_awww_count, 0);
+    }
+
+    #[test]
+    fn named_awww_release_keeps_shared_daemon_and_records_target_only() {
+        let (_tmp, storage) = temp_storage();
+        let known = vec!["eDP-1".into(), "DP-8".into()];
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            ..Default::default()
+        };
+        let scope = ExecutionScope::named(vec!["eDP-1".into()]).unwrap();
+        let report = execute_display_actions(
+            &storage,
+            &[DisplayExecAction::Stop {
+                backend: Backend::Awww,
+                scope: scope.clone(),
+            }],
+            &ctx(&known),
+            &mut runtime,
+            &mut NoopReporter,
+            None,
+        )
+        .unwrap();
+        assert_eq!(runtime.stop_awww_count, 0);
+        assert_eq!(report.completed_stops().next().unwrap().scope, scope);
+        assert!(runtime
+            .command_output_args
+            .iter()
+            .any(|args| args == &["clear", "--outputs", "eDP-1", "00000000"]));
+    }
+
+    #[test]
     fn stop_only_runs_when_present_in_actions() {
         let (_tmp, s) = temp_storage();
         let img = _tmp.path().join("a.jpg");
@@ -455,8 +594,8 @@ mod tests {
         )
         .unwrap();
 
-        assert!(report.completed_stops.is_empty());
-        assert_eq!(report.completed_applies.len(), 1);
+        assert!(report.completed_stops().next().is_none());
+        assert_eq!(report.completed_applies().count(), 1);
         assert_eq!(rt.stop_awww_count, 0);
         assert_eq!(rt.stop_mpvpaper_count, 0);
         assert_eq!(rt.stop_lwe_count, 0);
@@ -565,19 +704,35 @@ mod tests {
         assert_eq!(rt.stop_mpvpaper_count, 1);
         assert_eq!(rt.stop_awww_count, 0);
         assert_eq!(rt.stop_lwe_count, 0);
-        assert!(report.completed_stops[0].destructive);
+        assert!(report.completed_stops().next().unwrap().destructive);
     }
 
     #[test]
     fn partial_named_stop_is_rejected_without_running_global_stop() {
         let (_tmp, s) = temp_storage();
         let known = vec!["eDP-1".into(), "HDMI-1".into()];
-        let mut rt = FakeRuntime::default();
+        let mut rt = FakeRuntime {
+            extra_command_lines: vec![vec![
+                "linux-wallpaperengine",
+                "--screen-root",
+                "eDP-1",
+                "--bg",
+                "42",
+                "--screen-root",
+                "HDMI-1",
+                "--bg",
+                "42",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()],
+            ..Default::default()
+        };
         let mut reporter = NoopReporter;
         let err = execute_display_actions(
             &s,
             &[DisplayExecAction::Stop {
-                backend: Backend::Awww,
+                backend: Backend::LinuxWallpaperEngine,
                 scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
             }],
             &ctx(&known),
@@ -586,8 +741,8 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.error.to_string().contains("refusing to broaden"));
-        assert_eq!(rt.stop_awww_count, 0);
+        assert!(err.error.to_string().contains("non-target display HDMI-1"));
+        assert_eq!(rt.stop_lwe_count, 0);
         assert!(!err.after_destructive_stop());
     }
 
@@ -743,7 +898,7 @@ mod tests {
         .unwrap_err();
         assert!(err.error.to_string().contains("awww"));
         assert_eq!(rt.stop_mpvpaper_count, 0);
-        assert!(err.report.completed_applies.is_empty());
+        assert!(err.report.completed_applies().next().is_none());
         assert!(!err.after_destructive_stop());
     }
 
@@ -780,8 +935,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(rt.stop_mpvpaper_count, 1);
         assert!(err.after_destructive_stop());
-        assert_eq!(err.report.completed_stops.len(), 1);
-        assert!(err.report.completed_applies.is_empty());
+        assert_eq!(err.report.completed_stops().count(), 1);
+        assert!(err.report.completed_applies().next().is_none());
     }
 
     #[test]
@@ -802,6 +957,9 @@ mod tests {
             status_calls: usize,
         }
         impl ProcessIo for SeqRuntime {
+            fn awww_query_json(&mut self) -> Result<String, WcError> {
+                self.inner.awww_query_json()
+            }
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -901,9 +1059,9 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.after_destructive_stop());
-        assert_eq!(err.report.completed_applies.len(), 1);
+        assert_eq!(err.report.completed_applies().count(), 1);
         assert_eq!(
-            err.report.completed_applies[0].scope,
+            err.report.completed_applies().next().unwrap().scope,
             ExecutionScope::named(vec!["eDP-1".into()]).unwrap()
         );
     }
@@ -920,6 +1078,9 @@ mod tests {
             status_calls: usize,
         }
         impl ProcessIo for SeqRuntime {
+            fn awww_query_json(&mut self) -> Result<String, WcError> {
+                self.inner.awww_query_json()
+            }
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -1026,18 +1187,17 @@ mod tests {
         .unwrap_err();
         assert_eq!(rt.inner.stop_mpvpaper_count, 0);
         assert_eq!(rt.inner.failed_mpvpaper_launch_cleanup_count, 1);
-        assert_eq!(err.report.completed_applies.len(), 1);
+        assert_eq!(err.report.completed_applies().count(), 1);
         let mpvpaper_stops: Vec<_> = err
             .report
-            .completed_stops
-            .iter()
+            .completed_stops()
             .filter(|stop| stop.backend == Backend::Mpvpaper)
             .collect();
         assert_eq!(
             mpvpaper_stops.len(),
             1,
             "readiness cleanup must record one named mpvpaper stop: {:?}",
-            err.report.completed_stops
+            err.report.completed_stops().collect::<Vec<_>>()
         );
         assert_eq!(
             mpvpaper_stops[0].scope,
@@ -1046,7 +1206,7 @@ mod tests {
         assert!(
             !matches!(mpvpaper_stops[0].scope, ExecutionScope::AllDisplays),
             "targeted cleanup must not report a global mpvpaper stop: {:?}",
-            err.report.completed_stops
+            err.report.completed_stops().collect::<Vec<_>>()
         );
     }
 
@@ -1062,6 +1222,9 @@ mod tests {
             stop_checked_calls: usize,
         }
         impl ProcessIo for FailStopRuntime {
+            fn awww_query_json(&mut self) -> Result<String, WcError> {
+                self.inner.awww_query_json()
+            }
             fn command_output(&mut self, c: &mut Command) -> Result<std::process::Output, WcError> {
                 self.inner.command_output(c)
             }
@@ -1159,8 +1322,8 @@ mod tests {
         .unwrap_err();
         assert_eq!(rt.stop_checked_calls, 1);
         assert!(err.error.to_string().contains("mpvpaper still running"));
-        assert!(err.report.completed_stops.is_empty());
-        assert!(err.report.completed_applies.is_empty());
+        assert!(err.report.completed_stops().next().is_none());
+        assert!(err.report.completed_applies().next().is_none());
         assert!(rt.inner.command_output_args.is_empty());
         assert!(!err.after_destructive_stop());
     }
@@ -1196,8 +1359,7 @@ mod tests {
         assert_eq!(rt.failed_mpvpaper_launch_cleanup_count, 1);
         let mpvpaper_stops: Vec<_> = err
             .report
-            .completed_stops
-            .iter()
+            .completed_stops()
             .filter(|stop| stop.backend == Backend::Mpvpaper)
             .collect();
         assert_eq!(mpvpaper_stops.len(), 1);
@@ -1245,7 +1407,7 @@ mod tests {
             )]
         );
         assert_eq!(runtime.stop_mpvpaper_count, 0);
-        assert!(failure.report.completed_stops.is_empty());
+        assert!(failure.report.completed_stops().next().is_none());
     }
 
     #[test]
@@ -1310,7 +1472,7 @@ mod tests {
         .unwrap();
         assert_eq!(rt.lwe_apply_calls.len(), 1);
         assert_eq!(rt.lwe_apply_calls[0].1, vec!["eDP-1".to_string()]);
-        assert_eq!(report.completed_applies.len(), 1);
+        assert_eq!(report.completed_applies().count(), 1);
         let stages = reporter.stages();
         assert!(stages.contains(&apply_stage::ApplyStage::StartLwe));
         assert!(stages.contains(&apply_stage::ApplyStage::WaitRendererAlive));
@@ -1350,18 +1512,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(rt.stop_mpvpaper_count, 0);
-        assert_eq!(rt.stop_mpvpaper_outputs_calls, vec![vec!["eDP-1".to_string()]]);
-        assert_eq!(report.completed_stops.len(), 1);
         assert_eq!(
-            report.completed_stops[0].scope,
+            rt.stop_mpvpaper_outputs_calls,
+            vec![vec!["eDP-1".to_string()]]
+        );
+        assert_eq!(report.completed_stops().count(), 1);
+        assert_eq!(
+            report.completed_stops().next().unwrap().scope,
             ExecutionScope::named(vec!["eDP-1".into()]).unwrap()
         );
         assert!(
             rt.mpvpaper_process_table
                 .iter()
                 .any(|process| process.pid == 20
-                    && process.selector
-                        == MpvpaperOutputSelector::Single("HDMI-1".into())),
+                    && process.selector == MpvpaperOutputSelector::Single("HDMI-1".into())),
             "sibling process must remain: {:?}",
             rt.mpvpaper_process_table
         );
@@ -1494,7 +1658,7 @@ mod tests {
     }
 
     #[test]
-    fn awww_partial_named_stop_still_rejected() {
+    fn failed_awww_release_is_uncertain_without_killing_daemon() {
         let (_tmp, s) = temp_storage();
         let known = vec!["eDP-1".into(), "HDMI-1".into()];
         let mut rt = FakeRuntime::default();
@@ -1511,7 +1675,182 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.error.to_string().contains("refusing to broaden"));
+        assert!(err.error.to_string().contains("transparent release failed"));
+        assert!(err.cleanup_uncertain);
+        assert!(err.report.completed_stops().next().is_none());
         assert_eq!(rt.stop_awww_count, 0);
+    }
+
+    #[test]
+    fn d3_mpvpaper_prepare_fails_closed_when_awww_socket_query_fails() {
+        let (tmp, s) = temp_storage();
+        let video = tmp.path().join("video.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let known = vec!["eDP-1".into(), "DP-8".into()];
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            awww_readiness_sequence: std::cell::RefCell::new(vec![
+                AwwwReadiness::SocketPresentQueryFailed {
+                    stderr: "daemon busy".into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Apply {
+                backend: Backend::Mpvpaper,
+                path: video.to_string_lossy().into(),
+                scope: ExecutionScope::named(vec!["DP-8".into()]).unwrap(),
+                use_instant: true,
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.error.to_string().contains("cannot verify awww state"),
+            "unexpected error: {}",
+            err.error
+        );
+        assert!(
+            err.report.completed_applies().next().is_none(),
+            "a video must never report success while awww ownership is unknown"
+        );
+        assert!(rt.command_status_args.is_empty(), "no launch attempted");
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert!(!err.cleanup_uncertain);
+    }
+
+    #[test]
+    fn d3_mpvpaper_execute_rechecks_awww_and_keeps_prior_stops_in_failure_report() {
+        let (tmp, s) = temp_storage();
+        let video = tmp.path().join("video.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let known = vec!["eDP-1".into(), "DP-8".into()];
+        let mut rt = FakeRuntime {
+            command_status_success: true,
+            // Prepare sees a ready daemon; by execution the socket stops answering.
+            awww_readiness_sequence: std::cell::RefCell::new(vec![
+                AwwwReadiness::Ready,
+                AwwwReadiness::SocketPresentQueryFailed {
+                    stderr: "query timed out".into(),
+                },
+            ]),
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[
+                DisplayExecAction::Stop {
+                    backend: Backend::Mpvpaper,
+                    scope: ExecutionScope::AllDisplays,
+                },
+                DisplayExecAction::Apply {
+                    backend: Backend::Mpvpaper,
+                    path: video.to_string_lossy().into(),
+                    scope: ExecutionScope::named(vec!["DP-8".into()]).unwrap(),
+                    use_instant: true,
+                },
+            ],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.error
+                .to_string()
+                .contains("cannot verify awww released output DP-8"),
+            "unexpected error: {}",
+            err.error
+        );
+        assert_eq!(
+            err.report.completed_stops().count(),
+            1,
+            "the confirmed stop must stay in the failure report"
+        );
+        assert!(err.report.completed_applies().next().is_none());
+        assert!(rt.command_status_args.is_empty(), "no launch attempted");
+        assert!(!err.cleanup_uncertain, "nothing was launched or cleaned up");
+    }
+
+    #[test]
+    fn d3_failed_transparent_release_blocks_video_launch() {
+        let (tmp, s) = temp_storage();
+        let video = tmp.path().join("video.mp4");
+        std::fs::write(&video, b"video").unwrap();
+        let known = vec!["eDP-1".into(), "DP-8".into()];
+        let mut rt = FakeRuntime {
+            // Daemon ready and still displays an image on the target, but the
+            // release command fails: the video must not start underneath it.
+            command_output_success: false,
+            command_status_success: true,
+            awww_displayed: vec![("DP-8".into(), "/walls/still.jpg".into())],
+            ..Default::default()
+        };
+        let mut reporter = NoopReporter;
+        let err = execute_display_actions(
+            &s,
+            &[DisplayExecAction::Apply {
+                backend: Backend::Mpvpaper,
+                path: video.to_string_lossy().into(),
+                scope: ExecutionScope::named(vec!["DP-8".into()]).unwrap(),
+                use_instant: true,
+            }],
+            &ctx(&known),
+            &mut rt,
+            &mut reporter,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.error.to_string().contains("transparent release"),
+            "unexpected error: {}",
+            err.error
+        );
+        assert!(err.report.completed_applies().next().is_none());
+        assert!(rt.command_status_args.is_empty(), "no launch attempted");
+    }
+
+    #[test]
+    fn d3_missing_socket_and_released_target_still_launch_video() {
+        for readiness in [
+            AwwwReadiness::SocketMissing,
+            AwwwReadiness::Ready, // ready daemon, target has no surface
+        ] {
+            let (tmp, s) = temp_storage();
+            let video = tmp.path().join("video.mp4");
+            std::fs::write(&video, b"video").unwrap();
+            let known = vec!["eDP-1".into(), "DP-8".into()];
+            let mut rt = FakeRuntime {
+                command_status_success: true,
+                awww_readiness_sequence: std::cell::RefCell::new(vec![readiness]),
+                ..Default::default()
+            };
+            let mut reporter = NoopReporter;
+            let report = execute_display_actions(
+                &s,
+                &[DisplayExecAction::Apply {
+                    backend: Backend::Mpvpaper,
+                    path: video.to_string_lossy().into(),
+                    scope: ExecutionScope::named(vec!["DP-8".into()]).unwrap(),
+                    use_instant: true,
+                }],
+                &ctx(&known),
+                &mut rt,
+                &mut reporter,
+                None,
+            )
+            .unwrap();
+            assert_eq!(report.completed_applies().count(), 1);
+            assert_eq!(rt.command_status_args.len(), 1);
+        }
     }
 }

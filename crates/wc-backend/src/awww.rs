@@ -354,4 +354,138 @@ mod tests {
             self.killed.borrow_mut().push(pid);
         }
     }
+
+    #[test]
+    fn alpha_format_requires_explicit_argb_or_abgr() {
+        assert!(!alpha_format_supported(&[]));
+        assert!(!alpha_format_supported(&[
+            "awww-daemon".into(),
+            "--no-cache".into(),
+        ]));
+        assert!(!alpha_format_supported(&[
+            "awww-daemon".into(),
+            "--format".into(),
+            "rgb".into(),
+        ]));
+        assert!(alpha_format_supported(&[
+            "awww-daemon".into(),
+            "--no-cache".into(),
+            "--format".into(),
+            "argb".into(),
+        ]));
+        assert!(alpha_format_supported(&[
+            "awww-daemon".into(),
+            "--format=abgr".into(),
+        ]));
+    }
+}
+
+/// awww 0.12 serializes the RGBA zero value without leading zeroes (`#0`).
+/// Only the exact transparent black release marker is accepted, never an
+/// arbitrary color, an absent value, or malformed query evidence.
+pub(crate) fn is_transparent_color(color: &str) -> bool {
+    matches!(color, "#0" | "#00000000")
+}
+
+/// Named video selectors are the only ones that can be released without
+/// silently widening the operation to an unrelated output.
+pub(crate) fn running_video_outputs(
+    runtime: &mut dyn crate::runtime::BackendRuntime,
+) -> Result<Vec<String>, wc_core::error::WcError> {
+    use crate::runtime::MpvpaperOutputSelector;
+    if runtime.mpvpaper_pids()?.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut outputs = Vec::new();
+    for process in runtime.mpvpaper_processes()? {
+        match process.selector {
+            MpvpaperOutputSelector::Single(output) => {
+                if !outputs.contains(&output) { outputs.push(output); }
+            }
+            _ => return Err(wc_core::error::WcError::Other("mixed wallpaper requires named mpvpaper processes; restore displays to replace legacy wildcard processes".into())),
+        }
+    }
+    Ok(outputs)
+}
+
+pub(crate) fn release_outputs(
+    runtime: &mut dyn crate::runtime::BackendRuntime,
+    outputs: &[String],
+) -> Result<(), wc_core::error::WcError> {
+    use wc_core::error::WcError;
+    crate::ExecutionScope::named(outputs.to_vec())?;
+    crate::driver::preflight_awww_transparency(runtime, false)?;
+    let result = runtime.command_output(Command::new("awww").args([
+        "clear",
+        "--outputs",
+        &outputs.join(","),
+        "00000000",
+    ]))?;
+    if !result.status.success() {
+        return Err(WcError::Other(format!(
+            "awww transparent release failed: {}",
+            String::from_utf8_lossy(&result.stderr)
+        )));
+    }
+    let query: serde_json::Value = serde_json::from_str(&runtime.awww_query_json()?)
+        .map_err(|error| WcError::Other(format!("invalid awww release evidence: {error}")))?;
+    for output in outputs {
+        let entries: Vec<_> = query
+            .as_object()
+            .into_iter()
+            .flat_map(|root| root.values())
+            .filter_map(serde_json::Value::as_array)
+            .flatten()
+            .filter(|entry| entry["name"].as_str() == Some(output))
+            .collect();
+        if entries.len() != 1
+            || !entries[0]["displaying"]["color"]
+                .as_str()
+                .is_some_and(is_transparent_color)
+        {
+            return Err(WcError::Other(format!(
+                "awww did not confirm transparent release of {output}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn alpha_format_supported(argv: &[String]) -> bool {
+    // Missing `--format` is not alpha-capable: historical defaults are opaque.
+    // Only an explicit argb/abgr flag proves transparent release is possible.
+    let mut saw_alpha = false;
+    for (index, arg) in argv.iter().enumerate() {
+        if matches!(arg.as_str(), "-f" | "--format") {
+            if argv
+                .get(index + 1)
+                .is_some_and(|value| matches!(value.as_str(), "argb" | "abgr"))
+            {
+                saw_alpha = true;
+            } else {
+                return false;
+            }
+        }
+        if let Some(value) = arg.strip_prefix("--format=") {
+            if matches!(value, "argb" | "abgr") {
+                saw_alpha = true;
+            } else {
+                return false;
+            }
+        }
+    }
+    saw_alpha
+}
+
+pub(crate) fn query_has_output(raw: &str, output: &str) -> Result<bool, wc_core::error::WcError> {
+    let query: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|error| wc_core::error::WcError::Other(format!("invalid awww query: {error}")))?;
+    let namespaces = query
+        .as_object()
+        .ok_or_else(|| wc_core::error::WcError::Other("invalid awww namespaces".into()))?;
+    Ok(namespaces
+        .values()
+        .filter_map(serde_json::Value::as_array)
+        .flatten()
+        .any(|entry| entry["name"].as_str() == Some(output)))
 }

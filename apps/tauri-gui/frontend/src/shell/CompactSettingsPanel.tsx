@@ -13,7 +13,6 @@ import type {
 import type { ShellPreferencesUpdate } from './useShellPreferences.ts';
 import {
   AWWW_TRANSITION_TYPES,
-  DEFAULT_MPVPAPER_OPTIONS,
   LWE_SCALING_MODES,
   type AwwwTransitionType,
   type GifRenderer,
@@ -35,6 +34,9 @@ export interface CompactSettingsPanelProps {
   readonly updatePreferences: (update: ShellPreferencesUpdate) => void;
   readonly behaviorSettings: WallpaperBehaviorSettings | null;
   readonly updateBehaviorSettings: (update: WallpaperBehaviorSettingsUpdate) => void;
+  readonly onApplyMpvpaperOptions?: (options: string) => void;
+  readonly mpvpaperApplying?: boolean;
+  readonly wallpaperApplying?: boolean;
   readonly behaviorReady: boolean;
   readonly loadError: Error | null;
   readonly saveError: Error | null;
@@ -66,6 +68,9 @@ export function CompactSettingsPanelView({
   updatePreferences,
   behaviorSettings,
   updateBehaviorSettings,
+  onApplyMpvpaperOptions,
+  mpvpaperApplying = false,
+  wallpaperApplying = false,
   behaviorReady,
   loadError,
   saveError,
@@ -201,12 +206,6 @@ export function CompactSettingsPanelView({
       event.preventDefault();
       event.currentTarget.value = behaviorSettings.mpvpaperOptions;
       event.currentTarget.blur();
-    }
-  };
-  const restoreDefaultMpvpaperOptions = () => {
-    if (mpvpaperOptionsInput) mpvpaperOptionsInput.value = DEFAULT_MPVPAPER_OPTIONS;
-    if (behaviorSettings.mpvpaperOptions !== DEFAULT_MPVPAPER_OPTIONS) {
-      updateMpvpaperOptions(DEFAULT_MPVPAPER_OPTIONS);
     }
   };
   const updateLweScaling = (value: string) => {
@@ -558,7 +557,7 @@ export function CompactSettingsPanelView({
                     aria-label="mpvpaper options"
                     data-behavior-control={true}
                     defaultValue={behaviorSettings.mpvpaperOptions}
-                    disabled={!behaviorReady || !usesMpvpaper}
+                    disabled={!behaviorReady || !usesMpvpaper || mpvpaperApplying}
                     key={behaviorSettings.mpvpaperOptions}
                     onBlur={(event) => commitMpvpaperOptions(event.currentTarget)}
                     onKeyDown={handleMpvpaperOptionsKeyDown}
@@ -569,15 +568,14 @@ export function CompactSettingsPanelView({
                     type="text"
                   />
                   <button
-                    aria-label="Restore default mpvpaper options"
-                    className="btn settings-options-reset"
+                    className="btn settings-options-apply"
                     data-behavior-control={true}
-                    disabled={!behaviorReady || !usesMpvpaper}
-                    onClick={restoreDefaultMpvpaperOptions}
+                    disabled={!behaviorReady || mpvpaperApplying || wallpaperApplying || !onApplyMpvpaperOptions}
                     onMouseDown={(event) => event.preventDefault()}
+                    onClick={() => onApplyMpvpaperOptions?.(mpvpaperOptionsInput?.value ?? behaviorSettings.mpvpaperOptions)}
                     type="button"
                   >
-                    Restore default
+                    {mpvpaperApplying ? 'Applying…' : 'Apply'}
                   </button>
                 </span>
               </label>

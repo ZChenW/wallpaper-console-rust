@@ -381,7 +381,21 @@ fn command_error_from_app_error(err: wc_app::AppError) -> CommandResult {
 }
 
 fn stop_with_storage(s: &StorageApi) -> CommandResult {
-    match wc_backend::stop_all_backends(Some(s)) {
+    stop_with_storage_using(s, wc_backend::stop_all_backends)
+}
+
+fn stop_with_storage_using(
+    s: &StorageApi,
+    stop_backends: impl FnOnce(Option<&StorageApi>) -> Result<(), wc_core::error::WcError>,
+) -> CommandResult {
+    let _guard = match wc_app::output_recovery::RendererMutationGuard::acquire(s) {
+        Ok(guard) => guard,
+        Err(error) => return fail(error.to_string()),
+    };
+    if let Err(error) = wc_app::output_recovery::disarm(s) {
+        return fail(error.to_string());
+    }
+    match stop_backends(Some(s)) {
         Ok(()) => match s.runtime_state_clear() {
             Ok(()) => ok("Stopped wallpaper backends."),
             Err(e) => fail(e.to_string()),
@@ -451,7 +465,7 @@ pub async fn we_clear_backend_error(path: String) -> CommandResult {
 pub async fn we_debug_info() -> Result<WeDebugInfoDto, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let s = storage()?;
-        let log_path = s.cd.path.join("linux-wallpaperengine-last.log");
+        let log_path = wc_backend::linux_wallpaperengine::last_log_path(s);
         Ok(WeDebugInfoDto {
             last_command_line: s.config_get("lwe_last_command_line", ""),
             last_target_config: s.config_get("lwe_last_target_config", ""),
@@ -580,6 +594,27 @@ pub async fn apply_to_display(
     })
     .await
     .unwrap_or_else(|e| fail(e.to_string()))
+}
+
+#[tauri::command]
+pub async fn reapply_mpvpaper() -> Result<wc_app::mpvpaper_reapply::MpvpaperReapplyResult, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let outputs = discover_connected_outputs()?;
+        with_renderer_state_lock(&APPLY_LOCK, || {
+            let s = storage()?;
+            let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+                path: s.cd.path.clone(),
+            });
+            service
+                .reapply_mpvpaper_with_runtime(
+                    &outputs,
+                    &mut wc_backend::runtime::SystemBackendRuntime,
+                )
+                .map_err(|error| error.message)
+        })
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -926,6 +961,42 @@ mod tests {
     }
 
     #[test]
+    fn stop_with_storage_verification_failure_preserves_state_and_preferences() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = wc_core::ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        cd.init().unwrap();
+        let storage = wc_storage::StorageApi::new(cd);
+        storage.current_write("/walls/current.jpg").unwrap();
+        storage.last_backend_write("awww").unwrap();
+        storage
+            .display_state_upsert(
+                &wc_storage::sqlite::DisplayStateTarget::Output("eDP-1".into()),
+                "/walls/scene",
+                "linux-wallpaperengine",
+            )
+            .unwrap();
+        let before = storage.display_state_list().unwrap();
+        let result = stop_with_storage_using(&storage, |_| {
+            Err(wc_core::error::WcError::Other(
+                "renderer still running".into(),
+            ))
+        });
+        assert!(!result.success);
+        assert!(result.stderr.contains("renderer still running"));
+        assert_eq!(
+            storage.current_read().unwrap().as_deref(),
+            Some("/walls/current.jpg")
+        );
+        assert_eq!(
+            storage.last_backend_read().unwrap().as_deref(),
+            Some("awww")
+        );
+        assert_eq!(storage.display_state_list().unwrap(), before);
+    }
+
+    #[test]
     fn stop_with_storage_clears_runtime_state_and_preserves_history() {
         let tmp = tempfile::tempdir().unwrap();
         let cd = wc_core::ConfigDir {
@@ -938,7 +1009,7 @@ mod tests {
         storage.last_backend_write("awww").unwrap();
         insert_history(&storage, "/walls/current.jpg", "awww");
 
-        let result = stop_with_storage(&storage);
+        let result = stop_with_storage_using(&storage, |_| Ok(()));
 
         assert!(result.success, "stop failed: {}", result.stderr);
         assert_eq!(storage.current_read().unwrap(), None);

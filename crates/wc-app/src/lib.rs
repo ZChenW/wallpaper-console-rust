@@ -10,12 +10,14 @@ pub mod display_target;
 pub mod library_refresh;
 pub mod library_refresh_round;
 pub mod library_rescan;
+pub mod mpvpaper_reapply;
+pub mod output_recovery;
 pub mod post_apply;
 pub mod scan_worker;
-pub mod theme_source;
 pub mod scan_worker_snapshot;
 pub mod source_management;
 pub mod sources_maintenance;
+pub mod theme_source;
 
 use std::path::{Path, PathBuf};
 

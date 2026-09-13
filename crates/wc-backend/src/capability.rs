@@ -3,8 +3,10 @@
 //! Facts come from installed CLI help/behavior, current stop/apply
 //! implementation limits, and live runtime probes. Automated tests must not
 //! launch desktop renderers. mpvpaper per-output multi-instance coexistence is
-//! runtime-verified on this host (mpvpaper 1.9, eDP-1 + DP-8 in parallel);
-//! cross-backend coexistence still stays unknown until proven.
+//! runtime-verified on this host (mpvpaper 1.9, eDP-1 + DP-8 in parallel).
+//! Cross-backend pairs are allowlisted only via
+//! [`verified_cross_backend_pair`] after host probes — never as a blanket
+//! coexistence claim on a backend.
 
 use wc_core::types::Backend;
 
@@ -50,6 +52,8 @@ pub enum AllDisplaysTargeting {
 /// Scope of the backend's stop/cleanup path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopScope {
+    /// Shared daemon remains alive; a named output is released transparently.
+    SharedDaemonPerOutput,
     /// One-shot setter leaves no renderer process to stop.
     NoPersistentProcess,
     /// Stopping the shared daemon clears wallpaper for all outputs.
@@ -238,11 +242,11 @@ mod tests {
         assert_eq!(cap.all_displays_evidence, Evidence::CliVerified);
         assert_eq!(cap.multi_instance, MultiInstanceSupport::SharedDaemon);
         assert_eq!(cap.multi_instance_evidence, Evidence::CliVerified);
-        assert_eq!(cap.stop_scope, StopScope::DaemonWide);
-        assert_eq!(cap.stop_scope_evidence, Evidence::ImplementationLimit);
+        assert_eq!(cap.stop_scope, StopScope::SharedDaemonPerOutput);
+        assert_eq!(cap.stop_scope_evidence, Evidence::RuntimeVerified);
         assert_eq!(cap.same_target_replacement, SameTargetReplacement::InPlace);
         assert!(cap.verified_named_output_targeting());
-        assert!(cap.stop_may_affect_non_target_outputs());
+        assert!(!cap.stop_may_affect_non_target_outputs());
         assert!(!cap.cross_output_coexistence_verified());
     }
 
@@ -287,30 +291,27 @@ mod tests {
     }
 
     #[test]
-    fn lwe_current_stop_scope_is_all_matching_because_of_residual_pkill() {
+    fn lwe_uses_checked_per_output_processes() {
         let cap = capability_for(Backend::LinuxWallpaperEngine).expect("lwe");
         assert_eq!(
             cap.output_target_mode,
             OutputTargetMode::RepeatedScreenRootPairs
         );
         assert_eq!(cap.output_target_evidence, Evidence::CliVerified);
-        assert_eq!(
-            cap.all_displays,
-            AllDisplaysTargeting::SingleProcessMultiOutput
-        );
-        assert_eq!(cap.stop_scope, StopScope::AllMatchingProcesses);
+        assert_eq!(cap.all_displays, AllDisplaysTargeting::OneProcessPerOutput);
+        assert_eq!(cap.stop_scope, StopScope::TrackedProcessPerOutput);
         assert_eq!(cap.stop_scope_evidence, Evidence::ImplementationLimit);
         assert_eq!(
             cap.same_target_replacement,
-            SameTargetReplacement::ManagedHandoff
+            SameTargetReplacement::StopThenApply
         );
-        assert!(!cap.requires_stop_before_same_target_apply());
-        assert!(cap.stop_may_affect_non_target_outputs());
+        assert!(cap.requires_stop_before_same_target_apply());
+        assert!(!cap.stop_may_affect_non_target_outputs());
         assert_eq!(
             cap.multi_instance,
-            MultiInstanceSupport::SingleProcessUnverified
+            MultiInstanceSupport::SeparateProcessesVerified
         );
-        assert_eq!(cap.multi_instance_evidence, Evidence::Unverified);
+        assert_eq!(cap.multi_instance_evidence, Evidence::RuntimeVerified);
         assert!(!cap.cross_output_coexistence_verified());
     }
 
@@ -342,7 +343,7 @@ mod tests {
         let lwe = capability_for(Backend::LinuxWallpaperEngine).expect("lwe");
         assert_eq!(
             lwe.same_target_replacement,
-            SameTargetReplacement::ManagedHandoff
+            SameTargetReplacement::StopThenApply
         );
     }
 
@@ -384,4 +385,56 @@ mod tests {
             assert!(!cap.cross_output_coexistence_verified());
         }
     }
+
+    #[test]
+    fn verified_cross_backend_pairs_are_explicit_and_symmetric() {
+        use super::verified_cross_backend_pair;
+        use wc_core::types::Backend;
+
+        assert!(verified_cross_backend_pair(
+            Backend::Awww,
+            Backend::Mpvpaper
+        ));
+        assert!(verified_cross_backend_pair(
+            Backend::Mpvpaper,
+            Backend::Awww
+        ));
+        assert!(verified_cross_backend_pair(
+            Backend::LinuxWallpaperEngine,
+            Backend::Mpvpaper
+        ));
+        assert!(verified_cross_backend_pair(
+            Backend::Mpvpaper,
+            Backend::LinuxWallpaperEngine
+        ));
+        assert!(!verified_cross_backend_pair(
+            Backend::LinuxWallpaperEngine,
+            Backend::Awww
+        ));
+        assert!(!verified_cross_backend_pair(
+            Backend::Awww,
+            Backend::LinuxWallpaperEngine
+        ));
+        assert!(!verified_cross_backend_pair(
+            Backend::Mpvpaper,
+            Backend::Swaybg
+        ));
+    }
+}
+
+/// Pair-specific permission, never a blanket promise about other renderers.
+///
+/// - `awww` ↔ `mpvpaper`: runtime preflight further restricts transparent
+///   release to niri + awww 0.12 with an alpha-capable default-namespace daemon.
+/// - `linux-wallpaperengine` ↔ `mpvpaper`: verified on dual independent
+///   processes (`--screen-root` / per-output mpvpaper); sibling PID and CPU
+///   activity stayed live across both directions. LWE ↔ awww stays unverified.
+pub fn verified_cross_backend_pair(left: Backend, right: Backend) -> bool {
+    matches!(
+        (left, right),
+        (Backend::Awww, Backend::Mpvpaper)
+            | (Backend::Mpvpaper, Backend::Awww)
+            | (Backend::LinuxWallpaperEngine, Backend::Mpvpaper)
+            | (Backend::Mpvpaper, Backend::LinuxWallpaperEngine)
+    )
 }

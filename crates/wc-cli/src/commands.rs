@@ -13,6 +13,14 @@ pub(crate) fn run(command: Option<Commands>) -> anyhow::Result<()> {
             crate::output::print_help();
             Ok(())
         }
+        Some(Commands::WatchDisplays { config_dir }) => {
+            let service =
+                wc_app::AppService::try_from_config_dir(ConfigDir::from_path(config_dir.into()))
+                    .map_err(|e| anyhow::anyhow!(e.message))?;
+            service
+                .watch_displays()
+                .map_err(|e| anyhow::anyhow!(e.message))
+        }
         Some(Commands::MigrateToSqlite) => crate::sqlite::migrate_to_sqlite(),
         Some(cmd) => {
             let cd = ConfigDir::new()?;

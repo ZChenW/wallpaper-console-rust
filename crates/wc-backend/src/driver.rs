@@ -39,6 +39,44 @@ use crate::target_commands::{
     ExecutionScope,
 };
 
+/// Validate transparent awww output release using the same rules for every adapter.
+/// A fresh daemon is launched with WC's known arguments, so old argv is irrelevant.
+pub fn preflight_awww_transparency(
+    runtime: &mut dyn ProcessIo,
+    fresh_daemon: bool,
+) -> Result<(), WcError> {
+    let facts = runtime.awww_environment(!fresh_daemon)?;
+    if !facts.niri_socket_present {
+        return Err(WcError::Other(
+            "mixed awww/mpvpaper is currently verified only on niri".into(),
+        ));
+    }
+    if !facts
+        .version
+        .as_deref()
+        .is_some_and(|v| v.trim().starts_with("awww 0.12."))
+    {
+        return Err(WcError::Other(
+            "transparent output release requires the verified awww 0.12 series".into(),
+        ));
+    }
+    if !fresh_daemon
+        && facts.daemon_commands.iter().any(|argv| {
+            argv.first().is_some_and(|name| {
+                std::path::Path::new(name)
+                    .file_name()
+                    .is_some_and(|name| name == "awww-daemon")
+            }) && (!crate::awww::alpha_format_supported(argv)
+                || argv.iter().any(|arg| {
+                    matches!(arg.as_str(), "-n" | "--namespace") || arg.starts_with("--namespace=")
+                }))
+        })
+    {
+        return Err(WcError::Other("mixed wallpaper requires one default awww namespace with an alpha-capable format (argb/abgr); stop the custom daemon first".into()));
+    }
+    Ok(())
+}
+
 /// Per-backend behavior that used to be scattered across `match backend` arms.
 pub(crate) trait BackendDriver: Send + Sync {
     fn backend(&self) -> Backend;
@@ -101,7 +139,10 @@ pub(crate) trait BackendDriver: Send + Sync {
     }
 
     fn supports_output_scoped_stop(&self) -> bool {
-        self.capability().stop_scope == StopScope::TrackedProcessPerOutput
+        matches!(
+            self.capability().stop_scope,
+            StopScope::TrackedProcessPerOutput | StopScope::SharedDaemonPerOutput
+        )
     }
 }
 
@@ -109,6 +150,7 @@ pub(crate) struct PrepareApplyRequest<'a> {
     pub path: &'a str,
     pub scope: &'a ExecutionScope,
     pub after_stop: bool,
+    pub stopped_backends: &'a [Backend],
     pub clear_state_hint: bool,
     pub request_id: Option<&'a str>,
 }
@@ -131,11 +173,9 @@ enum PreparedOperation {
     Mpvpaper {
         command: Command,
         output: String,
-        previous_pids: Vec<u32>,
     },
     Swaybg {
         command: Command,
-        previous_pids: Vec<u32>,
     },
     Feh {
         command: Command,
@@ -242,6 +282,7 @@ pub(crate) fn prepare_legacy_apply(
         &PrepareApplyRequest {
             path,
             scope: &scope,
+            stopped_backends: &[],
             after_stop,
             clear_state_hint,
             request_id,
@@ -350,7 +391,7 @@ pub(crate) fn ensure_awww_daemon_running(runtime: &mut dyn ProcessIo) -> Result<
         return Ok(());
     }
     let user = crate::current_process_user();
-    let was_running = crate::awww::is_awww_daemon_running(&user);
+    let was_running = runtime.awww_process_running();
     if !was_running {
         let mut cmd = build_awww_daemon_command();
         let status = runtime.command_status(&mut cmd).map_err(|_| {
@@ -440,13 +481,24 @@ fn prepare_mpvpaper(
     let output = outputs[0].clone();
     let options_raw = storage.config_get("mpvpaper_options", "--loop-file=inf --panscan=1.0");
     let options = normalize_mpvpaper_options(&options_raw);
-    let command = build_mpvpaper_launch_command_for_output(options, &output, request.path)?;
-    let previous_pids = runtime.mpvpaper_pids()?;
-    Ok(PreparedOperation::Mpvpaper {
-        command,
-        output,
-        previous_pids,
-    })
+    let options = runtime.prepare_mpvpaper_options(options, request.path)?;
+    let command = build_mpvpaper_launch_command_for_output(&options, &output, request.path)?;
+    if !request.stopped_backends.contains(&Backend::Awww) {
+        // A socket that exists but does not answer is not proof that no awww
+        // surface covers the target; only a missing socket or a ready daemon
+        // lets preparation proceed.
+        match runtime.awww_socket_ready() {
+            AwwwReadiness::Ready => preflight_awww_transparency(runtime, false)?,
+            AwwwReadiness::SocketMissing => {}
+            AwwwReadiness::SocketPresentQueryFailed { stderr } => {
+                return Err(WcError::Other(format!(
+                    "cannot verify awww state before applying mpvpaper to {output}: {stderr}"
+                )));
+            }
+        }
+    }
+    runtime.mpvpaper_pids()?;
+    Ok(PreparedOperation::Mpvpaper { command, output })
 }
 
 fn prepare_swaybg(
@@ -465,11 +517,8 @@ fn prepare_swaybg(
         normalize_awww_resize(&resize_raw),
         request.scope,
     )?;
-    let previous_pids = runtime.swaybg_pids()?;
-    Ok(PreparedOperation::Swaybg {
-        command,
-        previous_pids,
-    })
+    runtime.swaybg_pids()?;
+    Ok(PreparedOperation::Swaybg { command })
 }
 
 fn prepare_feh(
@@ -524,6 +573,11 @@ fn prepare_lwe(request: &PrepareApplyRequest<'_>) -> Result<PreparedOperation, W
         }
         ExecutionScope::Named(outputs) => outputs.clone(),
     };
+    if outputs.len() != 1 {
+        return Err(WcError::Other(
+            "linux-wallpaperengine requires one output per Apply; expand All Displays before execution".into(),
+        ));
+    }
     let project = crate::linux_wallpaperengine::project_from_path(request.path)?;
     Ok(PreparedOperation::LinuxWallpaperEngine { project, outputs })
 }
@@ -533,22 +587,35 @@ fn execute_mpvpaper(
     runtime: &mut dyn BackendRuntime,
 ) -> Result<(), DriverApplyFailure> {
     let path = prepared.path.clone();
-    let PreparedOperation::Mpvpaper {
-        command,
-        output,
-        previous_pids,
-    } = &mut prepared.operation
-    else {
+    let PreparedOperation::Mpvpaper { command, output } = &mut prepared.operation else {
         return Err(
             WcError::Other("mpvpaper driver received another backend's apply".into()).into(),
         );
     };
+    // Re-check the shared daemon at execution time: a ready socket must prove
+    // the target has no awww surface (transparent-release it first), a missing
+    // socket means no daemon can obscure the video, and an unanswerable socket
+    // means ownership is unknown — never launch and report success on unknown.
+    match runtime.awww_socket_ready() {
+        AwwwReadiness::Ready => {
+            if crate::awww::query_has_output(&runtime.awww_query_json()?, output)? {
+                crate::awww::release_outputs(runtime, std::slice::from_ref(output))?;
+            }
+        }
+        AwwwReadiness::SocketMissing => {}
+        AwwwReadiness::SocketPresentQueryFailed { stderr } => {
+            return Err(DriverApplyFailure::new(WcError::Other(format!(
+                "cannot verify awww released output {output} before starting mpvpaper: {stderr}"
+            ))));
+        }
+    }
+    let previous_pids = runtime.mpvpaper_pids()?;
     let status = match runtime.command_status(command) {
         Ok(status) if status.success() => status,
         Ok(_) => {
             return Err(cleanup_failed_mpvpaper_start(
                 runtime,
-                previous_pids,
+                &previous_pids,
                 output,
                 &path,
                 WcError::Other("mpvpaper failed to apply wallpaper".into()),
@@ -557,7 +624,7 @@ fn execute_mpvpaper(
         Err(error) => {
             return Err(cleanup_failed_mpvpaper_start(
                 runtime,
-                previous_pids,
+                &previous_pids,
                 output,
                 &path,
                 WcError::Other(format!("mpvpaper failed: {error}")),
@@ -565,12 +632,12 @@ fn execute_mpvpaper(
         }
     };
     let _ = status;
-    let pid = match runtime.wait_for_mpvpaper_ready(previous_pids, output, &path) {
+    let pid = match runtime.wait_for_mpvpaper_ready(&previous_pids, output, &path) {
         Ok(pid) => pid,
         Err(error) => {
             return Err(cleanup_started_mpvpaper(
                 runtime,
-                previous_pids,
+                &previous_pids,
                 output,
                 &path,
                 error,
@@ -581,14 +648,14 @@ fn execute_mpvpaper(
         Ok(true) => Ok(()),
         Ok(false) => Err(cleanup_started_mpvpaper(
             runtime,
-            previous_pids,
+            &previous_pids,
             output,
             &path,
             WcError::Other("mpvpaper renderer exited before startup settled".into()),
         )),
         Err(error) => Err(cleanup_started_mpvpaper(
             runtime,
-            previous_pids,
+            &previous_pids,
             output,
             &path,
             error,
@@ -645,19 +712,16 @@ fn execute_swaybg(
 ) -> Result<(), DriverApplyFailure> {
     let path = prepared.path.clone();
     let scope = prepared.scope.clone();
-    let PreparedOperation::Swaybg {
-        command,
-        previous_pids,
-    } = &mut prepared.operation
-    else {
+    let PreparedOperation::Swaybg { command } = &mut prepared.operation else {
         return Err(WcError::Other("swaybg driver received another backend's apply".into()).into());
     };
+    let previous_pids = runtime.swaybg_pids()?;
     match runtime.command_status(command) {
         Ok(status) if status.success() => {}
         Ok(_) => {
             return Err(cleanup_failed_swaybg_start(
                 runtime,
-                previous_pids,
+                &previous_pids,
                 &path,
                 &scope,
                 WcError::Other("swaybg failed to apply wallpaper".into()),
@@ -666,14 +730,14 @@ fn execute_swaybg(
         Err(error) => {
             return Err(cleanup_failed_swaybg_start(
                 runtime,
-                previous_pids,
+                &previous_pids,
                 &path,
                 &scope,
                 WcError::Other(format!("swaybg failed: {error}")),
             ));
         }
     }
-    let pid = match runtime.wait_for_swaybg_ready(previous_pids, &path, &scope) {
+    let pid = match runtime.wait_for_swaybg_ready(&previous_pids, &path, &scope) {
         Ok(pid) => pid,
         Err(error) => return Err(cleanup_started_swaybg(runtime, error)),
     };
@@ -750,8 +814,8 @@ impl BackendDriver for AwwwDriver {
             output_target_evidence: Evidence::CliVerified,
             all_displays: AllDisplaysTargeting::OmitMeansAll,
             all_displays_evidence: Evidence::CliVerified,
-            stop_scope: StopScope::DaemonWide,
-            stop_scope_evidence: Evidence::ImplementationLimit,
+            stop_scope: StopScope::SharedDaemonPerOutput,
+            stop_scope_evidence: Evidence::RuntimeVerified,
             multi_instance: MultiInstanceSupport::SharedDaemon,
             // CLI: `awww img` talks to `awww-daemon`; `--outputs` retargets within that daemon.
             multi_instance_evidence: Evidence::CliVerified,
@@ -778,6 +842,16 @@ impl BackendDriver for AwwwDriver {
         runtime: &mut dyn BackendRuntime,
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
+        let video_outputs = if !request.stopped_backends.contains(&Backend::Mpvpaper)
+            && matches!(request.scope, ExecutionScope::Named(_))
+        {
+            crate::awww::running_video_outputs(runtime)?
+        } else {
+            Vec::new()
+        };
+        if !video_outputs.is_empty() {
+            preflight_awww_transparency(runtime, false)?;
+        }
         Ok(PreparedApply {
             backend: self.backend(),
             path: request.path.to_string(),
@@ -809,7 +883,28 @@ impl BackendDriver for AwwwDriver {
             apply_stage::ApplyStage::EnsureAwwwDaemon,
             request_id,
         );
-        ensure_awww_daemon_running(runtime)?;
+        let videos = if matches!(prepared.scope, ExecutionScope::Named(_)) {
+            crate::awww::running_video_outputs(runtime)?
+        } else {
+            Vec::new()
+        };
+        let had_daemon = runtime.awww_process_running()
+            || !matches!(runtime.awww_socket_ready(), AwwwReadiness::SocketMissing);
+        let ready = ensure_awww_daemon_running(runtime);
+        if !videos.is_empty() {
+            if let Err(error) = ready.and_then(|()| crate::awww::release_outputs(runtime, &videos))
+            {
+                // A newly created shared surface must not obscure surviving videos.
+                let cleanup = if !had_daemon && self.stop_checked(runtime, None).is_ok() {
+                    CleanupOutcome::NotRequired
+                } else {
+                    CleanupOutcome::UncertainTarget
+                };
+                return Err(DriverApplyFailure { error, cleanup });
+            }
+        } else {
+            ready?;
+        }
         apply_stage::report_stage(
             reporter,
             apply_stage::ApplyStage::AwwwSocketReady,
@@ -838,12 +933,39 @@ impl BackendDriver for AwwwDriver {
     ) -> Result<(), WcError> {
         self.stop(runtime, None);
         // Verify via ProcessIo socket probe (not live pgrep) so fakes stay hermetic.
-        if matches!(runtime.awww_socket_ready(), AwwwReadiness::Ready) {
-            return Err(WcError::Other(
+        match runtime.awww_socket_ready() {
+            AwwwReadiness::SocketMissing => Ok(()),
+            AwwwReadiness::Ready => Err(WcError::Other(
                 "awww socket still answers query after stop".into(),
-            ));
+            )),
+            AwwwReadiness::SocketPresentQueryFailed { stderr } => Err(WcError::Other(format!(
+                "cannot verify awww stopped: {stderr}"
+            ))),
         }
-        Ok(())
+    }
+    fn preflight_stop(
+        &self,
+        _scope: &ExecutionScope,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<(), WcError> {
+        preflight_awww_transparency(runtime, false)
+    }
+    fn stop_scoped_checked(
+        &self,
+        runtime: &mut dyn BackendRuntime,
+        storage: Option<&StorageApi>,
+        scope: &ExecutionScope,
+    ) -> Result<(), WcError> {
+        match scope {
+            ExecutionScope::AllDisplays => self.stop_checked(runtime, storage),
+            ExecutionScope::Named(outputs) => match runtime.awww_socket_ready() {
+                AwwwReadiness::SocketMissing => Ok(()),
+                AwwwReadiness::Ready => crate::awww::release_outputs(runtime, outputs),
+                AwwwReadiness::SocketPresentQueryFailed { stderr } => Err(WcError::Other(format!(
+                    "cannot release awww output: {stderr}"
+                ))),
+            },
+        }
     }
 }
 
@@ -1130,15 +1252,17 @@ impl BackendDriver for LweDriver {
             backend: Backend::LinuxWallpaperEngine,
             output_target_mode: OutputTargetMode::RepeatedScreenRootPairs,
             output_target_evidence: Evidence::CliVerified,
-            all_displays: AllDisplaysTargeting::SingleProcessMultiOutput,
+            all_displays: AllDisplaysTargeting::OneProcessPerOutput,
             all_displays_evidence: Evidence::CliVerified,
-            // stop() clears the tracked PGID then residual-pkills all matching processes.
-            stop_scope: StopScope::AllMatchingProcesses,
+            // Named stop inspects argv and refuses legacy processes shared with siblings.
+            stop_scope: StopScope::TrackedProcessPerOutput,
             stop_scope_evidence: Evidence::ImplementationLimit,
-            multi_instance: MultiInstanceSupport::SingleProcessUnverified,
-            multi_instance_evidence: Evidence::Unverified,
-            // Apply path replaces the managed tracked process as part of apply.
-            same_target_replacement: SameTargetReplacement::ManagedHandoff,
+            multi_instance: MultiInstanceSupport::SeparateProcessesVerified,
+            multi_instance_evidence: Evidence::RuntimeVerified,
+            // Explicit stop lets execution report target state accurately after failures.
+            // Two instances verified on niri / eDP-1 + DP-8; stopping one kept
+            // the sibling PID rendering (local probe, 2026-09-12).
+            same_target_replacement: SameTargetReplacement::StopThenApply,
             same_target_replacement_evidence: Evidence::ImplementationLimit,
             cross_output_coexistence: CrossOutputCoexistence::Unknown,
             cross_output_coexistence_evidence: Evidence::Unknown,
@@ -1164,6 +1288,14 @@ impl BackendDriver for LweDriver {
         runtime: &mut dyn BackendRuntime,
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
+        if !request.stopped_backends.contains(&self.backend()) {
+            if let ExecutionScope::Named(outputs) = request.scope {
+                crate::lwe_process::targeted_processes(
+                    &runtime.renderer_command_lines()?,
+                    outputs,
+                )?;
+            }
+        }
         Ok(PreparedApply {
             backend: self.backend(),
             path: request.path.to_string(),
@@ -1206,6 +1338,29 @@ impl BackendDriver for LweDriver {
             }
         }
         Ok(())
+    }
+
+    fn preflight_stop(
+        &self,
+        scope: &ExecutionScope,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<(), WcError> {
+        if let ExecutionScope::Named(outputs) = scope {
+            crate::lwe_process::targeted_processes(&runtime.renderer_command_lines()?, outputs)?;
+        }
+        Ok(())
+    }
+
+    fn stop_scoped_checked(
+        &self,
+        runtime: &mut dyn BackendRuntime,
+        storage: Option<&StorageApi>,
+        scope: &ExecutionScope,
+    ) -> Result<(), WcError> {
+        match scope {
+            ExecutionScope::AllDisplays => self.stop_checked(runtime, storage),
+            ExecutionScope::Named(outputs) => runtime.stop_lwe_outputs(outputs),
+        }
     }
 
     fn stop(&self, runtime: &mut dyn BackendRuntime, storage: Option<&StorageApi>) {

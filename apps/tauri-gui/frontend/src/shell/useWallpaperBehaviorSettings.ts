@@ -70,6 +70,7 @@ export interface UseWallpaperBehaviorSettingsResult {
   readonly loadError: Error | null;
   readonly saveError: Error | null;
   readonly updateSettings: (update: WallpaperBehaviorSettingsUpdate) => void;
+  readonly saveMpvpaperOptions: (options: string) => Promise<void>;
 }
 
 const SETTING_FIELDS = Object.freeze([
@@ -220,11 +221,30 @@ export function useWallpaperBehaviorSettings(
     });
   }, [writer]);
 
+  const saveMpvpaperOptions = useCallback(async (mpvpaperOptions: string) => {
+    const current = settingsRef.current;
+    if (current === null) throw new Error('Behavior settings have not loaded.');
+    const next = { ...current, mpvpaperOptions };
+    settingsRef.current = next;
+    setSettings(next);
+    setSaveError(null);
+    try {
+      // Always persist this explicit intent, even if a preceding blur optimistically
+      // changed the UI. The writer queues it after earlier saves and retries failures.
+      await writer.persist({ mpvpaperOptions });
+      setSaveError(null);
+    } catch (failure) {
+      setSaveError(errorFromUnknown(failure, 'Failed to save mpv arguments.'));
+      throw failure;
+    }
+  }, [writer]);
+
   return {
     settings,
     ready,
     loadError,
     saveError,
     updateSettings,
+    saveMpvpaperOptions,
   };
 }
