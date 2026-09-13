@@ -142,5 +142,56 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "lwe_stop_tests.rs"]
-mod stop_tests;
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn delayed_exit_after_signal_is_not_a_cleanup_failure() {
+        let mut probes = 0;
+        let result = verify_stopped_with(
+            &["DP-8".into()],
+            || {
+                probes += 1;
+                Ok(if probes < 3 {
+                    vec![ProcessCommandLine {
+                        pid: 123,
+                        argv: vec![],
+                    }]
+                } else {
+                    vec![]
+                })
+            },
+            |_| {},
+        );
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(probes, 3);
+    }
+
+    #[test]
+    fn remaining_owner_is_still_rejected_after_bounded_wait() {
+        let mut probes = 0;
+        assert!(verify_stopped_with(
+            &["DP-8".into()],
+            || {
+                probes += 1;
+                Ok(vec![ProcessCommandLine {
+                    pid: 123,
+                    argv: vec![],
+                }])
+            },
+            |_| {}
+        )
+        .is_err());
+        assert!(probes <= 41);
+    }
+
+    #[test]
+    fn inspection_failure_is_not_treated_as_success() {
+        assert!(verify_stopped_with(
+            &["DP-8".into()],
+            || Err(WcError::Other("inspection failed".into())),
+            |_| {}
+        )
+        .is_err());
+    }
+}

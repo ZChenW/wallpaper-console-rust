@@ -532,10 +532,7 @@ mod tests {
         }
     }
 
-    fn assert_verified_pair_replaces_only_target(
-        pairs: &[(Backend, Backend)],
-        expect_label: &str,
-    ) {
+    fn assert_verified_pair_replaces_only_target(pairs: &[(Backend, Backend)], expect_label: &str) {
         for &(before, after) in pairs {
             let plan = plan_display_apply(&req(
                 DisplayTarget::Output(edp()),
@@ -552,7 +549,9 @@ mod tests {
                     },
                 ],
             ))
-            .unwrap_or_else(|err| panic!("{expect_label}: before={before:?} after={after:?}: {err:?}"));
+            .unwrap_or_else(|err| {
+                panic!("{expect_label}: before={before:?} after={after:?}: {err:?}")
+            });
             assert_eq!(
                 plan.actions,
                 vec![
@@ -617,18 +616,12 @@ mod tests {
 
     #[test]
     fn accepts_lwe_when_sibling_uses_mpvpaper() {
-        assert_apply_only_when_sibling_uses(
-            Backend::LinuxWallpaperEngine,
-            Backend::Mpvpaper,
-        );
+        assert_apply_only_when_sibling_uses(Backend::LinuxWallpaperEngine, Backend::Mpvpaper);
     }
 
     #[test]
     fn accepts_mpvpaper_when_sibling_uses_lwe() {
-        assert_apply_only_when_sibling_uses(
-            Backend::Mpvpaper,
-            Backend::LinuxWallpaperEngine,
-        );
+        assert_apply_only_when_sibling_uses(Backend::Mpvpaper, Backend::LinuxWallpaperEngine);
     }
 
     #[test]

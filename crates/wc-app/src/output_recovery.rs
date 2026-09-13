@@ -320,5 +320,88 @@ impl AppService {
 }
 
 #[cfg(test)]
-#[path = "output_recovery_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+
+    fn assignment() -> Assignment {
+        Assignment {
+            backend: "mpvpaper".into(),
+            path: "/video.mp4".into(),
+        }
+    }
+
+    fn names(values: &[&str]) -> HashSet<String> {
+        values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn returns_only_the_previously_playing_output() {
+        let mut tracker = RecoveryTracker::default();
+        let saved = HashMap::from([
+            ("DP-8".into(), assignment()),
+            ("eDP-1".into(), assignment()),
+        ]);
+        assert!(tracker
+            .advance(
+                names(&["DP-8", "eDP-1"]),
+                &saved,
+                names(&["DP-8", "eDP-1"]),
+                "".into()
+            )
+            .is_empty());
+        assert!(tracker
+            .advance(names(&["eDP-1"]), &saved, names(&["eDP-1"]), "".into())
+            .is_empty());
+        assert_eq!(
+            tracker.advance(
+                names(&["DP-8", "eDP-1"]),
+                &saved,
+                names(&["eDP-1"]),
+                "".into()
+            ),
+            vec![("DP-8".into(), assignment())]
+        );
+        assert!(tracker
+            .advance(
+                names(&["DP-8", "eDP-1"]),
+                &saved,
+                names(&["eDP-1"]),
+                "".into()
+            )
+            .is_empty());
+    }
+
+    #[test]
+    fn explicit_stop_while_disconnected_cancels_pending_restore() {
+        let mut tracker = RecoveryTracker::default();
+        let saved = HashMap::from([("DP-8".into(), assignment())]);
+        tracker.advance(names(&["DP-8"]), &saved, names(&["DP-8"]), "".into());
+        tracker.advance(names(&[]), &saved, names(&[]), "".into());
+        assert!(tracker
+            .advance(names(&["DP-8"]), &saved, names(&[]), "stopped".into())
+            .is_empty());
+    }
+
+    #[test]
+    fn saved_preferences_alone_never_restart_stopped_wallpaper() {
+        let mut tracker = RecoveryTracker::default();
+        let saved = HashMap::from([("DP-8".into(), assignment())]);
+        tracker.advance(names(&["DP-8"]), &saved, names(&[]), "".into());
+        tracker.advance(names(&[]), &saved, names(&[]), "".into());
+        assert!(tracker
+            .advance(names(&["DP-8"]), &saved, names(&[]), "".into())
+            .is_empty());
+    }
+
+    #[test]
+    fn assignment_changed_while_absent_is_not_overwritten() {
+        let mut tracker = RecoveryTracker::default();
+        let mut saved = HashMap::from([("DP-8".into(), assignment())]);
+        tracker.advance(names(&["DP-8"]), &saved, names(&["DP-8"]), "".into());
+        tracker.advance(names(&[]), &saved, names(&[]), "".into());
+        saved.get_mut("DP-8").unwrap().path = "/new.mp4".into();
+        assert!(tracker
+            .advance(names(&["DP-8"]), &saved, names(&[]), "".into())
+            .is_empty());
+    }
+}

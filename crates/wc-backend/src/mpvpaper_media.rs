@@ -141,5 +141,39 @@ pub(crate) fn cleanup_socket(argv: &[String]) {
 }
 
 #[cfg(test)]
-#[path = "mpvpaper_media_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_video_is_rejected_before_launch() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("bad.mp4");
+        std::fs::write(&path, b"not a media file").unwrap();
+        let error = prepare_options("--loop-file=inf", path.to_str().unwrap()).unwrap_err();
+        assert!(error.to_string().contains("cannot be decoded"), "{error}");
+    }
+
+    #[test]
+    fn live_ipc_with_no_loaded_media_is_not_ready() {
+        use std::os::unix::net::UnixListener;
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("control.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            for id in 0..3 {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                writeln!(
+                    stream,
+                    "{}",
+                    json!({"request_id":id,"error":"property unavailable"})
+                )
+                .ok();
+            }
+        });
+        assert!(!query_loaded(&path, "/bad.mp4").unwrap());
+        worker.join().unwrap();
+    }
+}
