@@ -28,17 +28,17 @@ Download the AppImage, optional CLI bundle, and `SHA256SUMS` from the
 
 ```bash
 sha256sum -c SHA256SUMS
-chmod +x wallpaper-console_0.1.3_x86_64.AppImage
-./wallpaper-console_0.1.3_x86_64.AppImage
+chmod +x wallpaper-console_0.1.4_x86_64.AppImage
+./wallpaper-console_0.1.4_x86_64.AppImage
 ```
 
 The AppImage contains the GUI. Install the CLI for login restoration and terminal
 commands:
 
 ```bash
-tar --zstd -xf wallpaper-console-cli_0.1.3_x86_64.tar.zst
+tar --zstd -xf wallpaper-console-cli_0.1.4_x86_64.tar.zst
 install -Dm755 \
-  wallpaper-console-cli_0.1.3_x86_64/wallpaper-console-rust \
+  wallpaper-console-cli_0.1.4_x86_64/wallpaper-console-rust \
   "$HOME/.local/bin/wallpaper-console-rust"
 ```
 
@@ -98,7 +98,7 @@ themes.
 If the GUI opens as a blank window because of WebKitGTK rendering issues, try:
 
 ```bash
-WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.3_x86_64.AppImage
+WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.4_x86_64.AppImage
 ```
 
 There is no automatic updater. Download and verify newer release assets before
