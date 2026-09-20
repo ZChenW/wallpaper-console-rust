@@ -16,6 +16,8 @@ use wc_core::types::Backend;
 pub enum DisplayTarget {
     /// A concrete Wayland/X output name (for example `eDP-1`).
     Output(String),
+    /// Explicit nonempty unique subset; listing every output still is not All.
+    Outputs(Vec<String>),
     /// Explicit all-display operation; never inferred from a named output.
     AllDisplays,
 }
@@ -139,6 +141,7 @@ pub fn plan_display_apply_with_capability(
     match &request.target {
         DisplayTarget::AllDisplays => plan_all_displays(request, capability),
         DisplayTarget::Output(output) => plan_named_output(request, capability, output),
+        DisplayTarget::Outputs(outputs) => plan_output_set(request, capability, outputs),
     }
 }
 
@@ -195,6 +198,27 @@ fn validate_request_invariants(request: &DisplayApplyRequest) -> Result<(), Reje
     }
 
     match &request.target {
+        DisplayTarget::Outputs(outputs) => {
+            if outputs.is_empty() {
+                return Err(RejectionReason::NoKnownOutputs);
+            }
+            let mut seen = std::collections::HashSet::new();
+            for output in outputs {
+                if is_blank(output) {
+                    return Err(RejectionReason::EmptyNamedOutput);
+                }
+                if !seen.insert(output) {
+                    return Err(RejectionReason::DuplicateKnownOutputs {
+                        output: output.clone(),
+                    });
+                }
+                if !request.known_outputs.contains(output) {
+                    return Err(RejectionReason::UnknownNamedOutput {
+                        output: output.clone(),
+                    });
+                }
+            }
+        }
         DisplayTarget::Output(output) => {
             if is_blank(output) {
                 return Err(RejectionReason::EmptyNamedOutput);
@@ -288,7 +312,8 @@ fn plan_named_output(
 
     for other in &others {
         if other.backend != request.backend {
-            if !wc_backend::capability::verified_cross_backend_pair(request.backend, other.backend)
+            if wc_backend::capability::cross_backend_support(request.backend, other.backend)
+                == wc_backend::capability::PairSupport::Unverified
             {
                 return Err(RejectionReason::ReliesOnUnknownCoexistence {
                     explanation: format!(
@@ -314,6 +339,47 @@ fn plan_named_output(
 
     Ok(DisplayApplyPlan {
         actions,
+        capability,
+    })
+}
+
+fn plan_output_set(
+    request: &DisplayApplyRequest,
+    capability: BackendCapability,
+    outputs: &[String],
+) -> Result<DisplayApplyPlan, RejectionReason> {
+    if outputs.len() > 1
+        && capability.all_displays == AllDisplaysTargeting::OneProcessPerOutput
+        && capability.multi_instance != MultiInstanceSupport::SeparateProcessesVerified
+    {
+        return Err(RejectionReason::ReliesOnUnknownCoexistence {
+            explanation: "independent instances of this renderer have not been verified".into(),
+        });
+    }
+    let mut stops = Vec::new();
+    let mut applies = Vec::new();
+    for output in outputs {
+        let mut scoped = request.clone();
+        scoped.target = DisplayTarget::Output(output.clone());
+        scoped.running.retain(|assignment| {
+            assignment.output == *output || !outputs.contains(&assignment.output)
+        });
+        for action in plan_named_output(&scoped, capability.clone(), output)?.actions {
+            match action {
+                PlannedAction::Apply { .. } => applies.push(action),
+                PlannedAction::StopBackend { .. } => {
+                    return Err(RejectionReason::UnverifiedTargetScope {
+                        explanation:
+                            "an explicit output set cannot authorize a global renderer stop".into(),
+                    })
+                }
+                PlannedAction::Stop { .. } => stops.push(action),
+            }
+        }
+    }
+    stops.extend(applies);
+    Ok(DisplayApplyPlan {
+        actions: stops,
         capability,
     })
 }
@@ -973,7 +1039,7 @@ mod tests {
             dual_outputs(),
             vec![RunningAssignment {
                 output: hdmi(),
-                backend: Backend::Swaybg,
+                backend: Backend::Feh,
             }],
         ))
         .unwrap_err();
@@ -1258,7 +1324,7 @@ mod tests {
                 },
                 RunningAssignment {
                     output: hdmi(),
-                    backend: Backend::Swaybg,
+                    backend: Backend::Feh,
                 },
             ],
         ))
@@ -1267,15 +1333,15 @@ mod tests {
             err,
             RejectionReason::ReliesOnUnknownCoexistence {
                 explanation:
-                    "applying awww to eDP-1 while swaybg runs on HDMI-1 relies on unknown cross-output coexistence"
+                    "applying awww to eDP-1 while feh runs on HDMI-1 relies on unknown cross-output coexistence"
                         .into(),
             }
         );
     }
 
     #[test]
-    fn cross_backend_replacement_rejects_when_stop_would_hit_non_target() {
-        let err = plan_display_apply(&req(
+    fn cross_backend_replacement_plans_scoped_swaybg_stop() {
+        let plan = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
             Backend::Awww,
             dual_outputs(),
@@ -1290,12 +1356,12 @@ mod tests {
                 },
             ],
         ))
-        .unwrap_err();
+        .unwrap();
         assert_eq!(
-            err,
-            RejectionReason::StopWouldAffectNonTarget {
-                non_target: hdmi(),
-                explanation: "swaybg stop is process-wide and would affect HDMI-1".into(),
+            plan.actions[0],
+            PlannedAction::Stop {
+                backend: Backend::Swaybg,
+                outputs: vec![edp()]
             }
         );
     }
@@ -1480,11 +1546,11 @@ mod tests {
                     dual_outputs(),
                     vec![RunningAssignment {
                         output: hdmi(),
-                        backend: Backend::Swaybg,
+                        backend: Backend::Feh,
                     }],
                 ),
                 RejectionReason::ReliesOnUnknownCoexistence {
-                    explanation: "applying mpvpaper to eDP-1 while swaybg runs on HDMI-1 relies on unknown cross-output coexistence".into(),
+                    explanation: "applying mpvpaper to eDP-1 while feh runs on HDMI-1 relies on unknown cross-output coexistence".into(),
                 },
             ),
             (
@@ -1494,11 +1560,11 @@ mod tests {
                     dual_outputs(),
                     vec![RunningAssignment {
                         output: hdmi(),
-                        backend: Backend::Awww,
+                        backend: Backend::Feh,
                     }],
                 ),
                 RejectionReason::ReliesOnUnknownCoexistence {
-                    explanation: "applying linux-wallpaperengine to eDP-1 while awww runs on HDMI-1 relies on unknown cross-output coexistence".into(),
+                    explanation: "applying linux-wallpaperengine to eDP-1 while feh runs on HDMI-1 relies on unknown cross-output coexistence".into(),
                 },
             ),
         ];

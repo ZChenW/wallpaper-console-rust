@@ -163,7 +163,8 @@ pub(super) fn verify_appimage_runtime(
 
 const APPIMAGE_APP_RUN: &str = r#"#!/bin/sh
 set -eu
-APPDIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+launcher=$(readlink -f -- "$0")
+APPDIR=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd)
 export APPDIR
 
 host_library_path=

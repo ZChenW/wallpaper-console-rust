@@ -1,5 +1,6 @@
-import type { ApplyResultDTO } from '../api/types.ts';
+import type { ApplyResultDTO, PostApplyReportDTO } from '../api/types.ts';
 import { normalizeDisplayOutputs } from './displayTargets.ts';
+import { parseSwitchReport } from '../api/switchReport.ts';
 
 /**
  * Shared ApplyResult evidence for RuntimeWallpaper: queue parse + session confirm.
@@ -32,8 +33,12 @@ export function parseApplyResult(stdout: string): ApplyResultDTO | undefined {
     ) {
       return undefined;
     }
+    const switchReport = parseSwitchReport(value.switchReport);
+    const postApply = parsePostApplyReport(value.postApply);
     return {
+      ...(switchReport ? { switchReport } : {}),
       ...(typeof value.requestId === 'string' ? { requestId: value.requestId } : {}),
+      ...(postApply ? { postApply } : {}),
       appliedPath: value.appliedPath,
       statePath: value.statePath,
       backend: value.backend,
@@ -78,4 +83,14 @@ export function applyResultMatchesRequestId(
 ): boolean {
   if (requestId === undefined) return true;
   return result?.requestId === requestId;
+}
+
+export function parsePostApplyReport(value: unknown): PostApplyReportDTO | undefined {
+  if (!value || typeof value !== 'object') return undefined;
+  const report = value as Record<string, unknown>;
+  if (report.version !== 1 || typeof report.status !== 'string'
+    || !['disabled', 'skipped', 'succeeded', 'failed', 'timed_out'].includes(report.status)
+    || typeof report.detail !== 'string' || typeof report.reason !== 'string'
+    || typeof report.finishedAt !== 'number' || !Number.isFinite(report.finishedAt)) return undefined;
+  return report as unknown as PostApplyReportDTO;
 }

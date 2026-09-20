@@ -108,6 +108,10 @@ pub struct ApplyRequestDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyResultDto {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub switch_report: Option<wc_app::display_operation::SwitchReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub post_apply: Option<wc_app::post_apply::PostApplyReport>,
     pub request_id: Option<String>,
     pub applied_path: String,
     pub state_path: String,

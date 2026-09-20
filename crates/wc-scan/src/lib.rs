@@ -523,8 +523,7 @@ pub fn we_project_info_from_json(
         ),
         "image" | "gif" | "video" => {
             let file = file.as_deref()?;
-            let ext = formats::get_extension(file)?;
-            let (ftype, backend) = formats::classify_extension(&ext)?;
+            let (ftype, backend) = formats::classify_media_path(Path::new(file))?;
             (ftype, backend, None)
         }
         other => (
@@ -768,7 +767,7 @@ pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
         return None;
     }
     let ext = formats::get_extension(path)?;
-    let (ftype, backend) = formats::classify_extension(&ext)?;
+    let (ftype, backend) = formats::classify_media_path(p)?;
     let meta = fs::metadata(path).ok()?;
     let size = meta.len();
     let mtime = meta
@@ -1057,7 +1056,7 @@ pub fn make_entry_cached(
         Some(e) => e,
         None => return (None, false),
     };
-    let (ftype, backend) = match formats::classify_extension(&ext) {
+    let (ftype, backend) = match formats::classify_media_path(p) {
         Some(fb) => fb,
         None => return (None, false),
     };
@@ -1079,9 +1078,11 @@ pub fn make_entry_cached(
                 Some(WallpaperEntry {
                     path: Utf8PathBuf::from(path),
                     resolution: prior.resolution.clone(),
-                    file_type: prior.file_type,
-                    ext: prior.ext.clone(),
-                    backend: prior.backend,
+                    // Container classification can improve between versions even
+                    // when the file and its expensive dimension probe are unchanged.
+                    file_type: ftype,
+                    ext,
+                    backend,
                     size,
                     mtime,
                     project: prior.project.clone(),
@@ -1822,6 +1823,31 @@ fn cached_entry_reuses_prior_metadata() {
         "1920x1080",
         "resolution should come from cache"
     );
+}
+
+#[test]
+fn cached_dimensions_do_not_preserve_obsolete_static_animation_classification() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("animated.png");
+    let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+    bytes.extend_from_slice(&8u32.to_be_bytes());
+    bytes.extend_from_slice(b"acTL");
+    bytes.extend_from_slice(&[0; 12]);
+    std::fs::write(&path, bytes).unwrap();
+    let mut prior = make_entry(path.to_str().unwrap()).unwrap();
+    prior.file_type = wc_core::types::FileType::Image;
+    prior.backend = wc_core::types::Backend::Awww;
+    prior.resolution = "32x32".into();
+    let cache = std::collections::HashMap::from([(
+        path.canonicalize().unwrap().to_string_lossy().into_owned(),
+        prior,
+    )]);
+    let (entry, reused) = make_entry_cached(path.to_str().unwrap(), &cache);
+    let entry = entry.unwrap();
+    assert!(reused);
+    assert_eq!(entry.file_type, wc_core::types::FileType::Gif);
+    assert_eq!(entry.backend, wc_core::types::Backend::Mpvpaper);
+    assert_eq!(entry.resolution, "32x32");
 }
 
 #[test]

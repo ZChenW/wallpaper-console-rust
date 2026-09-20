@@ -9,20 +9,14 @@
 use std::path::Path;
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
-use wc_backend::apply_transition::{
-    execute_apply_transitions, TransitionRequest, TransitionStart, TransitionStep,
-};
-use wc_backend::display_executor::DisplayExecReport;
+use wc_backend::apply_transition::TransitionStep;
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 #[cfg(test)]
 use wc_config::ConfigDirExt;
 use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
-use crate::display_apply::{
-    display_exec_failure_from_transition, reconcile_display_state_from_report,
-    rejection_to_app_error, to_exec_action, transition_scope_for_target,
-};
+use crate::display_apply::{rejection_to_app_error, to_exec_action, transition_scope_for_target};
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
 };
@@ -32,10 +26,13 @@ use crate::{AppError, AppService};
 #[derive(Default)]
 pub struct DisplayRestoreRuntimeOpts {
     pub request_id: Option<String>,
+    pub target: Option<DisplayTarget>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 struct RestoreStep {
+    recipe: Option<wc_core::display_assignment::RenderRecipe>,
+    assignment_target: DisplayStateTarget,
     target: DisplayTarget,
     path: String,
     backend: Backend,
@@ -85,6 +82,12 @@ impl AppService {
         let _guard = crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
             .map_err(AppError::from_wc_error)?;
         let request_id = opts.request_id.as_deref();
+        let selected = opts
+            .target
+            .as_ref()
+            .unwrap_or(&DisplayTarget::AllDisplays)
+            .outputs(known_outputs)
+            .map_err(|error| AppError::from_wc_error(wc_core::error::WcError::Other(error)))?;
         apply_stage::report_stage(reporter, apply_stage::ApplyStage::ResolveTarget, request_id);
 
         let previous_rows = self
@@ -92,7 +95,7 @@ impl AppService {
             .display_state_list()
             .map_err(AppError::from_wc_error)?;
         let mut steps = Vec::new();
-        for step in build_restore_steps(&previous_rows, known_outputs) {
+        for step in build_restore_steps(&previous_rows, &selected) {
             let user_unsupported = self
                 .storage
                 .user_unsupported_contains_path(&step.path)
@@ -106,10 +109,20 @@ impl AppService {
         }
 
         for step in &mut steps {
-            ensure_wallpaper_present(&step.path)?;
-            let target = self.resolve_apply_target(&step.path)?;
-            step.path = target.resolved_path;
-            step.backend = target.backend;
+            let recipe = self
+                .storage
+                .display_recipe(&step.assignment_target)
+                .map_err(AppError::from_wc_error)?
+                .ok_or_else(|| {
+                    AppError::from_wc_error(wc_core::error::WcError::Other(
+                        "saved recipe missing".into(),
+                    ))
+                })?;
+            ensure_wallpaper_present(&recipe.media_path)?;
+            let resolved = self.resolve_recipe_target(&recipe)?;
+            step.path = resolved.resolved_path;
+            step.backend = resolved.backend;
+            step.recipe = Some(recipe);
         }
         let restored_state = restored_display_state(&previous_rows, known_outputs, &steps);
         let mixed = steps.iter().any(|step| step.backend == Backend::Awww)
@@ -129,6 +142,8 @@ impl AppService {
                             .find(|step| step.target == DisplayTarget::Output(output.clone()))
                             .unwrap_or(base);
                         RestoreStep {
+                            assignment_target: effective.assignment_target.clone(),
+                            recipe: effective.recipe.clone(),
                             target: DisplayTarget::Output(output.clone()),
                             path: effective.path.clone(),
                             backend: effective.backend,
@@ -144,7 +159,22 @@ impl AppService {
 
         // Preflight the full sequence with accumulating live assignments so a
         // later coexistence/capability rejection never partially executes.
-        let mut preflight_running: Vec<RunningAssignment> = Vec::new();
+        let ownership =
+            wc_backend::runtime_observation::observe_output_ownership(known_outputs, runtime);
+        let mut preflight_running: Vec<RunningAssignment> = ownership
+            .outputs
+            .iter()
+            .filter_map(|(output, state)| {
+                if let wc_backend::runtime_observation::OutputOwnership::Occupied(backend) = state {
+                    Some(RunningAssignment {
+                        output: output.clone(),
+                        backend: *backend,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
         let mut prepared_steps = Vec::new();
         for step in steps {
             let same_backend_already_running = preflight_running
@@ -174,6 +204,7 @@ impl AppService {
             let fallback_path = restore_fallback_path(&step.path);
             update_running_after_step(&mut preflight_running, known_outputs, &step);
             prepared_steps.push(TransitionStep {
+                recipe: step.recipe.clone(),
                 scope: transition_scope_for_target(&step.target, known_outputs)?,
                 target: step.backend,
                 core_actions: actions,
@@ -181,46 +212,34 @@ impl AppService {
             });
         }
 
-        let report = match execute_apply_transitions(
+        let changed_outputs: Vec<String> = prepared_steps
+            .iter()
+            .flat_map(|step| {
+                step.scope
+                    .named_outputs()
+                    .unwrap_or(known_outputs)
+                    .iter()
+                    .cloned()
+            })
+            .collect();
+        crate::display_operation::execute(
             &self.storage,
-            TransitionRequest {
-                start: TransitionStart::Restore,
+            crate::display_operation::OperationBatch {
+                outputs: &changed_outputs,
                 known_outputs,
                 steps: &prepared_steps,
                 request_id,
             },
             runtime,
             reporter,
-        ) {
-            Ok(report) => report.exec,
-            Err(failure) => {
-                return Err(self.handle_exec_failure(
-                    display_exec_failure_from_transition(failure),
-                    &previous_rows,
-                    known_outputs,
-                    None,
-                )?)
-            }
-        };
-
-        let commit_result = match before_state_commit.as_deref_mut() {
-            Some(seam) => self
-                .storage
-                .display_state_replace_all_seam(&restored_state, seam),
-            None => self.storage.display_state_replace_all(&restored_state),
-        };
-        if let Err(commit_error) = commit_result {
-            return Err(self.reconcile_restore_commit_failure(
-                commit_error,
-                &previous_rows,
-                &report,
-                known_outputs,
-                before_state_commit,
-            ));
-        }
+            || match before_state_commit.as_mut() {
+                Some(seam) => seam(),
+                None => Ok(()),
+            },
+        )?;
 
         if self.storage.config_get("post_apply_on_restore", "on") == "on" {
-            self.publish_theme_after_restore(&restored_state, known_outputs);
+            self.publish_theme_after_restore(&restored_state, known_outputs, &changed_outputs);
         }
         if runtime.supports_output_recovery() {
             crate::output_recovery::ensure_watcher(&self.storage);
@@ -232,61 +251,18 @@ impl AppService {
         &self,
         restored_state: &[(DisplayStateTarget, String, String)],
         known_outputs: &[String],
+        changed_outputs: &[String],
     ) {
         let ctx = crate::post_apply::build_theme_context(
             &self.storage,
             &crate::post_apply::ThemePublishRequest {
                 intended: restored_state,
                 known_outputs,
-                changed_outputs: known_outputs,
+                changed_outputs,
                 applied: None,
             },
         );
-        crate::post_apply::publish_theme_and_run_hook(&self.storage, &ctx);
-    }
-
-    fn reconcile_restore_commit_failure(
-        &self,
-        commit_error: wc_core::error::WcError,
-        previous_rows: &[DisplayStateRow],
-        report: &DisplayExecReport,
-        known_outputs: &[String],
-        before_reconcile: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
-    ) -> AppError {
-        let reconciled = reconcile_display_state_from_report(previous_rows, report, known_outputs);
-        let reconciliation_result = self
-            .storage
-            .display_state_replace_all_and_clear_legacy(&reconciled, before_reconcile);
-
-        match reconciliation_result {
-            Ok(()) => AppError {
-                code: "display_restore_state_commit_failed".into(),
-                message: "Wallpapers were restored. The intended state commit failed, but the \
-                          actual live display state was reconciled."
-                    .into(),
-                detail: Some(format!(
-                    "commit_error={commit_error}; reconciliation=ok; legacy_state_clear=ok"
-                )),
-                recoverable: true,
-                suggestion: Some(
-                    "Review display status and retry restore if the intended assignments differ."
-                        .into(),
-                ),
-            },
-            Err(error) => AppError {
-                code: "display_state_uncertain".into(),
-                message: "Wallpapers were restored, but persisted display state is uncertain."
-                    .into(),
-                detail: Some(format!(
-                    "commit_error={commit_error}; reconciliation_transaction_error={error}"
-                )),
-                recoverable: true,
-                suggestion: Some(
-                    "Refresh renderer status before applying or restoring another wallpaper."
-                        .into(),
-                ),
-            },
-        }
+        crate::post_apply::publish_theme_and_run_hook_for_reason(&self.storage, &ctx, "restore");
     }
 }
 
@@ -345,48 +321,22 @@ fn build_restore_steps(rows: &[DisplayStateRow], known_outputs: &[String]) -> Ve
         .iter()
         .find(|row| matches!(row.target, DisplayStateTarget::AllDisplays));
 
-    let mut connected_overrides: Vec<(String, String)> = Vec::new();
-    for row in rows {
-        let DisplayStateTarget::Output(name) = &row.target else {
-            continue;
-        };
-        if !known_outputs.iter().any(|known| known == name) {
-            continue;
-        }
-        if let Some(existing) = connected_overrides
-            .iter_mut()
-            .find(|(output, _)| output == name)
-        {
-            existing.1 = row.wallpaper_path.clone();
-        } else {
-            connected_overrides.push((name.clone(), row.wallpaper_path.clone()));
-        }
-    }
-
-    let mut steps = Vec::new();
-    if let Some(all) = all_row {
-        steps.push(RestoreStep {
-            target: DisplayTarget::AllDisplays,
-            path: all.wallpaper_path.clone(),
-            backend: Backend::Unsupported,
-        });
-    }
-
-    for (output, path) in connected_overrides {
-        if let Some(all) = all_row {
-            if path == all.wallpaper_path {
-                // Covered by the AllDisplays step; named row is redundant.
-                continue;
-            }
-        }
-        steps.push(RestoreStep {
-            target: DisplayTarget::Output(output),
-            path,
-            backend: Backend::Unsupported,
-        });
-    }
-
-    steps
+    known_outputs
+        .iter()
+        .filter_map(|output| {
+            let effective = rows
+                .iter()
+                .find(|row| row.target == DisplayStateTarget::Output(output.clone()))
+                .or(all_row)?;
+            Some(RestoreStep {
+                recipe: None,
+                assignment_target: effective.target.clone(),
+                target: DisplayTarget::Output(output.clone()),
+                path: effective.wallpaper_path.clone(),
+                backend: Backend::Unsupported,
+            })
+        })
+        .collect()
 }
 
 fn ensure_wallpaper_present(path: &str) -> Result<(), AppError> {
@@ -439,12 +389,54 @@ fn update_running_after_step(
                 });
             }
         }
+        DisplayTarget::Outputs(outputs) => {
+            for output in outputs {
+                if let Some(existing) = running.iter_mut().find(|a| a.output == *output) {
+                    existing.backend = step.backend;
+                } else {
+                    running.push(RunningAssignment {
+                        output: output.clone(),
+                        backend: step.backend,
+                    });
+                }
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fully_overridden_template_is_not_preflighted() {
+        let rows = [
+            DisplayStateRow {
+                target: DisplayStateTarget::AllDisplays,
+                wallpaper_path: "/deleted.png".into(),
+                backend: "awww".into(),
+                updated_at: String::new(),
+            },
+            DisplayStateRow {
+                target: DisplayStateTarget::Output("A".into()),
+                wallpaper_path: "/a.png".into(),
+                backend: "awww".into(),
+                updated_at: String::new(),
+            },
+            DisplayStateRow {
+                target: DisplayStateTarget::Output("B".into()),
+                wallpaper_path: "/b.png".into(),
+                backend: "awww".into(),
+                updated_at: String::new(),
+            },
+        ];
+        let steps = build_restore_steps(&rows, &["A".into(), "B".into()]);
+        assert_eq!(steps.len(), 2);
+        assert!(steps.iter().all(|step| step.path != "/deleted.png"));
+        let steps = build_restore_steps(&rows, &["B".into(), "C".into()]);
+        assert_eq!(steps[1].target, DisplayTarget::Output("C".into()));
+        assert_eq!(steps[1].assignment_target, DisplayStateTarget::AllDisplays);
+    }
     use std::cell::RefCell;
     use std::path::Path;
     use std::process::Command;
@@ -478,9 +470,69 @@ mod tests {
         mpvpaper_pids_error: Option<String>,
         failed_launch_cleanup_error: Option<String>,
         awww_version: Option<String>,
+        displayed_images: std::collections::BTreeMap<String, String>,
+        cleared_outputs: std::collections::BTreeSet<String>,
     }
 
     impl ProcessIo for FakeRuntime {
+        fn renderer_command_lines(
+            &mut self,
+        ) -> Result<Vec<wc_backend::runtime_observation::ProcessCommandLine>, WcError> {
+            let mut lines = Vec::new();
+            if !self.displayed_images.is_empty() || !self.cleared_outputs.is_empty() {
+                lines.push(wc_backend::runtime_observation::ProcessCommandLine {
+                    pid: 50,
+                    argv: vec!["awww-daemon".into(), "--format".into(), "argb".into()],
+                });
+            }
+            for process in &self.mpvpaper_process_table {
+                let selector = match &process.selector {
+                    wc_backend::MpvpaperOutputSelector::Single(name) => name.clone(),
+                    wc_backend::MpvpaperOutputSelector::Wildcard => "*".into(),
+                    wc_backend::MpvpaperOutputSelector::Multi(names) => names.join(" "),
+                    wc_backend::MpvpaperOutputSelector::Unparseable => String::new(),
+                };
+                lines.push(wc_backend::runtime_observation::ProcessCommandLine {
+                    pid: process.pid,
+                    argv: vec![
+                        "mpvpaper".into(),
+                        selector,
+                        "--".into(),
+                        process.path.clone(),
+                    ],
+                });
+            }
+            for pid in &self.running_mpvpaper_pids {
+                if !lines.iter().any(|line| line.pid == *pid) {
+                    lines.push(wc_backend::runtime_observation::ProcessCommandLine {
+                        pid: *pid,
+                        argv: vec!["mpvpaper".into()],
+                    });
+                }
+            }
+            Ok(lines)
+        }
+
+        fn verify_recipe(
+            &mut self,
+            output: &str,
+            recipe: &wc_core::display_assignment::RenderRecipe,
+            _: &[String],
+        ) -> Result<(), WcError> {
+            let matches = match recipe.options.backend() {
+                Backend::Awww => self.displayed_images.get(output) == Some(&recipe.media_path),
+                Backend::Mpvpaper => self.mpvpaper_process_table.iter().any(|p| {
+                    p.matches_stop_outputs(&[output.into()]) && p.path == recipe.media_path
+                }),
+                _ => false,
+            };
+            if matches {
+                Ok(())
+            } else {
+                Err(WcError::Other("fake renderer content mismatch".into()))
+            }
+        }
+
         fn awww_environment(
             &mut self,
             _inspect_daemons: bool,
@@ -497,19 +549,16 @@ mod tests {
         }
 
         fn awww_query_json(&mut self) -> Result<String, WcError> {
-            let outputs = self
-                .command_output_args
+            let outputs: Vec<_> = self
+                .displayed_images
                 .iter()
-                .rev()
-                .find(|args| args.first().is_some_and(|arg| arg == "clear"))
-                .and_then(|args| args.get(2))
-                .map(|names| {
-                    names
-                        .split(',')
-                        .map(|name| serde_json::json!({"name":name,"displaying":{"color":"#0"}}))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+                .map(|(name, path)| serde_json::json!({"name":name,"displaying":{"image":path}}))
+                .chain(
+                    self.cleared_outputs
+                        .iter()
+                        .map(|name| serde_json::json!({"name":name,"displaying":{"color":"#0"}})),
+                )
+                .collect();
             Ok(serde_json::json!({"awww-daemon":outputs}).to_string())
         }
 
@@ -523,6 +572,20 @@ mod tests {
                     .map(|a| a.to_string_lossy().to_string())
                     .collect(),
             );
+            if self.command_output_success {
+                let args = self.command_output_args.last().unwrap();
+                if let Some(names) = args.windows(2).find(|p| p[0] == "--outputs").map(|p| &p[1]) {
+                    for name in names.split(',') {
+                        if args[0] == "img" {
+                            self.displayed_images.insert(name.into(), args[1].clone());
+                            self.cleared_outputs.remove(name);
+                        } else if args[0] == "clear" {
+                            self.displayed_images.remove(name);
+                            self.cleared_outputs.insert(name.into());
+                        }
+                    }
+                }
+            }
             let program = if self.command_output_success {
                 "true"
             } else {
@@ -584,10 +647,19 @@ mod tests {
         fn wait_for_mpvpaper_ready(
             &mut self,
             _previous_pids: &[u32],
-            _output: &str,
-            _path: &str,
+            output: &str,
+            path: &str,
         ) -> Result<u32, WcError> {
-            Ok(self.mpvpaper_ready_pid.unwrap_or(7))
+            let pid = self
+                .mpvpaper_process_table
+                .iter()
+                .map(|p| p.pid)
+                .max()
+                .unwrap_or(self.mpvpaper_ready_pid.unwrap_or(7))
+                + 1;
+            self.mpvpaper_process_table
+                .push(MpvpaperProcess::for_output(pid, output, path));
+            Ok(pid)
         }
 
         fn mpvpaper_pid_running(&mut self, _pid: u32) -> Result<bool, WcError> {
@@ -772,17 +844,17 @@ mod tests {
             "expected at least one awww apply"
         );
         assert!(
-            !rt.command_output_args[0].iter().any(|a| a == "--outputs"),
-            "AllDisplays restore must omit --outputs: {:?}",
+            rt.command_output_args[0].iter().any(|a| a == "--outputs"),
+            "AllDisplays restore must freeze named outputs: {:?}",
             rt.command_output_args[0]
         );
         let rows = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
         assert_eq!(rows[0].wallpaper_path, img.to_string_lossy());
-        assert_eq!(rt.stop_awww_count, 1);
-        assert_eq!(rt.stop_mpvpaper_count, 1);
-        assert_eq!(rt.stop_lwe_count, 1);
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_lwe_count, 0);
         assert_eq!(rt.lwe_apply_calls, 0);
     }
 
@@ -805,7 +877,7 @@ mod tests {
     }
 
     #[test]
-    fn dual_video_restore_restarts_once_and_applies_each_named_output() {
+    fn dual_video_restore_only_replaces_each_owned_output() {
         let (_tmp, service, video) = dual_video_service();
         let outputs = ["eDP-1".into(), "HDMI-1".into()];
         let mut runtime = FakeRuntime {
@@ -813,8 +885,7 @@ mod tests {
             command_status_success: true,
             ..Default::default()
         };
-        // Repeated restore clears the renderer set once per restore, with no
-        // stop between launching the first and second screen.
+        // Cold restore starts both outputs; repeated restore stops only their owners.
         for round in 1..=2 {
             service
                 .restore_displays_with_runtime(
@@ -824,11 +895,22 @@ mod tests {
                     DisplayRestoreRuntimeOpts::default(),
                 )
                 .unwrap();
-            assert_eq!(runtime.stop_mpvpaper_count, round);
+            assert_eq!(runtime.stop_mpvpaper_count, 0);
             assert_eq!(runtime.command_status_args.len(), round * 2);
             assert_eq!(
                 runtime.mpvpaper_events,
-                ["stop", "apply:eDP-1", "apply:HDMI-1"].repeat(round)
+                if round == 1 {
+                    vec!["apply:eDP-1", "apply:HDMI-1"]
+                } else {
+                    vec![
+                        "apply:eDP-1",
+                        "apply:HDMI-1",
+                        "stop-outputs:[eDP-1]",
+                        "apply:eDP-1",
+                        "stop-outputs:[HDMI-1]",
+                        "apply:HDMI-1",
+                    ]
+                }
             );
             let rows = service.storage_for_tests().display_state_list().unwrap();
             assert_eq!(rows.len(), 1);
@@ -839,7 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_uncertain_second_launch_keeps_first_output_progress() {
+    fn restore_uncertain_second_launch_still_compensates_first_output() {
         let (_tmp, service, video) = dual_video_service();
         let mut runtime = FakeRuntime {
             command_output_success: true,
@@ -856,27 +938,20 @@ mod tests {
                 DisplayRestoreRuntimeOpts::default(),
             )
             .unwrap_err();
-        assert_eq!(error.code, "display_state_uncertain");
-        assert!(error
-            .detail
-            .unwrap()
-            .contains("injected unverifiable cleanup"));
+        assert_eq!(error.code, "display_partial", "{error:?}");
+        let report: serde_json::Value =
+            serde_json::from_str(error.detail.as_ref().unwrap()).unwrap();
+        assert_eq!(report["outputs"][0]["outcome"], "restored_previous");
+        assert_eq!(report["outputs"][1]["outcome"], "unknown");
+        assert!(runtime.mpvpaper_process_table.is_empty());
         let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "must retain only the confirmed first Apply: {rows:?}"
-        );
-        assert_eq!(rows[0].target, DisplayStateTarget::Output("eDP-1".into()));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
         assert_eq!(rows[0].wallpaper_path, video.to_string_lossy());
-        assert_eq!(
-            runtime.mpvpaper_events,
-            ["stop", "apply:eDP-1", "apply:DP-8"]
-        );
     }
 
     #[test]
-    fn dual_video_restore_second_launch_failure_removes_stopped_output_state() {
+    fn dual_video_restore_second_launch_failure_preserves_preferences() {
         let (_tmp, service, video) = dual_video_service();
         let mut runtime = FakeRuntime {
             command_output_success: true,
@@ -892,24 +967,17 @@ mod tests {
                 DisplayRestoreRuntimeOpts::default(),
             )
             .unwrap_err();
+        assert_eq!(err.code, "display_restored_previous", "{err:?}");
+        assert!(runtime.mpvpaper_process_table.is_empty());
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
         let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert_eq!(
-            rows.len(),
-            1,
-            "failed output must not retain stopped state: {rows:?}"
-        );
-        assert_eq!(rows[0].target, DisplayStateTarget::Output("eDP-1".into()));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
         assert_eq!(rows[0].wallpaper_path, video.to_string_lossy());
-        assert_eq!(rows[0].backend, "mpvpaper");
-        assert_eq!(err.code, "display_apply_failed_after_stop");
-        assert_eq!(
-            runtime.mpvpaper_events,
-            ["stop", "apply:eDP-1", "apply:HDMI-1"]
-        );
     }
 
     #[test]
-    fn dual_video_restore_first_launch_failure_clears_stopped_state() {
+    fn dual_video_restore_first_launch_failure_preserves_preferences() {
         let (_tmp, service, _video) = dual_video_service();
         let mut runtime = FakeRuntime {
             command_output_success: true,
@@ -924,17 +992,111 @@ mod tests {
                 DisplayRestoreRuntimeOpts::default(),
             )
             .unwrap_err();
+        assert_eq!(err.code, "display_restored_previous", "{err:?}");
+        assert!(runtime.mpvpaper_process_table.is_empty());
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
         let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert!(
-            rows.is_empty(),
-            "stopped renderers must not remain saved as live: {rows:?}"
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
+        assert_eq!(
+            runtime.mpvpaper_events,
+            ["apply:eDP-1", "stop-outputs:[eDP-1]"]
         );
-        assert_eq!(err.code, "display_apply_failed_after_stop");
-        assert_eq!(runtime.mpvpaper_events, ["stop", "apply:eDP-1"]);
     }
 
     #[test]
-    fn display_restore_re_resolves_backend_from_current_safe_settings() {
+    fn corrupt_or_future_recipe_fails_before_any_stop() {
+        for sql in [
+            "UPDATE display_state SET recipe_json=NULL",
+            "UPDATE display_state SET recipe_version=999",
+            "UPDATE display_state SET recipe_json='not json'",
+        ] {
+            let (tmp, service) = temp_service();
+            let path = write_image(tmp.path(), "image.jpg");
+            let storage = service.storage_for_tests();
+            storage
+                .display_state_upsert(
+                    &DisplayStateTarget::Output("eDP-1".into()),
+                    &path.to_string_lossy(),
+                    "awww",
+                )
+                .unwrap();
+            let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd).unwrap();
+            conn.execute_batch(sql).unwrap();
+            storage.config_set("awww_resize", "stretch").unwrap();
+            let mut runtime = FakeRuntime::default();
+            service
+                .restore_displays_with_runtime(
+                    &["eDP-1".into()],
+                    &mut runtime,
+                    &mut NoopReporter,
+                    DisplayRestoreRuntimeOpts::default(),
+                )
+                .unwrap_err();
+            assert_eq!(runtime.stop_awww_count, 0);
+            assert_eq!(runtime.stop_mpvpaper_count, 0);
+            assert_eq!(runtime.stop_lwe_count, 0);
+            assert!(runtime.command_output_args.is_empty());
+        }
+    }
+
+    #[test]
+    fn restore_same_image_with_distinct_recipes_ignores_new_defaults() {
+        let (tmp, service) = temp_service();
+        let path = write_image(tmp.path(), "same.jpg");
+        let storage = service.storage_for_tests();
+        storage.config_set("awww_resize", "fit").unwrap();
+        storage
+            .display_state_upsert(
+                &DisplayStateTarget::Output("eDP-1".into()),
+                &path.to_string_lossy(),
+                "awww",
+            )
+            .unwrap();
+        storage
+            .config_set("mpvpaper_options", "--volume=37")
+            .unwrap();
+        storage
+            .display_state_upsert(
+                &DisplayStateTarget::Output("HDMI-1".into()),
+                &path.to_string_lossy(),
+                "mpvpaper",
+            )
+            .unwrap();
+        storage.config_set("image_backend", "swaybg").unwrap();
+        storage.config_set("awww_resize", "stretch").unwrap();
+        storage
+            .config_set("mpvpaper_options", "--volume=90")
+            .unwrap();
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &["eDP-1".into(), "HDMI-1".into()],
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+        assert!(runtime
+            .command_output_args
+            .iter()
+            .any(|args| args.contains(&"fit".into())));
+        assert!(runtime
+            .command_status_args
+            .iter()
+            .any(|args| args.contains(&"--volume=37".into())));
+        assert!(!runtime
+            .command_status_args
+            .iter()
+            .any(|args| args.contains(&"--volume=90".into())));
+    }
+
+    #[test]
+    fn display_restore_preserves_saved_backend_when_global_defaults_change() {
         let (tmp, service) = temp_service();
         let image = write_image(tmp.path(), "configured.jpg");
         service
@@ -965,19 +1127,19 @@ mod tests {
             )
             .unwrap();
 
-        assert!(runtime.command_output_args.is_empty());
-        assert!(runtime
+        assert!(!runtime.command_output_args.is_empty());
+        assert!(!runtime
             .command_status_args
             .iter()
             .flatten()
             .any(|arg| arg == "mpvpaper"));
         let rows = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].backend, "mpvpaper");
+        assert_eq!(rows[0].backend, "awww");
     }
 
     #[test]
-    fn display_restore_clamps_legacy_video_awww_state_to_mpvpaper() {
+    fn display_restore_rejects_incompatible_legacy_recipe_before_stopping() {
         let (tmp, service) = temp_service();
         let video = write_video(tmp.path(), "legacy.mp4");
         service
@@ -999,6 +1161,7 @@ mod tests {
         };
         let mut reporter = NoopReporter;
 
+        let before = service.storage_for_tests().display_state_list().unwrap();
         service
             .restore_displays_with_runtime(
                 &["eDP-1".into()],
@@ -1006,14 +1169,15 @@ mod tests {
                 &mut reporter,
                 DisplayRestoreRuntimeOpts::default(),
             )
-            .unwrap();
-
+            .unwrap_err();
         assert!(runtime.command_output_args.is_empty());
-        assert!(runtime
-            .command_status_args
-            .iter()
-            .flatten()
-            .any(|arg| arg == "mpvpaper"));
+        assert!(runtime.command_status_args.is_empty());
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert_eq!(runtime.stop_awww_count, 0);
+        assert_eq!(
+            service.storage_for_tests().display_state_list().unwrap(),
+            before
+        );
     }
 
     #[test]
@@ -1049,7 +1213,7 @@ mod tests {
                 DisplayRestoreRuntimeOpts::default(),
             )
             .unwrap();
-        assert_eq!(runtime.mpvpaper_events, ["stop", "apply:HDMI-1"]);
+        assert_eq!(runtime.mpvpaper_events, ["apply:HDMI-1"]);
         let image_args = runtime
             .command_output_args
             .iter()
@@ -1098,7 +1262,7 @@ mod tests {
                 DisplayRestoreRuntimeOpts::default(),
             )
             .unwrap();
-        assert_eq!(runtime.mpvpaper_events, ["stop"]);
+        assert!(runtime.mpvpaper_events.is_empty());
     }
 
     #[test]
@@ -1184,8 +1348,8 @@ mod tests {
             rt.command_output_args
         );
         assert!(
-            !rt.command_output_args[0].iter().any(|a| a == "--outputs"),
-            "first step is AllDisplays"
+            rt.command_output_args[0].iter().any(|a| a == "--outputs"),
+            "effective named assignments must be resolved before execution"
         );
         let named_args = rt
             .command_output_args
@@ -1338,11 +1502,11 @@ mod tests {
     }
 
     #[test]
-    fn conflicting_backend_combination_rejects_without_deleting_preferences() {
+    fn unsupported_feh_scoped_restore_rejects_without_deleting_preferences() {
         let (tmp, service) = temp_service();
         service
             .storage_for_tests()
-            .config_set("image_backend", "swaybg")
+            .config_set("image_backend", "feh")
             .unwrap();
         let img = write_image(tmp.path(), "still.jpg");
         let vid = write_video(tmp.path(), "motion.mp4");
@@ -1352,7 +1516,7 @@ mod tests {
                 (
                     DisplayStateTarget::Output("eDP-1".into()),
                     img.to_string_lossy().into(),
-                    "awww".into(),
+                    "feh".into(),
                 ),
                 (
                     DisplayStateTarget::Output("HDMI-1".into()),
@@ -1380,8 +1544,7 @@ mod tests {
 
         assert_eq!(err.code, "display_apply_rejected");
         assert!(
-            err.message.contains("coexistence")
-                || err.detail.as_deref().unwrap_or("").contains("Coexistence"),
+            err.message.contains("feh") || err.detail.as_deref().unwrap_or("").contains("feh"),
             "expected coexistence rejection: {err:?}"
         );
         assert!(
@@ -1395,7 +1558,7 @@ mod tests {
     }
 
     #[test]
-    fn partial_failure_after_stop_reconciles_truthfully_and_preserves_disconnected() {
+    fn failed_restore_preserves_template_named_and_disconnected_preferences() {
         let (tmp, service) = temp_service();
         let img = write_image(tmp.path(), "all.jpg");
         let vid = write_video(tmp.path(), "override.mp4");
@@ -1437,30 +1600,25 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(
-            err.code == "display_apply_failed_after_stop"
-                || err.code == "display_state_uncertain"
-                || err.code == "command_failed",
-            "must not claim success after partial failure: {err:?}"
-        );
-        assert!(rt.stop_awww_count >= 1, "override should stop prior awww");
+        assert_eq!(err.code, "display_restored_previous", "{err:?}");
+        assert_eq!(rt.stop_awww_count, 0);
         let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert!(
-            rows.iter().any(|r| {
-                r.target == DisplayStateTarget::Output("DP-ghost".into()) && r.backend == "mpvpaper"
-            }),
-            "disconnected preference preserved: {rows:?}"
-        );
-        assert!(
-            rows.iter().all(|r| {
-                !(matches!(r.target, DisplayStateTarget::AllDisplays) && r.backend == "awww")
-            }),
-            "must not claim stopped AllDisplays awww still runs: {rows:?}"
-        );
+        assert_eq!(rows.len(), 3);
+        assert!(rows
+            .iter()
+            .any(|r| r.target == DisplayStateTarget::AllDisplays
+                && r.wallpaper_path == img.to_string_lossy()));
+        assert!(rows
+            .iter()
+            .any(|r| r.target == DisplayStateTarget::Output("eDP-1".into())
+                && r.wallpaper_path == vid.to_string_lossy()));
+        assert!(rows
+            .iter()
+            .any(|r| r.target == DisplayStateTarget::Output("DP-ghost".into())));
     }
 
     #[test]
-    fn uncertain_stop_does_not_claim_success_and_preserves_disconnected() {
+    fn ambiguous_live_renderer_blocks_restore_without_deleting_preferences() {
         let (tmp, service) = temp_service();
         let img = write_image(tmp.path(), "all.jpg");
         let vid = write_video(tmp.path(), "override.mp4");
@@ -1488,7 +1646,7 @@ mod tests {
         let mut rt = FakeRuntime {
             command_output_success: true,
             command_status_success: true,
-            stop_awww_error: Some("verification probe failed".into()),
+            running_mpvpaper_pids: vec![9],
             mpvpaper_ready_pid: Some(9),
             ..Default::default()
         };
@@ -1502,19 +1660,22 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(err.code, "display_state_uncertain");
-        let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert!(
-            rows.iter().any(|r| {
-                r.target == DisplayStateTarget::Output("DP-ghost".into()) && r.backend == "mpvpaper"
-            }),
-            "disconnected preference preserved: {rows:?}"
+        assert!(err.message.contains("ownership"), "{err:?}");
+        assert_eq!(rt.stop_awww_count, 0);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert!(rt.command_status_args.is_empty());
+        assert_eq!(
+            service
+                .storage_for_tests()
+                .display_state_list()
+                .unwrap()
+                .len(),
+            3
         );
-        assert!(rt.stop_awww_count >= 1);
     }
 
     #[test]
-    fn successful_restore_reconciles_live_report_after_primary_state_commit_failure() {
+    fn failed_restore_commit_compensates_without_changing_legacy_state() {
         let (_tmp, service, image) = restore_service_with_changed_backend();
         let mut runtime = FakeRuntime {
             command_output_success: true,
@@ -1543,36 +1704,39 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(commit_attempts, 2);
-        assert_eq!(error.code, "display_restore_state_commit_failed");
-        let detail = error.detail.as_deref().unwrap_or_default();
-        assert!(
-            detail.contains("injected primary commit failure"),
-            "{detail}"
-        );
-        assert!(detail.contains("reconciliation=ok"), "{detail}");
-
+        assert_eq!(commit_attempts, 1);
+        assert_eq!(error.code, "display_restored_previous", "{error:?}");
+        assert!(error
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("injected primary commit failure"));
+        assert!(runtime.displayed_images.is_empty());
         let rows = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].target,
-            DisplayStateTarget::Output("eDP-1".into()),
-            "reconciliation must persist the executor's per-output live scope"
-        );
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
         assert_eq!(rows[0].wallpaper_path, image.to_string_lossy());
+        assert_eq!(rows[0].backend, "awww");
         assert_eq!(
-            rows[0].backend, "mpvpaper",
-            "reconciliation must persist the backend that actually started"
+            service
+                .storage_for_tests()
+                .current_read()
+                .unwrap()
+                .as_deref(),
+            Some(image.to_string_lossy().as_ref())
         );
-        assert_eq!(service.storage_for_tests().current_read().unwrap(), None);
         assert_eq!(
-            service.storage_for_tests().last_backend_read().unwrap(),
-            None
+            service
+                .storage_for_tests()
+                .last_backend_read()
+                .unwrap()
+                .as_deref(),
+            Some("awww")
         );
     }
 
     #[test]
-    fn successful_restore_reports_both_errors_when_reconciliation_commit_also_fails() {
+    fn failed_restore_commit_does_not_retry_preference_writes() {
         let (_tmp, service, image) = restore_service_with_changed_backend();
         let mut runtime = FakeRuntime {
             command_output_success: true,
@@ -1602,31 +1766,26 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(commit_attempts, 2);
-        assert_eq!(error.code, "display_state_uncertain");
-        let detail = error.detail.as_deref().unwrap_or_default();
-        assert!(detail.contains("commit_error=injected primary commit failure"));
-        assert!(
-            detail.contains(
-                "reconciliation_transaction_error=injected reconciliation commit failure"
-            ),
-            "{detail}"
-        );
-
+        assert_eq!(commit_attempts, 1);
+        assert_eq!(error.code, "display_restored_previous", "{error:?}");
+        assert!(error
+            .detail
+            .as_ref()
+            .unwrap()
+            .contains("injected primary commit failure"));
+        assert!(runtime.displayed_images.is_empty());
         let rows = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(
-            rows[0].backend, "awww",
-            "both injected transactions must roll back without partial persistence"
-        );
+        assert_eq!(rows[0].target, DisplayStateTarget::AllDisplays);
+        assert_eq!(rows[0].wallpaper_path, image.to_string_lossy());
+        assert_eq!(rows[0].backend, "awww");
         assert_eq!(
             service
                 .storage_for_tests()
                 .current_read()
                 .unwrap()
                 .as_deref(),
-            Some(image.to_string_lossy().as_ref()),
-            "failed reconciliation transaction must preserve legacy state"
+            Some(image.to_string_lossy().as_ref())
         );
         assert_eq!(
             service
@@ -1634,8 +1793,7 @@ mod tests {
                 .last_backend_read()
                 .unwrap()
                 .as_deref(),
-            Some("awww"),
-            "failed reconciliation transaction must preserve the legacy backend"
+            Some("awww")
         );
     }
 
@@ -1674,17 +1832,16 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(runtime.stop_mpvpaper_count, 1);
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
         assert!(runtime.stop_mpvpaper_outputs_calls.is_empty());
-        assert_eq!(runtime.mpvpaper_events[0], "stop");
-        let applies: Vec<_> = runtime.mpvpaper_events[1..].to_vec();
+        let applies = &runtime.mpvpaper_events;
         assert_eq!(applies.len(), 2);
         assert!(applies.contains(&"apply:eDP-1".to_string()));
         assert!(applies.contains(&"apply:HDMI-1".to_string()));
     }
 
     #[test]
-    fn all_displays_plus_named_override_restore_uses_scoped_stop_for_override() {
+    fn restore_resolves_overrides_before_launching_each_output_once() {
         let (tmp, service) = temp_service();
         let base = write_video(tmp.path(), "base.mp4");
         let override_video = write_video(tmp.path(), "override.mp4");
@@ -1718,20 +1875,20 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(
-            runtime.mpvpaper_events,
-            [
-                "stop",
-                "apply:eDP-1",
-                "apply:HDMI-1",
-                "stop-outputs:[HDMI-1]",
-                "apply:HDMI-1",
-            ]
+        assert_eq!(runtime.mpvpaper_events, ["apply:eDP-1", "apply:HDMI-1"]);
+        assert!(runtime.stop_mpvpaper_outputs_calls.is_empty());
+        assert!(
+            runtime
+                .mpvpaper_process_table
+                .iter()
+                .any(|p| p.matches_stop_outputs(&["eDP-1".into()])
+                    && p.path == base.to_string_lossy())
         );
-        assert_eq!(
-            runtime.stop_mpvpaper_outputs_calls,
-            vec![vec!["HDMI-1".to_string()]]
-        );
+        assert!(runtime
+            .mpvpaper_process_table
+            .iter()
+            .any(|p| p.matches_stop_outputs(&["HDMI-1".into()])
+                && p.path == override_video.to_string_lossy()));
     }
 
     fn write_executable_script(path: &std::path::Path, body: &str) -> std::io::Result<()> {

@@ -20,9 +20,9 @@ pub(crate) enum Commands {
     // ── Wallpaper ────────────────────────────────────────────────────
     Apply {
         file: String,
-        /// Apply to one connected output, or `all` for an explicit all-display plan.
+        /// Target output; repeat for a subset, or use `all` by itself.
         #[arg(long)]
-        target: Option<String>,
+        target: Vec<String>,
         /// Complete connected-output set. Repeat for multiple outputs; omit to query Wayland.
         #[arg(long = "output")]
         outputs: Vec<String>,
@@ -35,8 +35,16 @@ pub(crate) enum Commands {
         #[arg(long)]
         config_dir: String,
     },
-    Stop,
+    Stop {
+        /// Stop only these outputs; repeat for a subset. Omit for legacy global Stop.
+        #[arg(long = "target")]
+        targets: Vec<String>,
+    },
     Status,
+    /// Print the last optional action result as JSON (does not run it).
+    PostApplyStatus,
+    /// Run the configured action for the last wallpaper, without reapplying it.
+    PostApplyRetry,
     Restore,
     /// Print connected display outputs as JSON.
     Displays,
@@ -46,6 +54,9 @@ pub(crate) enum Commands {
     /// Restore persisted assignments for connected or explicitly supplied outputs.
     #[command(name = "restore-displays")]
     RestoreDisplays {
+        /// Restore only these outputs; repeat for a subset, or omit for all.
+        #[arg(long = "target")]
+        targets: Vec<String>,
         /// Connected output name. Repeat for multiple outputs; omit to query Wayland.
         #[arg(long = "output")]
         outputs: Vec<String>,
@@ -229,6 +240,9 @@ pub(crate) enum Commands {
 
 fn main() -> anyhow::Result<()> {
     let args = std::env::args().collect::<Vec<_>>();
+    if let Some(exit_code) = wc_backend::image_media::try_run_worker_mode(&args) {
+        std::process::exit(exit_code);
+    }
     if let Some(exit_code) = wc_app::scan_worker::try_run_worker_mode(&args) {
         std::process::exit(exit_code);
     }
@@ -249,7 +263,7 @@ mod tests {
             panic!("expected apply command");
         };
         assert_eq!(file, "/walls/a.jpg");
-        assert_eq!(target, None);
+        assert!(target.is_empty());
     }
 
     #[test]
@@ -267,7 +281,7 @@ mod tests {
             let Some(Commands::Apply { target, .. }) = cli.command else {
                 panic!("expected apply command");
             };
-            assert_eq!(target.as_deref(), Some(expected));
+            assert_eq!(target, [expected]);
         }
     }
 
@@ -288,7 +302,7 @@ mod tests {
             "HDMI-A-1",
         ])
         .unwrap();
-        let Some(Commands::RestoreDisplays { outputs }) = restore.command else {
+        let Some(Commands::RestoreDisplays { outputs, .. }) = restore.command else {
             panic!("expected restore-displays command");
         };
         assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
@@ -326,7 +340,7 @@ mod tests {
         else {
             panic!("expected apply command");
         };
-        assert_eq!(target.as_deref(), Some("eDP-1"));
+        assert_eq!(target, ["eDP-1"]);
         assert_eq!(outputs, ["eDP-1", "HDMI-A-1"]);
     }
 

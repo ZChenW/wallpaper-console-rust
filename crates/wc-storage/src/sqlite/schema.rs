@@ -27,7 +27,7 @@ const WALLPAPER_QUERY_INDEXES_SQL: &str = "
     CREATE INDEX IF NOT EXISTS idx_wallpapers_added_at ON wallpapers(added_at DESC, id DESC);
 ";
 pub const FTS_SCHEMA_VERSION: &str = "2";
-pub const CURRENT_SCHEMA_VERSION: i64 = 7;
+pub const CURRENT_SCHEMA_VERSION: i64 = 9;
 pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "config",
     "sources",
@@ -38,6 +38,8 @@ pub(crate) const CURRENT_PERSISTENT_TABLES: &[&str] = &[
     "history",
     "state",
     "display_state",
+    "display_operations",
+    "display_stop_intents",
     "source_refresh_state",
     "db_meta",
 ];
@@ -208,6 +210,11 @@ pub fn create_schema(conn: &Connection) -> Result<(), WcError> {
             [],
         )
         .map_err(sqlite_err)?;
+        super::display_state::ensure_display_state_schema(&tx)?;
+        super::display_operations::ensure_schema(&tx)?;
+        if version < 8 {
+            super::display_recipe::fill_missing_recipes(&tx)?;
+        }
         if version < CURRENT_SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", CURRENT_SCHEMA_VERSION)
                 .map_err(sqlite_err)?;
@@ -1675,6 +1682,24 @@ fn try_ensure_sqlite_db_with_seam(
     // schema lock and bootstrap/migrate.
     let conn = open_or_create_connection(cd)?;
     before_create_schema();
+    let version: i64 = conn
+        .pragma_query_value(None, "user_version", |r| r.get(0))
+        .map_err(sqlite_err)?;
+    if version > 0 && version < CURRENT_SCHEMA_VERSION {
+        let backup = cd.db_path().with_extension(format!(
+            "db.before-v{version}-to-v8-{}.bak",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        let mut destination = rusqlite::Connection::open(&backup).map_err(sqlite_err)?;
+        let snapshot =
+            rusqlite::backup::Backup::new(&conn, &mut destination).map_err(sqlite_err)?;
+        snapshot
+            .run_to_completion(128, std::time::Duration::from_millis(10), None)
+            .map_err(sqlite_err)?;
+    }
     create_schema(&conn)?;
     apply_runtime_pragmas(&conn)?;
     Ok(())
@@ -1772,12 +1797,12 @@ mod tests {
     }
 
     #[test]
-    fn fresh_v7_schema_initializes_revision_refresh_and_derived_search_state() {
+    fn fresh_schema_initializes_revision_refresh_and_derived_search_state() {
         let conn = Connection::open_in_memory().unwrap();
 
         create_schema(&conn).unwrap();
 
-        assert_eq!(CURRENT_SCHEMA_VERSION, 7);
+        assert_eq!(CURRENT_SCHEMA_VERSION, 9);
         assert_eq!(crate::sqlite::read_library_revision(&conn).unwrap(), 0);
         assert!(source_refresh_state_table_exists(&conn));
         assert_eq!(

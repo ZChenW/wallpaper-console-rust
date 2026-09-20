@@ -52,10 +52,13 @@ where
 
 pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
     let user = crate::current_process_user();
-    running_pids_for_scope_with(&user, |cmd| {
+    Ok(running_pids_for_scope_with(&user, |cmd| {
         crate::deadline_command::output(cmd, std::time::Duration::from_secs(2))
             .map_err(|error| std::io::Error::other(error.to_string()))
-    })
+    })?
+    .into_iter()
+    .filter(|pid| crate::runtime_observation::process_in_current_session(*pid))
+    .collect())
 }
 
 pub(crate) fn stop_swaybg() {
@@ -130,13 +133,15 @@ pub(crate) fn stop_pids_started_after(
         .filter(|pid| pid_matches_target(*pid, path, scope))
         .collect::<Vec<_>>();
     for pid in &target_pids {
-        if !pid_matches_target(*pid, path, scope) {
+        let tokens =
+            crate::process_control::read_proc_cmdline_tokens(*pid as i32).unwrap_or_default();
+        if !cmdline_matches_target(&tokens, path, scope) {
             return Err(WcError::Other(format!(
                 "refusing to stop PID {pid} after failed swaybg launch because its target \
                  identity changed"
             )));
         }
-        crate::process_control::kill_pid_gracefully(*pid);
+        crate::process_control::kill_pid_matching_argv(*pid, &tokens);
     }
     for poll in 0..=40 {
         let still_running = running_pids()?

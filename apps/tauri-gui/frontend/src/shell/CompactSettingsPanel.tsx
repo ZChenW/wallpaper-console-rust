@@ -546,7 +546,7 @@ export function CompactSettingsPanelView({
               <BehaviorHelp
                 id="settings-mpvpaper-playback-help"
                 label="About mpvpaper playback"
-                text="One global argument string shared by every image, GIF, and video applied with mpvpaper. Leave it empty to pass no extra arguments."
+                text="Default arguments for newly applied mpvpaper wallpapers. Saved displays retain their own parameters. Apply reloads only confirmed mpvpaper wallpapers on the selected displays. Leave empty for no extra arguments."
               />
             </div>
             <div className="settings-behavior-card__rows">

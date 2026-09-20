@@ -146,6 +146,12 @@ export interface DisplayDTO {
   name: string;
 }
 
+export interface DisplayRenderingSettingsDTO {
+  output: string;
+  backend: string;
+  values: Record<string, string>;
+}
+
 export interface DisplayListDTO {
   outputs: DisplayDTO[];
 }
@@ -174,12 +180,15 @@ export interface TargetedApplyRequestDTO {
   path: string;
   /** Omitted means All Displays for compatibility with legacy apply callers. */
   target?: string;
+  /** Explicit nonempty output subset; cannot be combined with target. */
+  targets?: string[];
   requestId?: string;
 }
 
 export interface TargetedRestoreRequestDTO {
   /** Omitted means discover currently connected outputs. */
   outputs?: string[];
+  targets?: string[];
 }
 
 export interface BackendStatusDTO {
@@ -241,7 +250,17 @@ export interface ApplyRequestDTO {
   requestId?: string;
 }
 
+export interface PostApplyReportDTO {
+  version: number;
+  status: 'disabled' | 'skipped' | 'succeeded' | 'failed' | 'timed_out';
+  detail: string;
+  reason: string;
+  finishedAt: number;
+}
+
 export interface ApplyResultDTO {
+  switchReport?: SwitchReportDTO;
+  postApply?: PostApplyReportDTO;
   requestId?: string;
   appliedPath: string;
   statePath: string;
@@ -250,6 +269,17 @@ export interface ApplyResultDTO {
   preview: boolean;
   /** Present for display-aware applies; omitted when the legacy transport cannot prove outputs. */
   appliedOutputs?: string[];
+}
+
+export type SwitchOutcome = 'applied' | 'stopped' | 'already_satisfied' | 'unchanged'
+  | 'restored_previous' | 'partial' | 'recovery_failed' | 'unknown';
+
+export interface SwitchReportDTO {
+  operationId: string;
+  outcome: SwitchOutcome;
+  originalError: string | null;
+  originalErrorCode?: string | null;
+  outputs: { output: string; outcome: SwitchOutcome; error: string | null }[];
 }
 
 export interface ApplyActionDTO {
@@ -340,11 +370,15 @@ export interface WallpaperConsoleApi {
   removeMissingSources(): Promise<CommandResult>;
   scanSteamWorkshop(): Promise<CommandResult>;
 
+  postApplyStatus(): Promise<PostApplyReportDTO | null>;
+  displayRenderingSettings(targets: string[]): Promise<DisplayRenderingSettingsDTO[]>;
+  updateDisplayRendering(targets: string[], patch: Record<string, string>): Promise<SwitchReportDTO>;
+  postApplyRetry(): Promise<PostApplyReportDTO>;
   configGet(key: string): Promise<string>;
   configGetMany(keys: string[]): Promise<Record<string, string>>;
   configSet(key: string, value: string): Promise<CommandResult>;
   behaviorSettingsGet(): Promise<BehaviorSettingsSnapshotDTO>;
-  reapplyMpvpaper(): Promise<MpvpaperReapplyResultDTO>;
+  reapplyMpvpaper(targets?: string[]): Promise<MpvpaperReapplyResultDTO>;
   behaviorSettingsUpdate(
     expectedRevision: string,
     patch: BehaviorSettingsPatchDTO,

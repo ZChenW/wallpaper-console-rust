@@ -83,6 +83,7 @@ export function useApplyQueue(args: {
   }
 
   return {
+    cancelPendingForTargets: (outputs?: readonly string[]) => controllerRef.current?.cancelPendingForTargets(outputs),
     applying: queueState.applying,
     activePath: queueState.activePath,
     pendingPath: queueState.pendingPath,

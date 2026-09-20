@@ -60,7 +60,7 @@ pub(crate) fn stop_outputs(outputs: &[String]) -> Result<(), WcError> {
         if crate::process_control::read_proc_cmdline_tokens(process.pid as i32).as_ref()
             == Some(&process.argv)
         {
-            crate::process_control::kill_pid_gracefully(process.pid);
+            crate::process_control::kill_pid_matching_argv(process.pid, &process.argv);
         }
     }
     verify_stopped_with(outputs, || inspect_targets(outputs), std::thread::sleep)

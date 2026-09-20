@@ -55,6 +55,22 @@ impl AppService {
         known_outputs: &[String],
         runtime: &mut dyn BackendRuntime,
     ) -> Result<MpvpaperReapplyResult, AppError> {
+        self.reapply_mpvpaper_to_displays_with_runtime(
+            known_outputs,
+            &DisplayTarget::AllDisplays,
+            runtime,
+        )
+    }
+
+    pub fn reapply_mpvpaper_to_displays_with_runtime(
+        &self,
+        known_outputs: &[String],
+        target: &DisplayTarget,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<MpvpaperReapplyResult, AppError> {
+        let selected = target
+            .outputs(known_outputs)
+            .map_err(|e| AppError::from_wc_error(wc_core::error::WcError::Other(e)))?;
         let _guard = crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
             .map_err(AppError::from_wc_error)?;
         let rows = self
@@ -69,6 +85,9 @@ impl AppService {
         let observations = observe_runtime_wallpapers_with(known_outputs, &rows, &snapshot);
         let mut result = MpvpaperReapplyResult::default();
         for observation in observations {
+            if !selected.contains(&observation.output) {
+                continue;
+            }
             let assigned = rows
                 .iter()
                 .find(|row| row.target == DisplayStateTarget::Output(observation.output.clone()))
@@ -88,6 +107,21 @@ impl AppService {
                 .and_then(|ext| wc_core::formats::classify_extension(&ext))
                 .ok_or_else(|| AppError::unsupported_path(path))
                 .and_then(|(file_type, _)| {
+                    let previous = self
+                        .storage
+                        .display_recipe(&assigned.target)
+                        .map_err(AppError::from_wc_error)?
+                        .ok_or_else(|| {
+                            AppError::from_wc_error(wc_core::error::WcError::Other(
+                                "saved mpvpaper recipe missing".into(),
+                            ))
+                        })?;
+                    let preview =
+                        previous.presentation == wc_core::display_assignment::Presentation::Preview;
+                    let recipe = self
+                        .storage
+                        .capture_recipe(&previous.source, path, Backend::Mpvpaper, preview)
+                        .map_err(AppError::from_wc_error)?;
                     self.execute_resolved_display_apply(
                         ApplyRequest {
                             kind: ApplyRequestKind::Apply,
@@ -101,15 +135,16 @@ impl AppService {
                         DisplayApplyRuntimeOpts::default(),
                         None,
                         ApplyExecutionTarget {
-                            input_path: path.clone(),
+                            recipe: Some(recipe),
+                            input_path: previous.source,
                             resolved_path: path.clone(),
                             state_path: path.clone(),
                             file_type,
                             backend: Backend::Mpvpaper,
-                            preview: false,
+                            preview,
                             fallback_path: None,
                         },
-                        false,
+                        crate::display_apply::AssignmentUpdate::RenderingOnly,
                     )
                 });
             match outcome {

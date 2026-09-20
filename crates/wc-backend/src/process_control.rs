@@ -152,29 +152,96 @@ pub(crate) fn kill_lwe_process_group(pid: i32) {
 
 /// Send SIGTERM then SIGKILL to a single PID.
 pub(crate) fn kill_pid_gracefully(pid: u32) {
-    let Some(identity) = read_proc_cmdline_tokens(pid as i32) else {
+    let Some(identity) = ProcessIdentity::read(pid) else {
         return;
     };
-    let pid_str = pid.to_string();
-    let _ = Command::new("kill")
-        .args(["-TERM", &pid_str])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
-    std::thread::sleep(Duration::from_millis(80));
-    if read_proc_cmdline_tokens(pid as i32).as_ref() != Some(&identity) {
+    kill_identity_gracefully(&identity);
+}
+
+pub(crate) fn kill_pid_matching_argv(pid: u32, expected: &[String]) {
+    let Some(identity) = ProcessIdentity::read(pid).filter(|identity| identity.argv == expected)
+    else {
+        return;
+    };
+    kill_identity_gracefully(&identity);
+}
+
+pub(crate) fn kill_identity_gracefully(identity: &ProcessIdentity) {
+    let pid = identity.pid;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    // A pidfd pins this kernel process, so later PID reuse cannot redirect SIGKILL.
+    // SAFETY: pidfd_open accepts a numeric PID and flags=0 and returns an owned fd.
+    let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if fd < 0 {
         return;
     }
-    let _ = Command::new("kill")
-        .args(["-KILL", &pid_str])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    // SAFETY: successful pidfd_open returned a new owned descriptor.
+    let handle = unsafe { std::fs::File::from_raw_fd(fd as i32) };
+    if ProcessIdentity::read(pid).as_ref() != Some(identity) {
+        return;
+    }
+    let signal = |value: libc::c_int| {
+        // SAFETY: the owned pidfd remains valid; null siginfo and flags=0 are supported.
+        unsafe {
+            libc::syscall(
+                libc::SYS_pidfd_send_signal,
+                handle.as_raw_fd(),
+                value,
+                std::ptr::null::<libc::siginfo_t>(),
+                0,
+            )
+        }
+    };
+    signal(libc::SIGTERM);
+    std::thread::sleep(Duration::from_millis(80));
+    if ProcessIdentity::read(pid).as_ref() != Some(identity) {
+        return;
+    }
+    signal(libc::SIGKILL);
     if identity
+        .argv
         .first()
         .is_some_and(|p| token_is_mpvpaper_program(p))
     {
-        crate::mpvpaper_media::cleanup_socket(&identity);
+        crate::mpvpaper_media::cleanup_socket(&identity.argv);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ProcessIdentity {
+    uid: u32,
+    pid: u32,
+    start_ticks: u64,
+    argv: Vec<String>,
+}
+impl ProcessIdentity {
+    pub(crate) fn read(pid: u32) -> Option<Self> {
+        use std::os::unix::fs::MetadataExt;
+        let directory = format!("/proc/{pid}");
+        let uid = std::fs::metadata(&directory).ok()?.uid();
+        let stat = std::fs::read_to_string(format!("{directory}/stat")).ok()?;
+        let mut fields = stat[stat.rfind(')')? + 1..].split_whitespace();
+        let start_ticks = fields.nth(19)?.parse().ok()?;
+        let argv = read_proc_cmdline_tokens(pid as i32)?;
+        // Detect reuse while the uid/stat/argv snapshot itself was assembled.
+        if std::fs::read_to_string(format!("{directory}/stat"))
+            .ok()?
+            .rsplit_once(')')?
+            .1
+            .split_whitespace()
+            .nth(19)?
+            .parse::<u64>()
+            .ok()?
+            != start_ticks
+        {
+            return None;
+        }
+        Some(Self {
+            uid,
+            pid,
+            start_ticks,
+            argv,
+        })
     }
 }
 
@@ -203,7 +270,9 @@ pub(crate) fn find_lwe_pids_for_current_user() -> Vec<u32> {
             Ok(metadata) => metadata,
             Err(_) => continue,
         };
-        if metadata.uid() != current_uid {
+        if metadata.uid() != current_uid
+            || !crate::runtime_observation::process_in_current_session(pid)
+        {
             continue;
         }
         if pid_looks_like_lwe(pid as i32) {

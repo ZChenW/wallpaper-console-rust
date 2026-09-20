@@ -14,7 +14,7 @@ display.
 
 - Grid and Flow browsing
 - Images, GIFs, videos, and compatible Wallpaper Engine scenes
-- Multiple folders, favorites, and per-display selection
+- Multiple folders, favorites, and explicit display subsets
 - Optional wallpaper restore after login
 - Optional post-apply command for tools such as matugen
 
@@ -51,6 +51,37 @@ install only those needed for your desktop and media:
 - `mpvpaper` — Wayland images, GIFs, and videos
 - `linux-wallpaperengine` — compatible Wallpaper Engine scenes
 
+### Independent displays
+
+Use the display selector to choose one output, several outputs, or All. Stop and
+Restore act on that selection. **Selected display settings** changes only edited
+fields; mixed values and unselected displays keep their own settings. Global
+renderer settings are defaults, not a rewrite of saved display recipes.
+
+```bash
+wallpaper-console-rust apply /absolute/path/wallpaper.png --target eDP-1 --target DP-8
+wallpaper-console-rust stop --target DP-8
+wallpaper-console-rust restore-displays --target DP-8
+```
+
+Stop retains saved settings but cancels automatic recovery for that output in
+the current session. Explicit Apply or Restore enables recovery again. Failed
+switches report whether the old wallpaper was unchanged, restored, or still
+needs recovery; restoration of the old wallpaper does not count as a successful
+new Apply.
+
+Mixed awww/LWE and swaybg pairs are conditional on verified niri support;
+awww sharing additionally requires the supported default, alpha-capable daemon.
+swaybg currently requires niri surface observation. Sway and Hyprland have output
+discovery/recovery adapters but their new mixed-renderer combinations remain
+unverified. Transactional feh switching is not available because X-root content
+cannot be verified and recovered reliably.
+
+Animated PNG/APNG and WebP use mpvpaper; AVI and FLV are accepted only after actual
+codec preflight. TIFF, AVIF, HEIC and SVG remain unavailable with the bundled
+decoder set. Web rendering is a separate milestone; Application projects never
+execute arbitrary project binaries.
+
 ## Build from source
 
 Building requires Rust 1.88+, Node.js 22.6+, the
@@ -63,6 +94,21 @@ cd wallpaper-console-rust
 ./install.sh
 ```
 
+To install downloaded release assets without compiling, put the matching
+AppImage, CLI archive and `SHA256SUMS` in one directory, then run from this checkout:
+
+```bash
+./install.sh --release-dir ~/Downloads/Wallpaper-Console
+```
+
+This verifies both assets and installs the same menu entry and managed launchers.
+The release launcher extracts into a cache keyed by the AppImage checksum, so it
+does not need FUSE or `fusermount`. Reuse the command with newer verified assets
+to upgrade. `./install.sh --uninstall` removes unchanged installer-owned files;
+settings and the extracted cache are preserved. Installation checks command
+availability, not actual rendering: add a folder and apply a wallpaper to verify
+your desktop. If no folder picker is installed, use **Enter path** in Sources.
+
 The installer uses `~/.local` by default. Launch it from the application menu or
 run `wallpaper-console-gui-rust`.
 
@@ -74,17 +120,59 @@ Restore the previous wallpaper after login:
 wallpaper-console-rust config-set restore_on_login on
 ```
 
-Then run `wallpaper-console-rust restore-at-login` from your compositor's
-startup configuration.
+Turning the setting on (GUI or `config-set`) installs an XDG autostart entry that
+runs `wallpaper-console-rust restore-at-login` when the desktop session starts.
+Turning it off removes that entry. Compositors that ignore XDG autostart still
+need an explicit startup line for the same command.
 
-Enable the post-apply hook:
+Enable the post-apply hook (Waypaper-style: opt-in command after apply). Defaults
+are **off** and an **empty** command — nothing runs until you configure both.
+
+Matugen example:
 
 ```bash
 wallpaper-console-rust config-set post_apply_enabled on
+wallpaper-console-rust config-set post_apply_command 'matugen image "$WCR_STILL" --prefer saturation'
 ```
 
-Its default command is `matugen image "$still"`. Configure
-`post_apply_command` to integrate another theme tool.
+WC manages wallpaper selection and application; your command owns palette
+preferences, templates, and desktop reloads. Commands execute as your user through
+`sh -c`, with no interactive stdin and a configurable timeout (default 30 seconds).
+
+The **post-apply interface v1** supplies these environment variables, always set
+(unavailable optional values are empty):
+
+| Variable | Meaning |
+| --- | --- |
+| `WCR_HOOK_VERSION` | `1` |
+| `WCR_REASON` | `apply`, `restore`, or `retry` |
+| `WCR_WALLPAPER` | Wallpaper selected as the theme source |
+| `WCR_STILL` | Source image/GIF, extracted video frame, or WE Scene preview |
+| `WCR_FILE_TYPE` / `WCR_BACKEND` | Theme source type and renderer |
+| `WCR_OUTPUTS` / `WCR_OUTPUT` | Comma-separated affected outputs; legacy `*` means all |
+| `WCR_THEME_SOURCE_OUTPUT` | Output selected by the theme-source policy |
+| `WCR_THEME_MANIFEST` | Path to version 1 `theme-state.json`, when per-output data exists |
+
+Quote paths, e.g. `"$WCR_STILL"`. Legacy `$still`, `$wallpaper`, `$path`, `$backend`,
+`$outputs`, `$manifest`, and `$theme_source` remain available as shell variables.
+Paths are no longer substituted into shell source: single quotes now correctly
+keep variable names literal. Scripts should use the versioned `WCR_*` variables.
+WE Web/Application actions are skipped; a missing Scene preview or extraction
+failure is reported. Scene previews do not represent live rendered frames.
+
+```bash
+wallpaper-console-rust post-apply-status
+wallpaper-console-rust post-apply-retry
+```
+
+Status and retry print JSON with `version`, `status`, `detail`, `reason`, and
+`finishedAt` (Unix seconds). Status is `disabled`, `skipped`, `succeeded`, `failed`,
+or `timed_out`. Retry returns a nonzero exit status unless the command succeeds.
+Retry uses the last published wallpaper context and the currently saved command;
+it may change theme files, but never applies or restarts wallpaper renderers.
+Command success does not prove that desktop components reloaded their themes.
+The theme manifest describes wallpaper inputs, not action success. Unknown extra
+fields may be added within v1; consumers must check the version and ignore them.
 
 For multi-monitor **focus-follow** (precompute palettes on apply, swap on
 focus with no matugen), see `examples/theme-focus-follow/`. WC always writes

@@ -3,6 +3,9 @@
 
 fn main() {
     let args = std::env::args().collect::<Vec<_>>();
+    if let Some(exit_code) = wc_backend::image_media::try_run_worker_mode(&args) {
+        std::process::exit(exit_code);
+    }
     if let Some(exit_code) = wc_app::scan_worker::try_run_worker_mode(&args) {
         std::process::exit(exit_code);
     }

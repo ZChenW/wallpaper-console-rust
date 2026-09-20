@@ -438,3 +438,61 @@ pub fn verified_cross_backend_pair(left: Backend, right: Backend) -> bool {
             | (Backend::Mpvpaper, Backend::LinuxWallpaperEngine)
     )
 }
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PairSupport {
+    Independent,
+    NiriTransparentAwww,
+    NiriIndependentProcesses,
+    Unverified,
+}
+
+/// Permission to plan is conditional; callers must check the condition against
+/// the live session before any stop. Evidence: local dual-output matrix 2026-09-19.
+pub fn cross_backend_support(left: Backend, right: Backend) -> PairSupport {
+    use Backend::*;
+    if left == right {
+        return PairSupport::Independent;
+    }
+    match (left, right) {
+        (Awww, Mpvpaper | LinuxWallpaperEngine | Swaybg)
+        | (Mpvpaper | LinuxWallpaperEngine | Swaybg, Awww) => PairSupport::NiriTransparentAwww,
+        (Swaybg, Mpvpaper | LinuxWallpaperEngine) | (Mpvpaper | LinuxWallpaperEngine, Swaybg) => {
+            PairSupport::NiriIndependentProcesses
+        }
+        (LinuxWallpaperEngine, Mpvpaper) | (Mpvpaper, LinuxWallpaperEngine) => {
+            PairSupport::Independent
+        }
+        _ => PairSupport::Unverified,
+    }
+}
+
+pub fn preflight_pair(
+    left: Backend,
+    right: Backend,
+    runtime: &mut dyn crate::runtime::BackendRuntime,
+) -> Result<(), wc_core::error::WcError> {
+    use wc_core::error::WcError;
+    match cross_backend_support(left, right) {
+        PairSupport::Independent => Ok(()),
+        PairSupport::NiriTransparentAwww => {
+            let fresh = matches!(
+                runtime.awww_socket_ready(),
+                crate::runtime::AwwwReadiness::SocketMissing
+            );
+            crate::driver::preflight_awww_transparency(runtime, fresh)
+        }
+        PairSupport::NiriIndependentProcesses => {
+            if runtime.is_niri_session()? {
+                Ok(())
+            } else {
+                Err(WcError::Other("this renderer pair is verified only on niri; other compositor acceptance is pending".into()))
+            }
+        }
+        PairSupport::Unverified => Err(WcError::Other(format!(
+            "unverified renderer pair: {} / {}",
+            left.as_str(),
+            right.as_str()
+        ))),
+    }
+}

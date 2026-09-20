@@ -1,4 +1,4 @@
-//! Session-scoped niri output recovery. Only previously observed assignments
+//! Session-scoped compositor output recovery. Only previously observed assignments
 //! are armed; saved preferences alone never resurrect a stopped wallpaper.
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -12,11 +12,9 @@ use wc_backend::apply_stage::NoopReporter;
 use wc_backend::runtime::SystemBackendRuntime;
 use wc_backend::runtime_observation::{observe_runtime_wallpapers, RuntimeObservationStatus};
 use wc_core::error::WcError;
-use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 use wc_storage::StorageApi;
 
-use crate::apply_execution::ApplyExecutionTarget;
 use crate::display_apply::DisplayApplyRuntimeOpts;
 use crate::{AppError, AppService, ApplyRequest, ApplyRequestKind, DisplayTarget};
 
@@ -29,19 +27,80 @@ pub struct RendererMutationGuard {
     path: PathBuf,
 }
 impl RendererMutationGuard {
-    pub fn acquire(storage: &StorageApi) -> Result<Self, WcError> {
-        let path = storage.cd.path.join("renderer-mutation.lock");
+    pub fn acquire(_storage: &StorageApi) -> Result<Self, WcError> {
+        let path = session_lock_path()?;
         if HELD.with(|held| held.borrow().contains(&path)) {
             return Ok(Self { file: None, path });
         }
         let file = lock_file(&path).map_err(io_error)?;
-        file.lock_exclusive().map_err(io_error)?;
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        loop {
+            match file.try_lock_exclusive() {
+                Ok(()) => break,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() >= deadline {
+                        return Err(WcError::Other(
+                            "another wallpaper operation is still running in this desktop session"
+                                .into(),
+                        ));
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+                Err(error) => return Err(io_error(error)),
+            }
+        }
         HELD.with(|held| held.borrow_mut().insert(path.clone()));
         Ok(Self {
             file: Some(file),
             path,
         })
     }
+}
+
+/// Independent configuration directories still operate on the same desktop.
+pub fn renderer_session_id() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut identity = std::collections::hash_map::DefaultHasher::new();
+    // Optional terminal-only variables (DISPLAY/XDG_SESSION_ID) must not split
+    // a compositor session from its systemd-started GUI.
+    for key in [
+        "NIRI_SOCKET",
+        "SWAYSOCK",
+        "HYPRLAND_INSTANCE_SIGNATURE",
+        "WAYLAND_DISPLAY",
+        "DISPLAY",
+    ] {
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            key.hash(&mut identity);
+            value.hash(&mut identity);
+            break;
+        }
+    }
+    std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .ok()
+        .hash(&mut identity);
+    format!("{:016x}", identity.finish())
+}
+
+fn session_lock_path() -> Result<PathBuf, WcError> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    // SAFETY: getuid has no preconditions or side effects.
+    let uid = unsafe { libc::getuid() };
+    let root = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| std::env::temp_dir().join(format!("wallpaper-console-{uid}")));
+    if !root.exists() {
+        let mut builder = std::fs::DirBuilder::new();
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700).create(&root).map_err(io_error)?;
+    }
+    let metadata = std::fs::symlink_metadata(&root).map_err(io_error)?;
+    if !metadata.is_dir() || metadata.uid() != uid || metadata.permissions().mode() & 0o022 != 0 {
+        return Err(WcError::Other(
+            "renderer session runtime directory has unsafe ownership or permissions".into(),
+        ));
+    }
+    Ok(root.join(format!("wallpaper-console-{}.lock", renderer_session_id())))
 }
 impl Drop for RendererMutationGuard {
     fn drop(&mut self) {
@@ -67,13 +126,101 @@ fn lock_file(path: &Path) -> std::io::Result<File> {
 
 /// Call under the mutation lock before an explicit Stop, even if Stop fails.
 pub fn disarm(storage: &StorageApi) -> Result<(), WcError> {
+    write_session_intents(&["*".into()], true)?;
     let epoch = format!("{:?}", std::time::SystemTime::now());
     std::fs::write(storage.cd.path.join("output-recovery-stop"), epoch).map_err(io_error)
 }
 
+pub(crate) fn set_output_stopped(
+    storage: &StorageApi,
+    outputs: &[String],
+    stopped: bool,
+) -> Result<(), WcError> {
+    // The lock and stop intent have the same session scope: a watcher using a
+    // different configuration directory must also observe this user's Stop.
+    write_session_intents(outputs, stopped)?;
+    let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd)?;
+    wc_storage::sqlite::display_operations::set_stopped(
+        &conn,
+        &renderer_session_id(),
+        outputs,
+        stopped,
+    )
+}
+
+fn session_intents() -> Result<HashMap<String, (u64, bool)>, WcError> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let path = session_lock_path()?.with_extension("intents.json");
+    let file = match OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(HashMap::new()),
+        Err(error) => return Err(io_error(error)),
+    };
+    let mut bytes = Vec::new();
+    file.take(65537).read_to_end(&mut bytes).map_err(io_error)?;
+    if bytes.len() > 65536 {
+        return Err(WcError::Other(
+            "session stop intents exceed size limit".into(),
+        ));
+    }
+    serde_json::from_slice(&bytes)
+        .map_err(|e| WcError::Other(format!("invalid session stop intents: {e}")))
+}
+
+/// Caller holds RendererMutationGuard. Atomic rename prevents readers from
+/// observing a truncated intent if the writing process exits unexpectedly.
+fn write_session_intents(outputs: &[String], stopped: bool) -> Result<(), WcError> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut intents = session_intents()?;
+    let epoch = intents
+        .values()
+        .map(|(epoch, _)| *epoch)
+        .max()
+        .unwrap_or(0)
+        .checked_add(1)
+        .ok_or_else(|| WcError::Other("session intent epoch overflow".into()))?;
+    for output in outputs {
+        intents.insert(output.clone(), (epoch, stopped));
+    }
+    let bytes = serde_json::to_vec(&intents).map_err(|e| WcError::Other(e.to_string()))?;
+    if bytes.len() > 65536 {
+        return Err(WcError::Other("too many session stop intents".into()));
+    }
+    let path = session_lock_path()?.with_extension("intents.json");
+    let temporary = path.with_extension(format!("{}-{epoch}.tmp", std::process::id()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&temporary)
+        .map_err(io_error)?;
+    let result = (|| {
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.map_err(io_error)
+}
+
 pub(crate) fn ensure_watcher(storage: &StorageApi) {
-    if std::env::var_os("NIRI_SOCKET").is_none()
-        || std::env::var_os("WCR_DISABLE_OUTPUT_WATCH").is_some()
+    if !matches!(
+        crate::compositor::Adapter::current(),
+        Some(
+            crate::compositor::Adapter::Niri
+                | crate::compositor::Adapter::Sway
+                | crate::compositor::Adapter::Hyprland
+        )
+    ) || std::env::var_os("WCR_DISABLE_OUTPUT_WATCH").is_some()
     {
         return;
     }
@@ -127,6 +274,7 @@ pub(crate) fn ensure_watcher(storage: &StorageApi) {
 struct Assignment {
     backend: String,
     path: String,
+    version: String,
 }
 fn assignments(rows: &[DisplayStateRow], outputs: &[String]) -> HashMap<String, Assignment> {
     outputs
@@ -144,6 +292,7 @@ fn assignments(rows: &[DisplayStateRow], outputs: &[String]) -> HashMap<String, 
                 Assignment {
                     backend: row.backend.clone(),
                     path: row.wallpaper_path.clone(),
+                    version: String::new(),
                 },
             ))
         })
@@ -158,6 +307,13 @@ struct RecoveryTracker {
     stop_epoch: String,
 }
 impl RecoveryTracker {
+    fn remember_disconnected(&mut self, enabled: &HashSet<String>) {
+        for output in self.enabled.difference(enabled) {
+            if let Some(assignment) = self.armed.remove(output) {
+                self.pending.insert(output.clone(), assignment);
+            }
+        }
+    }
     fn advance(
         &mut self,
         enabled: HashSet<String>,
@@ -170,11 +326,7 @@ impl RecoveryTracker {
             self.pending.clear();
             self.stop_epoch = epoch;
         }
-        for output in self.enabled.difference(&enabled) {
-            if let Some(assignment) = self.armed.remove(output) {
-                self.pending.insert(output.clone(), assignment);
-            }
-        }
+        self.remember_disconnected(&enabled);
         let mut restore = Vec::new();
         for output in enabled.difference(&self.enabled) {
             if let Some(assignment) = self.pending.remove(output) {
@@ -195,23 +347,43 @@ impl RecoveryTracker {
     }
 }
 
-fn niri_outputs() -> Result<(Vec<String>, HashSet<String>), String> {
-    let output =
-        crate::command_probe::run_probe("niri", &["msg", "-j", "outputs"], Duration::from_secs(1))
-            .map_err(|e| format!("niri output probe failed: {e:?}"))?;
-    if !output.success {
-        return Err(output.stderr);
-    }
-    let data: serde_json::Value =
-        serde_json::from_str(&output.stdout).map_err(|e| e.to_string())?;
-    let rows = data.as_object().ok_or("niri outputs are not an object")?;
-    let all = rows.keys().cloned().collect();
-    let enabled = rows
-        .iter()
-        .filter(|(_, row)| row["current_mode"].is_number() && row["logical"].is_object())
-        .map(|(name, _)| name.clone())
-        .collect();
-    Ok((all, enabled))
+fn assignment_version(storage: &StorageApi, output: &str) -> Result<String, WcError> {
+    let conn = wc_storage::sqlite::open_runtime_connection(&storage.cd)?;
+    conn.query_row("SELECT assignment_revision,recipe_json,wallpaper_path FROM display_state WHERE target_key IN (?1,'__all_displays__') ORDER BY target_key=?1 DESC LIMIT 1", [output], |row| {
+        use std::os::unix::fs::MetadataExt;
+        let path = row.get::<_,String>(2)?;
+        let stamp = std::fs::metadata(&path).ok().map(|m| (m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec()));
+        Ok(format!("{}:{}:{stamp:?}",row.get::<_,i64>(0)?,row.get::<_,String>(1)?))
+    }).map_err(|e|WcError::Other(e.to_string()))
+}
+
+struct Retry {
+    assignment: Assignment,
+    due: std::time::Instant,
+    attempt: usize,
+}
+const RETRY_DELAYS: [u64; 5] = [500, 1000, 2000, 4000, 8000];
+
+fn transient_recovery_error(error: &AppError) -> bool {
+    let text = format!(
+        "{} {} {}",
+        error.code,
+        error.message,
+        error.detail.as_deref().unwrap_or("")
+    )
+    .to_lowercase();
+    ![
+        "unsupported",
+        "unverified",
+        "decode",
+        "corrupt",
+        "not a regular file",
+        "invalid",
+        "not found",
+        "assignment changed",
+    ]
+    .iter()
+    .any(|part| text.contains(part))
 }
 
 impl AppService {
@@ -221,20 +393,33 @@ impl AppService {
         assignment: &Assignment,
         known: &[String],
     ) -> Result<(), AppError> {
-        let backend = match assignment.backend.as_str() {
-            "awww" => Backend::Awww,
-            "mpvpaper" => Backend::Mpvpaper,
-            "linux-wallpaperengine" => Backend::LinuxWallpaperEngine,
-            "swaybg" => Backend::Swaybg,
-            _ => return Ok(()),
-        };
-        let mut resolved = self.resolve_apply_request_target(&ApplyRequest {
-            kind: ApplyRequestKind::Apply,
-            path: assignment.path.clone(),
-            request_id: None,
+        let _guard =
+            RendererMutationGuard::acquire(&self.storage).map_err(AppError::from_wc_error)?;
+        let target = wc_storage::sqlite::DisplayStateTarget::Output(output.into());
+        let recipe = match self
+            .storage
+            .display_recipe(&target)
+            .map_err(AppError::from_wc_error)?
+        {
+            Some(recipe) => Some(recipe),
+            None => self
+                .storage
+                .display_recipe(&wc_storage::sqlite::DisplayStateTarget::AllDisplays)
+                .map_err(AppError::from_wc_error)?,
+        }
+        .ok_or_else(|| {
+            AppError::from_wc_error(WcError::Other("saved output recipe missing".into()))
         })?;
-        // Keep the assigned renderer even if current routing preferences changed.
-        resolved.backend = backend;
+        if recipe.media_path != assignment.path
+            || recipe.options.backend().as_str() != assignment.backend
+            || assignment_version(&self.storage, output).map_err(AppError::from_wc_error)?
+                != assignment.version
+        {
+            return Err(AppError::from_wc_error(WcError::Other(
+                "output assignment changed during recovery".into(),
+            )));
+        }
+        let resolved = self.resolve_recipe_target(&recipe)?;
         self.execute_resolved_display_apply(
             ApplyRequest {
                 kind: ApplyRequestKind::Apply,
@@ -247,11 +432,8 @@ impl AppService {
             &mut NoopReporter,
             DisplayApplyRuntimeOpts::default(),
             None,
-            ApplyExecutionTarget {
-                backend,
-                ..resolved
-            },
-            false,
+            resolved,
+            crate::display_apply::AssignmentUpdate::Restore,
         )
         .map(|_| ())
     }
@@ -264,48 +446,217 @@ impl AppService {
             return Ok(());
         }
         let mut tracker = RecoveryTracker::default();
+        let Some(adapter) = crate::compositor::Adapter::current() else {
+            return Ok(());
+        };
+        if adapter == crate::compositor::Adapter::Xrandr {
+            return Ok(());
+        }
+        let mut retries: HashMap<String, Retry> = HashMap::new();
+        let mut last_outputs: Vec<crate::compositor::Output> = Vec::new();
+        let mut previous_intents = HashMap::new();
         let mut failures = 0;
         loop {
-            if std::env::var_os("NIRI_SOCKET").is_none_or(|socket| !Path::new(&socket).exists()) {
-                return Ok(());
-            }
-            let snapshot = niri_outputs();
-            if let Ok((known, enabled)) = snapshot {
+            if let Ok(snapshot) = adapter.snapshot() {
                 failures = 0;
                 let _guard = RendererMutationGuard::acquire(&self.storage)
                     .map_err(AppError::from_wc_error)?;
+                let known: Vec<_> = snapshot
+                    .iter()
+                    .filter(|o| o.enabled)
+                    .map(|o| o.name.clone())
+                    .collect();
+                let enabled: HashSet<_> = known.iter().cloned().collect();
+                let intents = session_intents().map_err(AppError::from_wc_error)?;
+                let global_epoch = intents
+                    .get("*")
+                    .filter(|(_, stopped)| *stopped)
+                    .map(|(epoch, _)| *epoch)
+                    .unwrap_or(0);
+                let is_stopped = |name: &str| match intents.get(name) {
+                    Some((epoch, stopped)) => *stopped || *epoch < global_epoch,
+                    None => global_epoch > 0,
+                };
+                tracker.pending.retain(|output, _| !is_stopped(output));
+                tracker.armed.retain(|output, _| !is_stopped(output));
+                tracker.remember_disconnected(&enabled);
+                // Unique hardware identities permit a connector rename. Preserve
+                // the old preference and never overwrite an existing new target.
+                for output in &snapshot {
+                    if let Some(previous) =
+                        crate::compositor::matching_previous(output, &last_outputs)
+                    {
+                        if previous.name != output.name
+                            && !snapshot.iter().any(|o| o.name == previous.name)
+                        {
+                            if let Some(assignment) = tracker.pending.get(&previous.name).cloned() {
+                                if is_stopped(&output.name)
+                                    || assignment_version(&self.storage, &previous.name)
+                                        .map_err(AppError::from_wc_error)?
+                                        != assignment.version
+                                {
+                                    tracker.pending.remove(&previous.name);
+                                    continue;
+                                }
+                                let target = DisplayStateTarget::Output(output.name.clone());
+                                if self
+                                    .storage
+                                    .display_recipe(&target)
+                                    .map_err(AppError::from_wc_error)?
+                                    .is_none()
+                                {
+                                    let recipe = self
+                                        .storage
+                                        .display_recipe(&DisplayStateTarget::Output(
+                                            previous.name.clone(),
+                                        ))
+                                        .map_err(AppError::from_wc_error)?;
+                                    let recipe = match recipe {
+                                        Some(recipe) => Some(recipe),
+                                        None => self
+                                            .storage
+                                            .display_recipe(&DisplayStateTarget::AllDisplays)
+                                            .map_err(AppError::from_wc_error)?,
+                                    };
+                                    if let Some(recipe) = recipe {
+                                        let conn = wc_storage::sqlite::open_runtime_connection(
+                                            &self.storage.cd,
+                                        )
+                                        .map_err(AppError::from_wc_error)?;
+                                        wc_storage::sqlite::display_state_commit_distinct_recipes(
+                                            &conn,
+                                            &[(target, recipe)],
+                                        )
+                                        .map_err(AppError::from_wc_error)?;
+                                        tracker.pending.remove(&previous.name);
+                                        tracker.pending.insert(
+                                            output.name.clone(),
+                                            Assignment {
+                                                version: assignment_version(
+                                                    &self.storage,
+                                                    &output.name,
+                                                )
+                                                .map_err(AppError::from_wc_error)?,
+                                                ..assignment
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    } else if last_outputs.iter().any(|o| o.name == output.name) {
+                        tracker.pending.remove(&output.name);
+                        tracker.armed.remove(&output.name);
+                        retries.remove(&output.name);
+                    }
+                }
+                for output in snapshot {
+                    if let Some(id) = &output.hardware_identity {
+                        last_outputs.retain(|old| {
+                            old.name == output.name || old.hardware_identity.as_ref() != Some(id)
+                        });
+                    }
+                    if let Some(old) = last_outputs.iter_mut().find(|o| o.name == output.name) {
+                        *old = output;
+                    } else {
+                        last_outputs.push(output);
+                    }
+                }
                 let rows = self
                     .storage
                     .display_state_list()
                     .map_err(AppError::from_wc_error)?;
                 let mut names = known.clone();
                 names.extend(tracker.pending.keys().cloned());
-                let saved = assignments(&rows, &names);
+                names.extend(retries.keys().cloned());
+                let mut saved = assignments(&rows, &names);
+                for (output, assignment) in &mut saved {
+                    assignment.version = assignment_version(&self.storage, output)
+                        .map_err(AppError::from_wc_error)?;
+                }
+                let intents = session_intents().map_err(AppError::from_wc_error)?;
+                let global_epoch = intents
+                    .get("*")
+                    .filter(|(_, stopped)| *stopped)
+                    .map(|(epoch, _)| *epoch)
+                    .unwrap_or(0);
+                for (output, (epoch, _)) in &intents {
+                    if previous_intents
+                        .get(output)
+                        .is_some_and(|previous| previous != epoch)
+                    {
+                        tracker.armed.remove(output);
+                        tracker.pending.remove(output);
+                        retries.remove(output);
+                    }
+                    previous_intents.insert(output.clone(), *epoch);
+                }
+                let stopped: HashSet<String> = names
+                    .iter()
+                    .filter(|output| match intents.get(*output) {
+                        Some((epoch, stopped)) => *stopped || *epoch < global_epoch,
+                        None => global_epoch > 0,
+                    })
+                    .cloned()
+                    .collect();
+                tracker.armed.retain(|output, _| !stopped.contains(output));
+                tracker
+                    .pending
+                    .retain(|output, _| !stopped.contains(output));
                 let active: Vec<_> = enabled.iter().cloned().collect();
                 let observed = observe_runtime_wallpapers(&active, &rows);
                 let confirmed = observed
                     .into_iter()
-                    .filter(|row| row.status == RuntimeObservationStatus::Confirmed)
+                    .filter(|row| {
+                        row.status == RuntimeObservationStatus::Confirmed
+                            && !stopped.contains(&row.output)
+                    })
                     .map(|row| row.output)
                     .collect();
-                let epoch =
-                    std::fs::read_to_string(self.storage.cd.path.join("output-recovery-stop"))
-                        .unwrap_or_default();
-                for (output, assignment) in tracker.advance(enabled, &saved, confirmed, epoch) {
-                    // Let output/layer creation settle, then revalidate topology.
-                    std::thread::sleep(Duration::from_millis(350));
-                    let Ok((current, enabled)) = niri_outputs() else {
-                        continue;
-                    };
-                    if !enabled.contains(&output) {
-                        continue;
-                    }
-                    match self.restore_returned_output(&output, &assignment, &current) {
+                let epoch = global_epoch.to_string();
+                if epoch != tracker.stop_epoch {
+                    retries.clear();
+                }
+                for (output, assignment) in
+                    tracker.advance(enabled.clone(), &saved, confirmed, epoch)
+                {
+                    retries.insert(
+                        output,
+                        Retry {
+                            assignment,
+                            due: std::time::Instant::now() + Duration::from_millis(300),
+                            attempt: 0,
+                        },
+                    );
+                }
+                retries.retain(|output, retry| {
+                    !stopped.contains(output)
+                        && enabled.contains(output)
+                        && saved.get(output) == Some(&retry.assignment)
+                });
+                let due: Vec<_> = retries
+                    .iter()
+                    .filter(|(_, r)| r.due <= std::time::Instant::now())
+                    .map(|(o, _)| o.clone())
+                    .collect();
+                for output in due {
+                    let mut retry = retries.remove(&output).expect("scheduled recovery");
+                    match self.restore_returned_output(&output, &retry.assignment, &known) {
                         Ok(()) => eprintln!(
                             "Restored returned output {output} using {}",
-                            assignment.backend
+                            retry.assignment.backend
                         ),
-                        Err(error) => eprintln!("Output recovery failed for {output}: {error:?}"),
+                        Err(error) => {
+                            if transient_recovery_error(&error)
+                                && retry.attempt < RETRY_DELAYS.len()
+                            {
+                                retry.due = std::time::Instant::now()
+                                    + Duration::from_millis(RETRY_DELAYS[retry.attempt]);
+                                retry.attempt += 1;
+                                retries.insert(output.clone(), retry);
+                            }
+                            eprintln!("Output recovery failed for {output}: {error:?}");
+                        }
                     }
                 }
             } else {
@@ -327,11 +678,34 @@ mod tests {
         Assignment {
             backend: "mpvpaper".into(),
             path: "/video.mp4".into(),
+            version: String::new(),
         }
     }
 
     fn names(values: &[&str]) -> HashSet<String> {
         values.iter().map(|v| v.to_string()).collect()
+    }
+
+    #[test]
+    fn direct_connector_rename_retains_pending_before_identity_migration() {
+        let mut tracker = RecoveryTracker::default();
+        let saved = HashMap::from([("A".into(), assignment())]);
+        tracker.advance(names(&["A"]), &saved, names(&["A"]), "".into());
+        tracker.remember_disconnected(&names(&["B"]));
+        let value = tracker
+            .pending
+            .remove("A")
+            .expect("direct rename must retain old live assignment");
+        tracker.pending.insert("B".into(), value.clone());
+        assert_eq!(
+            tracker.advance(
+                names(&["B"]),
+                &HashMap::from([("B".into(), value.clone())]),
+                names(&[]),
+                "".into()
+            ),
+            vec![("B".into(), value)]
+        );
     }
 
     #[test]

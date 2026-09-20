@@ -134,6 +134,7 @@ pub struct TransitionStep {
     pub target: Backend,
     pub fallback_path: Option<String>,
     pub core_actions: Vec<DisplayExecAction>,
+    pub recipe: Option<wc_core::display_assignment::RenderRecipe>,
 }
 
 pub enum TransitionStart<'a> {
@@ -180,12 +181,30 @@ pub fn execute_apply_transitions(
     runtime: &mut dyn BackendRuntime,
     reporter: &mut dyn ApplyStageReporter,
 ) -> Result<ApplyTransitionReport, ApplyTransitionFailure> {
+    let prepared = prepare_apply_transitions(storage, request, runtime)?;
+    execute_prepared_transitions(prepared, runtime, reporter)
+}
+
+/// Opaque, fully preflighted batch. Preparation cannot mutate a renderer.
+pub struct PreparedTransitions {
+    transitions: Vec<PreparedTransition>,
+    request_id: Option<String>,
+}
+
+#[allow(clippy::result_large_err)]
+pub fn prepare_apply_transitions(
+    storage: &StorageApi,
+    request: TransitionRequest<'_>,
+    runtime: &mut dyn BackendRuntime,
+) -> Result<PreparedTransitions, ApplyTransitionFailure> {
     let mut plans = Vec::new();
+    let mut recipe_options = Vec::new();
     let mut previous = match request.start {
         TransitionStart::Current {
             previous_backend_raw,
         } => previous_backend_raw.to_string(),
         TransitionStart::Restore => {
+            recipe_options.push(None);
             if request
                 .steps
                 .iter()
@@ -208,6 +227,10 @@ pub fn execute_apply_transitions(
         }
     };
     for step in request.steps {
+        if let Some(recipe) = &step.recipe {
+            recipe.validate()?;
+        }
+        recipe_options.push(step.recipe.as_ref().map(|r| &r.options));
         plans.push(plan_apply_transition(&ApplyTransitionRequest {
             scope: step.scope.clone(),
             target: step.target,
@@ -217,14 +240,14 @@ pub fn execute_apply_transitions(
         })?);
         previous = step.target.as_str().to_owned();
     }
-    execute_plans(
+    prepare_plans(
         storage,
         &plans,
+        &recipe_options,
         &DisplayExecContext {
             known_outputs: request.known_outputs,
         },
         runtime,
-        reporter,
         request.request_id,
     )
 }
@@ -234,6 +257,7 @@ enum PreparedAdornment {
     Settle(u64),
 }
 struct PreparedTransition {
+    storage: StorageApi,
     prefix: Vec<PreparedAdornment>,
     core: PreparedDisplayActions,
     suffix: Vec<PreparedAdornment>,
@@ -303,19 +327,21 @@ fn prepare_adornments(
 }
 
 #[allow(clippy::result_large_err)]
-fn execute_plans(
+fn prepare_plans(
     storage: &StorageApi,
     plans: &[ApplyTransitionPlan],
+    recipe_options: &[Option<&wc_core::display_assignment::RenderOptions>],
     ctx: &DisplayExecContext<'_>,
     runtime: &mut dyn BackendRuntime,
-    reporter: &mut dyn ApplyStageReporter,
     request_id: Option<&str>,
-) -> Result<ApplyTransitionReport, ApplyTransitionFailure> {
+) -> Result<PreparedTransitions, ApplyTransitionFailure> {
     let mut prepared = Vec::new();
     // These resets invalidate pre-batch observations even after a planned new Apply.
     // The execution path always probes the new live renderer before touching it.
     let mut reset_backends = Vec::new();
-    for plan in plans {
+    for (plan, options) in plans.iter().zip(recipe_options) {
+        let scoped_storage = storage.with_render_options(*options);
+        let storage = &scoped_storage;
         let prefix = prepare_adornments(
             storage,
             &plan.prefix,
@@ -380,15 +406,49 @@ fn execute_plans(
             Vec::new()
         };
         prepared.push(PreparedTransition {
+            storage: scoped_storage,
             prefix,
             core,
             suffix,
             rollback,
         });
     }
+    for transition in &prepared {
+        crate::display_executor::verify_prepared_media(&transition.core)?;
+        for adornment in transition.prefix.iter().chain(&transition.suffix) {
+            if let PreparedAdornment::Actions(actions) = adornment {
+                crate::display_executor::verify_prepared_media(actions)?;
+            }
+        }
+    }
+    Ok(PreparedTransitions {
+        transitions: prepared,
+        request_id: request_id.map(str::to_owned),
+    })
+}
+
+impl PreparedTransitions {
+    /// Recheck every input immediately before beginning a destructive batch.
+    pub fn verify_media(&self) -> Result<(), WcError> {
+        for transition in &self.transitions {
+            crate::display_executor::verify_prepared_media(&transition.core)?;
+        }
+        Ok(())
+    }
+}
+
+#[allow(clippy::result_large_err)]
+pub fn execute_prepared_transitions(
+    prepared: PreparedTransitions,
+    runtime: &mut dyn BackendRuntime,
+    reporter: &mut dyn ApplyStageReporter,
+) -> Result<ApplyTransitionReport, ApplyTransitionFailure> {
+    prepared.verify_media()?;
+    let request_id = prepared.request_id.as_deref();
     let mut exec = DisplayExecReport::default();
     let mut any_fallback = false;
-    for transition in prepared {
+    for transition in prepared.transitions {
+        let storage = &transition.storage;
         let mut fallback_applied = false;
         let result = (|| -> Result<(), DisplayExecFailure> {
             for adornment in transition.prefix {

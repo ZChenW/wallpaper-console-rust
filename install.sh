@@ -43,6 +43,7 @@ Usage:
   ./install.sh [options]
 
 Options:
+  --release-dir DIR  Install downloaded AppImage + CLI + SHA256SUMS without building
   --build-only       Build release binaries without installing them
   --prefix DIR       Install under DIR (default: ~/.local)
   --uninstall        Remove files installed by this script
@@ -57,9 +58,14 @@ PREFIX="${PREFIX:-$HOME/.local}"
 BUILD_ONLY=false
 UNINSTALL=false
 FORCE=false
+RELEASE_DIR=""
+RELEASE_STAGE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
+    --release-dir)
+      [[ $# -ge 2 && "$2" != --* ]] || err "--release-dir requires a directory"
+      RELEASE_DIR="$2"; shift ;;
     --build-only) BUILD_ONLY=true ;;
     --uninstall) UNINSTALL=true ;;
     --force) FORCE=true ;;
@@ -103,6 +109,10 @@ if $UNINSTALL && $BUILD_ONLY; then
 fi
 if $UNINSTALL && $FORCE; then
   err "--force is only valid when installing"
+fi
+
+if [[ -n "$RELEASE_DIR" ]] && { $BUILD_ONLY || $UNINSTALL; }; then
+  err "--release-dir cannot be combined with --build-only or --uninstall"
 fi
 
 BIN_DIR="$PREFIX/bin"
@@ -493,8 +503,63 @@ ensure_build_tmpdir() {
   esac
 }
 
+runtime_capabilities() {
+  info "Runtime commands (presence only; playback is verified when applying):"
+  local feature="" commands="" found="" candidate=""
+  while IFS=: read -r feature commands; do
+    found=""
+    for candidate in $commands; do
+      if command -v "$candidate" >/dev/null 2>&1; then found="$candidate"; break; fi
+    done
+    if [[ -n "$found" ]]; then info "  $feature: $found"; else warn "  $feature: missing ($commands)"; fi
+  done <<'CAPABILITIES'
+Image:awww swaybg mpvpaper feh
+GIF:awww mpvpaper
+Video:mpvpaper
+Wallpaper Engine scenes:linux-wallpaperengine
+Folder picker (Enter path also available):zenity kdialog yad
+Optional palette tool:matugen
+CAPABILITIES
+}
+
+prepare_release() {
+  for candidate in sha256sum tar zstd flock; do
+    command -v "$candidate" >/dev/null 2>&1 || err "Release install requires $candidate"
+  done
+  [[ "$(uname -m)" == x86_64 ]] || err "These release assets require x86_64"
+  RELEASE_DIR="$(cd -- "$RELEASE_DIR" && pwd)"
+  local images=("$RELEASE_DIR"/wallpaper-console_*_x86_64.AppImage)
+  [[ ${#images[@]} -eq 1 && -f "${images[0]}" ]] || err "Expected exactly one Wallpaper Console AppImage in $RELEASE_DIR"
+  local name="${images[0]##*/}"
+  [[ "$name" =~ ^wallpaper-console_([0-9][a-zA-Z0-9.+-]*)_x86_64.AppImage$ ]] || err "Invalid release asset name"
+  local version="${BASH_REMATCH[1]}"
+  local archive="wallpaper-console-cli_${version}_x86_64.tar.zst"
+  [[ -f "$RELEASE_DIR/SHA256SUMS" && -f "$RELEASE_DIR/$archive" ]] || err "Download matching CLI archive and SHA256SUMS into the same directory"
+  local expected="" asset=""
+  for asset in "$name" "$archive"; do
+    expected="$(awk -v name="$asset" '$2 == name { print $1 }' "$RELEASE_DIR/SHA256SUMS")"
+    [[ "$expected" =~ ^[a-fA-F0-9]{64}$ ]] || err "Missing or ambiguous checksum for $asset"
+    [[ "$(file_sha256 "$RELEASE_DIR/$asset")" == "$expected" ]] || err "Checksum mismatch: $asset"
+  done
+  RELEASE_STAGE="$(mktemp -d)"
+  trap 'rm -rf -- "$RELEASE_STAGE"' EXIT
+  TAURI_BIN="$RELEASE_STAGE/wallpaper-console.AppImage"
+  cp -- "$RELEASE_DIR/$name" "$TAURI_BIN"
+  chmod 755 "$TAURI_BIN"
+  CLI_BIN="$RELEASE_STAGE/wallpaper-console-rust"
+  tar --zstd -xOf "$RELEASE_DIR/$archive" "wallpaper-console-cli_${version}_x86_64/wallpaper-console-rust" > "$CLI_BIN"
+  [[ -s "$CLI_BIN" ]] || err "CLI archive contains no executable"
+  chmod 755 "$CLI_BIN"
+  # Verify extraction now; installed launchers cache this AppDir per image hash.
+  (cd "$RELEASE_STAGE" && "$TAURI_BIN" --appimage-extract >/dev/null)
+  [[ -x "$RELEASE_STAGE/squashfs-root/AppRun" ]] || err "AppImage contains no executable AppRun"
+  info "Release $version checksums and extraction verified; FUSE is not required."
+}
+
 # ── Build from current workspace source ────────────────────────────────────
-if [[ "${WCR_INSTALL_SKIP_BUILD:-}" == "1" ]]; then
+if [[ -n "$RELEASE_DIR" ]]; then
+  prepare_release
+elif [[ "${WCR_INSTALL_SKIP_BUILD:-}" == "1" ]]; then
   TAURI_BIN="${WCR_INSTALL_TAURI_BIN:?WCR_INSTALL_TAURI_BIN is required when WCR_INSTALL_SKIP_BUILD=1}"
   CLI_BIN="${WCR_INSTALL_CLI_BIN:?WCR_INSTALL_CLI_BIN is required when WCR_INSTALL_SKIP_BUILD=1}"
   FRONTEND_DIST="${WCR_INSTALL_FRONTEND_DIST:?WCR_INSTALL_FRONTEND_DIST is required when WCR_INSTALL_SKIP_BUILD=1}"
@@ -555,13 +620,13 @@ else
   fi
 fi
 
-info "Tauri GUI built: $TAURI_BIN"
-info "Rust CLI helper built: $CLI_BIN"
+info "Tauri GUI artifact: $TAURI_BIN"
+info "Rust CLI artifact: $CLI_BIN"
 
 # ── Verify GUI build artifacts ─────────────────────────────────────────────
 info "Verifying GUI build artifacts..."
 
-if [[ ! -s "$FRONTEND_DIST/index.html" ]]; then
+if [[ -z "$RELEASE_DIR" && ! -s "$FRONTEND_DIST/index.html" ]]; then
   err "Frontend dist/index.html missing. Did npm run build succeed?"
 fi
 
@@ -644,6 +709,7 @@ cleanup_install_process() {
   set +e
   cleanup_install_stage "$status"
   release_install_lock
+  if [[ -n "$RELEASE_STAGE" ]]; then rm -rf -- "$RELEASE_STAGE"; fi
   return "$status"
 }
 
@@ -699,6 +765,38 @@ launcher_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 install_prefix=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
 exec "$install_prefix/lib/wallpaper-console-rust/wallpaper-console-gui-rust" "$@"
 EOF_GUI_WRAPPER
+if [[ -n "$RELEASE_DIR" ]]; then
+  cat > "$STAGING_DIR/bin/wallpaper-console-gui-rust" <<'EOF_RELEASE_WRAPPER'
+#!/bin/sh
+set -eu
+launcher=$(readlink -f -- "$0")
+launcher_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd)
+install_prefix=$(CDPATH= cd -- "$launcher_dir/.." && pwd)
+image="$install_prefix/lib/wallpaper-console-rust/wallpaper-console-gui-rust"
+digest=$(sha256sum -- "$image")
+digest=${digest%% *}
+cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper-console/appimage"
+mkdir -p -- "$cache_root"
+cache_root=$(CDPATH= cd -- "$cache_root" && pwd)
+appdir="$cache_root/$digest"
+# Serialize first-launch extraction; release the lock before starting the GUI.
+(
+  flock -x 9
+  if [ ! -x "$appdir/AppRun" ]; then
+    stage=$(mktemp -d "$cache_root/.extract.XXXXXX")
+    trap 'rm -rf -- "$stage"' EXIT HUP INT TERM
+    (cd "$stage" && "$image" --appimage-extract >/dev/null)
+    test -x "$stage/squashfs-root/AppRun"
+    if [ -e "$appdir" ]; then
+      echo "Incomplete AppImage cache: $appdir; remove this cache directory and retry." >&2
+      exit 1
+    fi
+    mv -- "$stage/squashfs-root" "$appdir"
+  fi
+) 9>"$cache_root/.extract.lock"
+exec "$appdir/AppRun" "$@"
+EOF_RELEASE_WRAPPER
+fi
 chmod 0755 "$STAGING_DIR/bin/wallpaper-console-gui-rust"
 
 cp -- "$CLI_BIN" "$STAGING_DIR/bin/wallpaper-console-rust"
@@ -773,8 +871,10 @@ PUBLISH_COMPLETE=true
 cleanup_install_stage 0
 STAGING_DIR=""
 release_install_lock
+if [[ -n "$RELEASE_STAGE" ]]; then rm -rf -- "$RELEASE_STAGE"; RELEASE_STAGE=""; fi
 trap - EXIT
 
+runtime_capabilities
 info "Installed verified payloads:"
 for relative in "${OWNED_RELATIVE_PATHS[@]}"; do
   info "  $PREFIX/$relative"

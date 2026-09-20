@@ -20,6 +20,7 @@ export type LibraryViewMode = 'grid' | 'flow';
 
 export type DisplayTarget =
   | { readonly kind: 'allDisplays' }
+  | { readonly kind: 'outputs'; readonly outputs: readonly string[] }
   | { readonly kind: 'output'; readonly output: string };
 
 export type ApplyGesture = 'single' | 'double';
@@ -89,6 +90,10 @@ function normalizeSourceFilter(value: unknown): SourceFilter {
 function normalizeDisplayTarget(value: unknown): DisplayTarget {
   if (!isRecord(value)) return { kind: 'allDisplays' };
   if (value.kind === 'allDisplays') return { kind: 'allDisplays' };
+  if (value.kind === 'outputs' && Array.isArray(value.outputs)) {
+    return { kind: 'outputs', outputs: [...new Set(value.outputs.filter((name): name is string =>
+      typeof name === 'string' && name.trim().length > 0).map((name) => name.trim()))] };
+  }
   if (value.kind === 'output' && typeof value.output === 'string') {
     const output = value.output.trim();
     if (output.length > 0) return { kind: 'output', output };

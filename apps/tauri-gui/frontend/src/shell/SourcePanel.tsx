@@ -96,6 +96,11 @@ export interface SourcePanelViewProps {
   readonly onClose: () => void;
   readonly onReload: () => void;
   readonly onAdd: () => void;
+  readonly onAddPath?: (path: string) => Promise<boolean | null>;
+  readonly pathDraft?: string;
+  readonly pathEntryOpen?: boolean;
+  readonly onPathDraftChange?: (path: string) => void;
+  readonly onTogglePathEntry?: () => void;
   readonly onRefreshAll: () => void;
   readonly onScanWallpaperEngine: () => void;
   readonly onRename: (id: number, displayName: string) => void;
@@ -191,7 +196,7 @@ export async function runAddSourceAction(
     onNotice({
       channel: 'settings',
       severity: 'error',
-      message: 'Could not add folder',
+      message: 'Could not add folder. You can also use Enter path.',
       technicalDetails: technicalDetailsForError(error),
     });
   }
@@ -487,6 +492,11 @@ export function SourcePanelView({
   onClose,
   onReload,
   onAdd,
+  onAddPath,
+  pathDraft = '',
+  pathEntryOpen = false,
+  onPathDraftChange,
+  onTogglePathEntry,
   onRefreshAll,
   onScanWallpaperEngine,
   onRename,
@@ -582,6 +592,19 @@ export function SourcePanelView({
           >
             Add folder
           </button>
+          {onAddPath && (
+            <button
+              className="source-panel__button source-panel__button--primary"
+              data-source-action="enter-path"
+              disabled={busy}
+              aria-expanded={pathEntryOpen}
+              aria-controls="source-path-entry"
+              onClick={onTogglePathEntry}
+              type="button"
+            >
+              Enter path
+            </button>
+          )}
           <button
             className="source-panel__button"
             data-source-action="refresh-all"
@@ -604,6 +627,20 @@ export function SourcePanelView({
           </button>
         </div>
 
+        {pathEntryOpen && onAddPath && <form id="source-path-entry" className="source-panel__path-entry"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (busy || !pathDraft.trim()) return;
+            void onAddPath(pathDraft).then((saved) => { if (saved) onPathDraftChange?.(''); });
+          }}>
+          <label htmlFor="source-folder-path">Folder path</label>
+          <div className="settings-options-control">
+            <input id="source-folder-path" className="source-panel__input" autoFocus
+              value={pathDraft} onChange={(event) => onPathDraftChange?.(event.currentTarget.value)}
+              placeholder="/home/user/Pictures" disabled={busy} required />
+            <button className="source-panel__button" type="submit" disabled={busy || !pathDraft.trim()}>Add</button>
+          </div>
+        </form>}
         <div className="source-panel__content">
           {pendingOperation ? (
             <p aria-live="polite" className="source-panel__status" role="status">
@@ -675,6 +712,8 @@ export function SourcePanel({
   sourceApi,
   onLibraryChanged,
 }: SourcePanelProps) {
+  const [pathDraft, setPathDraft] = useState('');
+  const [pathEntryOpen, setPathEntryOpen] = useState(false);
   const {
     sources,
     loading,
@@ -682,6 +721,7 @@ export function SourcePanel({
     pendingOperation,
     reload,
     addFromPicker,
+    addPath,
     rename,
     setRecursive,
     refresh,
@@ -756,7 +796,7 @@ export function SourcePanel({
   }, [renameEditor, sources]);
 
   const handleAdd = useCallback(() => {
-    void runAddSourceAction(addFromPicker, onNotice);
+    void runAddSourceAction(addFromPicker, onNotice).then((result) => { if (result === false) setPathEntryOpen(true); });
   }, [addFromPicker, onNotice]);
 
   const handleRename = useCallback((id: number, displayName: string) => {
@@ -828,7 +868,12 @@ export function SourcePanel({
       loading={loading}
       editingSourceId={renameEditor?.sourceId ?? null}
       onBack={onBack}
+      pathDraft={pathDraft}
+      pathEntryOpen={pathEntryOpen}
+      onPathDraftChange={setPathDraft}
+      onTogglePathEntry={() => setPathEntryOpen((value) => !value)}
       onAdd={handleAdd}
+      onAddPath={(path) => runAddSourceAction(() => addPath(path), onNotice)}
       onCancelRename={() => setRenameEditor(null)}
       onCancelRemove={() => setRemoveCandidateId(null)}
       onChangeRenameDraft={(draft) => setRenameEditor((current) => current ? { ...current, draft } : current)}

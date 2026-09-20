@@ -95,10 +95,13 @@ where
 
 pub(crate) fn running_pids() -> Result<Vec<u32>, WcError> {
     let user = crate::current_process_user();
-    running_pids_for_scope_with(&user, |cmd| {
+    Ok(running_pids_for_scope_with(&user, |cmd| {
         crate::deadline_command::output(cmd, std::time::Duration::from_secs(2))
             .map_err(|error| std::io::Error::other(error.to_string()))
-    })
+    })?
+    .into_iter()
+    .filter(|pid| crate::runtime_observation::process_in_current_session(*pid))
+    .collect())
 }
 
 pub(crate) fn stop_mpvpaper() {
@@ -266,7 +269,11 @@ pub(crate) fn stop_outputs(outputs: &[String]) -> Result<(), WcError> {
     let target_pids =
         pids_matching_single_outputs_with(&processes, outputs, reverify_single_output);
     for pid in target_pids {
-        crate::process_control::kill_pid_gracefully(pid);
+        if let Some(argv) = read_mpvpaper_cmdline(pid) {
+            if parse_launch_identity(&argv).is_some_and(|(output, _)| outputs.contains(&output)) {
+                crate::process_control::kill_pid_matching_argv(pid, &argv);
+            }
+        }
     }
     Ok(())
 }
@@ -313,13 +320,14 @@ pub(crate) fn stop_pids_started_after(
         read_mpvpaper_cmdline,
     );
     for pid in &target_pids {
-        if !pid_matches_target(*pid, output, path) {
+        let tokens = read_mpvpaper_cmdline(*pid).unwrap_or_default();
+        if !cmdline_matches_target(&tokens, output, path) {
             return Err(WcError::Other(format!(
                 "refusing to stop PID {pid} after failed mpvpaper launch because its target \
                  identity changed"
             )));
         }
-        crate::process_control::kill_pid_gracefully(*pid);
+        crate::process_control::kill_pid_matching_argv(*pid, &tokens);
     }
 
     for poll in 0..=40 {
@@ -342,12 +350,7 @@ pub(crate) fn stop_pids_started_after(
 }
 
 pub(crate) fn normalize_mpvpaper_options(raw: &str) -> &str {
-    let trimmed = raw.trim();
-    if trimmed == "no-audio --loop-file=inf" || trimmed == "--loop-file=inf" {
-        "--loop-file=inf --panscan=1.0"
-    } else {
-        trimmed
-    }
+    wc_core::display_assignment::normalize_mpvpaper_options(raw)
 }
 
 #[cfg(test)]

@@ -1,6 +1,21 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// Shared by CLI, GUI and storage before any configuration is persisted.
+pub fn validate_config_entry(key: &str, value: &str) -> Result<(), crate::error::WcError> {
+    if key.is_empty() || key.chars().any(|c| c.is_control() || c == '=') {
+        return Err(crate::error::WcError::Other(
+            "Invalid configuration key".into(),
+        ));
+    }
+    if value.contains(['\n', '\r', '\0']) {
+        return Err(crate::error::WcError::Other(format!(
+            "Config value for {key} must be a single line and must not contain line breaks or NUL characters. Use a script file for multi-line commands."
+        )));
+    }
+    Ok(())
+}
+
 use crate::behavior_setting::DEFAULT_MPVPAPER_OPTIONS;
 
 const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
@@ -34,7 +49,7 @@ const DEFAULT_CONFIG_PAIRS: &[(&str, &str)] = &[
     ("gui_terminal_file_manager", "yazi"),
     ("gui_terminal_file_manager_custom", ""),
     ("post_apply_enabled", "off"),
-    ("post_apply_command", "matugen image \"$still\""),
+    ("post_apply_command", ""),
     ("post_apply_timeout_secs", "30"),
     ("post_apply_theme_source", "last_applied"),
     ("post_apply_on_restore", "on"),
@@ -190,7 +205,7 @@ mod tests {
         );
         assert_eq!(
             defaults.get("post_apply_command").map(String::as_str),
-            Some("matugen image \"$still\"")
+            Some("")
         );
         assert_eq!(
             defaults.get("post_apply_timeout_secs").map(String::as_str),

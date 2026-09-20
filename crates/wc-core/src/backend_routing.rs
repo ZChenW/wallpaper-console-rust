@@ -14,6 +14,14 @@ pub struct BackendRouting {
 }
 
 impl BackendRouting {
+    /// Animated PNG/WebP are routed through ffmpeg/mpv, not a static first frame.
+    pub fn backend_for_media(self, file_type: FileType, ext: &str) -> Backend {
+        if file_type == FileType::Gif && matches!(ext, "png" | "apng" | "webp") {
+            Backend::Mpvpaper
+        } else {
+            self.backend_for(file_type)
+        }
+    }
     pub fn from_raw(image: &str, gif: &str, _video: &str) -> Self {
         Self {
             image: normalize_image_backend(image),
@@ -29,6 +37,19 @@ impl BackendRouting {
             FileType::WeScene => Backend::LinuxWallpaperEngine,
             FileType::WeWeb | FileType::WeApplication => Backend::Unsupported,
         }
+    }
+}
+
+pub fn backend_supports(file_type: FileType, backend: Backend) -> bool {
+    match file_type {
+        FileType::Image => matches!(
+            backend,
+            Backend::Awww | Backend::Mpvpaper | Backend::Swaybg | Backend::Feh
+        ),
+        FileType::Gif => matches!(backend, Backend::Awww | Backend::Mpvpaper),
+        FileType::Video => backend == Backend::Mpvpaper,
+        FileType::WeScene => backend == Backend::LinuxWallpaperEngine,
+        FileType::WeWeb | FileType::WeApplication => false,
     }
 }
 

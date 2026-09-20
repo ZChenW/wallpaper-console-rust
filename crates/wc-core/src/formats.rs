@@ -4,13 +4,76 @@ use crate::types::{Backend, FileType};
 /// Returns None for unsupported extensions.
 pub fn classify_extension(ext: &str) -> Option<(FileType, Backend)> {
     match ext.to_lowercase().as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => Some((FileType::Image, Backend::Awww)),
+        "png" | "apng" | "jpg" | "jpeg" | "webp" | "bmp" => Some((FileType::Image, Backend::Awww)),
         // GIF → configurable backend (default awww)
         "gif" => Some((FileType::Gif, Backend::Awww)),
         // Videos → mpvpaper
-        "mp4" | "webm" | "mkv" | "mov" => Some((FileType::Video, Backend::Mpvpaper)),
+        "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv" => {
+            Some((FileType::Video, Backend::Mpvpaper))
+        }
         _ => None,
     }
+}
+
+/// Cheap bounded container inspection, used during indexing, never decoding on
+/// Library scroll. Apply still validates actual codec data in a killable worker.
+pub fn classify_media_path(path: &std::path::Path) -> Option<(FileType, Backend)> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let candidate = classify_extension(&ext)?;
+    if matches!(ext.as_str(), "png" | "apng" | "webp") && is_animated_image(path).unwrap_or(false) {
+        Some((FileType::Gif, Backend::Mpvpaper))
+    } else {
+        Some(candidate)
+    }
+}
+
+fn is_animated_image(path: &std::path::Path) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let mut header = [0u8; 12];
+    file.read_exact(&mut header)?;
+    if &header[..4] == b"RIFF" && &header[8..] == b"WEBP" {
+        let mut chunk = [0u8; 8];
+        for _ in 0..256 {
+            if file.read_exact(&mut chunk).is_err() {
+                return Ok(false);
+            }
+            let size = u32::from_le_bytes(chunk[4..].try_into().unwrap()) as u64;
+            if file.stream_position()?.saturating_add(size) > length {
+                return Ok(false);
+            }
+            if &chunk[..4] == b"VP8X" && size >= 10 {
+                let mut flags = [0u8; 1];
+                file.read_exact(&mut flags)?;
+                return Ok(flags[0] & 2 != 0);
+            }
+            if &chunk[..4] == b"ANIM" {
+                return Ok(true);
+            }
+            file.seek(SeekFrom::Current((size + (size & 1)) as i64))?;
+        }
+    } else if &header[..8] == b"\x89PNG\r\n\x1a\n" {
+        file.seek(SeekFrom::Start(8))?;
+        let mut chunk = [0u8; 8];
+        for _ in 0..256 {
+            if file.read_exact(&mut chunk).is_err() {
+                return Ok(false);
+            }
+            let size = u32::from_be_bytes(chunk[..4].try_into().unwrap()) as u64;
+            if file.stream_position()?.saturating_add(size + 4) > length {
+                return Ok(false);
+            }
+            if &chunk[4..] == b"acTL" && size == 8 {
+                return Ok(true);
+            }
+            if matches!(&chunk[4..], b"IDAT" | b"IEND") {
+                return Ok(false);
+            }
+            file.seek(SeekFrom::Current((size + 4) as i64))?;
+        }
+    }
+    Ok(false)
 }
 
 /// Filenames that should never be treated as wallpaper candidates.
@@ -53,12 +116,9 @@ pub fn default_backend_for(ft: FileType) -> Backend {
 
 /// Return the file type as a display string ("image" / "gif" / "video" / "?").
 pub fn file_type_for_ext_str(ext: &str) -> &'static str {
-    match ext.to_lowercase().as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => "image",
-        "gif" => "gif",
-        "mp4" | "webm" | "mkv" | "mov" => "video",
-        _ => "?",
-    }
+    classify_extension(ext)
+        .map(|(kind, _)| kind.as_str())
+        .unwrap_or("?")
 }
 
 #[cfg(test)]

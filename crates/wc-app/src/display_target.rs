@@ -6,6 +6,65 @@ use wc_storage::sqlite::ALL_DISPLAYS_TARGET_KEY;
 
 use crate::DisplayTarget;
 
+impl DisplayTarget {
+    pub fn outputs(&self, known: &[String]) -> Result<Vec<String>, String> {
+        validate_known_outputs(known)?;
+        let outputs = match self {
+            Self::AllDisplays => known.to_vec(),
+            Self::Output(output) => vec![output.clone()],
+            Self::Outputs(outputs) => outputs.clone(),
+        };
+        validate_known_outputs(&outputs)?;
+        if outputs.is_empty() {
+            return Err("select at least one output".into());
+        }
+        for output in &outputs {
+            if !known.contains(output) {
+                return Err(format!("selected output is not connected: {output}"));
+            }
+        }
+        Ok(outputs)
+    }
+}
+
+/// New arrays and the legacy single-target DTO share one validation contract.
+pub fn parse_display_targets(
+    raw: Option<&[String]>,
+    legacy: Option<&str>,
+) -> Result<DisplayTarget, String> {
+    let Some(raw) = raw else {
+        return parse_display_target(legacy);
+    };
+    if legacy.is_some() {
+        return Err("cannot mix target and targets".into());
+    }
+    if raw.is_empty() {
+        return Err("select at least one output".into());
+    }
+    let parsed = raw
+        .iter()
+        .map(|s| parse_display_target(Some(s)))
+        .collect::<Result<Vec<_>, _>>()?;
+    if parsed.contains(&DisplayTarget::AllDisplays) {
+        if parsed.len() == 1 {
+            return Ok(DisplayTarget::AllDisplays);
+        }
+        return Err("cannot mix all and named output targets".into());
+    }
+    let outputs: Vec<_> = parsed
+        .into_iter()
+        .filter_map(|t| {
+            if let DisplayTarget::Output(name) = t {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+    validate_known_outputs(&outputs)?;
+    Ok(DisplayTarget::Outputs(outputs))
+}
+
 /// Parse an optional display target string.
 ///
 /// `None` means All Displays (GUI default). Blank non-empty strings are rejected.

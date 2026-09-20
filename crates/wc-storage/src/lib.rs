@@ -19,6 +19,7 @@ use wc_core::types::StorageBackend;
 pub struct StorageApi {
     pub cd: ConfigDir,
     pub mode: StorageBackend,
+    render_options: std::collections::HashMap<String, String>,
 }
 
 impl StorageApi {
@@ -42,6 +43,7 @@ impl StorageApi {
         Ok(StorageApi {
             cd,
             mode: StorageBackend::Sqlite,
+            render_options: Default::default(),
         })
     }
 
@@ -52,9 +54,57 @@ impl StorageApi {
         Self::try_new(cd).expect("storage initialization failed")
     }
 
+    /// An immutable rendering snapshot; never writes global defaults.
+    pub fn with_render_options(
+        &self,
+        options: Option<&wc_core::display_assignment::RenderOptions>,
+    ) -> Self {
+        Self {
+            cd: ConfigDir::from_path(self.cd.path.clone()),
+            mode: self.mode,
+            render_options: options.map(|o| o.config_entries()).unwrap_or_default(),
+        }
+    }
+
+    pub fn capture_recipe(
+        &self,
+        source: &str,
+        media_path: &str,
+        backend: wc_core::types::Backend,
+        preview: bool,
+    ) -> Result<wc_core::display_assignment::RenderRecipe, WcError> {
+        use wc_core::display_assignment::*;
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
+        let options = sqlite::capture_render_options(&conn, backend)?;
+        let recipe = RenderRecipe {
+            schema_version: 1,
+            source: source.into(),
+            media_path: media_path.into(),
+            presentation: if preview {
+                Presentation::Preview
+            } else {
+                Presentation::Original
+            },
+            options,
+        };
+        recipe.validate()?;
+        Ok(recipe)
+    }
+
+    pub fn display_recipe(
+        &self,
+        target: &sqlite::DisplayStateTarget,
+    ) -> Result<Option<wc_core::display_assignment::RenderRecipe>, WcError> {
+        let conn = sqlite::open_runtime_connection(&self.cd)?;
+        sqlite::display_recipe(&conn, target)
+    }
+
     // ── Reads (always SQLite) ─────────────────────────────────────────
 
     pub fn config_get(&self, key: &str, default: &str) -> String {
+        if let Some(value) = self.render_options.get(key) {
+            return value.clone();
+        }
         if key == "storage_backend" {
             return "sqlite".to_string();
         }
@@ -186,6 +236,7 @@ impl StorageApi {
     // ── Writes (always SQLite) ────────────────────────────────────────
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), WcError> {
+        wc_core::config::validate_config_entry(key, value)?;
         let value = wc_core::config_normalizer::normalize_config_value(key, value);
         sqlite::sqlite_config_set(&self.cd, key, &value)?;
         if let Err(err) = wc_config::write_config_value(&self.cd.path, key, &value) {
@@ -510,6 +561,7 @@ mod tests {
         let storage = StorageApi {
             cd,
             mode: StorageBackend::Sqlite,
+            render_options: Default::default(),
         };
 
         let results = [

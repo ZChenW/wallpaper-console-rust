@@ -4549,6 +4549,7 @@ dependencies = [
 name = "wc-backend"
 version = "0.1.5"
 dependencies = [
+ "image",
  "libc",
  "log",
  "serde_json",

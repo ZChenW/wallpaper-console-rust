@@ -110,13 +110,17 @@ export function resolveCurrentWallpaperState(
       : { kind: 'confirmed', wallpaperPath, outputs };
   }
 
-  if (connectedOutputs.length === 0) return { kind: 'unknown', outputs: [] };
-  const assignments = connectedOutputs.map((output) => ({
+  const selectedOutputs = snapshot.activeTarget.kind === 'outputs'
+    ? normalizedOutputNames(snapshot.activeTarget.outputs) : connectedOutputs;
+  if (selectedOutputs.length === 0 || selectedOutputs.some((name) => !connectedOutputs.includes(name))) {
+    return { kind: 'unknown', outputs: selectedOutputs };
+  }
+  const assignments = selectedOutputs.map((output) => ({
     output,
     wallpaperPath: confirmedPath(runtime, output),
   }));
   if (assignments.some((assignment) => assignment.wallpaperPath === null)) {
-    return { kind: 'unknown', outputs: connectedOutputs };
+    return { kind: 'unknown', outputs: selectedOutputs };
   }
 
   const confirmedAssignments = assignments as Array<{ output: string; wallpaperPath: string }>;
@@ -125,7 +129,7 @@ export function resolveCurrentWallpaperState(
     return {
       kind: 'confirmed',
       wallpaperPath: firstPath,
-      outputs: connectedOutputs,
+      outputs: selectedOutputs,
     };
   }
   return { kind: 'mixed', outputs: confirmedAssignments };

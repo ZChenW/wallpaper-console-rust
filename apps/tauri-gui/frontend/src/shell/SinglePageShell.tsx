@@ -271,7 +271,10 @@ export default function SinglePageShell() {
   const currentWallpaper = runtimeWallpaper.current.wallpaper;
   const { applying: mpvpaperApplying, apply: applyMpvpaperOptions } = useMpvpaperReapply({
     saveOptions: behavior.saveMpvpaperOptions,
-    reapply: api.reapplyMpvpaper,
+    reapply: () => {
+      const arg = targetArgument(preferences.displayTarget);
+      return api.reapplyMpvpaper(Array.isArray(arg) ? arg : [arg ?? 'all']);
+    },
     refreshCurrent: runtimeWallpaper.current.refresh,
     wallpaperApplying: runtimeWallpaper.apply.applying,
     setFeedback: setSystemFeedback,

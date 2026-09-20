@@ -84,20 +84,20 @@ export function createApplyQueueHandlers(
     handleApply(path: string): void {
       controller.enqueue({ kind: 'apply', path, requestId: makeRequestId() });
     },
-    handleApplyToDisplay(path: string, target?: string): void {
+    handleApplyToDisplay(path: string, target?: string | string[]): void {
       const request: TargetedApplyRequestDTO = {
         path,
         requestId: makeRequestId(),
-        ...(target === undefined ? {} : { target }),
+        ...(Array.isArray(target) ? { targets: [...target] } : target === undefined ? {} : { target }),
       };
       controller.enqueueTargeted(request);
     },
-    handleApplyActionToDisplay(request: ApplyRequestDTO, target?: string): void {
+    handleApplyActionToDisplay(request: ApplyRequestDTO, target?: string | string[]): void {
       const targeted: TargetedApplyRequestDTO = {
         kind: request.kind,
         path: request.path,
         requestId: request.requestId ?? makeRequestId(),
-        ...(target === undefined ? {} : { target }),
+        ...(Array.isArray(target) ? { targets: [...target] } : target === undefined ? {} : { target }),
       };
       controller.enqueueTargeted(targeted);
     },
@@ -140,6 +140,18 @@ export class ApplyQueueController {
 
   enqueueTargeted(request: TargetedApplyRequestDTO): void {
     this.enqueueItem({ transport: 'targeted', request });
+  }
+
+  cancelPendingForTargets(outputs?: readonly string[]): void {
+    if (!this.pending) return;
+    const request = this.pending.request;
+    const targets = 'targets' in request ? request.targets
+      : 'target' in request && request.target ? [request.target] : undefined;
+    if (!outputs || !targets || outputs.includes('all') || targets.includes('all')
+      || targets.some((name) => outputs.includes(name))) {
+      this.pending = null;
+      this.emitQueueState();
+    }
   }
 
   private enqueueItem(item: QueuedApply): void {
@@ -233,7 +245,13 @@ export class ApplyQueueController {
       void this.deps.refreshStatus().catch(() => {
         // Status refresh is secondary; the backend has already confirmed success.
       });
-      this.deps.setFeedback({
+      const action = evidence?.postApply;
+      const needsAttention = action && ['failed', 'timed_out', 'skipped'].includes(action.status);
+      this.deps.setFeedback(needsAttention ? {
+        state: 'warning',
+        label: 'Wallpaper applied · Post-apply action needs attention',
+        detail: `${action.detail} Retry with: wallpaper-console-rust post-apply-retry`,
+      } : {
         state: 'success',
         label: 'Applied',
         detail: detail?.preview ? 'Preview wallpaper applied.' : detail?.appliedPath.split('/').pop(),

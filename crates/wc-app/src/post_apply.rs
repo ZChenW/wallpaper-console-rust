@@ -9,6 +9,7 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use wc_core::types::{Backend, FileType};
 use wc_storage::sqlite::DisplayStateTarget;
@@ -17,7 +18,7 @@ use wc_storage::StorageApi;
 use crate::theme_source::ThemeSourcePolicy;
 
 /// One connected output's wallpaper + still for theme generation.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OutputThemeEntry {
     pub output: String,
     pub wallpaper: String,
@@ -29,7 +30,7 @@ pub struct OutputThemeEntry {
 
 /// Context for one successful apply/restore that may publish theme state and
 /// trigger the post-apply hook.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostApplyContext {
     /// Theme-source wallpaper (compat / WCR_WALLPAPER).
     pub wallpaper_path: String,
@@ -194,12 +195,116 @@ fn per_output_theme_entries(
         .collect()
 }
 
-/// Always write `theme-state.json` when `per_output` is non-empty, then run the
-/// external hook only if enabled. Never returns an error to callers.
-pub fn publish_theme_and_run_hook(storage: &StorageApi, ctx: &PostApplyContext) {
-    if let Err(err) = publish_theme_and_run_hook_inner(storage, ctx, None) {
-        log::warn!("post-apply hook skipped or failed: {err}");
+/// Versioned result of the optional action, never the wallpaper result.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PostApplyReport {
+    pub version: u32,
+    pub status: PostApplyStatus,
+    pub detail: String,
+    pub reason: String,
+    pub finished_at: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PostApplyStatus {
+    Disabled,
+    Skipped,
+    Succeeded,
+    Failed,
+    TimedOut,
+}
+
+#[derive(Serialize, Deserialize)]
+struct SavedAction {
+    context: PostApplyContext,
+    report: PostApplyReport,
+}
+
+pub fn last_report(storage: &StorageApi) -> Result<Option<PostApplyReport>, String> {
+    Ok(read_saved_action(storage)?.map(|saved| saved.report))
+}
+
+fn read_saved_action(storage: &StorageApi) -> Result<Option<SavedAction>, String> {
+    match std::fs::read(storage.cd.path.join("post-apply-state.json")) {
+        Ok(bytes) => {
+            let saved: SavedAction = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            if saved.report.version != 1 {
+                return Err("Unsupported post-apply state version".into());
+            }
+            Ok(Some(saved))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e.to_string()),
     }
+}
+
+/// Repeat only the action for the last published wallpaper context. The same
+/// cross-process lock as Apply/Restore prevents retrying an obsolete context
+/// while another wallpaper is being applied. No renderer is touched.
+pub fn retry_last_action(storage: &StorageApi) -> Result<PostApplyReport, String> {
+    let _guard = crate::output_recovery::RendererMutationGuard::acquire(storage)
+        .map_err(|e| e.to_string())?;
+    let saved = read_saved_action(storage)?
+        .ok_or("Apply a wallpaper before running the post-apply action.")?;
+    Ok(publish_theme_and_run_hook_for_reason(
+        storage,
+        &saved.context,
+        "retry",
+    ))
+}
+
+pub fn publish_theme_and_run_hook(storage: &StorageApi, ctx: &PostApplyContext) -> PostApplyReport {
+    publish_theme_and_run_hook_for_reason(storage, ctx, "apply")
+}
+
+pub fn publish_theme_and_run_hook_for_reason(
+    storage: &StorageApi,
+    ctx: &PostApplyContext,
+    reason: &str,
+) -> PostApplyReport {
+    let result = publish_theme_and_run_hook_inner(storage, ctx, None, reason);
+    let (status, detail) = match result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            log::warn!("post-apply action failed: {error}");
+            let status = if error.starts_with("post-apply command timed out") {
+                PostApplyStatus::TimedOut
+            } else {
+                PostApplyStatus::Failed
+            };
+            (status, error)
+        }
+    };
+    let mut report = PostApplyReport {
+        version: 1,
+        status,
+        detail,
+        reason: reason.into(),
+        finished_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    };
+    let save = || -> Result<(), String> {
+        let saved = SavedAction {
+            context: ctx.clone(),
+            report: report.clone(),
+        };
+        let bytes = serde_json::to_vec_pretty(&saved).map_err(|e| e.to_string())?;
+        let path = storage.cd.path.join("post-apply-state.json");
+        let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+        std::fs::write(&tmp, bytes).map_err(|e| e.to_string())?;
+        std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    };
+    if let Err(error) = save() {
+        log::warn!("Could not save post-apply result: {error}");
+        report
+            .detail
+            .push_str(&format!(" Result could not be saved: {error}"));
+    }
+    report
 }
 
 /// Backward-compatible alias for [`publish_theme_and_run_hook`].
@@ -216,14 +321,15 @@ pub(crate) fn run_post_apply_hook_with_still_override(
     ctx: &PostApplyContext,
     still_override: Option<PathBuf>,
 ) -> Result<(), String> {
-    publish_theme_and_run_hook_inner(storage, ctx, still_override)
+    publish_theme_and_run_hook_inner(storage, ctx, still_override, "test").map(|_| ())
 }
 
 fn publish_theme_and_run_hook_inner(
     storage: &StorageApi,
     ctx: &PostApplyContext,
     still_override: Option<PathBuf>,
-) -> Result<(), String> {
+    reason: &str,
+) -> Result<(PostApplyStatus, String), String> {
     let policy_raw = storage.config_get("post_apply_theme_source", "last_applied");
     let policy = ThemeSourcePolicy::parse(&policy_raw);
 
@@ -260,13 +366,19 @@ fn publish_theme_and_run_hook_inner(
 
     let enabled = storage.config_get("post_apply_enabled", "off");
     if enabled != "on" {
-        return Ok(());
+        return Ok((
+            PostApplyStatus::Disabled,
+            "Post-apply action is disabled.".into(),
+        ));
     }
 
     let command = storage.config_get("post_apply_command", "");
     let command = command.trim();
     if command.is_empty() {
-        return Ok(());
+        return Ok((
+            PostApplyStatus::Skipped,
+            "No post-apply command is configured.".into(),
+        ));
     }
 
     if matches!(ctx.file_type, FileType::WeWeb | FileType::WeApplication) {
@@ -274,9 +386,14 @@ fn publish_theme_and_run_hook_inner(
             "post-apply: skipping unsupported Wallpaper Engine type ({})",
             ctx.file_type.as_str()
         );
-        return Ok(());
+        return Ok((
+            PostApplyStatus::Skipped,
+            "This wallpaper type has no supported still image.".into(),
+        ));
     }
 
+    wc_core::config::validate_config_entry("post_apply_command", command)
+        .map_err(|e| e.to_string())?;
     let theme_source_still =
         resolve_theme_source_still(storage, ctx, &resolved_entries, still_override.as_deref())?;
 
@@ -290,15 +407,6 @@ fn publish_theme_and_run_hook_inner(
         .unwrap_or_default();
     let theme_source = ctx.theme_source_output.as_deref().unwrap_or("");
 
-    let expanded = expand_post_apply_command(
-        command,
-        wallpaper,
-        &still_s,
-        backend,
-        outputs,
-        &manifest_s,
-        theme_source,
-    );
     let timeout_secs: u64 = storage
         .config_get("post_apply_timeout_secs", "30")
         .parse()
@@ -306,24 +414,34 @@ fn publish_theme_and_run_hook_inner(
         .filter(|v| (1..=600).contains(v))
         .unwrap_or(30);
 
-    log::info!("post-apply: running `{expanded}` (timeout {timeout_secs}s)");
+    log::info!("post-apply: running action (timeout {timeout_secs}s)");
 
-    let mut env: Vec<(&str, String)> = vec![
+    let env: Vec<(&str, String)> = vec![
+        ("WCR_HOOK_VERSION", "1".into()),
+        ("WCR_REASON", reason.into()),
+        ("WCR_FILE_TYPE", ctx.file_type.as_str().into()),
+        ("WCR_THEME_MANIFEST", manifest_s.clone()),
+        ("WCR_THEME_SOURCE_OUTPUT", theme_source.into()),
+        // Compatibility aliases use shell expansion, never source interpolation.
+        ("wallpaper", wallpaper.into()),
+        ("path", wallpaper.into()),
+        ("still", still_s.to_string()),
+        ("backend", backend.into()),
+        ("outputs", outputs.into()),
+        ("manifest", manifest_s.clone()),
+        ("theme_source", theme_source.into()),
         ("WCR_WALLPAPER", wallpaper.to_string()),
         ("WCR_STILL", still_s.into_owned()),
         ("WCR_BACKEND", backend.to_string()),
         ("WCR_OUTPUTS", outputs.to_string()),
         ("WCR_OUTPUT", outputs.to_string()),
     ];
-    if !manifest_s.is_empty() {
-        env.push(("WCR_THEME_MANIFEST", manifest_s.clone()));
-    }
-    if !theme_source.is_empty() {
-        env.push(("WCR_THEME_SOURCE_OUTPUT", theme_source.to_string()));
-    }
-
     let env_refs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (*k, v.as_str())).collect();
-    run_command_with_timeout(&expanded, &env_refs, Duration::from_secs(timeout_secs))
+    run_command_with_timeout(command, &env_refs, Duration::from_secs(timeout_secs))?;
+    Ok((
+        PostApplyStatus::Succeeded,
+        "Post-apply command completed. Desktop refresh is managed by your command.".into(),
+    ))
 }
 
 fn resolve_theme_source_still(
@@ -393,34 +511,6 @@ fn write_theme_state_manifest(
         return Err(format!("failed to finalize theme-state: {e}"));
     }
     Ok(path)
-}
-
-/// Expand `$wallpaper` / `$path` / `$still` / `$backend` / `$outputs` /
-/// `$manifest` / `$theme_source` in the command template. Longer names are
-/// replaced before shorter ones so `$wallpaper` is not partially eaten by
-/// `$path`.
-pub fn expand_post_apply_command(
-    template: &str,
-    wallpaper: &str,
-    still: &str,
-    backend: &str,
-    outputs: &str,
-    manifest: &str,
-    theme_source: &str,
-) -> String {
-    let mut out = template.to_string();
-    for (needle, value) in [
-        ("$wallpaper", wallpaper),
-        ("$theme_source", theme_source),
-        ("$manifest", manifest),
-        ("$backend", backend),
-        ("$outputs", outputs),
-        ("$still", still),
-        ("$path", wallpaper),
-    ] {
-        out = out.replace(needle, value);
-    }
-    out
 }
 
 pub(crate) fn file_type_from_str(raw: &str) -> FileType {
@@ -565,13 +655,24 @@ fn extract_video_still(storage: &StorageApi, video_path: &str) -> Result<PathBuf
     Ok(dest)
 }
 
+fn read_diagnostic(mut pipe: impl std::io::Read) -> Vec<u8> {
+    use std::io::Read;
+    let mut retained = Vec::new();
+    let _ = pipe.by_ref().take(16 * 1024).read_to_end(&mut retained);
+    let discarded = std::io::copy(&mut pipe, &mut std::io::sink()).unwrap_or(0);
+    if discarded > 0 {
+        retained.extend_from_slice(b"\n[output truncated]");
+    }
+    retained
+}
+
 fn run_command_with_timeout(
     command: &str,
     env: &[(&str, &str)],
     timeout: Duration,
 ) -> Result<(), String> {
     // Launch under setsid so we can kill the whole process group on timeout.
-    let child = Command::new("setsid")
+    let mut child = Command::new("setsid")
         .arg("sh")
         .arg("-c")
         .arg(command)
@@ -583,10 +684,22 @@ fn run_command_with_timeout(
         .map_err(|e| format!("failed to spawn post-apply command: {e}"))?;
 
     let pid = child.id();
+    // Drain both pipes even after the retained diagnostic limit, so noisy tools
+    // cannot exhaust memory or block on a full pipe.
+    let stdout = child.stdout.take().expect("piped stdout");
+    let stderr = child.stderr.take().expect("piped stderr");
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
-        let output = child.wait_with_output();
-        let _ = tx.send(output);
+        let out = thread::spawn(move || read_diagnostic(stdout));
+        let err = thread::spawn(move || read_diagnostic(stderr));
+        let status = child.wait();
+        let stdout = out.join().unwrap_or_default();
+        let stderr = err.join().unwrap_or_default();
+        let _ = tx.send(status.map(|status| std::process::Output {
+            status,
+            stdout,
+            stderr,
+        }));
     });
 
     match rx.recv_timeout(timeout) {
@@ -805,35 +918,83 @@ mod tests {
     }
 
     #[test]
-    fn expand_replaces_all_placeholders() {
-        let expanded = expand_post_apply_command(
-            r#"echo $wallpaper $path $still $backend $outputs $manifest $theme_source"#,
-            "/walls/a.png",
-            "/cache/a.jpg",
-            "awww",
-            "eDP-1",
-            "/cfg/theme-state.json",
-            "eDP-1",
+    fn versioned_environment_preserves_special_paths_and_retry_uses_new_command() {
+        let (tmp, storage) = temp_storage();
+        let path = tmp
+            .path()
+            .join("中文 space \" ' $(touch INJECTED) `false` $still.png");
+        std::fs::write(&path, b"image").unwrap();
+        storage.config_set("post_apply_enabled", "on").unwrap();
+        let marker = tmp.path().join("capture");
+        storage.config_set("post_apply_command", &format!(
+            "printf '%s\\n' \"$WCR_HOOK_VERSION\" \"$WCR_REASON\" \"$WCR_STILL\" \"$still\" \"$WCR_THEME_MANIFEST\" > '{}'", marker.display()
+        )).unwrap();
+        let ctx = basic_ctx(
+            path.to_string_lossy().into_owned(),
+            Backend::Awww,
+            FileType::Image,
+            "*",
         );
+        let report = publish_theme_and_run_hook(&storage, &ctx);
+        assert_eq!(report.status, PostApplyStatus::Succeeded, "{report:?}");
+        let actual = std::fs::read_to_string(&marker).unwrap();
         assert_eq!(
-            expanded,
-            r#"echo /walls/a.png /walls/a.png /cache/a.jpg awww eDP-1 /cfg/theme-state.json eDP-1"#
+            actual,
+            format!("1\napply\n{}\n{}\n\n", path.display(), path.display())
         );
+        storage
+            .config_set("post_apply_command", "printf 'test failure' >&2; exit 7")
+            .unwrap();
+        let failed = retry_last_action(&storage).unwrap();
+        assert_eq!(failed.status, PostApplyStatus::Failed);
+        assert_eq!(failed.reason, "retry");
+        assert!(failed.detail.contains("test failure"));
+        assert_eq!(last_report(&storage).unwrap(), Some(failed));
+        storage.config_set("post_apply_command", "true").unwrap();
+        assert_eq!(
+            retry_last_action(&storage).unwrap().status,
+            PostApplyStatus::Succeeded
+        );
+        assert!(storage.current_read().unwrap().is_none());
+        assert!(storage.display_state_list().unwrap().is_empty());
     }
 
     #[test]
-    fn expand_wallpaper_before_path_substring() {
-        // `$path` must not corrupt `$wallpaper` when both appear.
-        let expanded = expand_post_apply_command(
-            "matugen image $wallpaper",
-            "/w/p.png",
-            "/s.jpg",
-            "awww",
+    fn result_distinguishes_disabled_skipped_failed_and_timeout() {
+        let (tmp, storage) = temp_storage();
+        let path = tmp.path().join("image.png");
+        std::fs::write(&path, b"image").unwrap();
+        let ctx = basic_ctx(
+            path.to_string_lossy().into_owned(),
+            Backend::Awww,
+            FileType::Image,
             "*",
-            "",
-            "",
         );
-        assert_eq!(expanded, "matugen image /w/p.png");
+        assert!(retry_last_action(&storage).is_err());
+        assert_eq!(
+            publish_theme_and_run_hook(&storage, &ctx).status,
+            PostApplyStatus::Disabled
+        );
+        storage.config_set("post_apply_enabled", "on").unwrap();
+        storage.config_set("post_apply_command", "").unwrap();
+        assert_eq!(
+            publish_theme_and_run_hook(&storage, &ctx).status,
+            PostApplyStatus::Skipped
+        );
+        storage
+            .config_set("post_apply_command", "sleep 20")
+            .unwrap();
+        storage.config_set("post_apply_timeout_secs", "1").unwrap();
+        assert_eq!(
+            publish_theme_and_run_hook(&storage, &ctx).status,
+            PostApplyStatus::TimedOut
+        );
+        storage.config_set("post_apply_command", "true").unwrap();
+        std::fs::remove_file(path).unwrap();
+        assert_eq!(
+            publish_theme_and_run_hook(&storage, &ctx).status,
+            PostApplyStatus::Failed
+        );
     }
 
     #[test]

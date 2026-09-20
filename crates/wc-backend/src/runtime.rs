@@ -37,6 +37,38 @@ pub fn awww_socket_path() -> Result<std::path::PathBuf, WcError> {
 /// Prefer this surface for new orchestration. Stop / apply policy belongs on
 /// [`crate::driver::BackendDriver`]; see domain term **ProcessIo**.
 pub trait ProcessIo {
+    fn preflight_swaybg_observation(&mut self) -> Result<(), WcError> {
+        Ok(())
+    }
+    fn is_niri_session(&mut self) -> Result<bool, WcError> {
+        Ok(self.awww_environment(false)?.niri_socket_present)
+    }
+    fn launch_swaybg(&mut self, command: &mut Command) -> Result<(), WcError> {
+        if self.command_status(command)?.success() {
+            Ok(())
+        } else {
+            Err(WcError::Other("swaybg failed to launch".into()))
+        }
+    }
+    fn renderer_identity_snapshot(&mut self) -> Result<String, WcError> {
+        Ok(format!("{:?}", self.renderer_command_lines()?))
+    }
+    /// Fakes explicitly model successful readiness; the system requires live evidence.
+    fn verify_recipe(
+        &mut self,
+        _output: &str,
+        _recipe: &wc_core::display_assignment::RenderRecipe,
+        _known_outputs: &[String],
+    ) -> Result<(), WcError> {
+        Ok(())
+    }
+    /// Fake runtimes may model image validation; the system uses a killable worker.
+    fn preflight_image(
+        &mut self,
+        _path: &str,
+    ) -> Result<Option<crate::image_media::ImageStamp>, WcError> {
+        Ok(None)
+    }
     /// Prepare media before any destructive stop. Fakes explicitly model success.
     fn prepare_mpvpaper_options(&mut self, options: &str, _path: &str) -> Result<String, WcError> {
         Ok(options.to_string())
@@ -148,6 +180,11 @@ pub trait BackendRuntime: ProcessIo {
     /// Fails closed when process inspection cannot complete.
     fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError>;
     fn stop_swaybg(&mut self) {}
+    fn stop_swaybg_outputs(&mut self, _outputs: &[String]) -> Result<(), WcError> {
+        Err(WcError::Other(
+            "swaybg scoped stop is unavailable for this runtime".into(),
+        ))
+    }
     fn stop_lwe(&mut self, s: Option<&StorageApi>);
     fn stop_lwe_outputs(&mut self, _outputs: &[String]) -> Result<(), WcError> {
         Err(WcError::Other(
@@ -384,7 +421,197 @@ where
     unreachable!("the bounded polling loop always returns")
 }
 
+/// Niri exposes mapped layer surfaces; other compositors stay unverified until
+/// their adapter can supply equivalent evidence (a living process is not enough).
+pub(crate) fn swaybg_surface_outputs() -> Result<Vec<String>, WcError> {
+    if std::env::var_os("NIRI_SOCKET").is_none() {
+        return Err(WcError::Other(
+            "swaybg surface readiness is unverified on this compositor; no wallpapers were stopped"
+                .into(),
+        ));
+    }
+    let result = crate::deadline_command::output(
+        Command::new("niri").args(["msg", "--json", "layers"]),
+        std::time::Duration::from_millis(1500),
+    )?;
+    if !result.status.success() {
+        return Err(WcError::Other(
+            "cannot inspect compositor background surfaces".into(),
+        ));
+    }
+    let rows: Vec<serde_json::Value> = serde_json::from_slice(&result.stdout)
+        .map_err(|e| WcError::Other(format!("invalid compositor surface snapshot: {e}")))?;
+    Ok(rows
+        .iter()
+        .filter(|row| row["namespace"] == "wallpaper" && row["layer"] == "Background")
+        .filter_map(|row| row["output"].as_str().map(str::to_owned))
+        .collect())
+}
+
+fn recipe_matches_argv(
+    output: &str,
+    recipe: &wc_core::display_assignment::RenderRecipe,
+    argv: &[String],
+) -> bool {
+    use wc_core::display_assignment::RenderOptions;
+    match &recipe.options {
+        RenderOptions::Mpvpaper { options } => {
+            if crate::mpvpaper::parse_launch_identity(argv)
+                != Some((output.into(), recipe.media_path.clone()))
+            {
+                return false;
+            }
+            argv.iter()
+                .position(|a| a == "-o")
+                .and_then(|i| argv.get(i + 1))
+                .is_some_and(|actual| {
+                    actual
+                        .rsplit_once(" --input-ipc-server=")
+                        .map(|(raw, _)| raw)
+                        .unwrap_or(actual)
+                        .trim()
+                        == options.trim()
+                })
+        }
+        RenderOptions::Swaybg { .. } => {
+            if !argv
+                .first()
+                .is_some_and(|a| crate::process_control::token_is_swaybg_program(a))
+            {
+                return false;
+            }
+            let values = recipe.options.config_entries();
+            let expected = crate::target_commands::build_swaybg_launch_command(
+                &recipe.media_path,
+                &values["awww_resize"],
+                &crate::target_commands::ExecutionScope::Named(vec![output.into()]),
+            );
+            expected.is_ok_and(|cmd| {
+                cmd.get_args()
+                    .map(|a| a.to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    == argv[1..]
+            })
+        }
+        RenderOptions::LinuxWallpaperengine {
+            fps, muted, volume, ..
+        } => {
+            if !crate::runtime_observation::parse_lwe_command_line(argv)
+                .is_some_and(|rows| rows.iter().any(|(name, _)| *name == output))
+            {
+                return false;
+            }
+            let value = |key: &str| {
+                argv.iter()
+                    .position(|a| a == key)
+                    .and_then(|i| argv.get(i + 1))
+                    .map(String::as_str)
+            };
+            let values = recipe.options.config_entries();
+            let scaling = values["linux_wallpaperengine_scaling"].as_str();
+            value("--scaling").unwrap_or("default") == scaling
+                && value("--fps").and_then(|s| s.parse::<u16>().ok()) == Some(*fps)
+                && value("--volume").and_then(|s| s.parse::<u8>().ok())
+                    == Some(if *muted { 0 } else { *volume })
+        }
+        RenderOptions::Awww { .. } => true, // The shared daemon exposes content, not a per-apply argv.
+        RenderOptions::Feh { .. } => false,
+    }
+}
+
 impl ProcessIo for SystemBackendRuntime {
+    fn preflight_swaybg_observation(&mut self) -> Result<(), WcError> {
+        swaybg_surface_outputs().map(|_| ())
+    }
+    fn is_niri_session(&mut self) -> Result<bool, WcError> {
+        Ok(std::env::var_os("NIRI_SOCKET")
+            .is_some_and(|socket| std::path::Path::new(&socket).exists()))
+    }
+    fn launch_swaybg(&mut self, command: &mut Command) -> Result<(), WcError> {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+        let child = command.spawn()?;
+        crate::process_control::detach_and_reap_child(child, "wc-swaybg-reaper");
+        Ok(())
+    }
+    fn renderer_identity_snapshot(&mut self) -> Result<String, WcError> {
+        let mut identities = Vec::new();
+        for process in self.renderer_command_lines()? {
+            let Some(program) = process
+                .argv
+                .first()
+                .and_then(|a| std::path::Path::new(a).file_name())
+                .and_then(|a| a.to_str())
+            else {
+                continue;
+            };
+            if !matches!(
+                program,
+                "mpvpaper" | "swaybg" | "awww-daemon" | "linux-wallpaperengine"
+            ) {
+                continue;
+            }
+            let identity =
+                crate::process_control::ProcessIdentity::read(process.pid).ok_or_else(|| {
+                    WcError::Other("renderer identity changed during inspection".into())
+                })?;
+            identities.push((process.pid, identity));
+        }
+        identities.sort_by_key(|(pid, _)| *pid);
+        Ok(format!("{identities:?}"))
+    }
+    fn verify_recipe(
+        &mut self,
+        output: &str,
+        recipe: &wc_core::display_assignment::RenderRecipe,
+        known_outputs: &[String],
+    ) -> Result<(), WcError> {
+        let rows = [wc_storage::sqlite::DisplayStateRow {
+            target: wc_storage::sqlite::DisplayStateTarget::Output(output.into()),
+            wallpaper_path: recipe.media_path.clone(),
+            backend: recipe.options.backend().as_str().into(),
+            updated_at: String::new(),
+        }];
+        let observations =
+            crate::runtime_observation::observe_runtime_wallpapers(known_outputs, &rows);
+        let observed = observations.iter().find(|row| row.output == output);
+        if observed.is_some_and(|row| {
+            row.status == crate::runtime_observation::RuntimeObservationStatus::Confirmed
+        }) {
+            use wc_core::display_assignment::RenderOptions;
+            if !matches!(recipe.options, RenderOptions::Awww { .. }) {
+                let processes = self.renderer_command_lines()?;
+                if !processes
+                    .iter()
+                    .any(|process| recipe_matches_argv(output, recipe, &process.argv))
+                {
+                    return Err(WcError::Other(format!("cannot confirm saved rendering parameters on {output}; the live renderer differs from its recipe")));
+                }
+            }
+            if matches!(recipe.options, RenderOptions::Swaybg { .. })
+                && !swaybg_surface_outputs()?.iter().any(|name| name == output)
+            {
+                return Err(WcError::Other(format!(
+                    "swaybg has no mapped background surface on {output}"
+                )));
+            }
+            Ok(())
+        } else {
+            Err(WcError::Other(format!(
+                "cannot confirm {} on {output}: {}",
+                recipe.media_path,
+                observed
+                    .and_then(|row| row.reason.as_deref())
+                    .unwrap_or("no live evidence")
+            )))
+        }
+    }
+    fn preflight_image(
+        &mut self,
+        path: &str,
+    ) -> Result<Option<crate::image_media::ImageStamp>, WcError> {
+        crate::image_media::preflight(path).map(Some)
+    }
     fn prepare_mpvpaper_options(&mut self, options: &str, path: &str) -> Result<String, WcError> {
         crate::mpvpaper_media::prepare_options(options, path)
     }
@@ -502,7 +729,15 @@ impl ProcessIo for SystemBackendRuntime {
             path,
             scope,
             || self.swaybg_pids(),
-            crate::swaybg::pid_matches_target,
+            |pid, path, scope| {
+                crate::swaybg::pid_matches_target(pid, path, scope)
+                    && swaybg_surface_outputs().is_ok_and(|mapped| match scope {
+                        crate::target_commands::ExecutionScope::Named(outputs) => {
+                            outputs.iter().all(|output| mapped.contains(output))
+                        }
+                        crate::target_commands::ExecutionScope::AllDisplays => false,
+                    })
+            },
             std::thread::sleep,
         )
     }
@@ -544,6 +779,9 @@ impl ProcessIo for SystemBackendRuntime {
 }
 
 impl BackendRuntime for SystemBackendRuntime {
+    fn stop_swaybg_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
+        crate::swaybg_process::stop_outputs(outputs)
+    }
     fn supports_output_recovery(&self) -> bool {
         true
     }
@@ -605,6 +843,36 @@ mod tests {
         MpvpaperOutputSelector, MpvpaperProcess,
     };
     use crate::target_commands::ExecutionScope;
+
+    #[test]
+    fn matching_path_with_different_mpv_options_is_not_recoverable_recipe_evidence() {
+        use wc_core::display_assignment::{Presentation, RenderOptions, RenderRecipe};
+        let recipe = RenderRecipe {
+            schema_version: 1,
+            source: "/video.mp4".into(),
+            media_path: "/video.mp4".into(),
+            presentation: Presentation::Original,
+            options: RenderOptions::Mpvpaper {
+                options: "--volume=20 --panscan=1".into(),
+            },
+        };
+        let mut argv: Vec<String> = [
+            "mpvpaper",
+            "--fork",
+            "-o",
+            "--volume=20 --panscan=1 --input-ipc-server=/tmp/control.sock",
+            "A",
+            "--",
+            "/video.mp4",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        assert!(super::recipe_matches_argv("A", &recipe, &argv));
+        argv[3] = "--volume=90 --panscan=1 --input-ipc-server=/tmp/control.sock".into();
+        assert!(!super::recipe_matches_argv("A", &recipe, &argv));
+        assert!(!super::recipe_matches_argv("B", &recipe, &argv));
+    }
 
     fn sample_process(pid: u32, output: &str) -> MpvpaperProcess {
         MpvpaperProcess {

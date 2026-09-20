@@ -12,6 +12,7 @@ pub mod apply_stage;
 pub mod apply_transition;
 pub mod capability;
 pub mod display_executor;
+pub mod image_media;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 mod lwe_process;
@@ -531,6 +532,7 @@ mod debug_log;
 mod mpvpaper;
 mod restore;
 mod swaybg;
+pub mod swaybg_process;
 
 pub use apply_transition::{
     ApplyTransitionFailure, ApplyTransitionPlan, ApplyTransitionReport, ApplyTransitionRequest,
@@ -834,11 +836,7 @@ pub(crate) fn apply_wallpaper_with_runtime(
     let target_elapsed = timing_start.elapsed();
 
     if let Err(failure) = target_result {
-        if matches!(
-            failure.cleanup,
-            driver::CleanupOutcome::UncertainGlobalStop(_)
-                | driver::CleanupOutcome::UncertainTarget
-        ) {
+        if matches!(failure.cleanup, driver::CleanupOutcome::UncertainTarget) {
             let _ = s.runtime_state_clear();
         }
         let rollback_msg = rollback_visual_fallback_after_target_failure_with_runtime(
@@ -2337,7 +2335,7 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(runtime.command_status_programs, ["setsid"]);
+        assert_eq!(runtime.command_status_programs, ["swaybg"]);
         assert_eq!(runtime.swaybg_wait_count, 1);
         assert_eq!(runtime.swaybg_pid_running_checks, [52]);
         assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("swaybg"));

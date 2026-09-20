@@ -169,6 +169,7 @@ pub fn ensure_display_state_schema(conn: &Connection) -> Result<(), WcError> {
         );",
     )
     .map_err(sqlite_err)?;
+    super::display_recipe::ensure_recipe_columns(conn)?;
     Ok(())
 }
 
@@ -284,6 +285,7 @@ pub fn migrate_legacy_display_state(conn: &Connection) -> Result<(), WcError> {
             params![all.storage_key(), path, normalized_backend],
         )
         .map_err(sqlite_err)?;
+        super::display_recipe::initialize_recipe(conn, all.storage_key())?;
         write_migration_marker(conn)?;
         Ok(())
     })();
@@ -373,16 +375,22 @@ pub fn display_state_upsert(
     target.validate()?;
     let backend = validate_assignment(wallpaper_path, backend)?;
     ensure_display_state_schema(conn)?;
-    conn.execute(
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let previous = super::display_recipe::snapshot(&tx)?;
+    tx.execute(
         "INSERT INTO display_state (target_key, wallpaper_path, backend, updated_at)
          VALUES (?1, ?2, ?3, datetime('now'))
          ON CONFLICT(target_key) DO UPDATE SET
             wallpaper_path = excluded.wallpaper_path,
             backend = excluded.backend,
-            updated_at = excluded.updated_at",
+            updated_at = excluded.updated_at, recipe_json = NULL",
         params![target.storage_key(), wallpaper_path, backend],
     )
     .map_err(sqlite_err)?;
+    super::display_recipe::initialize_recipe(&tx, target.storage_key())?;
+    let recipe = super::display_recipe::display_recipe(&tx, target)?.expect("upserted assignment");
+    super::display_recipe::write(&tx, target, &recipe, &previous)?;
+    tx.commit().map_err(sqlite_err)?;
     Ok(())
 }
 
@@ -416,7 +424,7 @@ pub fn display_state_replace_all_with_seam(
     rows: &[(DisplayStateTarget, String, String)],
     before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
 ) -> Result<(), WcError> {
-    display_state_replace_all_and_maybe_clear_legacy(conn, rows, false, before_commit)
+    display_state_replace_all_and_maybe_clear_legacy(conn, rows, false, None, before_commit)
 }
 
 /// Atomically replace every display assignment and clear the legacy
@@ -430,13 +438,127 @@ pub fn display_state_replace_all_and_clear_legacy(
     rows: &[(DisplayStateTarget, String, String)],
     before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
 ) -> Result<(), WcError> {
-    display_state_replace_all_and_maybe_clear_legacy(conn, rows, true, before_commit)
+    display_state_replace_all_and_maybe_clear_legacy(conn, rows, true, None, before_commit)
 }
+
+/// Commit different recipes as one batch, leaving templates and siblings untouched.
+pub fn display_state_commit_distinct_recipes(
+    conn: &Connection,
+    recipes: &[(
+        DisplayStateTarget,
+        wc_core::display_assignment::RenderRecipe,
+    )],
+) -> Result<(), WcError> {
+    let mut seen = HashSet::new();
+    for (target, recipe) in recipes {
+        target.validate()?;
+        recipe.validate()?;
+        if !seen.insert(target.storage_key()) {
+            return Err(WcError::Other("duplicate recipe target".into()));
+        }
+    }
+    let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let previous = super::display_recipe::snapshot(&tx)?;
+    for (target, recipe) in recipes {
+        tx.execute(
+            "INSERT INTO display_state(target_key,wallpaper_path,backend) VALUES(?1,?2,?3)
+             ON CONFLICT(target_key) DO UPDATE SET wallpaper_path=excluded.wallpaper_path,
+             backend=excluded.backend,updated_at=datetime('now')",
+            params![
+                target.storage_key(),
+                recipe.media_path,
+                recipe.options.backend().as_str()
+            ],
+        )
+        .map_err(sqlite_err)?;
+        super::display_recipe::write(&tx, target, recipe, &previous)?;
+    }
+    tx.commit().map_err(sqlite_err)
+}
+
+pub fn display_state_commit_recipe(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    target: &DisplayStateTarget,
+    recipe: &wc_core::display_assignment::RenderRecipe,
+    sync_legacy: bool,
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    display_state_commit_recipes(
+        conn,
+        rows,
+        std::slice::from_ref(target),
+        recipe,
+        sync_legacy,
+        before_commit,
+    )
+}
+
+/// Like `display_state_commit_recipe`, but writes the same resolved recipe to
+/// every named output target (an explicit output-subset apply). The All
+/// template row is never among the recipe targets of a subset commit.
+pub fn display_state_commit_recipes(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    targets: &[DisplayStateTarget],
+    recipe: &wc_core::display_assignment::RenderRecipe,
+    sync_legacy: bool,
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    recipe.validate()?;
+    let recipes: Vec<_> = targets
+        .iter()
+        .map(|target| (target.clone(), recipe.clone()))
+        .collect();
+    display_state_commit_recipe_batch(
+        conn,
+        rows,
+        &recipes,
+        sync_legacy.then_some(recipe),
+        before_commit,
+    )
+}
+
+pub fn display_state_commit_recipe_batch(
+    conn: &Connection,
+    rows: &[(DisplayStateTarget, String, String)],
+    recipes: &[(
+        DisplayStateTarget,
+        wc_core::display_assignment::RenderRecipe,
+    )],
+    legacy: Option<&wc_core::display_assignment::RenderRecipe>,
+    before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
+) -> Result<(), WcError> {
+    let mut seen = HashSet::new();
+    for (target, recipe) in recipes {
+        target.validate()?;
+        recipe.validate()?;
+        if !seen.insert(target.storage_key()) {
+            return Err(WcError::Other("duplicate recipe target".into()));
+        }
+    }
+    display_state_replace_all_and_maybe_clear_legacy(
+        conn,
+        rows,
+        false,
+        Some((recipes, legacy)),
+        before_commit,
+    )
+}
+
+type RecipeBatch<'a> = (
+    &'a [(
+        DisplayStateTarget,
+        wc_core::display_assignment::RenderRecipe,
+    )],
+    Option<&'a wc_core::display_assignment::RenderRecipe>,
+);
 
 fn display_state_replace_all_and_maybe_clear_legacy(
     conn: &Connection,
     rows: &[(DisplayStateTarget, String, String)],
     clear_legacy: bool,
+    applied: Option<RecipeBatch<'_>>,
     mut before_commit: Option<&mut dyn FnMut() -> Result<(), WcError>>,
 ) -> Result<(), WcError> {
     let mut seen = HashSet::new();
@@ -455,6 +577,7 @@ fn display_state_replace_all_and_maybe_clear_legacy(
     }
     ensure_display_state_schema(conn)?;
     let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let previous = super::display_recipe::snapshot(&tx)?;
     tx.execute("DELETE FROM display_state", [])
         .map_err(sqlite_err)?;
     {
@@ -469,12 +592,25 @@ fn display_state_replace_all_and_maybe_clear_legacy(
                 .map_err(sqlite_err)?;
         }
     }
+    if let Some((recipes, legacy)) = applied {
+        super::display_recipe::preserve(&tx, &previous)?;
+        for (target, recipe) in recipes {
+            super::display_recipe::write(&tx, target, recipe, &previous)?;
+        }
+        if let Some(recipe) = legacy {
+            tx.execute("INSERT INTO state(key,value) VALUES ('current',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [&recipe.media_path]).map_err(sqlite_err)?;
+            tx.execute("INSERT INTO state(key,value) VALUES ('last_backend',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [recipe.options.backend().as_str()]).map_err(sqlite_err)?;
+        }
+    }
     if clear_legacy {
         tx.execute(
             "DELETE FROM state WHERE key IN ('current', 'last_backend')",
             [],
         )
         .map_err(sqlite_err)?;
+    }
+    if applied.is_none() {
+        super::display_recipe::preserve(&tx, &previous)?;
     }
     if let Some(seam) = before_commit.as_mut() {
         seam()?;
@@ -525,6 +661,7 @@ pub fn display_state_commit_all_displays_with_legacy(
 
     ensure_display_state_schema(conn)?;
     let tx = conn.unchecked_transaction().map_err(sqlite_err)?;
+    let previous = super::display_recipe::snapshot(&tx)?;
     tx.execute("DELETE FROM display_state", [])
         .map_err(sqlite_err)?;
     tx.execute(
@@ -564,6 +701,7 @@ pub fn display_state_commit_all_displays_with_legacy(
         )
         .map_err(sqlite_err)?;
     }
+    super::display_recipe::preserve(&tx, &previous)?;
     if let Some(seam) = before_commit.as_mut() {
         seam()?;
     }

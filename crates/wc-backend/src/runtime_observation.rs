@@ -18,6 +18,9 @@ pub struct ProcessCommandLine {
 }
 
 pub trait RuntimeObservationIo {
+    fn swaybg_surface_mapped(&self, _output: &str) -> bool {
+        true
+    }
     fn mpvpaper_media_loaded(&self, _process: &ProcessCommandLine, _path: &str) -> bool {
         true
     }
@@ -36,6 +39,10 @@ fn awww_query_arguments() -> [&'static str; 3] {
 }
 
 impl RuntimeObservationIo for SystemRuntimeObservationIo {
+    fn swaybg_surface_mapped(&self, output: &str) -> bool {
+        crate::runtime::swaybg_surface_outputs()
+            .is_ok_and(|outputs| outputs.iter().any(|name| name == output))
+    }
     fn mpvpaper_media_loaded(&self, process: &ProcessCommandLine, path: &str) -> bool {
         crate::mpvpaper_media::media_ready(process.pid, path)
     }
@@ -276,7 +283,11 @@ pub fn observe_runtime_wallpapers_with(
                         observation
                     }
                     wc_core::types::Backend::Swaybg => {
-                        observe_swaybg(output, saved.wallpaper_path, &swaybg)
+                        if io.swaybg_surface_mapped(output) {
+                            observe_swaybg(output, saved.wallpaper_path, &swaybg)
+                        } else {
+                            unknown(output, "No verified swaybg background surface on this output.")
+                        }
                     }
                     wc_core::types::Backend::Feh => unknown(
                         output,
@@ -379,7 +390,7 @@ fn collect_swaybg_evidence(
     evidence
 }
 
-fn parse_swaybg_command_line(
+pub(crate) fn parse_swaybg_command_line(
     argv: &[String],
     connected_outputs: &[String],
 ) -> Option<Vec<(String, String)>> {
@@ -391,11 +402,7 @@ fn parse_swaybg_command_line(
         match argv[index].as_str() {
             "--output" | "-o" => {
                 let output = argv.get(index + 1)?.trim();
-                if output.is_empty()
-                    || !connected_outputs
-                        .iter()
-                        .any(|connected| connected == output)
-                {
+                if output.is_empty() {
                     return None;
                 }
                 current_output = Some(output);
@@ -624,6 +631,31 @@ fn decode_proc_cmdline(raw: &[u8]) -> Result<Vec<String>, String> {
 }
 
 #[cfg(unix)]
+pub(crate) fn process_in_current_session(pid: u32) -> bool {
+    let keys = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
+        &["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"][..]
+    } else if std::env::var_os("DISPLAY").is_some() {
+        &["DISPLAY"][..]
+    } else {
+        // Isolated non-desktop tests have no compositor to accidentally control.
+        return true;
+    };
+    let Ok(raw) = std::fs::read(format!("/proc/{pid}/environ")) else {
+        return false;
+    };
+    keys.iter().all(|key| {
+        let Some(value) = std::env::var_os(key) else {
+            return false;
+        };
+        use std::os::unix::ffi::OsStrExt;
+        let mut expected = key.as_bytes().to_vec();
+        expected.push(b'=');
+        expected.extend_from_slice(value.as_bytes());
+        raw.split(|byte| *byte == 0).any(|entry| entry == expected)
+    })
+}
+
+#[cfg(unix)]
 pub(crate) fn read_current_user_process_command_lines() -> Result<Vec<ProcessCommandLine>, String> {
     use std::os::unix::fs::MetadataExt;
 
@@ -649,7 +681,7 @@ pub(crate) fn read_current_user_process_command_lines() -> Result<Vec<ProcessCom
                 return Err(format!("could not inspect process {pid}: {error}"));
             }
         };
-        if metadata.uid() != current_uid {
+        if metadata.uid() != current_uid || !process_in_current_session(pid) {
             continue;
         }
         let raw = match std::fs::read(entry.path().join("cmdline")) {

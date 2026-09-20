@@ -11,3 +11,5 @@ pub mod types;
 pub use config::ConfigDir;
 pub use error::WcError;
 pub use types::{FileType, WallpaperEntry};
+
+pub mod display_assignment;

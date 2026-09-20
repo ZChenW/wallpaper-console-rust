@@ -1197,9 +1197,9 @@ mod tests {
                 "display_state",
                 query_rows(
                     conn,
-                    "SELECT target_key, wallpaper_path, backend, updated_at
+                    "SELECT target_key, wallpaper_path, backend, updated_at, recipe_version, recipe_json, assignment_revision, recipe_provenance
                      FROM display_state ORDER BY target_key",
-                    4,
+                    8,
                 ),
             ),
             (

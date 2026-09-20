@@ -5,7 +5,7 @@
 #   cp -a examples/matugen/. ~/.config/matugen/
 #
 # Prefer command (avoids interactive prompts):
-#   matugen image "$still" -m dark --prefer darkness
+#   matugen image "$WCR_STILL" -m dark --prefer darkness
 
 [config]
 version_check = false

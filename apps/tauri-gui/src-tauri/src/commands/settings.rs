@@ -5,6 +5,63 @@ use wc_config::ConfigDirExt;
 use super::common::{fail, format_bytes, ok, storage, CommandResult, ScanProgressDto};
 use super::files;
 
+#[tauri::command]
+pub async fn display_rendering_settings(
+    targets: Vec<String>,
+) -> Result<Vec<wc_app::display_settings::DisplayRenderingSettings>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = wc_app::display_target::parse_display_targets(Some(&targets), None)?;
+        let known = wc_app::discover_connected_outputs().map_err(|e| e.message)?;
+        let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+            path: storage()?.cd.path.clone(),
+        });
+        service
+            .display_rendering_settings(&target, &known)
+            .map_err(|e| serde_json::to_string(&e).unwrap_or(e.message))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn update_display_rendering(
+    targets: Vec<String>,
+    patch: HashMap<String, String>,
+) -> Result<wc_app::display_operation::SwitchReport, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let target = wc_app::display_target::parse_display_targets(Some(&targets), None)?;
+        let known = wc_app::discover_connected_outputs().map_err(|e| e.message)?;
+        let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+            path: storage()?.cd.path.clone(),
+        });
+        service
+            .update_display_rendering_with_runtime(
+                &target,
+                &known,
+                &patch,
+                &mut wc_backend::runtime::SystemBackendRuntime,
+                &mut wc_backend::apply_stage::NoopReporter,
+            )
+            .map_err(|e| serde_json::to_string(&e).unwrap_or(e.message))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn post_apply_status() -> Result<Option<wc_app::post_apply::PostApplyReport>, String> {
+    tauri::async_runtime::spawn_blocking(|| wc_app::post_apply::last_report(storage()?))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub async fn post_apply_retry() -> Result<wc_app::post_apply::PostApplyReport, String> {
+    tauri::async_runtime::spawn_blocking(|| wc_app::post_apply::retry_last_action(storage()?))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Keys the GUI may write via `config_set` IPC.
 ///
 /// Mirrors `apps/tauri-gui/frontend/src/settings/configSchema.ts` plus keys
@@ -55,11 +112,7 @@ fn validate_writable_config_set(key: &str, value: &str) -> Result<(), String> {
         return Err(format!("Config key is not writable from the GUI: {key}"));
     }
 
-    if value.contains('\n') || value.contains('\r') {
-        return Err(format!(
-            "Config value for {key} must not contain line breaks."
-        ));
-    }
+    wc_core::config::validate_config_entry(key, value).map_err(|error| error.to_string())?;
 
     match key {
         "linux_wallpaperengine_path" => validate_linux_wallpaperengine_path(value),
@@ -129,7 +182,17 @@ pub async fn config_set(key: String, value: String) -> CommandResult {
                 return fail(error);
             }
             match s.config_set(&key, &value) {
-                Ok(()) => ok(format!("{} = {}", key, value)),
+                Ok(()) => {
+                    if key == "restore_on_login" {
+                        let enabled = s.config_get("restore_on_login", "off");
+                        if let Err(error) =
+                            wc_app::login_restore::sync_login_restore_autostart_for_value(&enabled)
+                        {
+                            return fail(error.to_string());
+                        }
+                    }
+                    ok(format!("{} = {}", key, value))
+                }
                 Err(e) => fail(e.to_string()),
             }
         }
@@ -157,9 +220,18 @@ pub async fn behavior_settings_update(
     patch: wc_core::behavior_setting::BehaviorSettingsPatch,
 ) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        storage()?
+        let storage = storage()?;
+        let before = storage
+            .behavior_settings()
+            .map_err(|error| error.to_string())?;
+        let snapshot = storage
             .update_behavior_settings(&expected_revision, &patch)
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        if before.settings.restore_on_login != snapshot.settings.restore_on_login {
+            wc_app::login_restore::sync_login_restore_autostart(snapshot.settings.restore_on_login)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok(snapshot)
     })
     .await
     .map_err(|error| error.to_string())?

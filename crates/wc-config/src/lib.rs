@@ -168,11 +168,7 @@ pub fn write_config_values<'a>(
 ) -> Result<(), WcError> {
     let entries = entries.into_iter().collect::<Vec<_>>();
     for (key, value) in &entries {
-        if value.contains('\n') || value.contains('\r') {
-            return Err(WcError::Other(format!(
-                "config value for {key:?} must be a single line (found newline characters)"
-            )));
-        }
+        wc_core::config::validate_config_entry(key, value)?;
     }
     let _lock = acquire_config_lock(config_dir)?;
     let config_path = config_dir.join("config");

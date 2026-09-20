@@ -1302,6 +1302,15 @@ select:focus, input:focus { border-color: var(--primary); }
   padding: 0.8rem 1.1rem;
 }
 
+.source-panel__path-entry {
+  padding: 0 1.25rem 1rem;
+}
+
+.source-panel__path-entry label {
+  display: block;
+  margin-block-end: 0.5rem;
+}
+
 .source-panel__button {
   min-height: 2.1rem;
   padding: 0.35rem 0.7rem;
@@ -1597,6 +1606,16 @@ select:focus, input:focus { border-color: var(--primary); }
     animation: none !important;
     visibility: visible !important;
   }
+
+  .settings-overlay[data-presentation-phase="open"],
+  .source-panel__backdrop {
+    opacity: 1;
+  }
+
+  .settings-overlay[data-presentation-phase="open"] .settings-panel,
+  .source-panel[data-presentation-phase="open"] {
+    transform: none;
+  }
 }
 
 .settings-panel__header {
@@ -1731,6 +1750,26 @@ select:focus, input:focus { border-color: var(--primary); }
   margin: 0;
   color: var(--danger);
 }
+
+.settings-display-rendering summary { cursor: pointer; font-weight: 600; }
+.settings-display-rendering .settings-display-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.75rem 0;
+}
+.settings-display-rendering .settings-display-actions .btn { margin-top: 0; }
+.settings-display-rendering .settings-field { margin-block: 0.75rem; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.settings-display-rendering input {
+  min-width: 0;
+  width: 100%;
+  padding: 0.5rem;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--text-muted);
+  font: inherit;
+}
+.settings-display-rendering > .btn { margin-top: 0.75rem; white-space: normal; }
 
 .settings-renderer-field {
   min-width: 0;

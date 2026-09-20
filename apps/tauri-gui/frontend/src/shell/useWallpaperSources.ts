@@ -139,6 +139,18 @@ export function useWallpaperSources({
     }
   }, []);
 
+  const addPath = useCallback((path: string): Promise<AddSourceOutcome> => runOperation(
+    'add',
+    async () => {
+      if (!path.trim()) return { kind: 'cancelled' };
+      const result = await executeTrackedSourceScan(
+        () => executeSourceMutation(() => sourceApi.sourceAdd(path), reconcile),
+        onScanStarted, onScanFinished,
+      );
+      return { kind: 'completed', path, result };
+    },
+  ), [onScanFinished, onScanStarted, reconcile, runOperation, sourceApi]);
+
   const addFromPicker = useCallback((): Promise<AddSourceOutcome> => runOperation(
     'add',
     async () => {
@@ -218,6 +230,7 @@ export function useWallpaperSources({
     pendingOperation,
     reload,
     addFromPicker,
+    addPath,
     rename,
     setRecursive,
     refresh,

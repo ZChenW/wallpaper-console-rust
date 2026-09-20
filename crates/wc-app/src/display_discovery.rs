@@ -29,6 +29,17 @@ const OVERALL_DISPLAY_DEADLINE: Duration = Duration::from_secs(3);
 /// The primary compositor probe gets at most 1.5 seconds. All probes combined
 /// have a 3-second overall deadline. Timed-out children are killed and reaped.
 pub fn discover_connected_outputs() -> Result<Vec<String>, AppError> {
+    if let Some(adapter) = crate::compositor::Adapter::current() {
+        return adapter
+            .snapshot()
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|o| o.enabled)
+                    .map(|o| o.name)
+                    .collect()
+            })
+            .map_err(|error| discovery_error(vec![error]));
+    }
     discover_connected_outputs_with_deadline(|name| std::env::var(name).ok())
 }
 

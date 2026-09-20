@@ -2,7 +2,12 @@
 
 mod backup;
 mod connection;
+pub mod display_operations;
+mod display_recipe;
 mod display_state;
+pub use display_recipe::{
+    assignment_revision_fingerprint, capture_render_options, display_recipe,
+};
 mod library_fts;
 mod library_page;
 mod library_revision;

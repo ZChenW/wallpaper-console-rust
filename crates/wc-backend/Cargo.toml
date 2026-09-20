@@ -15,5 +15,7 @@ serde_json.workspace = true
 log = { workspace = true }
 libc = { workspace = true }
 
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "bmp", "gif"] }
+
 [dev-dependencies]
 tempfile.workspace = true

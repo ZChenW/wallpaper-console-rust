@@ -97,6 +97,10 @@ pub(crate) fn build_awww_instant_command(path: &str, resize: &str, fps: &str) ->
         .arg(resize)
         .arg("--transition-type")
         .arg("simple")
+        // Simple transitions ignore duration; a full channel step is required
+        // to restore opaque pixels in one frame after transparent output release.
+        .arg("--transition-step")
+        .arg("255")
         .arg("--transition-duration")
         .arg("0")
         .arg("--transition-fps")
@@ -232,6 +236,9 @@ mod tests {
             args.contains(&"simple".to_string()),
             "instant must use simple"
         );
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--transition-step", "255"]));
     }
 
     #[test]
@@ -403,6 +410,52 @@ pub(crate) fn running_video_outputs(
                 if !outputs.contains(&output) { outputs.push(output); }
             }
             _ => return Err(wc_core::error::WcError::Other("mixed wallpaper requires named mpvpaper processes; restore displays to replace legacy wildcard processes".into())),
+        }
+    }
+    Ok(outputs)
+}
+
+/// Every independently owned non-awww layer must survive a shared daemon start.
+pub(crate) fn running_foreign_outputs(
+    runtime: &mut dyn crate::runtime::BackendRuntime,
+) -> Result<Vec<String>, wc_core::error::WcError> {
+    let mut outputs = running_video_outputs(runtime)?;
+    for process in runtime.renderer_command_lines()? {
+        let Some(program) = process.argv.first() else {
+            continue;
+        };
+        let names: Vec<String> = if crate::process_control::token_is_lwe_program(program) {
+            crate::runtime_observation::parse_lwe_command_line(&process.argv)
+                .ok_or_else(|| {
+                    wc_core::error::WcError::Other("ambiguous LWE output ownership".into())
+                })?
+                .into_iter()
+                .map(|(name, _)| name.into())
+                .collect()
+        } else if crate::process_control::token_is_swaybg_program(program) {
+            if !process
+                .argv
+                .iter()
+                .any(|arg| matches!(arg.as_str(), "-o" | "--output"))
+            {
+                return Err(wc_core::error::WcError::Other(
+                    "legacy global swaybg cannot coexist with awww".into(),
+                ));
+            }
+            crate::runtime_observation::parse_swaybg_command_line(&process.argv, &[])
+                .ok_or_else(|| {
+                    wc_core::error::WcError::Other("ambiguous swaybg output ownership".into())
+                })?
+                .into_iter()
+                .map(|(name, _)| name)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        for name in names {
+            if !outputs.contains(&name) {
+                outputs.push(name);
+            }
         }
     }
     Ok(outputs)

@@ -10,6 +10,7 @@ use wc_backend::runtime::BackendRuntime;
 use wc_config::ConfigDirExt;
 use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget, ALL_DISPLAYS_TARGET_KEY};
+#[cfg(test)]
 use wc_storage::StorageApi;
 
 /// Connected Wayland/X output discovered from the compositor/daemon.
@@ -68,6 +69,7 @@ pub struct TargetedApplyRequestDto {
     pub kind: String,
     pub path: String,
     pub target: Option<String>,
+    pub targets: Option<Vec<String>>,
     pub request_id: Option<String>,
 }
 
@@ -80,6 +82,7 @@ fn default_targeted_apply_kind() -> String {
 #[serde(rename_all = "camelCase")]
 pub struct TargetedRestoreRequestDto {
     pub outputs: Option<Vec<String>>,
+    pub targets: Option<Vec<String>>,
 }
 
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -305,6 +308,8 @@ fn execute_and_format_result(
     match service.execute_apply_request_with_options(request, options) {
         Ok(result) => {
             let dto = super::common::ApplyResultDto {
+                switch_report: Some(result.switch_report),
+                post_apply: result.post_apply,
                 request_id: result.request_id,
                 applied_path: result.applied_path.clone(),
                 state_path: result.state_path,
@@ -380,14 +385,13 @@ fn command_error_from_app_error(err: wc_app::AppError) -> CommandResult {
     }
 }
 
-fn stop_with_storage(s: &StorageApi) -> CommandResult {
-    stop_with_storage_using(s, wc_backend::stop_all_backends)
-}
-
+#[cfg(test)]
 fn stop_with_storage_using(
     s: &StorageApi,
     stop_backends: impl FnOnce(Option<&StorageApi>) -> Result<(), wc_core::error::WcError>,
 ) -> CommandResult {
+    // Legacy inject seam for unit tests. Production Stop always goes through
+    // AppService::stop_displays so recipes and session stop epochs are retained.
     let _guard = match wc_app::output_recovery::RendererMutationGuard::acquire(s) {
         Ok(guard) => guard,
         Err(error) => return fail(error.to_string()),
@@ -405,10 +409,28 @@ fn stop_with_storage_using(
 }
 
 #[tauri::command]
-pub async fn stop() -> CommandResult {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn stop(request: Option<TargetedRestoreRequestDto>) -> CommandResult {
+    // Invalidate applies still resolving paths/topology before they reach APPLY_LOCK.
+    // The queue is latest-intent-wins; a completed Stop must not be undone by one.
+    APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    tauri::async_runtime::spawn_blocking(move || {
         with_renderer_state_lock(&APPLY_LOCK, || match storage() {
-            Ok(s) => Ok(stop_with_storage(s)),
+            Ok(s) => {
+                let target = match request.as_ref().and_then(|r| r.targets.as_deref()) {
+                    Some(targets) => {
+                        wc_app::display_target::parse_display_targets(Some(targets), None)?
+                    }
+                    None => wc_app::DisplayTarget::AllDisplays,
+                };
+                let known = discover_connected_outputs()?;
+                let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
+                    path: s.cd.path.clone(),
+                });
+                Ok(match service.stop_displays(target, &known) {
+                    Ok(report) => ok(serde_json::to_string(&report).map_err(|e| e.to_string())?),
+                    Err(error) => command_error_from_app_error(error),
+                })
+            }
             Err(e) => Ok(fail(e)),
         })
         .unwrap_or_else(fail)
@@ -549,7 +571,7 @@ pub async fn apply_to_display(
                 Ok(value) => value,
                 Err(err) => return command_error_from_app_error(err),
             };
-            let target = match parse_display_target(request.target.as_deref()) {
+            let target = match wc_app::display_target::parse_display_targets(request.targets.as_deref(), request.target.as_deref()) {
                 Ok(t) => t,
                 Err(err) => {
                     return command_error_from_app_error(wc_app::AppError {
@@ -597,17 +619,21 @@ pub async fn apply_to_display(
 }
 
 #[tauri::command]
-pub async fn reapply_mpvpaper() -> Result<wc_app::mpvpaper_reapply::MpvpaperReapplyResult, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+pub async fn reapply_mpvpaper(
+    targets: Option<Vec<String>>,
+) -> Result<wc_app::mpvpaper_reapply::MpvpaperReapplyResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
         let outputs = discover_connected_outputs()?;
+        let target = wc_app::display_target::parse_display_targets(targets.as_deref(), None)?;
         with_renderer_state_lock(&APPLY_LOCK, || {
             let s = storage()?;
             let service = wc_app::AppService::from_config_dir(wc_core::ConfigDir {
                 path: s.cd.path.clone(),
             });
             service
-                .reapply_mpvpaper_with_runtime(
+                .reapply_mpvpaper_to_displays_with_runtime(
                     &outputs,
+                    &target,
                     &mut wc_backend::runtime::SystemBackendRuntime,
                 )
                 .map_err(|error| error.message)
@@ -642,7 +668,10 @@ pub async fn restore_displays(request: Option<TargetedRestoreRequestDto>) -> Com
                 path: s.cd.path.clone(),
             });
             with_renderer_state_lock(&APPLY_LOCK, || {
-                match service.restore_displays(&known_outputs) {
+                let target = wc_app::display_target::parse_display_targets(request.as_ref().and_then(|r| r.targets.as_deref()), None)?;
+                match service.restore_displays_with_runtime(&known_outputs, &mut wc_backend::runtime::SystemBackendRuntime,
+                    &mut wc_backend::apply_stage::NoopReporter,
+                    wc_app::DisplayRestoreRuntimeOpts { request_id: None, target: Some(target) }) {
                     Ok(()) => Ok(ok("Restored display wallpapers.")),
                     Err(err) => Ok(command_error_from_app_error(err)),
                 }
@@ -724,6 +753,8 @@ fn execute_display_apply_and_format(
     ) {
         Ok(result) => {
             let dto = super::common::ApplyResultDto {
+                switch_report: Some(result.switch_report),
+                post_apply: result.post_apply,
                 request_id: result.request_id,
                 applied_path: result.applied_path,
                 state_path: result.state_path,
@@ -831,6 +862,7 @@ where
     }
 }
 
+#[cfg(test)]
 fn parse_display_target(raw: Option<&str>) -> Result<wc_app::DisplayTarget, String> {
     wc_app::display_target::parse_display_target(raw)
 }
@@ -1360,6 +1392,8 @@ mod tests {
     #[test]
     fn targeted_apply_result_serializes_applied_outputs() {
         let dto = super::super::common::ApplyResultDto {
+            switch_report: None,
+            post_apply: None,
             request_id: Some("req-outputs".into()),
             applied_path: "/walls/a.jpg".into(),
             state_path: "/walls/a.jpg".into(),
@@ -1396,6 +1430,7 @@ mod tests {
     fn explicit_restore_outputs_must_match_discovery_order_independently() {
         let request = TargetedRestoreRequestDto {
             outputs: Some(vec!["eDP-1".into(), "HDMI-A-1".into()]),
+            targets: None,
         };
 
         let resolved = resolve_restore_outputs_with(Some(&request), || {
@@ -1410,6 +1445,7 @@ mod tests {
     fn explicit_restore_outputs_reject_incomplete_or_extra_sets() {
         let incomplete = TargetedRestoreRequestDto {
             outputs: Some(vec!["eDP-1".into()]),
+            targets: None,
         };
         let err = resolve_restore_outputs_with(Some(&incomplete), || {
             Ok(vec!["eDP-1".into(), "HDMI-A-1".into()])
@@ -1419,6 +1455,7 @@ mod tests {
 
         let extra = TargetedRestoreRequestDto {
             outputs: Some(vec!["eDP-1".into(), "HDMI-A-1".into()]),
+            targets: None,
         };
         let err =
             resolve_restore_outputs_with(Some(&extra), || Ok(vec!["eDP-1".into()])).unwrap_err();
@@ -1429,6 +1466,7 @@ mod tests {
     fn explicit_restore_outputs_reject_discovery_failure() {
         let request = TargetedRestoreRequestDto {
             outputs: Some(vec!["eDP-1".into()]),
+            targets: None,
         };
 
         let err = resolve_restore_outputs_with(Some(&request), || {

@@ -15,11 +15,11 @@ Include the kitty theme from your `kitty.conf` if you use it:
 include themes/matugen.conf
 ```
 
-Enable the hook in Wallpaper Console:
+Enable the hook in Wallpaper Console (defaults are off + empty command):
 
 ```bash
 wallpaper-console-rust config-set post_apply_enabled on
-# default: post_apply_command=matugen image "$still"
+wallpaper-console-rust config-set post_apply_command 'matugen image "$WCR_STILL" --prefer saturation'
 ```
 
 Optional helper with kitty/waybar reload:

@@ -38,13 +38,32 @@ fn run_with_storage(cmd: Commands, storage: &StorageApi) -> anyhow::Result<()> {
             outputs,
         } => crate::wallpaper::apply(storage, file, target, outputs),
         Commands::Inspect { path } => crate::wallpaper::inspect(storage, path),
-        Commands::Stop => crate::wallpaper::stop(storage),
+        Commands::Stop { targets } => crate::wallpaper::stop_targeted(storage, targets),
         Commands::Status => crate::wallpaper::status(storage),
+        Commands::PostApplyStatus => {
+            let report = wc_app::post_apply::last_report(storage).map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(())
+        }
+        Commands::PostApplyRetry => {
+            let report =
+                wc_app::post_apply::retry_last_action(storage).map_err(anyhow::Error::msg)?;
+            println!("{}", serde_json::to_string(&report)?);
+            anyhow::ensure!(
+                matches!(
+                    report.status,
+                    wc_app::post_apply::PostApplyStatus::Succeeded
+                ),
+                "{}",
+                report.detail
+            );
+            Ok(())
+        }
         Commands::Restore => crate::wallpaper::restore(storage),
         Commands::Displays => crate::wallpaper::displays(),
         Commands::DisplayState => crate::wallpaper::display_state(storage),
-        Commands::RestoreDisplays { outputs } => {
-            crate::wallpaper::restore_displays(storage, outputs)
+        Commands::RestoreDisplays { outputs, targets } => {
+            crate::wallpaper::restore_displays_targeted(storage, outputs, targets)
         }
         Commands::RestoreAtLogin => crate::wallpaper::restore_at_login(storage),
         other => run_remaining(other, storage),

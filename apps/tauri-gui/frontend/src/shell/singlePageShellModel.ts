@@ -3,7 +3,8 @@ import type { CurrentWallpaperState } from './currentWallpaperState.ts';
 import type { DisplayTarget, SourceFilter } from './shellPreferences.ts';
 
 /** Convert the persisted target into the Tauri wire format without inventing a sentinel. */
-export function targetArgument(target: DisplayTarget): string | undefined {
+export function targetArgument(target: DisplayTarget): string | string[] | undefined {
+  if (target.kind === 'outputs') return [...target.outputs];
   if (target.kind !== 'output') return undefined;
   const output = target.output.trim();
   return output.length > 0 ? output : undefined;

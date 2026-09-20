@@ -24,18 +24,25 @@ export default function DisplayTargetSelector({
   const model = buildDisplayTargetModel(connectedOutputs, value);
   if (model.hidden) return null;
 
-  const handleChange = (value: string) => {
-    const decoded = displayTargetFromSelectValue(value);
-    onChange(decoded);
-  };
+  const options = [...model.options];
+  if (value.kind === 'outputs' && value.outputs.length > 0) {
+    const multiValue = displayTargetToSelectValue(value);
+    if (!options.some((option) => option.value === multiValue)) {
+      options.splice(1, 0, {
+        label: `${value.outputs.length} displays`,
+        value: multiValue,
+        disabled: false,
+      });
+    }
+  }
 
   return (
     <SelectField
       aria-label={ariaLabel}
       disabled={disabled}
       value={displayTargetToSelectValue(model.selectedTarget)}
-      options={model.options}
-      onValueChange={handleChange}
+      options={options}
+      onValueChange={(next) => onChange(displayTargetFromSelectValue(next))}
       variant="compact"
     />
   );

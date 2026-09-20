@@ -24,6 +24,8 @@ pub struct ApplyRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyExecutionTarget {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipe: Option<wc_core::display_assignment::RenderRecipe>,
     pub input_path: String,
     pub resolved_path: String,
     pub state_path: String,
@@ -36,6 +38,8 @@ pub struct ApplyExecutionTarget {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ApplyExecutionResult {
+    pub switch_report: crate::display_operation::SwitchReport,
+    pub post_apply: Option<crate::post_apply::PostApplyReport>,
     pub request_id: Option<String>,
     pub applied_path: String,
     pub state_path: String,
@@ -414,7 +418,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn execute_apply_request_lwe_crash_includes_resolve_and_wait_stages() {
+    fn execute_apply_request_rejects_unavailable_topology_before_lwe_launch() {
         use std::os::unix::fs::PermissionsExt;
         use std::sync::{Arc, Mutex};
         use wc_backend::apply_stage::{ApplyStage, ApplyStageEvent, ApplyStageReporter};
@@ -459,9 +463,9 @@ mod tests {
             known_outputs: Some(vec!["eDP-1".into()]),
         };
 
-        assert!(service
+        let error = service
             .execute_apply_request_with_options(request, options)
-            .is_err());
+            .unwrap_err();
         let stages: Vec<_> = events
             .lock()
             .unwrap()
@@ -472,11 +476,10 @@ mod tests {
             stages.contains(&ApplyStage::ResolveTarget),
             "expected ResolveTarget in {stages:?}"
         );
+        assert_eq!(stages, [ApplyStage::ResolveTarget], "{error:?}");
         assert!(
-            stages
-                .iter()
-                .any(|s| matches!(s, ApplyStage::StartLwe | ApplyStage::WaitRendererAlive)),
-            "expected LWE apply stages in {stages:?}"
+            error.message.contains("output") || error.message.contains("display"),
+            "{error:?}"
         );
     }
 }

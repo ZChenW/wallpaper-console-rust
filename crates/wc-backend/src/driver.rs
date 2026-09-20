@@ -48,7 +48,7 @@ pub fn preflight_awww_transparency(
     let facts = runtime.awww_environment(!fresh_daemon)?;
     if !facts.niri_socket_present {
         return Err(WcError::Other(
-            "mixed awww/mpvpaper is currently verified only on niri".into(),
+            "mixed awww wallpaper is currently verified only on niri".into(),
         ));
     }
     if !facts
@@ -163,6 +163,7 @@ pub(crate) struct PreparedApply {
     scope: ExecutionScope,
     request_id: Option<String>,
     operation: PreparedOperation,
+    image_stamp: Option<crate::image_media::ImageStamp>,
 }
 
 enum PreparedOperation {
@@ -190,6 +191,12 @@ enum PreparedOperation {
 }
 
 impl PreparedApply {
+    pub(crate) fn verify_media(&self) -> Result<(), WcError> {
+        if let Some(stamp) = &self.image_stamp {
+            stamp.verify(&self.path)?;
+        }
+        Ok(())
+    }
     pub(crate) fn backend(&self) -> Backend {
         self.backend
     }
@@ -222,8 +229,6 @@ pub(crate) enum CleanupOutcome {
         backend: Backend,
         outputs: Vec<String>,
     },
-    VerifiedGlobalStop(Backend),
-    UncertainGlobalStop(Backend),
     UncertainTarget,
 }
 
@@ -263,6 +268,7 @@ pub(crate) fn prepare_legacy_apply(
     if backend == Backend::LinuxWallpaperEngine {
         runtime.ensure_backend_available(backend, storage)?;
         return Ok(PreparedApply {
+            image_stamp: None,
             backend,
             path: path.to_string(),
             scope: ExecutionScope::AllDisplays,
@@ -506,11 +512,13 @@ fn prepare_swaybg(
     request: &PrepareApplyRequest<'_>,
     runtime: &mut dyn BackendRuntime,
 ) -> Result<PreparedOperation, WcError> {
+    runtime.preflight_swaybg_observation()?;
     let path = std::path::Path::new(request.path);
     if !path.is_file() {
         return Err(WcError::NotRegularFile(path.to_path_buf()));
     }
     request.scope.validate()?;
+    preflight_shared_surface(runtime)?;
     let resize_raw = storage.config_get("awww_resize", "crop");
     let command = build_swaybg_launch_command(
         request.path,
@@ -580,6 +588,38 @@ fn prepare_lwe(request: &PrepareApplyRequest<'_>) -> Result<PreparedOperation, W
     }
     let project = crate::linux_wallpaperengine::project_from_path(request.path)?;
     Ok(PreparedOperation::LinuxWallpaperEngine { project, outputs })
+}
+
+fn preflight_shared_surface(runtime: &mut dyn BackendRuntime) -> Result<(), WcError> {
+    match runtime.awww_socket_ready() {
+        AwwwReadiness::Ready => preflight_awww_transparency(runtime, false),
+        AwwwReadiness::SocketMissing => Ok(()),
+        AwwwReadiness::SocketPresentQueryFailed { stderr } => Err(WcError::Other(format!(
+            "cannot establish awww surface ownership: {stderr}"
+        ))),
+    }
+}
+
+fn release_shared_surface(
+    runtime: &mut dyn BackendRuntime,
+    outputs: &[String],
+) -> Result<(), WcError> {
+    preflight_shared_surface(runtime)?;
+    if matches!(runtime.awww_socket_ready(), AwwwReadiness::Ready) {
+        let raw = runtime.awww_query_json()?;
+        let present: Vec<_> = outputs
+            .iter()
+            .filter_map(|output| match crate::awww::query_has_output(&raw, output) {
+                Ok(true) => Some(Ok(output.clone())),
+                Ok(false) => None,
+                Err(e) => Some(Err(e)),
+            })
+            .collect::<Result<_, _>>()?;
+        if !present.is_empty() {
+            crate::awww::release_outputs(runtime, &present)?;
+        }
+    }
+    Ok(())
 }
 
 fn execute_mpvpaper(
@@ -712,21 +752,15 @@ fn execute_swaybg(
 ) -> Result<(), DriverApplyFailure> {
     let path = prepared.path.clone();
     let scope = prepared.scope.clone();
+    if let Some(outputs) = scope.named_outputs() {
+        release_shared_surface(runtime, outputs)?;
+    }
     let PreparedOperation::Swaybg { command } = &mut prepared.operation else {
         return Err(WcError::Other("swaybg driver received another backend's apply".into()).into());
     };
     let previous_pids = runtime.swaybg_pids()?;
-    match runtime.command_status(command) {
-        Ok(status) if status.success() => {}
-        Ok(_) => {
-            return Err(cleanup_failed_swaybg_start(
-                runtime,
-                &previous_pids,
-                &path,
-                &scope,
-                WcError::Other("swaybg failed to apply wallpaper".into()),
-            ));
-        }
+    match runtime.launch_swaybg(command) {
+        Ok(()) => {}
         Err(error) => {
             return Err(cleanup_failed_swaybg_start(
                 runtime,
@@ -739,15 +773,32 @@ fn execute_swaybg(
     }
     let pid = match runtime.wait_for_swaybg_ready(&previous_pids, &path, &scope) {
         Ok(pid) => pid,
-        Err(error) => return Err(cleanup_started_swaybg(runtime, error)),
+        Err(error) => {
+            return Err(cleanup_failed_swaybg_start(
+                runtime,
+                &previous_pids,
+                &path,
+                &scope,
+                error,
+            ))
+        }
     };
     match runtime.swaybg_pid_running(pid) {
         Ok(true) => Ok(()),
-        Ok(false) => Err(cleanup_started_swaybg(
+        Ok(false) => Err(cleanup_failed_swaybg_start(
             runtime,
+            &previous_pids,
+            &path,
+            &scope,
             WcError::Other("swaybg renderer exited before startup settled".into()),
         )),
-        Err(error) => Err(cleanup_started_swaybg(runtime, error)),
+        Err(error) => Err(cleanup_failed_swaybg_start(
+            runtime,
+            &previous_pids,
+            &path,
+            &scope,
+            error,
+        )),
     }
 }
 
@@ -766,24 +817,6 @@ fn cleanup_failed_swaybg_start(
                  {cleanup_error}"
             )),
             cleanup: CleanupOutcome::UncertainTarget,
-        },
-    }
-}
-
-fn cleanup_started_swaybg(
-    runtime: &mut dyn BackendRuntime,
-    original_error: WcError,
-) -> DriverApplyFailure {
-    match SWAYBG_DRIVER.stop_checked(runtime, None) {
-        Ok(()) => DriverApplyFailure {
-            error: original_error,
-            cleanup: CleanupOutcome::VerifiedGlobalStop(Backend::Swaybg),
-        },
-        Err(cleanup_error) => DriverApplyFailure {
-            error: WcError::Other(format!(
-                "{original_error}; swaybg cleanup could not be verified: {cleanup_error}"
-            )),
-            cleanup: CleanupOutcome::UncertainGlobalStop(Backend::Swaybg),
         },
     }
 }
@@ -845,7 +878,7 @@ impl BackendDriver for AwwwDriver {
         let video_outputs = if !request.stopped_backends.contains(&Backend::Mpvpaper)
             && matches!(request.scope, ExecutionScope::Named(_))
         {
-            crate::awww::running_video_outputs(runtime)?
+            crate::awww::running_foreign_outputs(runtime)?
         } else {
             Vec::new()
         };
@@ -853,6 +886,7 @@ impl BackendDriver for AwwwDriver {
             preflight_awww_transparency(runtime, false)?;
         }
         Ok(PreparedApply {
+            image_stamp: runtime.preflight_image(request.path)?,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -884,7 +918,7 @@ impl BackendDriver for AwwwDriver {
             request_id,
         );
         let videos = if matches!(prepared.scope, ExecutionScope::Named(_)) {
-            crate::awww::running_video_outputs(runtime)?
+            crate::awww::running_foreign_outputs(runtime)?
         } else {
             Vec::new()
         };
@@ -1012,6 +1046,7 @@ impl BackendDriver for MpvpaperDriver {
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
         Ok(PreparedApply {
+            image_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1092,12 +1127,12 @@ impl BackendDriver for SwaybgDriver {
             backend: Backend::Swaybg,
             output_target_mode: OutputTargetMode::NamedOutputs,
             output_target_evidence: Evidence::CliVerified,
-            all_displays: AllDisplaysTargeting::OmitMeansAll,
+            all_displays: AllDisplaysTargeting::OneProcessPerOutput,
             all_displays_evidence: Evidence::CliVerified,
-            stop_scope: StopScope::AllMatchingProcesses,
+            stop_scope: StopScope::TrackedProcessPerOutput,
             stop_scope_evidence: Evidence::ImplementationLimit,
-            multi_instance: MultiInstanceSupport::SingleProcessUnverified,
-            multi_instance_evidence: Evidence::Unverified,
+            multi_instance: MultiInstanceSupport::SeparateProcessesVerified,
+            multi_instance_evidence: Evidence::CliVerified,
             same_target_replacement: SameTargetReplacement::StopThenApply,
             same_target_replacement_evidence: Evidence::ImplementationLimit,
             cross_output_coexistence: CrossOutputCoexistence::Unknown,
@@ -1123,6 +1158,7 @@ impl BackendDriver for SwaybgDriver {
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
         Ok(PreparedApply {
+            image_stamp: runtime.preflight_image(request.path)?,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1143,6 +1179,42 @@ impl BackendDriver for SwaybgDriver {
 
     fn stop(&self, runtime: &mut dyn BackendRuntime, _storage: Option<&StorageApi>) {
         runtime.stop_swaybg();
+    }
+
+    fn preflight_stop(
+        &self,
+        scope: &ExecutionScope,
+        runtime: &mut dyn BackendRuntime,
+    ) -> Result<(), WcError> {
+        if let ExecutionScope::Named(outputs) = scope {
+            crate::swaybg_process::targeted_processes(&runtime.renderer_command_lines()?, outputs)?;
+        }
+        Ok(())
+    }
+
+    fn stop_scoped_checked(
+        &self,
+        runtime: &mut dyn BackendRuntime,
+        storage: Option<&StorageApi>,
+        scope: &ExecutionScope,
+    ) -> Result<(), WcError> {
+        match scope {
+            ExecutionScope::AllDisplays => self.stop_checked(runtime, storage),
+            ExecutionScope::Named(outputs) => {
+                runtime.stop_swaybg_outputs(outputs)?;
+                if !crate::swaybg_process::targeted_processes(
+                    &runtime.renderer_command_lines()?,
+                    outputs,
+                )?
+                .is_empty()
+                {
+                    return Err(WcError::Other(
+                        "swaybg still owns the requested outputs".into(),
+                    ));
+                }
+                Ok(())
+            }
+        }
     }
 
     fn stop_checked(
@@ -1197,6 +1269,7 @@ impl BackendDriver for FehDriver {
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
         Ok(PreparedApply {
+            image_stamp: runtime.preflight_image(request.path)?,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1288,6 +1361,7 @@ impl BackendDriver for LweDriver {
         runtime: &mut dyn BackendRuntime,
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
+        preflight_shared_surface(runtime)?;
         if !request.stopped_backends.contains(&self.backend()) {
             if let ExecutionScope::Named(outputs) = request.scope {
                 crate::lwe_process::targeted_processes(
@@ -1297,6 +1371,7 @@ impl BackendDriver for LweDriver {
             }
         }
         Ok(PreparedApply {
+            image_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1316,6 +1391,7 @@ impl BackendDriver for LweDriver {
         apply_stage::report_stage(reporter, apply_stage::ApplyStage::StartLwe, request_id);
         match &prepared.operation {
             PreparedOperation::LinuxWallpaperEngine { project, outputs } => {
+                release_shared_surface(runtime, outputs)?;
                 runtime.apply_lwe_to_outputs(storage, project, outputs)?;
                 apply_stage::report_stage(
                     reporter,

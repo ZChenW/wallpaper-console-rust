@@ -222,9 +222,11 @@ pub fn render_preview(cd: &ConfigDir, file: &str) {
 
     let ext = wc_core::formats::get_extension(file).unwrap_or_default();
 
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" | "gif" => preview_image(cd, file, &ext),
-        "mp4" | "webm" | "mkv" | "mov" => preview_video(cd, file, &ext),
+    match wc_core::formats::classify_media_path(path).map(|(kind, _)| kind) {
+        Some(wc_core::types::FileType::Image | wc_core::types::FileType::Gif) => {
+            preview_image(cd, file, &ext)
+        }
+        Some(wc_core::types::FileType::Video) => preview_video(cd, file, &ext),
         _ => println!(
             "Unsupported: {}",
             path.file_name()
@@ -487,11 +489,11 @@ fn config_preview_metadata(cd: &ConfigDir) -> String {
 
 fn config_backend_for_ext(cd: &ConfigDir, ext: &str) -> String {
     match ext {
-        "png" | "jpg" | "jpeg" | "webp" | "bmp" => {
+        "png" | "apng" | "jpg" | "jpeg" | "webp" | "bmp" => {
             wc_config::read_config_value(&cd.path, "image_backend", "awww")
         }
         "gif" => wc_config::read_config_value(&cd.path, "gif_backend", "awww"),
-        "mp4" | "webm" | "mkv" | "mov" => {
+        "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv" => {
             wc_config::read_config_value(&cd.path, "video_backend", "mpvpaper")
         }
         _ => "?".to_string(),
@@ -636,7 +638,7 @@ pub fn generate_gui_thumbnail(
     // deleting or partially overwriting one another before atomic publication.
     let tmp = reserve_unique_thumbnail_temp(cache_dir, &key)?;
 
-    let generated = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov") {
+    let generated = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv") {
         generate_video_thumbnail_v2(path, &tmp)
             .then_some(())
             .ok_or(ThumbnailFailure::ProbeFailed)

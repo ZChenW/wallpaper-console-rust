@@ -1,4 +1,5 @@
 import type { CommandResult } from './bridge';
+import { parseSwitchReport, switchOutcomeLabel } from './switchReport.ts';
 
 export type CommandFeedback =
   | { state: 'idle' }
@@ -21,6 +22,17 @@ export function commandSuccessFeedback(label: string, result?: CommandResult | v
 
 export function commandErrorFeedback(label: string, resultOrError: CommandResult | unknown): CommandFeedback {
   if (isCommandResult(resultOrError)) {
+    const report = parseSwitchReport(resultOrError.error?.detail);
+    if (report) {
+      const recovered = report.outcome === 'restored_previous' || report.outcome === 'unchanged';
+      return {
+        state: recovered ? 'warning' : 'error',
+        label: `${label} failed — ${switchOutcomeLabel[report.outcome].toLowerCase()}`,
+        detail: [report.originalError, ...report.outputs.map((row) =>
+          `${row.output}: ${switchOutcomeLabel[row.outcome]}${row.error ? ` — ${row.error}` : ''}`)]
+          .filter(Boolean).join('\n'),
+      };
+    }
     const detail = [
       resultOrError.error?.message || resultOrError.stderr || resultOrError.stdout || 'The command failed.',
       resultOrError.error?.suggestion,

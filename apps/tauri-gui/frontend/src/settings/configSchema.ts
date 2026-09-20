@@ -62,14 +62,14 @@ export const ALL_SETTINGS: SettingEntry[] = [
     description: 'mpvpaper output selector. Keep "*" unless you need a specific monitor.',
   },
   {
-    key: 'post_apply_enabled', label: 'Post-apply theme hook', type: 'select',
+    key: 'post_apply_enabled', label: 'Post-apply action', type: 'select',
     options: ['off', 'on'], category: 'wallpaper', advanced: true,
     description: 'After a successful apply, run an external command (for example matugen) to sync colors from the wallpaper. Also writes theme-state.json for per-output palettes.',
   },
   {
     key: 'post_apply_command', label: 'Post-apply command', type: 'text',
-    placeholder: 'matugen image "$still"', category: 'wallpaper', advanced: true,
-    description: 'Shell command run after apply. Placeholders: $wallpaper, $path, $still, $backend, $outputs, $manifest, $theme_source. Env: WCR_THEME_MANIFEST, WCR_THEME_SOURCE_OUTPUT.',
+    placeholder: 'matugen image "$WCR_STILL" --prefer saturation', category: 'wallpaper', advanced: true,
+    description: 'Shell command run after apply. Prefer versioned env vars such as "$WCR_STILL", "$WCR_WALLPAPER", "$WCR_BACKEND", "$WCR_OUTPUTS", and "$WCR_THEME_MANIFEST". Legacy $still/$wallpaper shell placeholders are no longer substituted into the command text.',
   },
   {
     key: 'post_apply_timeout_secs', label: 'Post-apply timeout (s)', type: 'number',

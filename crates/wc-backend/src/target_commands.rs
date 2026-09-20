@@ -130,8 +130,7 @@ pub fn build_swaybg_launch_command(
         "stretch" => "stretch",
         _ => "fill",
     };
-    let mut cmd = Command::new("setsid");
-    cmd.args(["-f", "swaybg"]);
+    let mut cmd = Command::new("swaybg");
     match scope {
         ExecutionScope::AllDisplays => {
             cmd.args(["--image", path, "--mode", mode]);
@@ -299,12 +298,10 @@ mod tests {
         let scope = ExecutionScope::named(vec!["eDP-1".into(), "HDMI-A-1".into()]).unwrap();
         let cmd = build_swaybg_launch_command("/tmp/a.jpg", "crop", &scope).unwrap();
 
-        assert_eq!(cmd.get_program(), "setsid");
+        assert_eq!(cmd.get_program(), "swaybg");
         assert_eq!(
             args_of(&cmd),
             vec![
-                "-f",
-                "swaybg",
                 "--output",
                 "eDP-1",
                 "--image",

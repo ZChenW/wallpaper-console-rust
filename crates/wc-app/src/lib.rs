@@ -2,14 +2,18 @@ pub mod apply_execution;
 pub mod apply_plan;
 pub mod apply_stage_labels;
 mod command_probe;
+pub mod compositor;
 pub mod display_apply;
 mod display_discovery;
+pub mod display_operation;
 pub mod display_plan;
 pub mod display_restore;
+pub mod display_settings;
 pub mod display_target;
 pub mod library_refresh;
 pub mod library_refresh_round;
 pub mod library_rescan;
+pub mod login_restore;
 pub mod mpvpaper_reapply;
 pub mod output_recovery;
 pub mod post_apply;
@@ -157,6 +161,8 @@ impl AppService {
             },
         )?;
         Ok(ApplyExecutionResult {
+            switch_report: result.switch_report,
+            post_apply: result.post_apply,
             request_id: result.request_id,
             applied_path: result.applied_path,
             state_path: result.state_path,
@@ -211,6 +217,33 @@ impl AppService {
         })
     }
 
+    pub(crate) fn resolve_recipe_target(
+        &self,
+        recipe: &wc_core::display_assignment::RenderRecipe,
+    ) -> Result<apply_execution::ApplyExecutionTarget, AppError> {
+        use wc_core::display_assignment::Presentation;
+        recipe.validate().map_err(AppError::from_wc_error)?;
+        let mut resolved = self.resolve_apply_request_target(&ApplyRequest {
+            kind: if recipe.presentation == Presentation::Preview {
+                ApplyRequestKind::ApplyPreview
+            } else {
+                ApplyRequestKind::Apply
+            },
+            path: recipe.source.clone(),
+            request_id: None,
+        })?;
+        let backend = recipe.options.backend();
+        let compatible = wc_core::backend_routing::backend_supports(resolved.file_type, backend);
+        if resolved.resolved_path != recipe.media_path || !compatible {
+            return Err(AppError::from_wc_error(wc_core::error::WcError::Other(
+                "saved recipe no longer matches its media; apply the wallpaper again".into(),
+            )));
+        }
+        resolved.backend = backend;
+        resolved.recipe = Some(recipe.clone());
+        Ok(resolved)
+    }
+
     pub fn resolve_apply_request_target(
         &self,
         request: &ApplyRequest,
@@ -220,6 +253,7 @@ impl AppService {
                 let target = self.resolve_apply_target(&request.path)?;
                 let fallback_path = resolve_fallback(&target);
                 Ok(apply_execution::ApplyExecutionTarget {
+                    recipe: None,
                     input_path: request.path.clone(),
                     resolved_path: target.resolved_path.clone(),
                     state_path: target.resolved_path,
@@ -249,6 +283,7 @@ impl AppService {
                     .ok_or_else(|| AppError::unsupported_path(&preview))?;
                 let backend = self.backend_for_entry(&preview_entry)?;
                 Ok(apply_execution::ApplyExecutionTarget {
+                    recipe: None,
                     input_path: request.path.clone(),
                     resolved_path: preview.to_string(),
                     state_path: preview.to_string(),
@@ -262,7 +297,10 @@ impl AppService {
     }
 
     fn backend_for_entry(&self, entry: &WallpaperEntry) -> Result<Backend, AppError> {
-        let backend = self.storage.backend_routing().backend_for(entry.file_type);
+        let backend = self
+            .storage
+            .backend_routing()
+            .backend_for_media(entry.file_type, &entry.ext);
         match backend {
             Backend::Unsupported => Err(AppError::unsupported_backend(
                 entry.file_type,

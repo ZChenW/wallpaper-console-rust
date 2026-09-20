@@ -23,6 +23,7 @@ pub fn sqlite_source_remove_canonical(cd: &ConfigDir, path: &str) -> Result<bool
 }
 
 pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
+    wc_core::config::validate_config_entry(key, value)?;
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
     conn.execute(

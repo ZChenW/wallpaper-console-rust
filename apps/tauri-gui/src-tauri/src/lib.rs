@@ -161,6 +161,8 @@ pub fn run() {
             commands::behavior_settings_get,
             commands::behavior_settings_update,
             commands::reapply_mpvpaper,
+            commands::display_rendering_settings,
+            commands::update_display_rendering,
             commands::sources_list,
             commands::first_run_source_suggestions,
             commands::source_add,
@@ -207,6 +209,8 @@ pub fn run() {
             commands::reveal_in_file_manager,
             commands::browse_directory,
             commands::export_diagnostics,
+            commands::post_apply_status,
+            commands::post_apply_retry,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| {

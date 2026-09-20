@@ -31,12 +31,14 @@ export function normalizeDisplayOutputs(outputs: readonly string[]): string[] {
 }
 
 export function normalizeDisplayTarget(target: DisplayTarget): DisplayTarget {
+  if (target.kind === 'outputs') return { kind: 'outputs', outputs: normalizeDisplayOutputs(target.outputs) };
   if (target.kind !== 'output') return { kind: 'allDisplays' };
   const output = target.output.trim();
   return output.length > 0 ? { kind: 'output', output } : { kind: 'allDisplays' };
 }
 
 export function displayTargetToSelectValue(target: DisplayTarget): string {
+  if (target.kind === 'outputs') return `outputs:${encodeURIComponent(JSON.stringify(target.outputs))}`;
   if (target.kind !== 'output') return ALL_DISPLAYS_SELECT_VALUE;
   const output = target.output.trim();
   return output.length > 0
@@ -45,6 +47,12 @@ export function displayTargetToSelectValue(target: DisplayTarget): string {
 }
 
 export function displayTargetFromSelectValue(value: string): DisplayTarget {
+  if (value.startsWith('outputs:')) {
+    try {
+      const outputs: unknown = JSON.parse(decodeURIComponent(value.slice(8)));
+      return { kind: 'outputs', outputs: Array.isArray(outputs) ? normalizeDisplayOutputs(outputs) : [] };
+    } catch { return { kind: 'outputs', outputs: [] }; }
+  }
   if (value === ALL_DISPLAYS_SELECT_VALUE) return { kind: 'allDisplays' };
   if (!value.startsWith(OUTPUT_SELECT_VALUE_PREFIX)) return { kind: 'allDisplays' };
   try {
@@ -62,8 +70,9 @@ export function buildDisplayTargetModel(
   const outputs = normalizeDisplayOutputs(connectedOutputs);
   const selectedTarget = normalizeDisplayTarget(savedTarget);
   const canApply = outputs.length > 0 && (
-    selectedTarget.kind !== 'output'
-    || outputs.includes(selectedTarget.output)
+    selectedTarget.kind === 'outputs'
+      ? selectedTarget.outputs.length > 0 && selectedTarget.outputs.every((name) => outputs.includes(name))
+      : selectedTarget.kind !== 'output' || outputs.includes(selectedTarget.output)
   );
   const disconnectedOutput = selectedTarget.kind === 'output' && !canApply
     ? selectedTarget.output
@@ -84,7 +93,7 @@ export function buildDisplayTargetModel(
     });
   }
   return {
-    hidden: outputs.length <= 1 && disconnectedOutput === null,
+    hidden: outputs.length <= 1 && disconnectedOutput === null && selectedTarget.kind !== 'outputs',
     connectedOutputs: outputs,
     selectedTarget,
     canApply,

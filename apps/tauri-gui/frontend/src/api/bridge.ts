@@ -1,6 +1,7 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
   ApplyRequestDTO,
+  PostApplyReportDTO,
   BehaviorSettingsPatchDTO,
   BehaviorSettingsSnapshotDTO,
   MpvpaperReapplyResultDTO,
@@ -102,7 +103,8 @@ export const api = {
   ...createRuntimeObservationApi(),
   applyToDisplay: (request: TargetedApplyRequestDTO): Promise<CommandResult> =>
     invoke<CommandResult>('apply_to_display', { request }),
-  stop: (): Promise<CommandResult> => invoke<CommandResult>('stop'),
+  stop: (request?: TargetedRestoreRequestDTO): Promise<CommandResult> =>
+    request ? invoke<CommandResult>('stop', { request }) : invoke<CommandResult>('stop'),
   weClearBackendError: (path: string): Promise<CommandResult> => invoke<CommandResult>('we_clear_backend_error', { path }),
   weDebugInfo: (): Promise<WeDebugInfoDTO> => invoke<WeDebugInfoDTO>('we_debug_info'),
   restore: (): Promise<CommandResult> => invoke<CommandResult>('restore'),
@@ -146,14 +148,18 @@ export const api = {
   removeMissingSources: (): Promise<CommandResult> => invoke<CommandResult>('remove_missing_sources'),
   scanSteamWorkshop: (): Promise<CommandResult> => invoke<CommandResult>('scan_steam_workshop'),
 
+  postApplyStatus: (): Promise<PostApplyReportDTO | null> => invoke('post_apply_status'),
+  displayRenderingSettings: (targets: string[]): ReturnType<WallpaperConsoleApi['displayRenderingSettings']> => invoke('display_rendering_settings', { targets }),
+  updateDisplayRendering: (targets: string[], patch: Record<string, string>): ReturnType<WallpaperConsoleApi['updateDisplayRendering']> => invoke('update_display_rendering', { targets, patch }),
+  postApplyRetry: (): Promise<PostApplyReportDTO> => invoke('post_apply_retry'),
   configGet: (key: string): Promise<string> => invoke<string>('config_get', { key }),
   configGetMany: (keys: string[]): Promise<Record<string, string>> =>
     invoke<Record<string, string>>('config_get_many', { keys }),
   configSet: (key: string, value: string): Promise<CommandResult> => invoke<CommandResult>('config_set', { key, value }),
   behaviorSettingsGet: (): Promise<BehaviorSettingsSnapshotDTO> =>
     invoke<BehaviorSettingsSnapshotDTO>('behavior_settings_get'),
-  reapplyMpvpaper: (): Promise<MpvpaperReapplyResultDTO> =>
-    invoke<MpvpaperReapplyResultDTO>('reapply_mpvpaper'),
+  reapplyMpvpaper: (targets?: string[]): Promise<MpvpaperReapplyResultDTO> =>
+    invoke<MpvpaperReapplyResultDTO>('reapply_mpvpaper', targets ? { targets } : undefined),
   behaviorSettingsUpdate: (
     expectedRevision: string,
     patch: BehaviorSettingsPatchDTO,

@@ -101,9 +101,10 @@ pub fn plan_for_entry_with_kind_and_routing(
     routing: &BackendRouting,
 ) -> ApplyPlan {
     match entry.file_type {
-        FileType::Image | FileType::Gif | FileType::Video => {
-            plan_image(entry, routing.backend_for(entry.file_type))
-        }
+        FileType::Image | FileType::Gif | FileType::Video => plan_image(
+            entry,
+            routing.backend_for_media(entry.file_type, &entry.ext),
+        ),
         FileType::WeScene => plan_we_scene(entry, backend_failed, error_kind),
         FileType::WeWeb => plan_we_web(entry),
         FileType::WeApplication => plan_we_application(entry),

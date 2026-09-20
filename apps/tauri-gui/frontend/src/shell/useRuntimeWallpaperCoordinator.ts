@@ -63,9 +63,10 @@ export interface RuntimeWallpaperCoordinatorResult {
     readonly pendingPath: string | null;
     readonly applyActionToDisplay: (
       request: ApplyRequestDTO,
-      target?: string,
+      target?: string | string[],
     ) => void;
-    readonly applyToDisplay: (path: string, target?: string) => void;
+    readonly applyToDisplay: (path: string, target?: string | string[]) => void;
+    readonly cancelPendingForTargets: (outputs?: readonly string[]) => void;
   };
 }
 
@@ -194,6 +195,7 @@ export function useRuntimeWallpaperCoordinator({
     refresh: refreshCurrent,
   }), [currentPath, currentWallpaper, runtimeObservationReady, refreshCurrent]);
   const apply = useMemo(() => ({
+    cancelPendingForTargets: applyQueue.cancelPendingForTargets,
     applying: applyQueue.applying,
     activePath: applyQueue.activePath ?? null,
     pendingPath: applyQueue.pendingPath ?? null,
@@ -201,6 +203,7 @@ export function useRuntimeWallpaperCoordinator({
     applyToDisplay: applyQueue.handleApplyToDisplay,
   }), [
     applyQueue.activePath,
+    applyQueue.cancelPendingForTargets,
     applyQueue.applying,
     applyQueue.handleApplyActionToDisplay,
     applyQueue.handleApplyToDisplay,

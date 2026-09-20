@@ -7,6 +7,7 @@ use wc_storage::StorageApi;
 
 use crate::Commands;
 
+#[cfg(test)]
 fn parse_display_target(raw: &str) -> anyhow::Result<wc_app::DisplayTarget> {
     wc_app::display_target::parse_display_target(Some(raw)).map_err(anyhow::Error::msg)
 }
@@ -21,6 +22,7 @@ fn discover_connected_outputs() -> anyhow::Result<Vec<String>> {
     })
 }
 
+#[cfg(test)]
 fn apply_to_display_with<F>(
     path: &str,
     raw_target: &str,
@@ -38,6 +40,7 @@ where
     apply_targeted(path, target, known_outputs).map_err(|e| anyhow::anyhow!(e.message))
 }
 
+#[cfg(test)]
 fn restore_displays_with<F>(known_outputs: &[String], restore: F) -> anyhow::Result<()>
 where
     F: FnOnce(&[String]) -> Result<(), wc_app::AppError>,
@@ -84,31 +87,46 @@ fn app_service_from_storage(s: &StorageApi) -> anyhow::Result<wc_app::AppService
 pub(crate) fn apply(
     s: &StorageApi,
     file: String,
-    target: Option<String>,
+    targets: Vec<String>,
     explicit_outputs: Vec<String>,
 ) -> anyhow::Result<()> {
     let service = app_service_from_storage(s)?;
-    let target = match target {
-        None => {
-            if !explicit_outputs.is_empty() {
-                anyhow::bail!("--output requires an explicit --target");
-            }
-            service
-                .apply(&file)
-                .map_err(|e| anyhow::anyhow!(e.message))?
+    let target = if targets.is_empty() {
+        if !explicit_outputs.is_empty() {
+            anyhow::bail!("--output requires an explicit --target");
         }
-        Some(raw_target) => {
-            let known_outputs =
-                resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
-            apply_to_display_with(
-                &file,
-                &raw_target,
-                &known_outputs,
-                |path, target, outputs| service.apply_to_display(path, target, outputs),
-            )?
-        }
+        service
+            .apply(&file)
+            .map_err(|e| anyhow::anyhow!(e.message))?
+    } else {
+        let known_outputs =
+            resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
+        let target = wc_app::display_target::parse_display_targets(Some(&targets), None)
+            .map_err(anyhow::Error::msg)?;
+        service
+            .apply_to_display(&file, target, &known_outputs)
+            .map_err(app_error)?
     };
     println!("Applied: {}", target.resolved_path);
+    Ok(())
+}
+
+fn app_error(error: wc_app::AppError) -> anyhow::Error {
+    anyhow::anyhow!(serde_json::to_string_pretty(&error).unwrap_or(error.message))
+}
+
+pub(crate) fn stop_targeted(s: &StorageApi, targets: Vec<String>) -> anyhow::Result<()> {
+    let target = if targets.is_empty() {
+        wc_app::DisplayTarget::AllDisplays
+    } else {
+        wc_app::display_target::parse_display_targets(Some(&targets), None)
+            .map_err(anyhow::Error::msg)?
+    };
+    let known = discover_connected_outputs()?;
+    let report = app_service_from_storage(s)?
+        .stop_displays(target, &known)
+        .map_err(app_error)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
@@ -118,12 +136,6 @@ pub(crate) fn inspect(s: &StorageApi, path: String) -> anyhow::Result<()> {
         .inspect_path(&path)
         .map_err(|e| anyhow::anyhow!(serde_json::to_string_pretty(&e).unwrap_or(e.message)))?;
     println!("{}", serde_json::to_string_pretty(&inspected)?);
-    Ok(())
-}
-
-pub(crate) fn stop(s: &StorageApi) -> anyhow::Result<()> {
-    stop_wallpapers_with(s, wc_backend::stop_all_backends)?;
-    println!("All wallpaper backends stopped.");
     Ok(())
 }
 
@@ -165,9 +177,35 @@ pub(crate) fn restore_displays(
     s: &StorageApi,
     explicit_outputs: Vec<String>,
 ) -> anyhow::Result<()> {
+    restore_displays_targeted(s, explicit_outputs, Vec::new())
+}
+
+pub(crate) fn restore_displays_targeted(
+    s: &StorageApi,
+    explicit_outputs: Vec<String>,
+    targets: Vec<String>,
+) -> anyhow::Result<()> {
     let known_outputs = resolve_known_outputs_with(&explicit_outputs, discover_connected_outputs)?;
     let service = app_service_from_storage(s)?;
-    restore_displays_with(&known_outputs, |outputs| service.restore_displays(outputs))?;
+    let target = if targets.is_empty() {
+        None
+    } else {
+        Some(
+            wc_app::display_target::parse_display_targets(Some(&targets), None)
+                .map_err(anyhow::Error::msg)?,
+        )
+    };
+    service
+        .restore_displays_with_runtime(
+            &known_outputs,
+            &mut wc_backend::runtime::SystemBackendRuntime,
+            &mut wc_backend::apply_stage::NoopReporter,
+            wc_app::DisplayRestoreRuntimeOpts {
+                target,
+                request_id: None,
+            },
+        )
+        .map_err(app_error)?;
     println!("Display wallpapers restored.");
     Ok(())
 }
@@ -462,6 +500,11 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
         Commands::ConfigSet { key, value } => {
             let val = value.join(" ");
             s.config_set(&key, &val)?;
+            if key == "restore_on_login" {
+                let enabled = s.config_get("restore_on_login", "off");
+                wc_app::login_restore::sync_login_restore_autostart_for_value(&enabled)
+                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+            }
             println!("{} = {}", key, val);
         }
 
@@ -510,6 +553,7 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn stop_wallpapers_with<F>(
     s: &StorageApi,
     stop_backends: F,

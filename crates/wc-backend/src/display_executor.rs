@@ -54,6 +54,8 @@ pub enum DisplayExecAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DisplayExecReport {
     pub events: Vec<CompletedEvent>,
+    /// Includes failed attempts: a command can change a surface before returning an error.
+    pub attempted: Vec<(Backend, ExecutionScope)>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +91,7 @@ impl DisplayExecReport {
     }
     pub(crate) fn append(&mut self, other: Self) {
         self.events.extend(other.events);
+        self.attempted.extend(other.attempted);
     }
 }
 
@@ -101,6 +104,15 @@ pub(crate) enum PreparedDisplayAction {
     Apply(Box<driver::PreparedApply>),
 }
 pub(crate) type PreparedDisplayActions = Vec<PreparedDisplayAction>;
+
+pub(crate) fn verify_prepared_media(actions: &PreparedDisplayActions) -> Result<(), WcError> {
+    for action in actions {
+        if let PreparedDisplayAction::Apply(apply) = action {
+            apply.verify_media()?;
+        }
+    }
+    Ok(())
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletedStop {
@@ -164,6 +176,12 @@ pub(crate) fn execute_prepared_display_actions(
     reporter: &mut dyn ApplyStageReporter,
     request_id: Option<&str>,
 ) -> Result<DisplayExecReport, DisplayExecFailure> {
+    verify_prepared_media(&prepared).map_err(|error| DisplayExecFailure {
+        error,
+        report: DisplayExecReport::default(),
+        uncertain_stop: None,
+        cleanup_uncertain: false,
+    })?;
     let mut report = DisplayExecReport::default();
     for action in prepared {
         match action {
@@ -187,6 +205,7 @@ pub(crate) fn execute_prepared_display_actions(
                         }
                     }
                 }
+                report.attempted.push((backend, scope.clone()));
                 if let Err(error) = stop_backend(s, backend, &execution, runtime) {
                     return Err(DisplayExecFailure {
                         report,
@@ -206,8 +225,11 @@ pub(crate) fn execute_prepared_display_actions(
                 });
             }
             PreparedDisplayAction::Apply(mut operation) => {
+                report
+                    .attempted
+                    .push((operation.backend(), operation.scope().clone()));
                 if let Err(failure) = operation.execute(s, runtime, reporter) {
-                    let mut uncertain_stop = None;
+                    let uncertain_stop = None;
                     let mut cleanup_uncertain = false;
                     match failure.cleanup {
                         driver::CleanupOutcome::NotRequired => {}
@@ -219,21 +241,6 @@ pub(crate) fn execute_prepared_display_actions(
                                 scope,
                                 destructive: true,
                             });
-                        }
-                        driver::CleanupOutcome::VerifiedGlobalStop(backend) => {
-                            report.record_stop(CompletedStop {
-                                backend,
-                                scope: ExecutionScope::AllDisplays,
-                                destructive: true,
-                            });
-                        }
-                        driver::CleanupOutcome::UncertainGlobalStop(backend) => {
-                            uncertain_stop = Some(Box::new(CompletedStop {
-                                backend,
-                                scope: ExecutionScope::AllDisplays,
-                                destructive: true,
-                            }));
-                            cleanup_uncertain = true;
                         }
                         driver::CleanupOutcome::UncertainTarget => {
                             cleanup_uncertain = true;
@@ -388,13 +395,15 @@ fn classify_stop_scope(
         ExecutionScope::Named(outputs) => {
             let known: HashSet<&str> = known_outputs.iter().map(String::as_str).collect();
             let named: HashSet<&str> = outputs.iter().map(String::as_str).collect();
-            if named == known && !known.is_empty() {
-                return Ok(StopExecution::Global);
-            }
             let supports_scoped = crate::driver::driver_for(backend)
                 .is_some_and(|driver| driver.supports_output_scoped_stop());
             if supports_scoped {
                 Ok(StopExecution::Scoped(outputs.clone()))
+            } else if named == known && !known.is_empty() {
+                // Legacy non-scoped drivers are retired only by an explicit All request.
+                Err(WcError::Other(
+                    "this renderer requires an explicit All Displays stop".into(),
+                ))
             } else {
                 Err(WcError::Other(format!(
                     "named stop scope {:?} covers fewer than all known connected outputs {:?}; \
@@ -701,7 +710,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
         assert_eq!(rt.stop_awww_count, 0);
         assert_eq!(rt.stop_lwe_count, 0);
         assert!(report.completed_stops().next().unwrap().destructive);
@@ -933,7 +942,7 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert_eq!(rt.stop_mpvpaper_count, 1);
+        assert_eq!(rt.stop_mpvpaper_count, 0);
         assert!(err.after_destructive_stop());
         assert_eq!(err.report.completed_stops().count(), 1);
         assert!(err.report.completed_applies().next().is_none());
@@ -1222,6 +1231,11 @@ mod tests {
             stop_checked_calls: usize,
         }
         impl ProcessIo for FailStopRuntime {
+            fn renderer_command_lines(
+                &mut self,
+            ) -> Result<Vec<crate::runtime_observation::ProcessCommandLine>, WcError> {
+                self.inner.renderer_command_lines()
+            }
             fn awww_query_json(&mut self) -> Result<String, WcError> {
                 self.inner.awww_query_json()
             }
@@ -1276,8 +1290,11 @@ mod tests {
                 // Force driver stop_checked's pid probe to fail immediately.
                 self.inner.mpvpaper_pids_error = Some("mpvpaper still running after stop".into());
             }
-            fn stop_mpvpaper_outputs(&mut self, outputs: &[String]) -> Result<(), WcError> {
-                self.inner.stop_mpvpaper_outputs(outputs)
+            fn stop_mpvpaper_outputs(&mut self, _outputs: &[String]) -> Result<(), WcError> {
+                self.stop_checked_calls += 1;
+                Err(WcError::Other(
+                    "mpvpaper still running after scoped stop".into(),
+                ))
             }
             fn stop_lwe(&mut self, s: Option<&StorageApi>) {
                 self.inner.stop_lwe(s);
@@ -1630,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn full_coverage_named_stop_still_global() {
+    fn full_coverage_named_stop_never_widens_to_global() {
         let (_tmp, s) = temp_storage();
         let known = vec!["eDP-1".into(), "HDMI-1".into()];
         let mut rt = FakeRuntime {
@@ -1653,8 +1670,8 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(rt.stop_mpvpaper_count, 1);
-        assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
+        assert_eq!(rt.stop_mpvpaper_count, 0);
+        assert_eq!(rt.stop_mpvpaper_outputs_calls, vec![known.clone()]);
     }
 
     #[test]
