@@ -291,7 +291,7 @@ pub fn observe_runtime_wallpapers_with(
                     }
                     wc_core::types::Backend::Feh => unknown(
                         output,
-                        "feh is a one-shot X root pixmap setter and exposes no process evidence.",
+                        wc_core::types::Backend::FEH_REMOVED_MESSAGE,
                     ),
                     wc_core::types::Backend::LinuxWallpaperEngine => {
                         observe_lwe(output, saved.wallpaper_path, &lwe)

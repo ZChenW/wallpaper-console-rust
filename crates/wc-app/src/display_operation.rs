@@ -161,7 +161,7 @@ where
         .any(|step| step.target == wc_core::types::Backend::Feh)
     {
         return Err(AppError::from_wc_error(WcError::Other(
-            "feh X-root content cannot currently be verified or recovered by the transactional display protocol; no wallpaper was changed. Use a verified Wayland renderer in a Wayland session".into(),
+            wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
         )));
     }
     static NEXT: AtomicU64 = AtomicU64::new(0);

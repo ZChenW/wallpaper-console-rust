@@ -35,8 +35,7 @@ use crate::runtime::{
 };
 use crate::target_commands::{
     build_awww_img_command_for_scope, build_awww_instant_command_for_scope,
-    build_feh_apply_command, build_mpvpaper_launch_command_for_output, build_swaybg_launch_command,
-    ExecutionScope,
+    build_mpvpaper_launch_command_for_output, build_swaybg_launch_command, ExecutionScope,
 };
 
 /// Validate transparent awww output release using the same rules for every adapter.
@@ -178,9 +177,6 @@ enum PreparedOperation {
     Swaybg {
         command: Command,
     },
-    Feh {
-        command: Command,
-    },
     LinuxWallpaperEngine {
         project: crate::linux_wallpaperengine::LinuxWallpaperEngineProject,
         outputs: Vec<String>,
@@ -262,6 +258,9 @@ pub(crate) fn prepare_legacy_apply(
     request_id: Option<&str>,
     runtime: &mut dyn BackendRuntime,
 ) -> Result<PreparedApply, WcError> {
+    if backend == Backend::Feh {
+        return Err(WcError::Other(Backend::FEH_REMOVED_MESSAGE.into()));
+    }
     let Some(backend_driver) = driver_for(backend) else {
         return Err(WcError::UnsupportedFileType(path.to_string()));
     };
@@ -303,7 +302,7 @@ pub(crate) fn driver_for(backend: Backend) -> Option<&'static dyn BackendDriver>
         Backend::Awww => Some(&AWWW_DRIVER),
         Backend::Mpvpaper => Some(&MPVPAPER_DRIVER),
         Backend::Swaybg => Some(&SWAYBG_DRIVER),
-        Backend::Feh => Some(&FEH_DRIVER),
+        Backend::Feh => None,
         Backend::LinuxWallpaperEngine => Some(&LWE_DRIVER),
         Backend::Unsupported => None,
     }
@@ -529,24 +528,6 @@ fn prepare_swaybg(
     Ok(PreparedOperation::Swaybg { command })
 }
 
-fn prepare_feh(
-    storage: &StorageApi,
-    request: &PrepareApplyRequest<'_>,
-) -> Result<PreparedOperation, WcError> {
-    let path = std::path::Path::new(request.path);
-    if !path.is_file() {
-        return Err(WcError::NotRegularFile(path.to_path_buf()));
-    }
-    let resize_raw = storage.config_get("awww_resize", "crop");
-    Ok(PreparedOperation::Feh {
-        command: build_feh_apply_command(
-            request.path,
-            normalize_awww_resize(&resize_raw),
-            request.scope,
-        )?,
-    })
-}
-
 fn ensure_swaybg_session(has_wayland_display: bool) -> Result<(), WcError> {
     if has_wayland_display {
         Ok(())
@@ -555,20 +536,6 @@ fn ensure_swaybg_session(has_wayland_display: bool) -> Result<(), WcError> {
             "swaybg requires a Wayland session (WAYLAND_DISPLAY is not set)".into(),
         ))
     }
-}
-
-fn ensure_feh_session(has_display: bool, session_type: Option<&str>) -> Result<(), WcError> {
-    if !has_display {
-        return Err(WcError::Other(
-            "feh requires an Xorg session (DISPLAY is not set)".into(),
-        ));
-    }
-    if session_type.is_some_and(|session| session.eq_ignore_ascii_case("wayland")) {
-        return Err(WcError::Other(
-            "feh targets the X root window and is unavailable in a Wayland session".into(),
-        ));
-    }
-    Ok(())
 }
 
 fn prepare_lwe(request: &PrepareApplyRequest<'_>) -> Result<PreparedOperation, WcError> {
@@ -826,13 +793,11 @@ fn cleanup_failed_swaybg_start(
 static AWWW_DRIVER: AwwwDriver = AwwwDriver;
 static MPVPAPER_DRIVER: MpvpaperDriver = MpvpaperDriver;
 static SWAYBG_DRIVER: SwaybgDriver = SwaybgDriver;
-static FEH_DRIVER: FehDriver = FehDriver;
 static LWE_DRIVER: LweDriver = LweDriver;
 
 struct AwwwDriver;
 struct MpvpaperDriver;
 struct SwaybgDriver;
-struct FehDriver;
 struct LweDriver;
 
 impl BackendDriver for AwwwDriver {
@@ -1227,94 +1192,6 @@ impl BackendDriver for SwaybgDriver {
     }
 }
 
-impl BackendDriver for FehDriver {
-    fn backend(&self) -> Backend {
-        Backend::Feh
-    }
-
-    fn capability(&self) -> BackendCapability {
-        BackendCapability {
-            backend: Backend::Feh,
-            output_target_mode: OutputTargetMode::AllDisplaysOnly,
-            output_target_evidence: Evidence::CliVerified,
-            all_displays: AllDisplaysTargeting::OmitMeansAll,
-            all_displays_evidence: Evidence::CliVerified,
-            stop_scope: StopScope::NoPersistentProcess,
-            stop_scope_evidence: Evidence::CliVerified,
-            multi_instance: MultiInstanceSupport::OneShot,
-            multi_instance_evidence: Evidence::CliVerified,
-            same_target_replacement: SameTargetReplacement::InPlace,
-            same_target_replacement_evidence: Evidence::CliVerified,
-            cross_output_coexistence: CrossOutputCoexistence::Unknown,
-            cross_output_coexistence_evidence: Evidence::Unknown,
-        }
-    }
-
-    fn ensure_available(&self, _storage: &StorageApi) -> Result<(), WcError> {
-        if which::which("feh").is_err() {
-            return Err(WcError::BackendNotFound("feh".to_string()));
-        }
-        let session_type = std::env::var("XDG_SESSION_TYPE").ok();
-        ensure_feh_session(
-            std::env::var_os("DISPLAY").is_some(),
-            session_type.as_deref(),
-        )
-    }
-
-    fn prepare(
-        &self,
-        storage: &StorageApi,
-        request: &PrepareApplyRequest<'_>,
-        runtime: &mut dyn BackendRuntime,
-    ) -> Result<PreparedApply, WcError> {
-        runtime.ensure_backend_available(self.backend(), storage)?;
-        Ok(PreparedApply {
-            image_stamp: runtime.preflight_image(request.path)?,
-            backend: self.backend(),
-            path: request.path.to_string(),
-            scope: request.scope.clone(),
-            request_id: request.request_id.map(str::to_string),
-            operation: prepare_feh(storage, request)?,
-        })
-    }
-
-    fn execute(
-        &self,
-        _storage: &StorageApi,
-        prepared: &mut PreparedApply,
-        runtime: &mut dyn BackendRuntime,
-        _reporter: &mut dyn ApplyStageReporter,
-    ) -> Result<(), DriverApplyFailure> {
-        let PreparedOperation::Feh { command } = &mut prepared.operation else {
-            return Err(
-                WcError::Other("feh driver received another backend's apply".into()).into(),
-            );
-        };
-        let output = runtime
-            .command_output(command)
-            .map_err(|error| WcError::Other(format!("feh failed: {error}")))?;
-        if !output.status.success() {
-            return Err(WcError::Other(format!(
-                "feh apply failed with status {}: {}",
-                output.status,
-                command_output_detail(&output)
-            ))
-            .into());
-        }
-        Ok(())
-    }
-
-    fn stop(&self, _runtime: &mut dyn BackendRuntime, _storage: Option<&StorageApi>) {}
-
-    fn stop_checked(
-        &self,
-        _runtime: &mut dyn BackendRuntime,
-        _storage: Option<&StorageApi>,
-    ) -> Result<(), WcError> {
-        Ok(())
-    }
-}
-
 impl BackendDriver for LweDriver {
     fn backend(&self) -> Backend {
         Backend::LinuxWallpaperEngine
@@ -1472,7 +1349,7 @@ mod tests {
         assert!(driver_for(Backend::Awww).is_some());
         assert!(driver_for(Backend::Mpvpaper).is_some());
         assert!(driver_for(Backend::Swaybg).is_some());
-        assert!(driver_for(Backend::Feh).is_some());
+        assert!(driver_for(Backend::Feh).is_none());
         assert!(driver_for(Backend::LinuxWallpaperEngine).is_some());
         assert!(driver_for(Backend::Unsupported).is_none());
     }
@@ -1487,9 +1364,5 @@ mod tests {
     fn session_guards_do_not_treat_xwayland_as_an_xorg_session() {
         assert!(ensure_swaybg_session(true).is_ok());
         assert!(ensure_swaybg_session(false).is_err());
-        assert!(ensure_feh_session(true, Some("x11")).is_ok());
-        assert!(ensure_feh_session(true, None).is_ok());
-        assert!(ensure_feh_session(true, Some("wayland")).is_err());
-        assert!(ensure_feh_session(false, Some("x11")).is_err());
     }
 }

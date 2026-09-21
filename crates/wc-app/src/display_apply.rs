@@ -804,19 +804,7 @@ pub(crate) fn to_exec_action(
             Ok(DisplayExecAction::Stop { backend, scope })
         }
         PlannedAction::Apply { backend, outputs } => {
-            let scope = match target {
-                DisplayTarget::AllDisplays => {
-                    // All Displays awww omits --outputs; mpvpaper/LWE still need named groups.
-                    if matches!(backend, Backend::Feh) && outputs.len() == known_outputs.len() {
-                        ExecutionScope::AllDisplays
-                    } else {
-                        ExecutionScope::named(outputs).map_err(AppError::from_wc_error)?
-                    }
-                }
-                DisplayTarget::Output(_) | DisplayTarget::Outputs(_) => {
-                    ExecutionScope::named(outputs).map_err(AppError::from_wc_error)?
-                }
-            };
+            let scope = ExecutionScope::named(outputs).map_err(AppError::from_wc_error)?;
             Ok(DisplayExecAction::Apply {
                 backend,
                 path: path.to_string(),

@@ -47,6 +47,8 @@ docs/
 CONTEXT.md
 
 # Development-only scripts and fixtures
+__pycache__/
+*.pyc
 scripts/
 /tests/
 *.html

@@ -37,6 +37,7 @@ pub enum Backend {
     Awww,
     Mpvpaper,
     Swaybg,
+    /// Read-only legacy identity. No driver or new selection is supported.
     Feh,
     #[serde(rename = "linux-wallpaperengine")]
     LinuxWallpaperEngine,
@@ -44,6 +45,8 @@ pub enum Backend {
 }
 
 impl Backend {
+    pub const FEH_REMOVED_MESSAGE: &'static str = "feh support has been removed. Wallpaper Console supports Wayland only. Choose awww, swaybg, or mpvpaper in Settings and apply the wallpaper again; saved feh assignments are retained.";
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Backend::Awww => "awww",

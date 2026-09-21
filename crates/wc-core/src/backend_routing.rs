@@ -42,10 +42,7 @@ impl BackendRouting {
 
 pub fn backend_supports(file_type: FileType, backend: Backend) -> bool {
     match file_type {
-        FileType::Image => matches!(
-            backend,
-            Backend::Awww | Backend::Mpvpaper | Backend::Swaybg | Backend::Feh
-        ),
+        FileType::Image => matches!(backend, Backend::Awww | Backend::Mpvpaper | Backend::Swaybg),
         FileType::Gif => matches!(backend, Backend::Awww | Backend::Mpvpaper),
         FileType::Video => backend == Backend::Mpvpaper,
         FileType::WeScene => backend == Backend::LinuxWallpaperEngine,
@@ -59,9 +56,22 @@ impl Default for BackendRouting {
     }
 }
 
+/// Validate explicit writes, not legacy reads or whole-config mirrors.
+pub fn validate_renderer_selection(key: &str, value: &str) -> Result<(), crate::error::WcError> {
+    if matches!(key, "image_backend" | "gif_backend" | "video_backend")
+        && value.trim().eq_ignore_ascii_case("feh")
+    {
+        return Err(crate::error::WcError::Other(
+            Backend::FEH_REMOVED_MESSAGE.into(),
+        ));
+    }
+    Ok(())
+}
+
 fn normalize_image_backend(raw: &str) -> Backend {
     match raw {
         "swaybg" => Backend::Swaybg,
+        // Preserve legacy choices for an actionable error, never silently reroute.
         "feh" => Backend::Feh,
         raw => normalize_gif_backend(raw),
     }
@@ -114,10 +124,11 @@ mod tests {
     }
 
     #[test]
-    fn static_images_can_opt_into_feh_without_routing_gifs_to_it() {
+    fn legacy_feh_is_readable_but_not_a_supported_image_renderer() {
         let routing = BackendRouting::from_raw("feh", "feh", "mpvpaper");
 
         assert_eq!(routing.backend_for(FileType::Image), Backend::Feh);
+        assert!(!super::backend_supports(FileType::Image, Backend::Feh));
         assert_eq!(routing.backend_for(FileType::Gif), Backend::Awww);
     }
 

@@ -57,7 +57,6 @@ pub struct RendererStatusesDto {
     pub awww: BackendStatusDto,
     pub mpvpaper: BackendStatusDto,
     pub swaybg: BackendStatusDto,
-    pub feh: BackendStatusDto,
     pub linux_wallpaper_engine: BackendStatusDto,
 }
 
@@ -854,7 +853,6 @@ where
         awww: renderer_status_from_result(Backend::Awww, probe(Backend::Awww)),
         mpvpaper: renderer_status_from_result(Backend::Mpvpaper, probe(Backend::Mpvpaper)),
         swaybg: renderer_status_from_result(Backend::Swaybg, probe(Backend::Swaybg)),
-        feh: renderer_status_from_result(Backend::Feh, probe(Backend::Feh)),
         linux_wallpaper_engine: renderer_status_from_result(
             Backend::LinuxWallpaperEngine,
             probe(Backend::LinuxWallpaperEngine),
@@ -1292,14 +1290,12 @@ mod tests {
                 wc_core::types::Backend::Awww,
                 wc_core::types::Backend::Mpvpaper,
                 wc_core::types::Backend::Swaybg,
-                wc_core::types::Backend::Feh,
                 wc_core::types::Backend::LinuxWallpaperEngine,
             ]
         );
         assert!(statuses.awww.available);
         assert!(!statuses.mpvpaper.available);
         assert!(statuses.swaybg.available);
-        assert!(statuses.feh.available);
         assert_eq!(
             statuses.mpvpaper.detail.as_deref(),
             Some("backend not found: mpvpaper")
@@ -1310,7 +1306,7 @@ mod tests {
         assert!(json.get("awww").is_some());
         assert!(json.get("mpvpaper").is_some());
         assert!(json.get("swaybg").is_some());
-        assert!(json.get("feh").is_some());
+        assert!(json.get("feh").is_none());
         assert!(json.get("linuxWallpaperEngine").is_some());
         assert!(json.get("linux_wallpaper_engine").is_none());
     }

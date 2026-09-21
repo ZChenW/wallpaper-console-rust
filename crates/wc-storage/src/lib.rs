@@ -236,6 +236,7 @@ impl StorageApi {
     // ── Writes (always SQLite) ────────────────────────────────────────
 
     pub fn config_set(&self, key: &str, value: &str) -> Result<(), WcError> {
+        wc_core::backend_routing::validate_renderer_selection(key, value)?;
         wc_core::config::validate_config_entry(key, value)?;
         let value = wc_core::config_normalizer::normalize_config_value(key, value);
         sqlite::sqlite_config_set(&self.cd, key, &value)?;
@@ -1031,6 +1032,62 @@ mod tests {
             .unwrap_err();
         assert!(matches!(stale, WcError::ConfigRevisionChanged { .. }));
         assert_eq!(storage.config_get("restore_on_login", ""), "on");
+    }
+
+    #[test]
+    fn legacy_feh_config_survives_reads_and_unrelated_edits_but_new_selections_fail() {
+        use wc_core::behavior_setting::{BehaviorSettingsPatch, ImageRenderer};
+        let tmp = tempfile::tempdir().unwrap();
+        let cd = ConfigDir {
+            path: tmp.path().join("wallpaper-console"),
+        };
+        // Import an actual pre-removal flat configuration, not a new config-set.
+        cd.init().unwrap();
+        wc_config::write_config_value(&cd.path, "image_backend", "feh").unwrap();
+        let storage = StorageApi::try_new(cd).unwrap();
+        let before = storage.behavior_settings().unwrap();
+        assert_eq!(before.settings.image_backend, ImageRenderer::Feh);
+        assert_eq!(
+            storage
+                .backend_routing()
+                .backend_for(wc_core::types::FileType::Image),
+            wc_core::types::Backend::Feh
+        );
+        let after = storage
+            .update_behavior_settings(
+                &before.revision,
+                &BehaviorSettingsPatch {
+                    awww_transition_fps: Some(30),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(after.settings.image_backend, ImageRenderer::Feh);
+        assert_eq!(storage.config_get("image_backend", ""), "feh");
+        for key in ["image_backend", "gif_backend", "video_backend"] {
+            assert!(storage
+                .config_set(key, "feh")
+                .unwrap_err()
+                .to_string()
+                .contains("removed"));
+            assert!(sqlite::sqlite_config_set(&storage.cd, key, "feh").is_err());
+        }
+        assert!(storage
+            .update_behavior_settings(
+                &after.revision,
+                &BehaviorSettingsPatch {
+                    image_backend: Some(ImageRenderer::Feh),
+                    awww_transition_fps: Some(60),
+                    ..Default::default()
+                }
+            )
+            .is_err());
+        assert_eq!(storage.behavior_settings().unwrap(), after);
+        storage.config_set("image_backend", "awww").unwrap();
+        assert_eq!(
+            storage.behavior_settings().unwrap().settings.image_backend,
+            ImageRenderer::Awww
+        );
     }
 
     #[test]

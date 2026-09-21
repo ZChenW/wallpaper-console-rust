@@ -513,7 +513,7 @@ runtime_capabilities() {
     done
     if [[ -n "$found" ]]; then info "  $feature: $found"; else warn "  $feature: missing ($commands)"; fi
   done <<'CAPABILITIES'
-Image:awww swaybg mpvpaper feh
+Image:awww swaybg mpvpaper
 GIF:awww mpvpaper
 Video:mpvpaper
 Wallpaper Engine scenes:linux-wallpaperengine

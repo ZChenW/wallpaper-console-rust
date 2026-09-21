@@ -141,8 +141,7 @@ export function CompactSettingsPanelView({
   const usesAwww = behaviorSettings.imageBackend === 'awww'
     || behaviorSettings.gifBackend === 'awww';
   const usesFillMode = usesAwww
-    || behaviorSettings.imageBackend === 'swaybg'
-    || behaviorSettings.imageBackend === 'feh';
+    || behaviorSettings.imageBackend === 'swaybg';
   const usesMpvpaper = behaviorSettings.imageBackend === 'mpvpaper'
     || behaviorSettings.gifBackend === 'mpvpaper'
     || behaviorSettings.videoBackend === 'mpvpaper';
@@ -155,8 +154,6 @@ export function CompactSettingsPanelView({
     || rendererStatuses?.mpvpaper.available !== true;
   const swaybgUnavailable = !rendererDetectionReady
     || rendererStatuses?.swaybg.available !== true;
-  const fehUnavailable = !rendererDetectionReady
-    || rendererStatuses?.feh.available !== true;
   const lweUnavailable = !rendererDetectionReady
     || rendererStatuses?.linuxWallpaperEngine.available !== true;
   const updateGesture = (value: string) => {
@@ -239,7 +236,7 @@ export function CompactSettingsPanelView({
     if (event.target === event.currentTarget) onClose();
   };
   const rendererCard = (
-    renderer: 'awww' | 'mpvpaper' | 'swaybg' | 'feh',
+    renderer: 'awww' | 'mpvpaper' | 'swaybg',
     selected: boolean,
     unavailable: boolean,
     onClick?: () => void,
@@ -399,10 +396,13 @@ export function CompactSettingsPanelView({
                     () => updateImageRenderer('mpvpaper'), rendererStatuses?.mpvpaper.detail)}
                   {rendererCard('swaybg', behaviorSettings.imageBackend === 'swaybg', swaybgUnavailable,
                     () => updateImageRenderer('swaybg'), rendererStatuses?.swaybg.detail)}
-                  {rendererCard('feh', behaviorSettings.imageBackend === 'feh', fehUnavailable,
-                    () => updateImageRenderer('feh'), rendererStatuses?.feh.detail)}
                 </div>
               </div>
+              {behaviorSettings.imageBackend === 'feh' && (
+                <p className="settings-help" role="status">
+                  feh is no longer supported. Choose a Wayland image renderer above, then apply your wallpaper again. Saved wallpapers are kept.
+                </p>
+              )}
               <div
                 aria-label="GIF"
                 className="settings-behavior-row settings-renderer-field"
@@ -447,7 +447,7 @@ export function CompactSettingsPanelView({
               <BehaviorHelp
                 id="settings-image-gif-fitting-help"
                 label="About Image & GIF fitting"
-                text={`Shared by awww for images and GIFs, and by swaybg and feh for images.${
+                text={`Shared by awww for images and GIFs, and by swaybg for images.${
                   !usesFillMode ? ' Select one of those renderers to edit.' : ''
                 }`}
               />

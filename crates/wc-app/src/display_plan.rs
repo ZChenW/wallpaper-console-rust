@@ -920,21 +920,15 @@ mod tests {
     }
 
     #[test]
-    fn feh_accepts_only_explicit_all_displays() {
-        let plan = plan_display_apply(&req(
+    fn removed_feh_rejects_all_and_named_targets() {
+        let error = plan_display_apply(&req(
             DisplayTarget::AllDisplays,
             Backend::Feh,
             dual_outputs(),
             vec![],
         ))
-        .expect("feh may intentionally update the X root for all displays");
-        assert_eq!(
-            plan.actions,
-            vec![PlannedAction::Apply {
-                backend: Backend::Feh,
-                outputs: dual_outputs(),
-            }]
-        );
+        .unwrap_err();
+        assert!(matches!(error, RejectionReason::UnsupportedBackend { .. }));
 
         let error = plan_display_apply(&req(
             DisplayTarget::Output(edp()),
@@ -943,10 +937,7 @@ mod tests {
             vec![],
         ))
         .unwrap_err();
-        assert!(matches!(
-            error,
-            RejectionReason::UnverifiedTargetScope { .. }
-        ));
+        assert!(matches!(error, RejectionReason::UnsupportedBackend { .. }));
     }
 
     #[test]

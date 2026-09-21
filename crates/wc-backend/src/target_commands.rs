@@ -147,31 +147,6 @@ pub fn build_swaybg_launch_command(
     Ok(cmd)
 }
 
-/// Apply one static image to the X root pixmap.
-///
-/// feh does not expose stable named-output targeting, so only the explicit
-/// All Displays scope is accepted.
-pub fn build_feh_apply_command(
-    path: &str,
-    fill_mode: &str,
-    scope: &ExecutionScope,
-) -> Result<Command, WcError> {
-    scope.validate()?;
-    if matches!(scope, ExecutionScope::Named(_)) {
-        return Err(WcError::Other(
-            "feh supports only the All Displays target".into(),
-        ));
-    }
-    let background_option = match fill_mode {
-        "fit" => "--bg-max",
-        "stretch" => "--bg-scale",
-        _ => "--bg-fill",
-    };
-    let mut cmd = Command::new("feh");
-    cmd.args(["--no-fehbg", background_option, path]);
-    Ok(cmd)
-}
-
 /// Build linux-wallpaperengine argv body (without binary) for planned outputs.
 ///
 /// Emits repeated `--screen-root` / `--bg` pairs. The same wallpaper id is used
@@ -316,23 +291,6 @@ mod tests {
                 "fill",
             ]
         );
-    }
-
-    #[test]
-    fn feh_all_displays_uses_fill_without_writing_fehbg() {
-        let cmd =
-            build_feh_apply_command("/tmp/a.jpg", "crop", &ExecutionScope::AllDisplays).unwrap();
-
-        assert_eq!(cmd.get_program(), "feh");
-        assert_eq!(args_of(&cmd), vec!["--no-fehbg", "--bg-fill", "/tmp/a.jpg"]);
-    }
-
-    #[test]
-    fn feh_rejects_named_output_targeting() {
-        let scope = ExecutionScope::named(vec!["eDP-1".into()]).unwrap();
-        let error = build_feh_apply_command("/tmp/a.jpg", "crop", &scope).unwrap_err();
-
-        assert!(error.to_string().contains("All Displays"));
     }
 
     #[test]

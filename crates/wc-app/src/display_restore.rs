@@ -1504,10 +1504,6 @@ mod tests {
     #[test]
     fn unsupported_feh_scoped_restore_rejects_without_deleting_preferences() {
         let (tmp, service) = temp_service();
-        service
-            .storage_for_tests()
-            .config_set("image_backend", "feh")
-            .unwrap();
         let img = write_image(tmp.path(), "still.jpg");
         let vid = write_video(tmp.path(), "motion.mp4");
         service
@@ -1542,10 +1538,9 @@ mod tests {
             )
             .unwrap_err();
 
-        assert_eq!(err.code, "display_apply_rejected");
         assert!(
             err.message.contains("feh") || err.detail.as_deref().unwrap_or("").contains("feh"),
-            "expected coexistence rejection: {err:?}"
+            "expected removed renderer rejection: {err:?}"
         );
         assert!(
             rt.command_output_args.is_empty(),

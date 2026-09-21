@@ -203,7 +203,6 @@ pub fn all_capabilities() -> Vec<BackendCapability> {
         Backend::Awww,
         Backend::Mpvpaper,
         Backend::Swaybg,
-        Backend::Feh,
         Backend::LinuxWallpaperEngine,
     ]
     .into_iter()
@@ -221,13 +220,13 @@ mod tests {
     }
 
     #[test]
-    fn matrix_covers_five_supported_backends() {
+    fn matrix_covers_four_supported_backends() {
         let caps = all_capabilities();
-        assert_eq!(caps.len(), 5);
+        assert_eq!(caps.len(), 4);
         assert!(caps.iter().any(|c| c.backend == Backend::Awww));
         assert!(caps.iter().any(|c| c.backend == Backend::Mpvpaper));
         assert!(caps.iter().any(|c| c.backend == Backend::Swaybg));
-        assert!(caps.iter().any(|c| c.backend == Backend::Feh));
+        assert!(!caps.iter().any(|c| c.backend == Backend::Feh));
         assert!(caps
             .iter()
             .any(|c| c.backend == Backend::LinuxWallpaperEngine));
@@ -280,14 +279,8 @@ mod tests {
     }
 
     #[test]
-    fn feh_is_an_all_displays_one_shot_backend() {
-        let cap = capability_for(Backend::Feh).expect("feh");
-        assert_eq!(cap.output_target_mode, OutputTargetMode::AllDisplaysOnly);
-        assert!(!cap.verified_named_output_targeting());
-        assert_eq!(cap.stop_scope, StopScope::NoPersistentProcess);
-        assert!(!cap.stop_may_affect_non_target_outputs());
-        assert_eq!(cap.multi_instance, MultiInstanceSupport::OneShot);
-        assert_eq!(cap.same_target_replacement, SameTargetReplacement::InPlace);
+    fn removed_feh_has_no_capability() {
+        assert!(capability_for(Backend::Feh).is_none());
     }
 
     #[test]

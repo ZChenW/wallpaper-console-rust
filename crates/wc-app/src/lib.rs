@@ -222,6 +222,11 @@ impl AppService {
         recipe: &wc_core::display_assignment::RenderRecipe,
     ) -> Result<apply_execution::ApplyExecutionTarget, AppError> {
         use wc_core::display_assignment::Presentation;
+        if recipe.options.backend() == Backend::Feh {
+            return Err(AppError::from_wc_error(WcError::Other(
+                Backend::FEH_REMOVED_MESSAGE.into(),
+            )));
+        }
         recipe.validate().map_err(AppError::from_wc_error)?;
         let mut resolved = self.resolve_apply_request_target(&ApplyRequest {
             kind: if recipe.presentation == Presentation::Preview {
@@ -302,15 +307,16 @@ impl AppService {
             .backend_routing()
             .backend_for_media(entry.file_type, &entry.ext);
         match backend {
+            Backend::Feh => Err(AppError::from_wc_error(WcError::Other(
+                Backend::FEH_REMOVED_MESSAGE.into(),
+            ))),
             Backend::Unsupported => Err(AppError::unsupported_backend(
                 entry.file_type,
                 entry.path.as_str(),
             )),
-            Backend::Awww
-            | Backend::Mpvpaper
-            | Backend::Swaybg
-            | Backend::Feh
-            | Backend::LinuxWallpaperEngine => Ok(backend),
+            Backend::Awww | Backend::Mpvpaper | Backend::Swaybg | Backend::LinuxWallpaperEngine => {
+                Ok(backend)
+            }
         }
     }
 }

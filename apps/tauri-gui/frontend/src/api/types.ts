@@ -204,7 +204,6 @@ export interface RendererStatusesDTO {
   awww: BackendStatusDTO;
   mpvpaper: BackendStatusDTO;
   swaybg: BackendStatusDTO;
-  feh: BackendStatusDTO;
   linuxWallpaperEngine: BackendStatusDTO;
 }
 
@@ -413,7 +412,7 @@ export interface MpvpaperReapplyResultDTO {
   readonly failures: readonly { readonly output: string; readonly message: string }[];
 }
 
-export type ImageRendererDTO = 'awww' | 'mpvpaper' | 'swaybg' | 'feh';
+export type ImageRendererDTO = 'awww' | 'mpvpaper' | 'swaybg';
 export type GifRendererDTO = 'awww' | 'mpvpaper';
 export type VideoRendererDTO = 'mpvpaper';
 export type WallpaperFillModeDTO = 'crop' | 'fit' | 'stretch';
@@ -424,7 +423,8 @@ export type LweScalingModeDTO = 'default' | 'fill' | 'fit' | 'stretch';
 export type OpenProjectLocationModeDTO = 'file_manager' | 'terminal';
 
 export interface BehaviorSettingsDTO {
-  readonly imageBackend: ImageRendererDTO;
+  /** feh is accepted only when reading a legacy configuration. */
+  readonly imageBackend: ImageRendererDTO | 'feh';
   readonly gifBackend: GifRendererDTO;
   readonly videoBackend: VideoRendererDTO;
   readonly mpvpaperOptions: string;
@@ -440,7 +440,9 @@ export interface BehaviorSettingsDTO {
   readonly openProjectLocationMode: OpenProjectLocationModeDTO;
 }
 
-export type BehaviorSettingsPatchDTO = Partial<BehaviorSettingsDTO>;
+export type BehaviorSettingsPatchDTO = Partial<Omit<BehaviorSettingsDTO, 'imageBackend'>> & {
+  readonly imageBackend?: ImageRendererDTO;
+};
 
 export interface BehaviorSettingsSnapshotDTO {
   readonly settings: BehaviorSettingsDTO;

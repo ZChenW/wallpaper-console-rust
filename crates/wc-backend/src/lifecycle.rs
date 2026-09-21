@@ -95,16 +95,8 @@ pub fn pre_stop_plan(previous: RunningBackend, target: Backend) -> StopPlan {
             RunningBackend::None => StopPlan::All,
             RunningBackend::Unsupported | RunningBackend::Unknown => StopPlan::None,
         },
-        Backend::Feh => match previous {
-            RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
-            RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
-            RunningBackend::Swaybg => StopPlan::SwaybgOnly,
-            RunningBackend::LinuxWallpaperEngine => StopPlan::LweOnly,
-            RunningBackend::Feh
-            | RunningBackend::None
-            | RunningBackend::Unsupported
-            | RunningBackend::Unknown => StopPlan::None,
-        },
+        // Removed legacy target must never authorize stopping a renderer.
+        Backend::Feh => StopPlan::None,
         Backend::LinuxWallpaperEngine => match previous {
             RunningBackend::Awww => StopPlan::AwwwDaemonOnly,
             RunningBackend::Mpvpaper => StopPlan::MpvpaperOnly,
@@ -205,9 +197,9 @@ mod tests {
     }
 
     #[test]
-    fn feh_is_a_one_shot_target_but_stops_a_previous_persistent_renderer() {
+    fn removed_feh_target_never_stops_a_previous_renderer() {
         let from_swaybg = plan_apply_lifecycle("swaybg", Backend::Feh);
-        assert_eq!(from_swaybg.pre_stop, StopPlan::SwaybgOnly);
+        assert_eq!(from_swaybg.pre_stop, StopPlan::None);
         assert_eq!(from_swaybg.post_success_stop, StopPlan::None);
 
         let from_feh = plan_apply_lifecycle("feh", Backend::Feh);

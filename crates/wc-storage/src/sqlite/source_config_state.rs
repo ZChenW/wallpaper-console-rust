@@ -23,6 +23,7 @@ pub fn sqlite_source_remove_canonical(cd: &ConfigDir, path: &str) -> Result<bool
 }
 
 pub fn sqlite_config_set(cd: &ConfigDir, key: &str, value: &str) -> Result<(), WcError> {
+    wc_core::backend_routing::validate_renderer_selection(key, value)?;
     wc_core::config::validate_config_entry(key, value)?;
     try_ensure_sqlite_db(cd)?;
     let conn = open_runtime_connection(cd)?;
@@ -66,6 +67,11 @@ pub fn update_behavior_settings(
     expected_revision: &str,
     patch: &BehaviorSettingsPatch,
 ) -> Result<BehaviorSettingsSnapshot, WcError> {
+    if patch.image_backend == Some(wc_core::behavior_setting::ImageRenderer::Feh) {
+        return Err(WcError::Other(
+            wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
+        ));
+    }
     try_ensure_sqlite_db(cd)?;
     let mut connection = open_runtime_connection(cd)?;
     let transaction = connection

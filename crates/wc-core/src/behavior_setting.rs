@@ -29,6 +29,7 @@ pub enum ImageRenderer {
     Awww,
     Mpvpaper,
     Swaybg,
+    /// Legacy stored value only; rejected in new settings patches.
     Feh,
 }
 

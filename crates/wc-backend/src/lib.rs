@@ -2342,7 +2342,7 @@ mod tests {
     }
 
     #[test]
-    fn feh_apply_runs_once_and_writes_state_only_after_success() {
+    fn removed_feh_apply_is_rejected_without_commands_or_state_changes() {
         let (tmp, s) = temp_storage();
         s.last_backend_write("").unwrap();
         let image = tmp.path().join("feh.png");
@@ -2361,16 +2361,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(runtime.command_output_programs, ["feh"]);
-        assert_eq!(
-            runtime.command_output_args,
-            [vec![
-                "--no-fehbg".to_string(),
-                "--bg-fill".to_string(),
-                image.to_string_lossy().to_string(),
-            ]]
-        );
-        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some("feh"));
+        assert!(error.to_string().contains("feh support has been removed"));
+        assert!(runtime.command_output_programs.is_empty());
+        assert_eq!(runtime.stop_awww_count, 0);
+        assert_eq!(runtime.stop_mpvpaper_count, 0);
+        assert_eq!(runtime.stop_lwe_count, 0);
+        assert_eq!(s.last_backend_read().unwrap().as_deref(), Some(""));
     }
 
     #[test]

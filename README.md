@@ -1,6 +1,6 @@
 # Wallpaper Console
 
-A Linux wallpaper manager for Wayland and Xorg. Browse local wallpapers and
+A Linux wallpaper manager for Wayland. Browse local wallpapers and
 supported Wallpaper Engine projects, manage favorites, and apply wallpapers per
 display.
 
@@ -47,7 +47,6 @@ install only those needed for your desktop and media:
 
 - `awww` — Wayland images and GIFs
 - `swaybg` — Wayland static images
-- `feh` — Xorg static images
 - `mpvpaper` — Wayland images, GIFs, and videos
 - `linux-wallpaperengine` — compatible Wallpaper Engine scenes
 
@@ -74,8 +73,11 @@ Mixed awww/LWE and swaybg pairs are conditional on verified niri support;
 awww sharing additionally requires the supported default, alpha-capable daemon.
 swaybg currently requires niri surface observation. Sway and Hyprland have output
 discovery/recovery adapters but their new mixed-renderer combinations remain
-unverified. Transactional feh switching is not available because X-root content
-cannot be verified and recovered reliably.
+unverified. X11/Xorg and feh are not supported. Existing feh preferences and saved
+wallpaper assignments are retained, but cannot be applied or restored. Choose a
+Wayland image renderer in Settings (or `config-set image_backend awww`) and
+explicitly apply a wallpaper to replace an old assignment. No automatic renderer
+substitution or assignment deletion is performed.
 
 Animated PNG/APNG and WebP use mpvpaper; AVI and FLV are accepted only after actual
 codec preflight. TIFF, AVIF, HEIC and SVG remain unavailable with the bundled
@@ -124,6 +126,11 @@ Turning the setting on (GUI or `config-set`) installs an XDG autostart entry tha
 runs `wallpaper-console-rust restore-at-login` when the desktop session starts.
 Turning it off removes that entry. Compositors that ignore XDG autostart still
 need an explicit startup line for the same command.
+
+Starting the updated GUI or CLI also repairs the autostart registration for
+existing configurations. Registration does not immediately change the wallpaper.
+A failed registration leaves a settings update unsaved; retrying the same value
+repairs missing entries. The desktop session must support XDG autostart.
 
 Enable the post-apply hook (Waypaper-style: opt-in command after apply). Defaults
 are **off** and an **empty** command — nothing runs until you configure both.

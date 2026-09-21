@@ -112,18 +112,23 @@ pub fn plan_for_entry_with_kind_and_routing(
 }
 
 fn plan_image(entry: &WallpaperEntry, backend: Backend) -> ApplyPlan {
+    let removed = backend == Backend::Feh;
     ApplyPlan {
-        availability: ApplyAvailability::Available,
+        availability: if removed {
+            ApplyAvailability::Unsupported
+        } else {
+            ApplyAvailability::Available
+        },
         backend: Some(backend),
         apply_path: Some(entry.path.to_string()),
         current_state_path: Some(entry.path.to_string()),
-        reason: None,
+        reason: removed.then(|| Backend::FEH_REMOVED_MESSAGE.into()),
         actions: vec![
             ApplyAction {
                 kind: ApplyActionKind::Apply,
                 label: "Apply".into(),
-                enabled: true,
-                reason: None,
+                enabled: !removed,
+                reason: removed.then(|| Backend::FEH_REMOVED_MESSAGE.into()),
             },
             ApplyAction {
                 kind: ApplyActionKind::OpenFolder,
