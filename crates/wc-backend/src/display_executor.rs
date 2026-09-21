@@ -454,6 +454,68 @@ mod tests {
         (tmp, s)
     }
 
+    #[test]
+    fn changed_video_or_project_is_rejected_before_any_stop() {
+        for backend in [Backend::Mpvpaper, Backend::LinuxWallpaperEngine] {
+            let (tmp, storage) = temp_storage();
+            let project = tmp.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::write(
+                project.join("project.json"),
+                r#"{"type":"scene","file":"scene.json"}"#,
+            )
+            .unwrap();
+            let media = project.join(if backend == Backend::Mpvpaper {
+                "movie.mp4"
+            } else {
+                "scene.json"
+            });
+            std::fs::write(&media, "original").unwrap();
+            let path = if backend == Backend::Mpvpaper {
+                &media
+            } else {
+                &project
+            };
+            let known = vec!["A".into()];
+            let actions = vec![
+                DisplayExecAction::Stop {
+                    backend: Backend::Awww,
+                    scope: ExecutionScope::AllDisplays,
+                },
+                DisplayExecAction::Apply {
+                    backend,
+                    path: path.to_string_lossy().into_owned(),
+                    scope: ExecutionScope::named(known.clone()).unwrap(),
+                    use_instant: false,
+                },
+            ];
+            let mut runtime = FakeRuntime::default();
+            let prepared = prepare_display_actions(
+                &storage,
+                &actions,
+                &ctx(&known),
+                &mut runtime,
+                None,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            std::fs::remove_file(&media).unwrap();
+            let error = execute_prepared_display_actions(
+                &storage,
+                prepared,
+                &mut runtime,
+                &mut NoopReporter,
+                None,
+            )
+            .unwrap_err();
+            assert!(error.report.events.is_empty());
+            assert!(error.report.attempted.is_empty());
+            assert_eq!(runtime.stop_awww_count, 0);
+            assert_eq!(runtime.stop_mpvpaper_count, 0);
+            assert_eq!(runtime.stop_lwe_count, 0);
+        }
+    }
+
     fn ctx<'a>(known: &'a [String]) -> DisplayExecContext<'a> {
         DisplayExecContext {
             known_outputs: known,

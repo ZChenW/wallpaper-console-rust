@@ -792,6 +792,9 @@ impl BackendRuntime for SystemBackendRuntime {
     ) -> Result<(), WcError> {
         match crate::driver::driver_for(backend) {
             Some(driver) => driver.ensure_available(storage),
+            None if backend == wc_core::types::Backend::Feh => Err(WcError::Other(
+                wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
+            )),
             None => Ok(()),
         }
     }

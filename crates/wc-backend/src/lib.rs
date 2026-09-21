@@ -16,6 +16,7 @@ pub mod image_media;
 pub mod lifecycle;
 pub mod linux_wallpaperengine;
 mod lwe_process;
+mod media_stamp;
 mod mpvpaper_media;
 pub mod process_control;
 pub mod runtime;
@@ -778,6 +779,10 @@ pub(crate) fn apply_wallpaper_with_runtime(
             None
         };
 
+    prepared_target.verify_media()?;
+    if let Some(fallback) = &prepared_fallback {
+        fallback.verify_media()?;
+    }
     let timing_start = std::time::Instant::now();
     execute_stop_plan_with_runtime(s, lifecycle.pre_stop, runtime)?;
     let pre_stop_elapsed = timing_start.elapsed();
@@ -2264,7 +2269,9 @@ mod tests {
         s.last_backend_write("").unwrap();
 
         let img = tmp.path().join("test.png");
-        std::fs::write(&img, b"").unwrap();
+        // Decode is supplied by FakeRuntime; the real file identity preflight
+        // still requires a nonempty input before any destructive stop.
+        std::fs::write(&img, b"fake decoded media").unwrap();
 
         let mut rt = FakeRuntime {
             command_output_success: true,
@@ -2352,14 +2359,14 @@ mod tests {
             ..Default::default()
         };
 
-        apply_with_fake_runtime(
+        let error = apply_with_fake_runtime(
             &s,
             &image.to_string_lossy(),
             Backend::Feh,
             None,
             &mut runtime,
         )
-        .unwrap();
+        .unwrap_err();
 
         assert!(error.to_string().contains("feh support has been removed"));
         assert!(runtime.command_output_programs.is_empty());

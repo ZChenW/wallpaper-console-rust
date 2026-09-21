@@ -163,6 +163,7 @@ pub(crate) struct PreparedApply {
     request_id: Option<String>,
     operation: PreparedOperation,
     image_stamp: Option<crate::image_media::ImageStamp>,
+    source_stamp: Option<crate::media_stamp::MediaStamp>,
 }
 
 enum PreparedOperation {
@@ -190,6 +191,9 @@ impl PreparedApply {
     pub(crate) fn verify_media(&self) -> Result<(), WcError> {
         if let Some(stamp) = &self.image_stamp {
             stamp.verify(&self.path)?;
+        }
+        if let Some(stamp) = &self.source_stamp {
+            stamp.verify()?;
         }
         Ok(())
     }
@@ -266,7 +270,9 @@ pub(crate) fn prepare_legacy_apply(
     };
     if backend == Backend::LinuxWallpaperEngine {
         runtime.ensure_backend_available(backend, storage)?;
-        return Ok(PreparedApply {
+        let source_stamp = crate::media_stamp::MediaStamp::project(path)?;
+        let prepared = PreparedApply {
+            source_stamp: Some(source_stamp),
             image_stamp: None,
             backend,
             path: path.to_string(),
@@ -275,7 +281,9 @@ pub(crate) fn prepare_legacy_apply(
             operation: PreparedOperation::LinuxWallpaperEngineLegacy {
                 project: crate::linux_wallpaperengine::project_from_path(path)?,
             },
-        });
+        };
+        prepared.verify_media()?;
+        return Ok(prepared);
     }
     let scope = if backend == Backend::Mpvpaper {
         ExecutionScope::named(vec![storage.config_get("mpvpaper_output", "*")])?
@@ -852,6 +860,7 @@ impl BackendDriver for AwwwDriver {
         }
         Ok(PreparedApply {
             image_stamp: runtime.preflight_image(request.path)?,
+            source_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1010,14 +1019,18 @@ impl BackendDriver for MpvpaperDriver {
         runtime: &mut dyn BackendRuntime,
     ) -> Result<PreparedApply, WcError> {
         runtime.ensure_backend_available(self.backend(), storage)?;
-        Ok(PreparedApply {
+        let stamp = crate::media_stamp::MediaStamp::file(request.path)?;
+        let prepared = PreparedApply {
+            source_stamp: Some(stamp),
             image_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
             request_id: request.request_id.map(str::to_string),
             operation: prepare_mpvpaper(storage, request, runtime)?,
-        })
+        };
+        prepared.verify_media()?;
+        Ok(prepared)
     }
 
     fn execute(
@@ -1124,6 +1137,7 @@ impl BackendDriver for SwaybgDriver {
         runtime.ensure_backend_available(self.backend(), storage)?;
         Ok(PreparedApply {
             image_stamp: runtime.preflight_image(request.path)?,
+            source_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
@@ -1247,14 +1261,18 @@ impl BackendDriver for LweDriver {
                 )?;
             }
         }
-        Ok(PreparedApply {
+        let stamp = crate::media_stamp::MediaStamp::project(request.path)?;
+        let prepared = PreparedApply {
+            source_stamp: Some(stamp),
             image_stamp: None,
             backend: self.backend(),
             path: request.path.to_string(),
             scope: request.scope.clone(),
             request_id: request.request_id.map(str::to_string),
             operation: prepare_lwe(request)?,
-        })
+        };
+        prepared.verify_media()?;
+        Ok(prepared)
     }
 
     fn execute(
@@ -1343,6 +1361,55 @@ impl BackendDriver for LweDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prepared_video_and_scene_reject_changed_material() {
+        use crate::test_support::FakeRuntime;
+        for backend in [Backend::Mpvpaper, Backend::LinuxWallpaperEngine] {
+            let temp = tempfile::tempdir().unwrap();
+            let storage = StorageApi::try_new(wc_core::ConfigDir {
+                path: temp.path().join("config"),
+            })
+            .unwrap();
+            let project = temp.path().join("project");
+            std::fs::create_dir(&project).unwrap();
+            std::fs::write(
+                project.join("project.json"),
+                r#"{"type":"scene","file":"scene.json"}"#,
+            )
+            .unwrap();
+            let media = project.join(if backend == Backend::Mpvpaper {
+                "movie.mp4"
+            } else {
+                "scene.json"
+            });
+            std::fs::write(&media, "original").unwrap();
+            let path = if backend == Backend::Mpvpaper {
+                &media
+            } else {
+                &project
+            };
+            let scope = ExecutionScope::named(vec!["A".into()]).unwrap();
+            let request = PrepareApplyRequest {
+                path: path.to_str().unwrap(),
+                scope: &scope,
+                after_stop: false,
+                stopped_backends: &[],
+                clear_state_hint: false,
+                request_id: None,
+            };
+            let prepared = driver_for(backend)
+                .unwrap()
+                .prepare(&storage, &request, &mut FakeRuntime::default())
+                .unwrap();
+            prepared.verify_media().unwrap();
+            std::fs::write(&media, "replaced after preflight").unwrap();
+            assert!(
+                prepared.verify_media().is_err(),
+                "{backend:?} accepted changed material"
+            );
+        }
+    }
 
     #[test]
     fn driver_for_covers_supported_backends_only() {
