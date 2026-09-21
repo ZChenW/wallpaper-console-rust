@@ -439,7 +439,11 @@ static STORAGE: StorageCell = StorageCell::new();
 pub fn storage() -> Result<&'static StorageApi, String> {
     STORAGE.get_or_init_with(|| {
         let cd = wc_core::ConfigDir::new().map_err(|e| e.to_string())?;
-        StorageApi::try_new(cd).map_err(|e| e.to_string())
+        let storage = StorageApi::try_new(cd).map_err(|e| e.to_string())?;
+        if let Err(error) = wc_app::login_restore::reconcile(&storage) {
+            log::warn!("Login restore registration needs attention: {error}");
+        }
+        Ok(storage)
     })
 }
 

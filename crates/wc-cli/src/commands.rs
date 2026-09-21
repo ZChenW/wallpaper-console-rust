@@ -25,6 +25,9 @@ pub(crate) fn run(command: Option<Commands>) -> anyhow::Result<()> {
         Some(cmd) => {
             let cd = ConfigDir::new()?;
             let storage = StorageApi::try_new(cd)?;
+            if let Err(error) = wc_app::login_restore::reconcile(&storage) {
+                eprintln!("Login restore registration needs attention: {error}");
+            }
             run_with_storage(cmd, &storage)
         }
     }

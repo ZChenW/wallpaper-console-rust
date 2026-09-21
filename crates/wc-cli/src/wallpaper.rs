@@ -499,12 +499,7 @@ pub(crate) fn run(cmd: Commands, s: &StorageApi) -> anyhow::Result<()> {
 
         Commands::ConfigSet { key, value } => {
             let val = value.join(" ");
-            s.config_set(&key, &val)?;
-            if key == "restore_on_login" {
-                let enabled = s.config_get("restore_on_login", "off");
-                wc_app::login_restore::sync_login_restore_autostart_for_value(&enabled)
-                    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
-            }
+            wc_app::login_restore::config_set(s, &key, &val)?;
             println!("{} = {}", key, val);
         }
 

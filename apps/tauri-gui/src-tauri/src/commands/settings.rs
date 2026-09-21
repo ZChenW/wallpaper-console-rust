@@ -181,18 +181,8 @@ pub async fn config_set(key: String, value: String) -> CommandResult {
             if let Err(error) = validate_writable_config_set(&key, &value) {
                 return fail(error);
             }
-            match s.config_set(&key, &value) {
-                Ok(()) => {
-                    if key == "restore_on_login" {
-                        let enabled = s.config_get("restore_on_login", "off");
-                        if let Err(error) =
-                            wc_app::login_restore::sync_login_restore_autostart_for_value(&enabled)
-                        {
-                            return fail(error.to_string());
-                        }
-                    }
-                    ok(format!("{} = {}", key, value))
-                }
+            match wc_app::login_restore::config_set(s, &key, &value) {
+                Ok(()) => ok(format!("{} = {}", key, value)),
                 Err(e) => fail(e.to_string()),
             }
         }
@@ -206,7 +196,9 @@ pub async fn config_set(key: String, value: String) -> CommandResult {
 pub async fn behavior_settings_get(
 ) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        storage()?
+        let storage = storage()?;
+        wc_app::login_restore::reconcile(storage).map_err(|error| error.to_string())?;
+        storage
             .behavior_settings()
             .map_err(|error| error.to_string())
     })
@@ -221,17 +213,8 @@ pub async fn behavior_settings_update(
 ) -> Result<wc_core::behavior_setting::BehaviorSettingsSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let storage = storage()?;
-        let before = storage
-            .behavior_settings()
-            .map_err(|error| error.to_string())?;
-        let snapshot = storage
-            .update_behavior_settings(&expected_revision, &patch)
-            .map_err(|error| error.to_string())?;
-        if before.settings.restore_on_login != snapshot.settings.restore_on_login {
-            wc_app::login_restore::sync_login_restore_autostart(snapshot.settings.restore_on_login)
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(snapshot)
+        wc_app::login_restore::update_behavior_settings(storage, &expected_revision, &patch)
+            .map_err(|error| error.to_string())
     })
     .await
     .map_err(|error| error.to_string())?
