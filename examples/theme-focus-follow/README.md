@@ -37,6 +37,13 @@ small bridge integration, the original generator still runs and the follower
 subsequently restores the focused palette. Generation failure falls back to the
 original bridge. Clavis source does not need modification.
 
+A shell that *drives* WC, applying wallpapers through it rather than only
+consuming its output, is a separate case this bridge does not cover. Such a
+shell must check `post_apply_enabled` and skip its own generation when the hook
+is on, otherwise both generators contend for the same lock on every wallpaper
+change. One measured system saw focus changes degrade from 130 ms to 197–216 ms
+while both were running.
+
 Apply/restore once to create `~/.config/wallpaper-console/theme-state.json` and
 populate all available outputs. `WCR_THEME_MANIFEST` overrides this path; WC sets
 it automatically for hooks. XDG config/cache/state directories are respected.
@@ -76,11 +83,13 @@ use the same settings in both when changing theme paths or compatibility mode.
 | --- | --- |
 | `WCR_FOCUS_PROVIDER` | `auto` (default), `niri`, `hyprland`, `sway`, or `custom` |
 | `WCR_FOCUS_COMMAND` | JSON argument array, e.g. `["/path/to/focus-query", "--json"]`; no shell expansion; stdout must be `{"name":"OUTPUT"}` or `null` |
+| `WCR_FOCUS_SKIP_TEMPLATES` | Comma-separated template names left untouched by focus changes; defaults to `niri`. Empty value writes every template on each focus change |
 | `WCR_MATUGEN_CONFIG` | Use any matugen template configuration path |
 | `WCR_THEME_MODE`, `WCR_THEME_SCHEME` | Override mode/scheme; defaults are `dark` / `scheme-tonal-spot` without Clavis |
 | `WCR_THEME_COMPAT` | `auto` preserves detected Clavis installations; `clavis` forces compatibility; `none` disables automatic Clavis preferences, lock and bridge |
 | `WCR_THEME_PERSONALIZATION` | Explicit optional preferences JSON path, with Clavis's `theme` schema |
 | `WCR_THEME_LOCK` | Override WC's primary live-write lock; Clavis compatibility still acquires its shared lock |
+| `WCR_CLAVIS_QS_CONFIG` | QuickShell configuration name used for the Clavis reload call; defaults to `clavis` |
 | `WCR_ORIGINAL_POST_APPLY` | Explicit optional existing bridge executable; works with any compatibility mode |
 | `WCR_ZSH_THEME_FILE` | Any generated zsh variables file; configure in `.zshrc` before sourcing the adapter |
 
@@ -108,6 +117,30 @@ replacement, with rollback if replacement fails. Consumers may briefly observe
 individual file changes during a successful multi-file activation; files across
 applications cannot be replaced as one filesystem transaction. The follower also
 repairs external file changes and new revisions without requiring a focus change.
+
+## Focus change cost
+
+A focus change holds the palette lock while it writes destinations and notifies
+consumers, so anything slow on that path becomes visible stutter and makes
+concurrent writers retry on a busy lock. Two costs dominate and are handled here.
+
+Generated files that a compositor's main configuration `include`s are skipped on
+focus changes, because replacing them makes the compositor reload its whole
+configuration. `WCR_FOCUS_SKIP_TEMPLATES` controls this and defaults to `niri`.
+Skipped consumers follow the wallpaper instead: the full post-apply activation
+and the CLI `activate` subcommand still write every template.
+
+Consumer reload commands should be native clients rather than interpreter
+wrapper scripts, since the interpreter's startup dominates. On one measured
+system the `key` venv entry point cost 115–120 ms per call while QuickShell's
+own client answered the same request in under 30 ms; the Clavis reload therefore
+prefers `qs`/`quickshell` and only falls back to `key`. These are single-machine
+measurements, not a latency promise.
+
+Consumers that watch generated files must re-arm their watch after each reload.
+Destinations are replaced atomically, which invalidates an inotify watch held on
+the previous inode and otherwise shows up as a palette that updates only
+sometimes.
 
 ## Consumers
 

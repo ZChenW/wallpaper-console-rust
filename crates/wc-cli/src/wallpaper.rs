@@ -150,6 +150,63 @@ pub(crate) fn status(s: &StorageApi) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn runtime_snapshot(s: &StorageApi, outputs: &[String]) -> anyhow::Result<serde_json::Value> {
+    use wc_backend::runtime_observation::{observe_runtime_wallpapers, RuntimeObservationStatus};
+    let saved = s.display_state_list()?;
+    let observations = observe_runtime_wallpapers(outputs, &saved);
+    let rows: Vec<_> = observations
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "output": row.output,
+                "wallpaperPath": row.wallpaper_path,
+                "status": match row.status {
+                    RuntimeObservationStatus::Confirmed => "confirmed",
+                    RuntimeObservationStatus::Unknown => "unknown",
+                },
+                "reason": row.reason,
+                "assigned": saved.iter().any(|saved| match &saved.target {
+                    wc_storage::sqlite::DisplayStateTarget::AllDisplays => true,
+                    wc_storage::sqlite::DisplayStateTarget::Output(name) => name == &row.output,
+                }),
+            })
+        })
+        .collect();
+    Ok(serde_json::json!({"schemaVersion": 1, "outputs": rows}))
+}
+
+pub(crate) fn runtime_state(s: &StorageApi) -> anyhow::Result<()> {
+    let outputs = discover_connected_outputs()?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&runtime_snapshot(s, &outputs)?)?
+    );
+    Ok(())
+}
+
+pub(crate) fn ensure_restored(s: &StorageApi) -> anyhow::Result<()> {
+    // Observation and mutation share the session lock with GUI/CLI/watcher.
+    let _guard = wc_app::output_recovery::RendererMutationGuard::acquire(s)?;
+    let outputs = discover_connected_outputs()?;
+    let snapshot = runtime_snapshot(s, &outputs)?;
+    let pending = unconfirmed_assigned_outputs(&snapshot);
+    if pending.is_empty() {
+        println!("No saved wallpapers need restoration.");
+        return Ok(());
+    }
+    restore_displays_targeted(s, outputs, pending)
+}
+
+fn unconfirmed_assigned_outputs(snapshot: &serde_json::Value) -> Vec<String> {
+    snapshot["outputs"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|row| row["assigned"] == true && row["status"] != "confirmed")
+        .filter_map(|row| row["output"].as_str().map(str::to_owned))
+        .collect()
+}
+
 pub(crate) fn restore(s: &StorageApi) -> anyhow::Result<()> {
     restore_displays(s, Vec::new())?;
     Ok(())
@@ -756,6 +813,22 @@ mod tests {
 
     fn no_op_stop(_s: Option<&StorageApi>) -> Result<(), wc_core::error::WcError> {
         Ok(())
+    }
+
+    #[test]
+    fn ensure_restored_targets_only_unconfirmed_saved_outputs() {
+        let snapshot = serde_json::json!({"outputs": [
+            {"output": "DP-8", "assigned": true, "status": "confirmed"},
+            {"output": "eDP-1", "assigned": true, "status": "unknown"},
+            {"output": "HDMI-1", "assigned": false, "status": "unknown"}
+        ]});
+        assert_eq!(unconfirmed_assigned_outputs(&snapshot), vec!["eDP-1"]);
+        assert!(
+            unconfirmed_assigned_outputs(&serde_json::json!({"outputs": [
+                {"output": "DP-8", "assigned": true, "status": "confirmed"}
+            ]}))
+            .is_empty()
+        );
     }
 
     #[test]

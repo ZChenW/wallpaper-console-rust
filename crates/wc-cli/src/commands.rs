@@ -63,6 +63,8 @@ fn run_with_storage(cmd: Commands, storage: &StorageApi) -> anyhow::Result<()> {
             Ok(())
         }
         Commands::Restore => crate::wallpaper::restore(storage),
+        Commands::EnsureRestored => crate::wallpaper::ensure_restored(storage),
+        Commands::RuntimeState => crate::wallpaper::runtime_state(storage),
         Commands::Displays => crate::wallpaper::displays(),
         Commands::DisplayState => crate::wallpaper::display_state(storage),
         Commands::RestoreDisplays { outputs, targets } => {

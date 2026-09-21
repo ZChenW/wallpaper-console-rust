@@ -34,6 +34,32 @@ STATE = xdg_home('XDG_STATE_HOME', HOME_DIR / '.local/state')
 DATA = xdg_home('XDG_DATA_HOME', HOME_DIR / '.local/share')
 
 
+def focus_skipped_templates():
+    """Templates too expensive to rewrite on every focus change.
+
+    niri includes its generated colors from the main config, so replacing that
+    file makes the compositor reload everything. Those consumers follow the
+    wallpaper instead, and are refreshed by the full post-apply activation.
+    """
+    setting = os.environ.get('WCR_FOCUS_SKIP_TEMPLATES', 'niri')
+    return {name.strip() for name in setting.split(',') if name.strip()}
+
+
+def clavis_reload_command():
+    """Ask Clavis to re-read the palette it was just handed.
+
+    This runs inside the palette lock on every focus change, so the launcher
+    matters: the `key` wrapper is a Python venv entry point that costs about
+    115 ms to start, while QuickShell's own client answers in under 30 ms.
+    """
+    config = os.environ.get('WCR_CLAVIS_QS_CONFIG', 'clavis')
+    qs = shutil.which('qs') or shutil.which('quickshell')
+    if qs:
+        return [qs, '-c', config, 'ipc', 'call', 'wallpaper', 'reloadColors']
+    key = HOME_DIR / '.local/bin/key'
+    return [str(key) if key.is_file() else 'key', 'ipc', 'call', 'wallpaper', 'reloadColors']
+
+
 def clavis_compatibility():
     setting = os.environ.get('WCR_THEME_COMPAT', 'auto')
     if setting not in ('auto', 'clavis', 'none'):
@@ -262,6 +288,9 @@ def reload_consumers(changed):
     if '/waybar/' in paths:
         style = CONFIG / 'waybar/style.css'
         if style.exists(): style.touch()
+    if any(path.endswith('/clavis/colors.json') or ('/clavis/profiles/' in path and path.endswith('/colors.json'))
+           for path in changed):
+        commands.append(clavis_reload_command())
     for command in commands:
         try:
             subprocess.run(command, check=True, timeout=1, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
@@ -271,10 +300,12 @@ def reload_consumers(changed):
     return sorted(set(pending))
 
 
-def activate(output, timeout=30):
+def activate(output, timeout=30, full=False):
     started = time.monotonic()
     with live_locked(timeout):
-        revision, payload = palette_for(output)
+        revision, complete = palette_for(output)
+        skipped = set() if full else focus_skipped_templates()
+        payload = [entry for entry in complete if entry[0]['name'] not in skipped]
         changed = []
         staged = []
         committed = []
@@ -314,7 +345,9 @@ def activate(output, timeout=30):
         remaining = reload_consumers(sorted(set(changed + pending)))
         if remaining != pending:
             atomic_json(pending_path, remaining)
-        state = {'output': output, 'revision': revision, 'files': [dict(destination=item['destination'], sha256=item['sha256']) for item, _ in payload]}
+        # Record the complete revision so a partial activation still describes
+        # the palette the outputs belong to.
+        state = {'output': output, 'revision': revision, 'files': [dict(destination=item['destination'], sha256=item['sha256']) for item, _ in complete]}
         if changed or read_json(CACHE / 'active.json') != state:
             atomic_json(CACHE / 'active.json', state)
     elapsed = (time.monotonic() - started) * 1000
@@ -374,7 +407,7 @@ def post_apply():
         generate()
         source = focused_output() or read_json(CACHE / 'outputs.json', {}).get('source')
         if source:
-            activate(source)
+            activate(source, full=True)
             ready = True
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'theme-palette: cache unavailable, preserving original hook: {error}', file=sys.stderr)
@@ -482,7 +515,7 @@ def main():
     if args.command == 'activate' and not args.output: parser.error('activate requires an output')
     signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
     try:
-        {'generate': generate, 'activate': lambda: activate(args.output), 'follow': follow,
+        {'generate': generate, 'activate': lambda: activate(args.output, full=True), 'follow': follow,
          'post-apply': post_apply, 'install-service': install_service}[args.command]()
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
         print(f'theme-palette: {error}', file=sys.stderr)

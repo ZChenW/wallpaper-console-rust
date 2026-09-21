@@ -46,6 +46,10 @@ pub(crate) enum Commands {
     /// Run the configured action for the last wallpaper, without reapplying it.
     PostApplyRetry,
     Restore,
+    /// Adopt verified running wallpapers; restore only unconfirmed saved outputs.
+    EnsureRestored,
+    /// Observe saved assignments against live renderers as versioned JSON.
+    RuntimeState,
     /// Print connected display outputs as JSON.
     Displays,
     /// Print persisted per-display wallpaper state as JSON.
