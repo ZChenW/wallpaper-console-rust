@@ -16,6 +16,9 @@ export interface LibraryViewportProps {
   readonly applyGesture: ApplyGesture;
   readonly initialAnchorWallpaperId: number | null;
   readonly focusToken: number;
+  // Bumped when another region hands keyboard control back to the library.
+  // Unlike focusToken it must not re-anchor or scroll the view.
+  readonly returnFocusToken: number;
   readonly onAnchorChange: (wallpaperId: number) => void;
 }
 
@@ -26,6 +29,7 @@ function LibraryViewportImpl({
   applyGesture,
   initialAnchorWallpaperId,
   focusToken,
+  returnFocusToken,
   onAnchorChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
@@ -36,6 +40,7 @@ function LibraryViewportImpl({
         initialAnchorWallpaperId={initialAnchorWallpaperId}
         model={model}
         onAnchorChange={onAnchorChange}
+        returnFocusToken={returnFocusToken}
       />
     ),
     grid: () => (
@@ -65,6 +70,7 @@ function LibraryViewportImpl({
         pendingPath={model.pendingPath}
         refreshing={model.refreshing}
         resetKey={model.resetKey}
+        returnFocusToken={returnFocusToken}
         selectedPath={model.selectedPath}
       />
     ),

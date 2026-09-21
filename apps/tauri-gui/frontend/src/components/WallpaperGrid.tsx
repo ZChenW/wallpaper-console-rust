@@ -69,6 +69,7 @@ interface Props {
   onLoadMore?: () => void | Promise<void>;
   initialAnchorWallpaperId?: number | null;
   focusToken?: number;
+  returnFocusToken?: number;
   onAnchorChange?: (wallpaperId: number) => void;
 }
 
@@ -119,6 +120,7 @@ function WallpaperGridImpl({
   onLoadMore,
   initialAnchorWallpaperId = null,
   focusToken = 0,
+  returnFocusToken = 0,
   onAnchorChange,
 }: Props) {
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; path: string } | null>(null);
@@ -142,6 +144,7 @@ function WallpaperGridImpl({
   const entriesLengthRef = useRef(entries.length);
   const initialAnchorAppliedRef = useRef(false);
   const lastHandledFocusTokenRef = useRef(0);
+  const lastHandledReturnFocusTokenRef = useRef(0);
   const entriesRef = useRef(entries);
   const activeIndexRef = useRef(activeIndex);
   entriesRef.current = entries;
@@ -481,6 +484,17 @@ function WallpaperGridImpl({
       });
     }));
   }, [virtualizer]);
+
+  // Another region handed keyboard control back. Re-focus the card the user
+  // was already on rather than re-anchoring the view like focusToken does.
+  useEffect(() => {
+    if (!active || !shouldApplyFocusToken(
+      lastHandledReturnFocusTokenRef.current,
+      returnFocusToken,
+    )) return;
+    lastHandledReturnFocusTokenRef.current = returnFocusToken;
+    focusGridIndex(activeIndexRef.current);
+  }, [active, focusGridIndex, returnFocusToken]);
 
   const handleGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     const target = event.target;

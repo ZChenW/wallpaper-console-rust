@@ -133,6 +133,7 @@ export default function SinglePageShell() {
   const [libraryViewportAnchorId, setLibraryViewportAnchorId] = useState<number | null>(null);
   const [libraryModeAnchorId, setLibraryModeAnchorId] = useState<number | null>(null);
   const [libraryViewFocusToken, setLibraryViewFocusToken] = useState(0);
+  const [libraryReturnFocusToken, setLibraryReturnFocusToken] = useState(0);
   const {
     refreshSubscribed: refreshThumbnails,
     retryFailures: retryThumbnailFailures,
@@ -842,6 +843,7 @@ export default function SinglePageShell() {
             mode={preferences.libraryViewMode}
             model={libraryViewModel}
             onAnchorChange={rememberLibraryAnchor}
+            returnFocusToken={libraryReturnFocusToken}
           />
           {!browser.refreshing
             && browser.canAppend
@@ -1067,10 +1069,13 @@ export default function SinglePageShell() {
         <DisplayTargetSelector
           connectedOutputs={catalog.connectedOutputs}
           value={preferences.displayTarget}
-          onChange={(displayTarget) => updatePreferences((current) => ({
-            ...current,
-            displayTarget,
-          }))}
+          onChange={(displayTarget) => {
+            updatePreferences((current) => ({ ...current, displayTarget }));
+            // Picking a target is the end of that errand. Leaving focus on the
+            // trigger makes the next arrow key reopen this menu instead of
+            // moving through wallpapers.
+            setLibraryReturnFocusToken((token) => token + 1);
+          }}
           disabled={!catalog.ready || Boolean(catalog.errors.displays)}
         />
         <button

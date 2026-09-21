@@ -102,6 +102,7 @@ export interface WallpaperFlowProps {
   readonly applyGesture?: ApplyGesture;
   readonly initialAnchorWallpaperId?: number | null;
   readonly focusToken?: number;
+  readonly returnFocusToken?: number;
   readonly onAnchorChange?: (wallpaperId: number) => void;
 }
 
@@ -197,6 +198,7 @@ function WallpaperFlowReady({
   applyGesture = 'single',
   initialAnchorWallpaperId = null,
   focusToken = 0,
+  returnFocusToken = 0,
   onAnchorChange,
 }: WallpaperFlowProps) {
   const flowRef = useRef<HTMLElement>(null);
@@ -991,6 +993,15 @@ function WallpaperFlowReady({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [focusToken]);
+
+  // Another region handed keyboard control back to the stream.
+  useEffect(() => {
+    if (returnFocusToken <= 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      streamRef.current?.focus({ preventScroll: true });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [returnFocusToken]);
 
   useEffect(() => {
     const stream = streamRef.current;
