@@ -59,6 +59,12 @@ const RUST_STEPS: &[Step] = &[
 
 const FRONTEND_STEPS: &[Step] = &[
     Step {
+        name: "Frontend lint",
+        cwd: StepCwd::Frontend,
+        program: "npm",
+        args: &["run", "lint"],
+    },
+    Step {
         name: "Frontend typecheck",
         cwd: StepCwd::Frontend,
         program: "npm",
@@ -172,7 +178,7 @@ mod tests {
         assert_eq!(frontend.len(), FRONTEND_STEPS.len());
         assert_eq!(
             frontend.iter().map(|step| step.name).collect::<Vec<_>>(),
-            ["Frontend typecheck", "Frontend build"]
+            ["Frontend lint", "Frontend typecheck", "Frontend build"]
         );
     }
 

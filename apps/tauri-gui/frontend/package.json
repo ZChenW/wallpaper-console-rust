@@ -10,8 +10,11 @@
     "typecheck": "tsc --noEmit",
     "test:unit": "node e2e/run-unit.mjs",
     "smoke": "node e2e/smoke.mjs",
-    "verify:local": "npm run typecheck && npm run test:unit && npm run smoke",
-    "bench:paging": "node --expose-gc --import ./e2e/register-tests.mjs e2e/paging-benchmark.ts"
+    "verify:local": "npm run lint && npm run typecheck && npm run test:unit && npm run smoke && npm run test:grid-render && npm run test:flow-perf",
+    "bench:paging": "node --expose-gc --import ./e2e/register-tests.mjs e2e/paging-benchmark.ts",
+    "lint": "eslint src",
+    "test:grid-render": "node e2e/grid-render.mjs",
+    "test:flow-perf": "node e2e/flow-perf.mjs"
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.0",
@@ -29,7 +32,10 @@
     "@types/node": "^22.13.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
+    "@typescript-eslint/parser": "^8.71.0",
     "@vitejs/plugin-react": "^4.3.0",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react-hooks": "^7.1.1",
     "typescript": "~5.7.0",
     "vite": "^6.0.0"
   },
