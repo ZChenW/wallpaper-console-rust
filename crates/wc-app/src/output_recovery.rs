@@ -368,6 +368,46 @@ struct Retry {
 }
 const RETRY_DELAYS: [u64; 5] = [500, 1000, 2000, 4000, 8000];
 
+const WATCH_ACTIVE_INTERVAL: Duration = Duration::from_millis(300);
+const WATCH_IDLE_INTERVAL: Duration = Duration::from_millis(2000);
+
+/// Facts already collected by a complete recovery round; no extra probes.
+#[derive(Clone, Default, PartialEq, Eq)]
+struct RoundFacts {
+    snapshot: Option<Vec<crate::compositor::Output>>,
+    pending_empty: bool,
+    retries_empty: bool,
+    confirmed: HashSet<String>,
+    intents: HashMap<String, (u64, bool)>,
+    saved: HashMap<String, Assignment>,
+}
+
+#[derive(Default)]
+struct WatchPacing {
+    unchanged_rounds: u8,
+    previous: Option<RoundFacts>,
+}
+
+impl WatchPacing {
+    fn observe(&mut self, round: &RoundFacts) -> Duration {
+        if round.snapshot.is_some()
+            && round.pending_empty
+            && round.retries_empty
+            && self.previous.as_ref() == Some(round)
+        {
+            self.unchanged_rounds = self.unchanged_rounds.saturating_add(1).min(10);
+        } else {
+            self.unchanged_rounds = 0;
+        }
+        self.previous = round.snapshot.as_ref().map(|_| round.clone());
+        if self.unchanged_rounds == 10 {
+            WATCH_IDLE_INTERVAL
+        } else {
+            WATCH_ACTIVE_INTERVAL
+        }
+    }
+}
+
 fn transient_recovery_error(error: &AppError) -> bool {
     let text = format!(
         "{} {} {}",
@@ -461,9 +501,12 @@ impl AppService {
         let mut last_outputs: Vec<crate::compositor::Output> = Vec::new();
         let mut previous_intents = HashMap::new();
         let mut failures = 0;
+        let mut pacing = WatchPacing::default();
         loop {
+            let mut round = RoundFacts::default();
             if let Ok(snapshot) = adapter.snapshot() {
                 failures = 0;
+                round.snapshot = Some(snapshot.clone());
                 let _guard = RendererMutationGuard::acquire(&self.storage)
                     .map_err(AppError::from_wc_error)?;
                 let known: Vec<_> = snapshot
@@ -610,7 +653,7 @@ impl AppService {
                     .retain(|output, _| !stopped.contains(output));
                 let active: Vec<_> = enabled.iter().cloned().collect();
                 let observed = observe_runtime_wallpapers(&active, &rows);
-                let confirmed = observed
+                let confirmed: HashSet<_> = observed
                     .into_iter()
                     .filter(|row| {
                         row.status == RuntimeObservationStatus::Confirmed
@@ -618,6 +661,7 @@ impl AppService {
                     })
                     .map(|row| row.output)
                     .collect();
+                round.confirmed = confirmed.clone();
                 let epoch = global_epoch.to_string();
                 if epoch != tracker.stop_epoch {
                     retries.clear();
@@ -664,13 +708,17 @@ impl AppService {
                         }
                     }
                 }
+                round.intents = intents;
+                round.saved = saved;
             } else {
                 failures += 1;
                 if failures >= 10 {
                     return Ok(());
                 }
             }
-            std::thread::sleep(Duration::from_millis(300));
+            round.pending_empty = tracker.pending.is_empty();
+            round.retries_empty = retries.is_empty();
+            std::thread::sleep(pacing.observe(&round));
         }
     }
 }
@@ -678,6 +726,125 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn stable_round() -> RoundFacts {
+        RoundFacts {
+            snapshot: Some(vec![crate::compositor::Output {
+                name: "DP-8".into(),
+                enabled: true,
+                hardware_identity: Some("monitor-1".into()),
+            }]),
+            pending_empty: true,
+            retries_empty: true,
+            confirmed: names(&["DP-8"]),
+            intents: HashMap::from([("DP-8".into(), (1, false))]),
+            saved: HashMap::from([("DP-8".into(), assignment())]),
+        }
+    }
+
+    #[test]
+    fn pacing_requires_ten_unchanged_rounds_before_idle() {
+        let mut pacing = WatchPacing::default();
+        let round = stable_round();
+        // First observation establishes the comparison baseline.
+        assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        for _ in 0..9 {
+            assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        }
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+    }
+
+    fn assert_pacing_restarts(change: impl FnOnce(&mut RoundFacts)) {
+        let mut pacing = WatchPacing::default();
+        let mut round = stable_round();
+        for _ in 0..11 {
+            pacing.observe(&round);
+        }
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+        change(&mut round);
+        assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        if !round.pending_empty || !round.retries_empty {
+            for _ in 0..20 {
+                assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+            }
+            round.pending_empty = true;
+            round.retries_empty = true;
+            assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        }
+        for _ in 0..9 {
+            assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        }
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+    }
+
+    #[test]
+    fn pacing_output_name_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| r.snapshot.as_mut().unwrap()[0].name = "DP-9".into());
+    }
+
+    #[test]
+    fn pacing_output_enabled_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| r.snapshot.as_mut().unwrap()[0].enabled = false);
+    }
+
+    #[test]
+    fn pacing_output_identity_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| {
+            r.snapshot.as_mut().unwrap()[0].hardware_identity = Some("monitor-2".into())
+        });
+    }
+
+    #[test]
+    fn pacing_pending_recovery_prevents_idle() {
+        assert_pacing_restarts(|r| r.pending_empty = false);
+    }
+
+    #[test]
+    fn pacing_retry_prevents_idle() {
+        assert_pacing_restarts(|r| r.retries_empty = false);
+    }
+
+    #[test]
+    fn pacing_confirmed_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| r.confirmed.clear());
+    }
+
+    #[test]
+    fn pacing_session_intent_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| {
+            r.intents.insert("DP-8".into(), (2, true));
+        });
+    }
+
+    #[test]
+    fn pacing_saved_assignment_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| r.saved.get_mut("DP-8").unwrap().path = "/other.mp4".into());
+    }
+
+    #[test]
+    fn pacing_assignment_version_change_restarts_active_rounds() {
+        assert_pacing_restarts(|r| r.saved.get_mut("DP-8").unwrap().version = "revision-2".into());
+    }
+
+    #[test]
+    fn pacing_snapshot_failure_clears_previous_stability() {
+        let mut pacing = WatchPacing::default();
+        let round = stable_round();
+        for _ in 0..11 {
+            pacing.observe(&round);
+        }
+        assert_eq!(
+            pacing.observe(&RoundFacts::default()),
+            Duration::from_millis(300)
+        );
+        // A successful snapshot establishes a fresh baseline after failure.
+        assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        for _ in 0..9 {
+            assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        }
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+    }
 
     fn assignment() -> Assignment {
         Assignment {
