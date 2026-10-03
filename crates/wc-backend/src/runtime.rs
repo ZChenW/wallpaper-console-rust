@@ -16,6 +16,15 @@ pub enum AwwwReadiness {
     SocketPresentQueryFailed { stderr: String },
 }
 
+/// Readiness and JSON from the same observation. A successful command can
+/// still return undecodable output, which is distinct from query failure.
+#[derive(Debug)]
+pub enum AwwwQueryReadiness {
+    SocketMissing,
+    SocketPresentQueryFailed { stderr: String },
+    Ready(Result<String, WcError>),
+}
+
 /// Observed host facts; the driver decides whether transparent release is supported.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AwwwEnvironment {
@@ -147,6 +156,15 @@ pub trait ProcessIo {
         ))
     }
     fn awww_socket_ready(&mut self) -> AwwwReadiness;
+    fn awww_query_json_if_ready(&mut self) -> AwwwQueryReadiness {
+        match self.awww_socket_ready() {
+            AwwwReadiness::SocketMissing => AwwwQueryReadiness::SocketMissing,
+            AwwwReadiness::SocketPresentQueryFailed { stderr } => {
+                AwwwQueryReadiness::SocketPresentQueryFailed { stderr }
+            }
+            AwwwReadiness::Ready => AwwwQueryReadiness::Ready(self.awww_query_json()),
+        }
+    }
     /// Command lines of the current user's processes, for renderer ownership
     /// observation. Fails closed: implementations that cannot inspect report
     /// an error rather than an empty list.
@@ -538,6 +556,25 @@ fn recipe_matches_argv(
 }
 
 impl ProcessIo for SystemBackendRuntime {
+    fn awww_query_json_if_ready(&mut self) -> AwwwQueryReadiness {
+        if !awww_socket_path().is_ok_and(|path| path.exists()) {
+            return AwwwQueryReadiness::SocketMissing;
+        }
+        match crate::deadline_command::output(
+            Command::new("awww").args(["query", "--json"]),
+            AWWW_QUERY_TIMEOUT,
+        ) {
+            Ok(output) if output.status.success() => AwwwQueryReadiness::Ready(
+                String::from_utf8(output.stdout).map_err(|error| WcError::Other(error.to_string())),
+            ),
+            Ok(output) => AwwwQueryReadiness::SocketPresentQueryFailed {
+                stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
+            },
+            Err(error) => AwwwQueryReadiness::SocketPresentQueryFailed {
+                stderr: error.to_string(),
+            },
+        }
+    }
     fn preflight_swaybg_observation(&mut self) -> Result<(), WcError> {
         swaybg_surface_outputs().map(|_| ())
     }

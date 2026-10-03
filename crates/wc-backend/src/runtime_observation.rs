@@ -771,8 +771,8 @@ pub fn observe_output_ownership(
     let process_scan_failed = process_inspection_error.is_some();
 
     // awww surfaces (shared daemon, per-output evidence).
-    match runtime.awww_socket_ready() {
-        crate::runtime::AwwwReadiness::SocketMissing => {
+    match runtime.awww_query_json_if_ready() {
+        crate::runtime::AwwwQueryReadiness::SocketMissing => {
             if processes
                 .iter()
                 .any(|process| program_is(&process.argv, "awww-daemon"))
@@ -784,13 +784,13 @@ pub fn observe_output_ownership(
                 );
             }
         }
-        crate::runtime::AwwwReadiness::SocketPresentQueryFailed { stderr } => {
+        crate::runtime::AwwwQueryReadiness::SocketPresentQueryFailed { stderr } => {
             implicate(Backend::Awww);
             uncertainty.push(format!(
                 "awww socket is present but its query failed: {stderr}"
             ));
         }
-        crate::runtime::AwwwReadiness::Ready => match runtime.awww_query_json() {
+        crate::runtime::AwwwQueryReadiness::Ready(result) => match result {
             Err(error) => {
                 implicate(Backend::Awww);
                 uncertainty.push(format!("awww runtime query failed: {error}"));
@@ -1322,6 +1322,139 @@ mod tests {
         use crate::runtime_observation::{observe_output_ownership, OutputOwnership};
         use crate::test_support::FakeRuntime;
         use wc_core::types::Backend;
+
+        /// Reuse renderer evidence from the existing fake; only query outcomes differ.
+        struct QueryRuntime {
+            inner: FakeRuntime,
+            answer: Option<crate::runtime::AwwwQueryReadiness>,
+            calls: usize,
+        }
+
+        impl crate::runtime::ProcessIo for QueryRuntime {
+            fn awww_query_json_if_ready(&mut self) -> crate::runtime::AwwwQueryReadiness {
+                self.calls += 1;
+                self.answer.take().expect("one query per observation")
+            }
+            fn awww_socket_ready(&mut self) -> AwwwReadiness {
+                panic!("ownership must not issue a separate readiness query")
+            }
+            fn awww_query_json(&mut self) -> Result<String, wc_core::error::WcError> {
+                panic!("ownership must not issue a second JSON query")
+            }
+            fn renderer_command_lines(
+                &mut self,
+            ) -> Result<Vec<super::super::ProcessCommandLine>, wc_core::error::WcError>
+            {
+                self.inner.renderer_command_lines()
+            }
+            fn command_output(
+                &mut self,
+                command: &mut std::process::Command,
+            ) -> Result<std::process::Output, wc_core::error::WcError> {
+                self.inner.command_output(command)
+            }
+            fn command_status(
+                &mut self,
+                command: &mut std::process::Command,
+            ) -> Result<std::process::ExitStatus, wc_core::error::WcError> {
+                self.inner.command_status(command)
+            }
+            fn mpvpaper_pids(&mut self) -> Result<Vec<u32>, wc_core::error::WcError> {
+                self.inner.mpvpaper_pids()
+            }
+            fn wait_for_mpvpaper_ready(
+                &mut self,
+                pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<u32, wc_core::error::WcError> {
+                self.inner.wait_for_mpvpaper_ready(pids, output, path)
+            }
+            fn mpvpaper_pid_running(&mut self, pid: u32) -> Result<bool, wc_core::error::WcError> {
+                self.inner.mpvpaper_pid_running(pid)
+            }
+            fn cleanup_failed_mpvpaper_launch(
+                &mut self,
+                pids: &[u32],
+                output: &str,
+                path: &str,
+            ) -> Result<(), wc_core::error::WcError> {
+                self.inner
+                    .cleanup_failed_mpvpaper_launch(pids, output, path)
+            }
+        }
+
+        fn assert_query_snapshot(
+            answer: crate::runtime::AwwwQueryReadiness,
+            expected: OutputOwnership,
+        ) {
+            let mut runtime = QueryRuntime {
+                inner: FakeRuntime {
+                    extra_command_lines: vec![vec!["awww-daemon".into()]],
+                    ..Default::default()
+                },
+                answer: Some(answer),
+                calls: 0,
+            };
+            assert_eq!(
+                observe_output_ownership(&["DP-8".into()], &mut runtime),
+                crate::runtime_observation::OutputOwnershipSnapshot {
+                    outputs: vec![("DP-8".into(), expected)],
+                    implicated_backends: vec![Backend::Awww],
+                    process_inspection_error: None,
+                }
+            );
+            assert_eq!(runtime.calls, 1);
+        }
+
+        #[test]
+        fn combined_query_preserves_missing_socket_snapshot() {
+            assert_query_snapshot(crate::runtime::AwwwQueryReadiness::SocketMissing,
+                OutputOwnership::Uncertain("awww-daemon is running but its default socket is missing; output ownership cannot be verified".into()));
+        }
+
+        #[test]
+        fn combined_query_preserves_failed_query_snapshot() {
+            assert_query_snapshot(
+                crate::runtime::AwwwQueryReadiness::SocketPresentQueryFailed {
+                    stderr: "unavailable".into(),
+                },
+                OutputOwnership::Uncertain(
+                    "awww socket is present but its query failed: unavailable".into(),
+                ),
+            );
+        }
+
+        #[test]
+        fn combined_query_preserves_successful_snapshot() {
+            assert_query_snapshot(
+                crate::runtime::AwwwQueryReadiness::Ready(Ok(
+                    r#"{"": [{"name":"DP-8","displaying":{"image":"/wall.png"}}]}"#.into(),
+                )),
+                OutputOwnership::Occupied(Backend::Awww),
+            );
+        }
+
+        #[test]
+        fn combined_query_preserves_invalid_utf8_snapshot() {
+            let error = String::from_utf8(vec![0xff]).unwrap_err().to_string();
+            assert_query_snapshot(
+                crate::runtime::AwwwQueryReadiness::Ready(Err(wc_core::error::WcError::Other(
+                    error.clone(),
+                ))),
+                OutputOwnership::Uncertain(format!("awww runtime query failed: {error}")),
+            );
+        }
+
+        #[test]
+        fn combined_query_preserves_invalid_json_snapshot() {
+            let raw = "invalid JSON";
+            let error = super::super::parse_awww_query_json(raw).unwrap_err();
+            assert_query_snapshot(
+                crate::runtime::AwwwQueryReadiness::Ready(Ok(raw.into())),
+                OutputOwnership::Uncertain(format!("awww runtime evidence is ambiguous: {error}")),
+            );
+        }
 
         fn dual() -> Vec<String> {
             vec!["eDP-1".to_string(), "DP-8".to_string()]
