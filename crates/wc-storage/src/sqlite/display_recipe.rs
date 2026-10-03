@@ -219,15 +219,13 @@ pub(crate) fn write(
 }
 
 /// Stable fingerprint of saved assignment revisions for queued-op rechecks.
-pub fn assignment_revision_fingerprint(
-    conn: &Connection,
-) -> Result<Vec<(String, i64)>, WcError> {
-    conn.prepare(
-        "SELECT target_key, assignment_revision FROM display_state ORDER BY target_key",
-    )
-    .map_err(sqlite_err)?
-    .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)))
-    .map_err(sqlite_err)?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(sqlite_err)
+pub fn assignment_revision_fingerprint(conn: &Connection) -> Result<Vec<(String, i64)>, WcError> {
+    conn.prepare("SELECT target_key, assignment_revision FROM display_state ORDER BY target_key")
+        .map_err(sqlite_err)?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(sqlite_err)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(sqlite_err)
 }
