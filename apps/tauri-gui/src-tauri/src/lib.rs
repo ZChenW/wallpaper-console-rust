@@ -107,7 +107,17 @@ pub fn run() {
         fatal_startup_error(format!("cannot initialize config directory: {error}"));
     }
 
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default();
+    if std::env::var_os("WCR_PERF").is_some() {
+        builder = builder.plugin(
+            tauri::plugin::Builder::<tauri::Wry>::new("performance-observation")
+                .js_init_script(
+                    "Object.defineProperty(globalThis, '__WCR_PERF__', { value: true });",
+                )
+                .build(),
+        );
+    }
+    builder
         .setup(move |app| {
             let log_config_dir = cd.path.clone();
             configure_logging(app.handle(), &log_config_dir)?;

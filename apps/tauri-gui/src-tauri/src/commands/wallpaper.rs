@@ -87,6 +87,66 @@ pub struct TargetedRestoreRequestDto {
 static APPLY_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 static APPLY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Measures the entire async command, including scheduling, validation and formatting.
+struct ApplyCommandMeasurement {
+    command: &'static str,
+    request_id: Option<String>,
+    started: std::time::Instant,
+    entry_micros: u128,
+    emit: fn(serde_json::Value),
+}
+
+impl ApplyCommandMeasurement {
+    fn start(command: &'static str, request_id: Option<&str>) -> Option<Self> {
+        Self::with_sink(
+            std::env::var_os("WCR_PERF").is_some(),
+            command,
+            request_id,
+            |event| {
+                log::debug!(target: "wc::performance", "{event}");
+            },
+        )
+    }
+
+    fn with_sink(
+        enabled: bool,
+        command: &'static str,
+        request_id: Option<&str>,
+        emit: fn(serde_json::Value),
+    ) -> Option<Self> {
+        if !enabled {
+            return None;
+        }
+        static ORIGIN: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        let origin = ORIGIN.get_or_init(std::time::Instant::now);
+        let started = std::time::Instant::now();
+        let measurement = Self {
+            command,
+            request_id: request_id.map(str::to_owned),
+            started,
+            entry_micros: started.duration_since(*origin).as_micros(),
+            emit,
+        };
+        measurement.record("entry", 0);
+        Some(measurement)
+    }
+
+    fn record(&self, phase: &str, elapsed_micros: u128) {
+        (self.emit)(serde_json::json!({
+            "event": "gui_apply_command", "command": self.command,
+            "phase": phase, "requestId": self.request_id,
+            "monotonicMicros": self.entry_micros + elapsed_micros,
+            "elapsedMicros": elapsed_micros,
+        }));
+    }
+}
+
+impl Drop for ApplyCommandMeasurement {
+    fn drop(&mut self) {
+        self.record("return", self.started.elapsed().as_micros());
+    }
+}
+
 fn with_renderer_state_lock<T>(
     lock: &Mutex<()>,
     operation: impl FnOnce() -> Result<T, String>,
@@ -198,6 +258,7 @@ pub async fn renderer_statuses() -> Result<RendererStatusesDto, String> {
 
 #[tauri::command]
 pub async fn apply(app: tauri::AppHandle, path: String) -> CommandResult {
+    let _measurement = ApplyCommandMeasurement::start("apply", None);
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
@@ -226,6 +287,8 @@ pub async fn apply_action(
     app: tauri::AppHandle,
     request: super::common::ApplyRequestDto,
 ) -> CommandResult {
+    let _measurement =
+        ApplyCommandMeasurement::start("apply_action", request.request_id.as_deref());
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
@@ -555,6 +618,8 @@ pub async fn apply_to_display(
     app: tauri::AppHandle,
     request: TargetedApplyRequestDto,
 ) -> CommandResult {
+    let _measurement =
+        ApplyCommandMeasurement::start("apply_to_display", request.request_id.as_deref());
     let seq = APPLY_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
     tauri::async_runtime::spawn_blocking(move || match storage() {
         Ok(s) => {
@@ -878,6 +943,16 @@ fn discover_connected_outputs() -> Result<Vec<String>, String> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn disabled_command_measurement_emits_nothing() {
+        assert!(
+            super::ApplyCommandMeasurement::with_sink(false, "apply", Some("test"), |_| {
+                panic!("disabled measurement must not emit");
+            })
+            .is_none()
+        );
+    }
+
     use super::*;
     use wc_backend::apply_stage::ApplyStage;
 

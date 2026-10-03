@@ -1,3 +1,4 @@
+import { applyTriggerTimestamp } from '../perf/metrics.ts';
 import type {
   ApplyRequestDTO,
   ApplyResultDTO,
@@ -40,7 +41,7 @@ export interface ApplyQueueDeps {
   invalidateLibrary: () => void;
   setFeedback: (feedback: CommandFeedback) => void;
   makeErrorFeedback: (label: string, error: unknown) => CommandFeedback;
-  recordMetric?: (name: string, value: number) => void;
+  recordMetric?: (name: string, value: number, requestId?: string) => void;
   subscribeApplyStage?: (handler: (event: ApplyStagePayload) => void) => () => void;
   onApplied?: (
     request: AppliedRequest,
@@ -52,9 +53,9 @@ export interface ApplyQueueDeps {
   slowStatusDelayMs?: number;
 }
 
-type QueuedApply =
+type QueuedApply = { triggeredAt?: number } & (
   | { transport: 'action'; request: ApplyRequestDTO }
-  | { transport: 'targeted'; request: TargetedApplyRequestDTO };
+  | { transport: 'targeted'; request: TargetedApplyRequestDTO });
 
 const DEFAULT_SLOW_STATUS_DELAY_MS = 500;
 const DEFAULT_SCHEDULER: ApplyQueueScheduler = {
@@ -69,8 +70,8 @@ function slowStatusDelay(value: number | undefined): number {
 }
 
 export interface ApplyQueueEnqueuer {
-  enqueue(request: ApplyRequestDTO): void;
-  enqueueTargeted(request: TargetedApplyRequestDTO): void;
+  enqueue(request: ApplyRequestDTO, triggeredAt?: number): void;
+  enqueueTargeted(request: TargetedApplyRequestDTO, triggeredAt?: number): void;
 }
 
 export function createApplyQueueHandlers(
@@ -79,27 +80,30 @@ export function createApplyQueueHandlers(
 ) {
   return {
     handleApplyAction(request: ApplyRequestDTO): void {
-      controller.enqueue(request);
+      controller.enqueue(request, applyTriggerTimestamp());
     },
     handleApply(path: string): void {
-      controller.enqueue({ kind: 'apply', path, requestId: makeRequestId() });
+      const triggeredAt = applyTriggerTimestamp();
+      controller.enqueue({ kind: 'apply', path, requestId: makeRequestId() }, triggeredAt);
     },
     handleApplyToDisplay(path: string, target?: string | string[]): void {
+      const triggeredAt = applyTriggerTimestamp();
       const request: TargetedApplyRequestDTO = {
         path,
         requestId: makeRequestId(),
         ...(Array.isArray(target) ? { targets: [...target] } : target === undefined ? {} : { target }),
       };
-      controller.enqueueTargeted(request);
+      controller.enqueueTargeted(request, triggeredAt);
     },
     handleApplyActionToDisplay(request: ApplyRequestDTO, target?: string | string[]): void {
+      const triggeredAt = applyTriggerTimestamp();
       const targeted: TargetedApplyRequestDTO = {
         kind: request.kind,
         path: request.path,
         requestId: request.requestId ?? makeRequestId(),
         ...(Array.isArray(target) ? { targets: [...target] } : target === undefined ? {} : { target }),
       };
-      controller.enqueueTargeted(targeted);
+      controller.enqueueTargeted(targeted, triggeredAt);
     },
   };
 }
@@ -134,12 +138,12 @@ export class ApplyQueueController {
     };
   }
 
-  enqueue(request: ApplyRequestDTO): void {
-    this.enqueueItem({ transport: 'action', request });
+  enqueue(request: ApplyRequestDTO, triggeredAt = applyTriggerTimestamp()): void {
+    this.enqueueItem({ transport: 'action', request, triggeredAt });
   }
 
-  enqueueTargeted(request: TargetedApplyRequestDTO): void {
-    this.enqueueItem({ transport: 'targeted', request });
+  enqueueTargeted(request: TargetedApplyRequestDTO, triggeredAt = applyTriggerTimestamp()): void {
+    this.enqueueItem({ transport: 'targeted', request, triggeredAt });
   }
 
   cancelPendingForTargets(outputs?: readonly string[]): void {
@@ -215,6 +219,10 @@ export class ApplyQueueController {
 
     try {
       let result: ApplyCommandResult;
+      const invokeStart = item.triggeredAt === undefined ? undefined : performance.now();
+      if (invokeStart !== undefined) {
+        this.deps.recordMetric?.('apply.queue.ms', invokeStart - item.triggeredAt!, request.requestId);
+      }
       try {
         result = item.transport === 'targeted'
           ? await this.deps.applyToDisplay(item.request)
@@ -222,6 +230,10 @@ export class ApplyQueueController {
       } catch (error) {
         this.reportFailure(error);
         return;
+      } finally {
+        if (invokeStart !== undefined) {
+          this.deps.recordMetric?.('apply.invoke.ms', performance.now() - invokeStart, request.requestId);
+        }
       }
 
       if (!result.success) {
