@@ -670,7 +670,7 @@ pub async fn restore_displays(request: Option<TargetedRestoreRequestDto>) -> Com
                 let target = wc_app::display_target::parse_display_targets(request.as_ref().and_then(|r| r.targets.as_deref()), None)?;
                 match service.restore_displays_with_runtime(&known_outputs, &mut wc_backend::runtime::SystemBackendRuntime,
                     &mut wc_backend::apply_stage::NoopReporter,
-                    wc_app::DisplayRestoreRuntimeOpts { request_id: None, target: Some(target) }) {
+                    wc_app::DisplayRestoreRuntimeOpts { target: Some(target), ..Default::default() }) {
                     Ok(()) => Ok(ok("Restored display wallpapers.")),
                     Err(err) => Ok(command_error_from_app_error(err)),
                 }

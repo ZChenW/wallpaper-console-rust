@@ -53,6 +53,24 @@ pub trait ProcessIo {
     fn renderer_identity_snapshot(&mut self) -> Result<String, WcError> {
         Ok(format!("{:?}", self.renderer_command_lines()?))
     }
+    /// Read-only confirmation for idempotent restore. Unknown is the safe default.
+    fn observe_wallpapers(
+        &mut self,
+        outputs: &[String],
+        _saved: &[wc_storage::sqlite::DisplayStateRow],
+    ) -> Vec<crate::runtime_observation::RuntimeWallpaperObservation> {
+        outputs
+            .iter()
+            .map(
+                |output| crate::runtime_observation::RuntimeWallpaperObservation {
+                    output: output.clone(),
+                    wallpaper_path: None,
+                    status: crate::runtime_observation::RuntimeObservationStatus::Unknown,
+                    reason: Some("runtime observation unavailable".into()),
+                },
+            )
+            .collect()
+    }
     /// Fakes explicitly model successful readiness; the system requires live evidence.
     fn verify_recipe(
         &mut self,
@@ -559,6 +577,13 @@ impl ProcessIo for SystemBackendRuntime {
         }
         identities.sort_by_key(|(pid, _)| *pid);
         Ok(format!("{identities:?}"))
+    }
+    fn observe_wallpapers(
+        &mut self,
+        outputs: &[String],
+        saved: &[wc_storage::sqlite::DisplayStateRow],
+    ) -> Vec<crate::runtime_observation::RuntimeWallpaperObservation> {
+        crate::runtime_observation::observe_runtime_wallpapers(outputs, saved)
     }
     fn verify_recipe(
         &mut self,

@@ -17,6 +17,7 @@ use wc_core::types::Backend;
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
 use crate::display_apply::{rejection_to_app_error, to_exec_action, transition_scope_for_target};
+use crate::display_operation::{OutputResult, SwitchOutcome, SwitchReport};
 use crate::display_plan::{
     plan_display_apply, DisplayApplyRequest, DisplayTarget, PlannedAction, RunningAssignment,
 };
@@ -27,6 +28,8 @@ use crate::{AppError, AppService};
 pub struct DisplayRestoreRuntimeOpts {
     pub request_id: Option<String>,
     pub target: Option<DisplayTarget>,
+    /// Adopt confirmed live renderers; explicit Restore leaves this false.
+    pub skip_confirmed: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -59,13 +62,19 @@ impl AppService {
         reporter: &mut dyn ApplyStageReporter,
         opts: DisplayRestoreRuntimeOpts,
     ) -> Result<(), AppError> {
-        self.restore_displays_with_runtime_and_commit_seam(
-            known_outputs,
-            runtime,
-            reporter,
-            opts,
-            None,
-        )
+        self.restore_displays_report_with_runtime(known_outputs, runtime, reporter, opts)
+            .map(|_| ())
+    }
+
+    /// Restore saved assignments and report adopted or restarted outputs.
+    pub fn restore_displays_report_with_runtime(
+        &self,
+        known_outputs: &[String],
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+        opts: DisplayRestoreRuntimeOpts,
+    ) -> Result<SwitchReport, AppError> {
+        self.restore_displays_report_with_commit_seam(known_outputs, runtime, reporter, opts, None)
     }
 
     /// Same as [`Self::restore_displays_with_runtime`] with a transaction-level
@@ -77,8 +86,26 @@ impl AppService {
         runtime: &mut dyn BackendRuntime,
         reporter: &mut dyn ApplyStageReporter,
         opts: DisplayRestoreRuntimeOpts,
-        mut before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
+        before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
     ) -> Result<(), AppError> {
+        self.restore_displays_report_with_commit_seam(
+            known_outputs,
+            runtime,
+            reporter,
+            opts,
+            before_state_commit,
+        )
+        .map(|_| ())
+    }
+
+    fn restore_displays_report_with_commit_seam(
+        &self,
+        known_outputs: &[String],
+        runtime: &mut dyn BackendRuntime,
+        reporter: &mut dyn ApplyStageReporter,
+        opts: DisplayRestoreRuntimeOpts,
+        mut before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
+    ) -> Result<SwitchReport, AppError> {
         let _guard = crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
             .map_err(AppError::from_wc_error)?;
         let request_id = opts.request_id.as_deref();
@@ -94,8 +121,39 @@ impl AppService {
             .storage
             .display_state_list()
             .map_err(AppError::from_wc_error)?;
+        let mut report = SwitchReport {
+            operation_id: String::new(),
+            outcome: SwitchOutcome::AlreadySatisfied,
+            original_error: None,
+            original_error_code: None,
+            outputs: Vec::new(),
+        };
+        let observations = if opts.skip_confirmed {
+            runtime.observe_wallpapers(known_outputs, &previous_rows)
+        } else {
+            Vec::new()
+        };
+        let pending: Vec<_> = selected
+            .iter()
+            .filter(|output| {
+                let confirmed = observations.iter().any(|row| {
+                    &row.output == *output
+                        && row.status
+                            == wc_backend::runtime_observation::RuntimeObservationStatus::Confirmed
+                });
+                if confirmed {
+                    report.outputs.push(OutputResult {
+                        output: (*output).clone(),
+                        outcome: SwitchOutcome::AlreadySatisfied,
+                        error: None,
+                    });
+                }
+                !confirmed
+            })
+            .cloned()
+            .collect();
         let mut steps = Vec::new();
-        for step in build_restore_steps(&previous_rows, &selected) {
+        for step in build_restore_steps(&previous_rows, &pending) {
             let user_unsupported = self
                 .storage
                 .user_unsupported_contains_path(&step.path)
@@ -105,7 +163,7 @@ impl AppService {
             }
         }
         if steps.is_empty() {
-            return Ok(());
+            return Ok(report);
         }
 
         for step in &mut steps {
@@ -222,7 +280,7 @@ impl AppService {
                     .cloned()
             })
             .collect();
-        crate::display_operation::execute(
+        let mut executed = crate::display_operation::execute(
             &self.storage,
             crate::display_operation::OperationBatch {
                 outputs: &changed_outputs,
@@ -238,13 +296,15 @@ impl AppService {
             },
         )?;
 
+        executed.outputs.extend(report.outputs);
+
         if self.storage.config_get("post_apply_on_restore", "on") == "on" {
             self.publish_theme_after_restore(&restored_state, known_outputs, &changed_outputs);
         }
         if runtime.supports_output_recovery() {
             crate::output_recovery::ensure_watcher(&self.storage);
         }
-        Ok(())
+        Ok(executed)
     }
 
     fn publish_theme_after_restore(
@@ -475,6 +535,33 @@ mod tests {
     }
 
     impl ProcessIo for FakeRuntime {
+        fn observe_wallpapers(
+            &mut self,
+            outputs: &[String],
+            saved: &[DisplayStateRow],
+        ) -> Vec<wc_backend::runtime_observation::RuntimeWallpaperObservation> {
+            struct Snapshot {
+                processes: Vec<wc_backend::runtime_observation::ProcessCommandLine>,
+                awww: String,
+            }
+            impl wc_backend::runtime_observation::RuntimeObservationIo for Snapshot {
+                fn awww_query_json(&self) -> Result<String, String> {
+                    Ok(self.awww.clone())
+                }
+                fn current_user_process_command_lines(
+                    &self,
+                ) -> Result<Vec<wc_backend::runtime_observation::ProcessCommandLine>, String>
+                {
+                    Ok(self.processes.clone())
+                }
+            }
+            let io = Snapshot {
+                processes: self.renderer_command_lines().unwrap(),
+                awww: self.awww_query_json().unwrap(),
+            };
+            wc_backend::runtime_observation::observe_runtime_wallpapers_with(outputs, saved, &io)
+        }
+
         fn renderer_command_lines(
             &mut self,
         ) -> Result<Vec<wc_backend::runtime_observation::ProcessCommandLine>, WcError> {
@@ -874,6 +961,107 @@ mod tests {
             )
             .unwrap();
         (tmp, service, video)
+    }
+
+    #[test]
+    fn confirmed_restore_preserves_processes_and_journal() {
+        let (_tmp, service, _) = dual_video_service();
+        let outputs = ["eDP-1".into(), "HDMI-1".into()];
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &outputs,
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+        let pids = runtime.mpvpaper_pids().unwrap();
+        let events = runtime.mpvpaper_events.clone();
+        let conn =
+            wc_storage::sqlite::open_runtime_connection(&service.storage_for_tests().cd).unwrap();
+        let count = || {
+            conn.query_row("SELECT count(*) FROM display_operations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+        };
+        let before = count();
+        let report = service
+            .restore_displays_report_with_runtime(
+                &outputs,
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts {
+                    skip_confirmed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(runtime.mpvpaper_pids().unwrap(), pids);
+        assert_eq!(runtime.mpvpaper_events, events);
+        assert_eq!(count(), before);
+        assert_eq!(report.outputs.len(), 2);
+        assert!(report
+            .outputs
+            .iter()
+            .all(|output| output.outcome
+                == crate::display_operation::SwitchOutcome::AlreadySatisfied));
+    }
+
+    #[test]
+    fn idempotent_restore_only_restarts_unknown_output() {
+        let (_tmp, service, _) = dual_video_service();
+        let outputs = ["eDP-1".into(), "HDMI-1".into()];
+        let mut runtime = FakeRuntime {
+            command_output_success: true,
+            command_status_success: true,
+            ..Default::default()
+        };
+        service
+            .restore_displays_with_runtime(
+                &outputs,
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts::default(),
+            )
+            .unwrap();
+        let first_pid = runtime
+            .mpvpaper_process_table
+            .iter()
+            .find(|p| p.matches_stop_outputs(&["eDP-1".into()]))
+            .unwrap()
+            .pid;
+        runtime.stop_mpvpaper_outputs(&["HDMI-1".into()]).unwrap();
+        runtime.mpvpaper_events.clear();
+        let report = service
+            .restore_displays_report_with_runtime(
+                &outputs,
+                &mut runtime,
+                &mut NoopReporter,
+                DisplayRestoreRuntimeOpts {
+                    skip_confirmed: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert_eq!(runtime.mpvpaper_events, ["apply:HDMI-1"]);
+        assert!(runtime
+            .mpvpaper_process_table
+            .iter()
+            .any(|p| p.pid == first_pid && p.matches_stop_outputs(&["eDP-1".into()])));
+        assert!(report
+            .outputs
+            .iter()
+            .any(|r| r.output == "eDP-1" && r.outcome == SwitchOutcome::AlreadySatisfied));
+        assert!(report
+            .outputs
+            .iter()
+            .any(|r| r.output == "HDMI-1" && r.outcome == SwitchOutcome::Applied));
     }
 
     #[test]

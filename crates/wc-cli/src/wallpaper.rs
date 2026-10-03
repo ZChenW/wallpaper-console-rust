@@ -185,26 +185,20 @@ pub(crate) fn runtime_state(s: &StorageApi) -> anyhow::Result<()> {
 }
 
 pub(crate) fn ensure_restored(s: &StorageApi) -> anyhow::Result<()> {
-    // Observation and mutation share the session lock with GUI/CLI/watcher.
-    let _guard = wc_app::output_recovery::RendererMutationGuard::acquire(s)?;
     let outputs = discover_connected_outputs()?;
-    let snapshot = runtime_snapshot(s, &outputs)?;
-    let pending = unconfirmed_assigned_outputs(&snapshot);
-    if pending.is_empty() {
-        println!("No saved wallpapers need restoration.");
-        return Ok(());
-    }
-    restore_displays_targeted(s, outputs, pending)
-}
-
-fn unconfirmed_assigned_outputs(snapshot: &serde_json::Value) -> Vec<String> {
-    snapshot["outputs"]
-        .as_array()
-        .into_iter()
-        .flatten()
-        .filter(|row| row["assigned"] == true && row["status"] != "confirmed")
-        .filter_map(|row| row["output"].as_str().map(str::to_owned))
-        .collect()
+    app_service_from_storage(s)?
+        .restore_displays_with_runtime(
+            &outputs,
+            &mut wc_backend::runtime::SystemBackendRuntime,
+            &mut wc_backend::apply_stage::NoopReporter,
+            wc_app::DisplayRestoreRuntimeOpts {
+                skip_confirmed: true,
+                ..Default::default()
+            },
+        )
+        .map_err(app_error)?;
+    println!("Saved wallpapers are restored.");
+    Ok(())
 }
 
 pub(crate) fn restore(s: &StorageApi) -> anyhow::Result<()> {
@@ -260,6 +254,7 @@ pub(crate) fn restore_displays_targeted(
             wc_app::DisplayRestoreRuntimeOpts {
                 target,
                 request_id: None,
+                ..Default::default()
             },
         )
         .map_err(app_error)?;
@@ -269,7 +264,7 @@ pub(crate) fn restore_displays_targeted(
 
 pub(crate) fn restore_at_login(s: &StorageApi) -> anyhow::Result<()> {
     let enabled = s.config_get("restore_on_login", "off") == "on";
-    let restored = restore_at_login_with(enabled, || restore_displays(s, Vec::new()))?;
+    let restored = restore_at_login_with(enabled, || ensure_restored(s))?;
     if !restored {
         println!("Login wallpaper restore is disabled.");
     }
@@ -813,22 +808,6 @@ mod tests {
 
     fn no_op_stop(_s: Option<&StorageApi>) -> Result<(), wc_core::error::WcError> {
         Ok(())
-    }
-
-    #[test]
-    fn ensure_restored_targets_only_unconfirmed_saved_outputs() {
-        let snapshot = serde_json::json!({"outputs": [
-            {"output": "DP-8", "assigned": true, "status": "confirmed"},
-            {"output": "eDP-1", "assigned": true, "status": "unknown"},
-            {"output": "HDMI-1", "assigned": false, "status": "unknown"}
-        ]});
-        assert_eq!(unconfirmed_assigned_outputs(&snapshot), vec!["eDP-1"]);
-        assert!(
-            unconfirmed_assigned_outputs(&serde_json::json!({"outputs": [
-                {"output": "DP-8", "assigned": true, "status": "confirmed"}
-            ]}))
-            .is_empty()
-        );
     }
 
     #[test]
