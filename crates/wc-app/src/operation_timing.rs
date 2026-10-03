@@ -45,7 +45,17 @@ impl OperationTimer {
     }
 
     pub(crate) fn measure<T>(&mut self, call: &str, action: impl FnOnce() -> T) -> T {
-        measure_detail(&mut self.details, &format!("{}.{call}", self.stage), action)
+        let started = Instant::now();
+        let result = action();
+        self.record_detail(call, started.elapsed());
+        result
+    }
+
+    pub(crate) fn record_detail(&mut self, call: &str, elapsed: std::time::Duration) {
+        *self
+            .details
+            .entry(format!("{}.{call}", self.stage))
+            .or_default() += micros(elapsed);
     }
 
     pub(crate) fn snapshot(&self) -> SwitchTimings {

@@ -189,28 +189,36 @@ where
         identities,
     } = preflight(storage, &batch, runtime, &id, &mut timer)?;
     timer.enter("journal_begin");
-    journal_begin(storage, &batch, &id, &before, &ownership, &identities)?;
-    assignment_revisions_unchanged(storage, &revisions)?;
+    timer.measure("write_journal", || {
+        journal_begin(storage, &batch, &id, &before, &ownership, &identities)
+    })?;
+    timer.measure("revisions", || {
+        assignment_revisions_unchanged(storage, &revisions)
+    })?;
 
     timer.enter("execute");
+    let execution_started = Instant::now();
     let execution = execute_prepared_transitions(prepared, runtime, reporter);
+    timer.record_detail("transitions", execution_started.elapsed());
     timer.enter("verify_recipe");
     let (progress, error, uncertain) = match execution {
         Ok(report) => {
             let verified = batch.steps.iter().try_for_each(|step| {
                 if let Some(recipe) = &step.recipe {
                     for output in step.scope.named_outputs().unwrap_or(batch.outputs) {
-                        runtime.verify_recipe(output, recipe, batch.known_outputs)?;
+                        timer.measure("verify_recipe", || {
+                            runtime.verify_recipe(output, recipe, batch.known_outputs)
+                        })?;
                     }
                 }
                 Ok::<_, WcError>(())
             });
             timer.enter("commit");
-            match verified.and_then(|()| commit()) {
+            match verified.and_then(|()| timer.measure("persist_state", commit)) {
                 Ok(()) => {
-                    if let Err(error) =
+                    if let Err(error) = timer.measure("arm_recovery", || {
                         crate::output_recovery::set_output_stopped(storage, batch.outputs, false)
-                    {
+                    }) {
                         log::warn!(
                             "wallpaper applied but output recovery could not be armed: {error}"
                         );
