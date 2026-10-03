@@ -389,6 +389,11 @@ struct WatchPacing {
 }
 
 impl WatchPacing {
+    fn wake(&mut self) {
+        self.unchanged_rounds = 0;
+        self.previous = None;
+    }
+
     fn observe(&mut self, round: &RoundFacts) -> Duration {
         if round.snapshot.is_some()
             && round.pending_empty
@@ -405,6 +410,62 @@ impl WatchPacing {
         } else {
             WATCH_ACTIVE_INTERVAL
         }
+    }
+}
+
+type WatchFingerprint = [Option<(std::time::SystemTime, u64)>; 3];
+
+fn watch_fingerprint(paths: &[PathBuf; 3]) -> std::io::Result<WatchFingerprint> {
+    let mut fingerprint = [None, None, None];
+    for (stamp, path) in fingerprint.iter_mut().zip(paths) {
+        // Like session_intents' O_NOFOLLOW, never inspect a symlink target.
+        // Only stat metadata is read; no database or file contents are opened.
+        match std::fs::symlink_metadata(path) {
+            Ok(metadata) if metadata.is_file() => {
+                *stamp = Some((metadata.modified()?, metadata.len()));
+            }
+            Ok(_) => return Err(std::io::Error::other("watch signal is not a regular file")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(fingerprint)
+}
+
+fn wait_for_watch(
+    interval: Duration,
+    mut sleep: impl FnMut(Duration),
+    mut fingerprint: impl FnMut() -> std::io::Result<WatchFingerprint>,
+) -> bool {
+    if interval != WATCH_IDLE_INTERVAL {
+        sleep(interval);
+        return false;
+    }
+    let Ok(before) = fingerprint() else {
+        return true;
+    };
+    let mut remaining = interval;
+    while !remaining.is_zero() {
+        let slice = remaining.min(WATCH_ACTIVE_INTERVAL);
+        sleep(slice);
+        if !matches!(fingerprint(), Ok(current) if current == before) {
+            return true;
+        }
+        remaining -= slice;
+    }
+    false
+}
+
+fn report_watch_pacing(interval: Duration, reason: &str) {
+    if std::env::var_os("WCR_PERF").is_some() {
+        eprintln!(
+            "WCR_PERF {}",
+            serde_json::json!({
+                "event": "watch_pacing",
+                "mode": if interval == WATCH_IDLE_INTERVAL { "idle" } else { "active" },
+                "reason": reason,
+            })
+        );
     }
 }
 
@@ -502,6 +563,14 @@ impl AppService {
         let mut previous_intents = HashMap::new();
         let mut failures = 0;
         let mut pacing = WatchPacing::default();
+        let watch_paths = [
+            session_lock_path()
+                .map_err(AppError::from_wc_error)?
+                .with_extension("intents.json"),
+            self.storage.cd.path.join("wallpapers.db"),
+            self.storage.cd.path.join("wallpapers.db-wal"),
+        ];
+        let mut previous_interval = WATCH_ACTIVE_INTERVAL;
         loop {
             let mut round = RoundFacts::default();
             if let Ok(snapshot) = adapter.snapshot() {
@@ -718,7 +787,18 @@ impl AppService {
             }
             round.pending_empty = tracker.pending.is_empty();
             round.retries_empty = retries.is_empty();
-            std::thread::sleep(pacing.observe(&round));
+            let interval = pacing.observe(&round);
+            if interval != previous_interval {
+                report_watch_pacing(interval, "round_facts");
+            }
+            previous_interval = interval;
+            if wait_for_watch(interval, std::thread::sleep, || {
+                watch_fingerprint(&watch_paths)
+            }) {
+                pacing.wake();
+                previous_interval = WATCH_ACTIVE_INTERVAL;
+                report_watch_pacing(WATCH_ACTIVE_INTERVAL, "file_changed");
+            }
         }
     }
 }
@@ -726,6 +806,165 @@ impl AppService {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idle_wait_uses_bounded_slices_without_waking_for_unchanged_files() {
+        let mut sleeps = Vec::new();
+        let woke = wait_for_watch(
+            Duration::from_millis(2000),
+            |duration| sleeps.push(duration),
+            || Ok([None, None, None]),
+        );
+        assert!(!woke);
+        assert_eq!(
+            sleeps,
+            vec![
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+                Duration::from_millis(300),
+                Duration::from_millis(200)
+            ]
+        );
+    }
+
+    fn assert_file_signal_wakes(index: usize, initially_present: bool) {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [
+            temp.path().join("session.intents.json"),
+            temp.path().join("wallpapers.db"),
+            temp.path().join("wallpapers.db-wal"),
+        ];
+        for (i, path) in paths.iter().enumerate() {
+            if i != index || initially_present {
+                std::fs::write(path, b"old").unwrap();
+            }
+        }
+        let mut sleeps = Vec::new();
+        let woke = wait_for_watch(
+            Duration::from_millis(2000),
+            |duration| {
+                sleeps.push(duration);
+                if sleeps.len() == 3 {
+                    std::fs::write(&paths[index], b"new and longer").unwrap();
+                }
+            },
+            || watch_fingerprint(&paths),
+        );
+        assert!(woke);
+        assert_eq!(sleeps, vec![Duration::from_millis(300); 3]);
+    }
+
+    #[test]
+    fn intent_file_changes_wake_on_the_first_changed_slice() {
+        assert_file_signal_wakes(0, true);
+        assert_file_signal_wakes(0, false);
+    }
+
+    #[test]
+    fn database_file_changes_wake_on_the_first_changed_slice() {
+        assert_file_signal_wakes(1, true);
+        assert_file_signal_wakes(1, false);
+    }
+
+    #[test]
+    fn wal_file_changes_wake_on_the_first_changed_slice() {
+        assert_file_signal_wakes(2, true);
+        assert_file_signal_wakes(2, false);
+    }
+
+    #[test]
+    fn modification_time_alone_wakes_the_wait() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [
+            temp.path().join("intent"),
+            temp.path().join("db"),
+            temp.path().join("wal"),
+        ];
+        std::fs::write(&paths[0], b"same size").unwrap();
+        let mut sleeps = 0;
+        assert!(wait_for_watch(
+            Duration::from_millis(2000),
+            |_| {
+                sleeps += 1;
+                File::open(&paths[0])
+                    .unwrap()
+                    .set_modified(std::time::SystemTime::UNIX_EPOCH + Duration::from_secs(123))
+                    .unwrap();
+            },
+            || watch_fingerprint(&paths)
+        ));
+        assert_eq!(sleeps, 1);
+    }
+
+    #[test]
+    fn removed_file_wakes_the_wait() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [
+            temp.path().join("intent"),
+            temp.path().join("db"),
+            temp.path().join("wal"),
+        ];
+        std::fs::write(&paths[2], b"wal").unwrap();
+        let mut sleeps = 0;
+        assert!(wait_for_watch(
+            Duration::from_millis(2000),
+            |_| {
+                sleeps += 1;
+                std::fs::remove_file(&paths[2]).unwrap();
+            },
+            || watch_fingerprint(&paths)
+        ));
+        assert_eq!(sleeps, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fingerprint_does_not_follow_symlinks() {
+        let temp = tempfile::tempdir().unwrap();
+        let paths = [
+            temp.path().join("intent"),
+            temp.path().join("db"),
+            temp.path().join("wal"),
+        ];
+        let target = temp.path().join("other-session");
+        std::fs::write(&target, b"unrelated").unwrap();
+        std::os::unix::fs::symlink(target, &paths[0]).unwrap();
+        assert!(watch_fingerprint(&paths).is_err());
+        assert!(wait_for_watch(
+            Duration::from_millis(2000),
+            |_| panic!("unknown signals must wake immediately"),
+            || watch_fingerprint(&paths)
+        ));
+    }
+
+    #[test]
+    fn active_wait_does_not_probe_file_metadata() {
+        let mut sleeps = Vec::new();
+        assert!(!wait_for_watch(
+            Duration::from_millis(300),
+            |duration| sleeps.push(duration),
+            || panic!("active wait should not stat files")
+        ));
+        assert_eq!(sleeps, vec![Duration::from_millis(300)]);
+    }
+
+    #[test]
+    fn waking_pacing_requires_fresh_stable_rounds() {
+        let mut pacing = WatchPacing::default();
+        let round = stable_round();
+        for _ in 0..11 {
+            pacing.observe(&round);
+        }
+        pacing.wake();
+        assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        for _ in 0..9 {
+            assert_eq!(pacing.observe(&round), Duration::from_millis(300));
+        }
+        assert_eq!(pacing.observe(&round), Duration::from_millis(2000));
+    }
 
     fn stable_round() -> RoundFacts {
         RoundFacts {
