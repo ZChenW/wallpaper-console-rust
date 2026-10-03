@@ -242,7 +242,25 @@ pub(crate) enum Commands {
     },
 }
 
+struct PerformanceLogger;
+impl log::Log for PerformanceLogger {
+    fn enabled(&self, metadata: &log::Metadata<'_>) -> bool {
+        metadata.target() == "wc::performance"
+    }
+    fn log(&self, record: &log::Record<'_>) {
+        if self.enabled(record.metadata()) {
+            eprintln!("{}", record.args());
+        }
+    }
+    fn flush(&self) {}
+}
+
 fn main() -> anyhow::Result<()> {
+    if std::env::var_os("WCR_PERF").is_some() {
+        static LOGGER: PerformanceLogger = PerformanceLogger;
+        let _ = log::set_logger(&LOGGER);
+        log::set_max_level(log::LevelFilter::Debug);
+    }
     let args = std::env::args().collect::<Vec<_>>();
     if let Some(exit_code) = wc_backend::image_media::try_run_worker_mode(&args) {
         std::process::exit(exit_code);

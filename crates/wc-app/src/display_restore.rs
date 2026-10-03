@@ -123,6 +123,7 @@ impl AppService {
             .map_err(AppError::from_wc_error)?;
         let mut report = SwitchReport {
             operation_id: String::new(),
+            timings: None,
             outcome: SwitchOutcome::AlreadySatisfied,
             original_error: None,
             original_error_code: None,

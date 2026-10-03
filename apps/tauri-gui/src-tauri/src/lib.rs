@@ -17,11 +17,20 @@ fn fatal_startup_error(message: impl AsRef<str>) -> ! {
 fn configure_logging(app: &tauri::AppHandle, config_dir: &std::path::Path) -> tauri::Result<()> {
     use tauri_plugin_log::{Builder, RotationStrategy, Target, TargetKind};
 
+    let perf_level = if std::env::var_os("WCR_PERF").is_some() {
+        log::LevelFilter::Debug
+    } else {
+        log::LevelFilter::Info
+    };
     let plugin = if cfg!(debug_assertions) {
-        Builder::default().level(log::LevelFilter::Info).build()
+        Builder::default()
+            .level(log::LevelFilter::Info)
+            .level_for("wc::performance", perf_level)
+            .build()
     } else {
         Builder::default()
             .level(log::LevelFilter::Info)
+            .level_for("wc::performance", perf_level)
             .rotation_strategy(RotationStrategy::KeepSome(5))
             .targets([Target::new(TargetKind::Folder {
                 path: config_dir.to_path_buf(),

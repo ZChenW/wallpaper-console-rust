@@ -214,6 +214,7 @@ impl AppService {
         apply_target: ApplyExecutionTarget,
         update_assignment: AssignmentUpdate,
     ) -> Result<DisplayApplyExecutionResult, AppError> {
+        let apply_started = std::time::Instant::now();
         let _guard = crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
             .map_err(AppError::from_wc_error)?;
         let request_id = request.request_id.as_deref();
@@ -409,6 +410,7 @@ impl AppService {
                 per_output.clear();
             }
         }
+        let planning_micros = crate::operation_timing::micros(apply_started.elapsed());
         let exec_result = crate::display_operation::execute(
             &self.storage,
             crate::display_operation::OperationBatch {
@@ -460,7 +462,8 @@ impl AppService {
         );
 
         match exec_result {
-            Ok(switch_report) => {
+            Ok(mut switch_report) => {
+                let post_started = std::time::Instant::now();
                 let mut post_apply = None;
                 if update_assignment == AssignmentUpdate::Apply {
                     if let Some(path) =
@@ -488,6 +491,21 @@ impl AppService {
                 }
                 if runtime.supports_output_recovery() {
                     crate::output_recovery::ensure_watcher(&self.storage);
+                }
+                if let Some(timings) = switch_report.timings.as_mut() {
+                    timings
+                        .stages
+                        .insert("resolve_plan".into(), planning_micros);
+                    timings.stages.insert(
+                        "post_apply".into(),
+                        crate::operation_timing::micros(post_started.elapsed()),
+                    );
+                    timings.total_micros = crate::operation_timing::micros(apply_started.elapsed());
+                    crate::operation_timing::log_timings(
+                        &switch_report.operation_id,
+                        "display_apply",
+                        timings,
+                    );
                 }
                 Ok(DisplayApplyExecutionResult {
                     switch_report,
@@ -2000,6 +2018,24 @@ mod tests {
             .unwrap();
 
         assert_eq!(result.applied_outputs, ["eDP-1", "HDMI-A-1"]);
+        let timings = result.switch_report.timings.unwrap();
+        for stage in [
+            "resolve_plan",
+            "preflight",
+            "prepare",
+            "prepare_recovery",
+            "revalidate",
+            "journal_begin",
+            "execute",
+            "verify_recipe",
+            "commit",
+            "post_apply",
+        ] {
+            assert!(timings.stages.contains_key(stage), "missing stage {stage}");
+        }
+        let measured: u64 = timings.stages.values().sum();
+        assert!(measured <= timings.total_micros);
+        assert!(timings.total_micros - measured <= timings.total_micros / 10 + 1000);
     }
 
     #[test]

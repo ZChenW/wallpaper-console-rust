@@ -54,6 +54,8 @@ pub struct SwitchReport {
     pub original_error: Option<String>,
     pub original_error_code: Option<String>,
     pub outputs: Vec<OutputResult>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timings: Option<crate::operation_timing::SwitchTimings>,
 }
 
 pub(crate) struct OperationBatch<'a> {
@@ -145,6 +147,18 @@ pub(crate) fn execute<F>(
 where
     F: FnOnce() -> Result<(), WcError>,
 {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let id = format!(
+        "{}-{}-{}-{}",
+        renderer_session_id(),
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    );
+    let mut timer = crate::operation_timing::OperationTimer::new(&id);
     let _guard = RendererMutationGuard::acquire(storage).map_err(AppError::from_wc_error)?;
     crate::display_target::validate_known_outputs(batch.outputs)
         .map_err(|e| AppError::from_wc_error(WcError::Other(e)))?;
@@ -164,17 +178,6 @@ where
             wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
         )));
     }
-    static NEXT: AtomicU64 = AtomicU64::new(0);
-    let id = format!(
-        "{}-{}-{}-{}",
-        renderer_session_id(),
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos(),
-        NEXT.fetch_add(1, Ordering::Relaxed)
-    );
     let ownership = observe_output_ownership(batch.known_outputs, runtime);
     // Validate the environment for every surviving or newly planned sibling,
     // not just the pair on the first output in a batch.
@@ -204,7 +207,9 @@ where
         .map_err(AppError::from_wc_error)?;
     // Validate the new request before preparing compensation. Both complete
     // before any mutation; invalid new media must not be hidden by stale history.
+    timer.enter("prepare");
     let prepared = prepare(storage, batch.steps, batch.known_outputs, runtime, &id)?;
+    timer.enter("prepare_recovery");
     let mut before = Vec::new();
     let mut recovery = Vec::new();
     for output in batch.outputs {
@@ -252,6 +257,7 @@ where
         };
         before.push((output.clone(), previous));
     }
+    timer.enter("revalidate");
     prepared.verify_media().map_err(AppError::from_wc_error)?;
     for (_, prepared_recovery) in &recovery {
         prepared_recovery
@@ -270,6 +276,7 @@ where
             "renderer ownership changed during preflight; retry".into(),
         )));
     }
+    timer.enter("journal_begin");
     let conn = sqlite::open_runtime_connection(&storage.cd).map_err(AppError::from_wc_error)?;
     let snapshot = serde_json::json!({"ownership":format!("{ownership:?}")}).to_string();
     display_operations::reconcile_interrupted(&conn, &renderer_session_id(), &snapshot)
@@ -289,7 +296,9 @@ where
     drop(conn);
     assignment_revisions_unchanged(storage, &revisions)?;
 
+    timer.enter("execute");
     let execution = execute_prepared_transitions(prepared, runtime, reporter);
+    timer.enter("verify_recipe");
     let (progress, error, uncertain) = match execution {
         Ok(report) => {
             let verified = batch.steps.iter().try_for_each(|step| {
@@ -300,6 +309,7 @@ where
                 }
                 Ok::<_, WcError>(())
             });
+            timer.enter("commit");
             match verified.and_then(|()| commit()) {
                 Ok(()) => {
                     if let Err(error) =
@@ -311,6 +321,7 @@ where
                     }
                     let result = SwitchReport {
                         operation_id: id.clone(),
+                        timings: Some(timer.snapshot()),
                         outcome: SwitchOutcome::Applied,
                         original_error: None,
                         original_error_code: None,
@@ -336,6 +347,7 @@ where
             failure.cleanup_uncertain,
         ),
     };
+    timer.enter("compensate");
     let changed: BTreeSet<String> = progress
         .attempted
         .iter()
@@ -367,6 +379,7 @@ where
     };
     let mut result = SwitchReport {
         operation_id: id,
+        timings: None,
         outcome: SwitchOutcome::Unchanged,
         original_error: Some(error.message),
         original_error_code: Some(error.code),
@@ -482,6 +495,7 @@ where
     } else {
         SwitchOutcome::RecoveryFailed
     };
+    result.timings = Some(timer.snapshot());
     finish(storage, &result);
     Err(report_error(result))
 }
@@ -654,6 +668,7 @@ impl crate::AppService {
         let after = observe_output_ownership(&observed_names, runtime);
         let mut report = SwitchReport {
             operation_id: id,
+            timings: None,
             outcome: SwitchOutcome::Stopped,
             original_error: execution.err().map(|e| e.error.to_string()),
             original_error_code: None,

@@ -15,6 +15,7 @@ pub mod library_refresh_round;
 pub mod library_rescan;
 pub mod login_restore;
 pub mod mpvpaper_reapply;
+pub mod operation_timing;
 pub mod output_recovery;
 pub mod post_apply;
 pub mod scan_worker;

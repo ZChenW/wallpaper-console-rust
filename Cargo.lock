@@ -4568,6 +4568,7 @@ dependencies = [
  "anyhow",
  "clap",
  "fs2",
+ "log",
  "rand",
  "rusqlite",
  "serde_json",

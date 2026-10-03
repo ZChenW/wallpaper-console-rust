@@ -274,6 +274,7 @@ export type SwitchOutcome = 'applied' | 'stopped' | 'already_satisfied' | 'uncha
   | 'restored_previous' | 'partial' | 'recovery_failed' | 'unknown';
 
 export interface SwitchReportDTO {
+  timings?: { totalMicros: number; stages: Record<string, number> };
   operationId: string;
   outcome: SwitchOutcome;
   originalError: string | null;
