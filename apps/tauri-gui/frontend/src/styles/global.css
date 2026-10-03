@@ -749,7 +749,7 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .single-page-topbar {
   display: grid;
-  grid-template-columns: auto minmax(12rem, 38rem) minmax(8rem, 1fr) auto auto;
+  grid-template-columns: auto minmax(12rem, 38rem) minmax(8rem, 1fr) auto auto auto;
   align-items: center;
   gap: 0.65rem;
   padding: 0.72rem 1rem;
@@ -760,12 +760,16 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 
 @media (min-width: 761px) {
-  .single-page-topbar > [data-topbar-action="random"] {
+  .single-page-topbar > [data-topbar-action="scan-we"] {
     grid-column: 4;
   }
 
-  .single-page-topbar > [data-topbar-action="settings"] {
+  .single-page-topbar > [data-topbar-action="random"] {
     grid-column: 5;
+  }
+
+  .single-page-topbar > [data-topbar-action="settings"] {
+    grid-column: 6;
   }
 }
 

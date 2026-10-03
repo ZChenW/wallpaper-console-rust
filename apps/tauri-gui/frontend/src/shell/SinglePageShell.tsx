@@ -1,4 +1,5 @@
 import {
+  MonitorCog,
   Search,
   Settings,
   Shuffle,
@@ -670,6 +671,18 @@ export default function SinglePageShell() {
           onCommit={returnFocusToLibrary}
           disabled={!catalog.ready || Boolean(catalog.errors.displays)}
         />
+        <button
+          aria-label="Scan Wallpaper Engine"
+          aria-busy={scanRunning}
+          className="single-page-icon-button"
+          data-topbar-action="scan-we"
+          type="button"
+          disabled={scanRunning}
+          onClick={() => void scanWallpaperEngine()}
+          title="Scan Wallpaper Engine"
+        >
+          <MonitorCog size={17} aria-hidden="true" />
+        </button>
         <button
           aria-label="Apply a random wallpaper from active filters"
           className="single-page-icon-button"
