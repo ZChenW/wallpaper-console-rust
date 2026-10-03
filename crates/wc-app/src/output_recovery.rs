@@ -22,6 +22,10 @@ thread_local! { static HELD: RefCell<HashSet<PathBuf>> = RefCell::new(HashSet::n
 
 /// Serialize watcher, CLI and GUI mutations; nested AppService calls reuse the
 /// current thread's lock. Read-only observations do not acquire this lock.
+///
+/// Reentrant only on the acquiring thread: nested apply/restore/operation guards
+/// borrow the outer lock. They must be dropped before that owning guard; the
+/// outermost lexical scope keeps the file lock through planning and execution.
 pub struct RendererMutationGuard {
     file: Option<File>,
     path: PathBuf,

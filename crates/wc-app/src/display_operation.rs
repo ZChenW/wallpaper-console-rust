@@ -58,6 +58,26 @@ pub struct SwitchReport {
     pub timings: Option<crate::operation_timing::SwitchTimings>,
 }
 
+/// Keep structured outcome evidence intact until the transport boundary.
+#[derive(Debug)]
+pub(crate) struct OperationFailure {
+    pub error: AppError,
+    pub report: Option<Box<SwitchReport>>,
+}
+impl From<AppError> for OperationFailure {
+    fn from(error: AppError) -> Self {
+        Self {
+            error,
+            report: None,
+        }
+    }
+}
+impl From<OperationFailure> for AppError {
+    fn from(failure: OperationFailure) -> Self {
+        failure.error
+    }
+}
+
 pub(crate) struct OperationBatch<'a> {
     pub outputs: &'a [String],
     pub known_outputs: &'a [String],
@@ -143,7 +163,7 @@ pub(crate) fn execute<F>(
     runtime: &mut dyn BackendRuntime,
     reporter: &mut dyn ApplyStageReporter,
     commit: F,
-) -> Result<SwitchReport, AppError>
+) -> Result<SwitchReport, OperationFailure>
 where
     F: FnOnce() -> Result<(), WcError>,
 {
@@ -160,140 +180,16 @@ where
     );
     let mut timer = crate::operation_timing::OperationTimer::new(&id);
     let _guard = RendererMutationGuard::acquire(storage).map_err(AppError::from_wc_error)?;
-    crate::display_target::validate_known_outputs(batch.outputs)
-        .map_err(|e| AppError::from_wc_error(WcError::Other(e)))?;
-    if batch.outputs.is_empty() || batch.outputs.len() > 32 {
-        return Err(AppError::from_wc_error(WcError::Other(
-            "display operation requires 1 to 32 outputs".into(),
-        )));
-    }
-    topology_still_matches(runtime, batch.known_outputs)?;
-    let revisions = assignment_revisions(storage)?;
-    if batch
-        .steps
-        .iter()
-        .any(|step| step.target == wc_core::types::Backend::Feh)
-    {
-        return Err(AppError::from_wc_error(WcError::Other(
-            wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
-        )));
-    }
-    let ownership = observe_output_ownership(batch.known_outputs, runtime);
-    // Validate the environment for every surviving or newly planned sibling,
-    // not just the pair on the first output in a batch.
-    for step in batch.steps {
-        for (output, state) in &ownership.outputs {
-            if !step
-                .scope
-                .named_outputs()
-                .is_some_and(|names| names.contains(output))
-            {
-                if let OutputOwnership::Occupied(backend) = state {
-                    wc_backend::capability::preflight_pair(step.target, *backend, runtime)
-                        .map_err(AppError::from_wc_error)?;
-                }
-            }
-        }
-        for other in batch.steps {
-            wc_backend::capability::preflight_pair(step.target, other.target, runtime)
-                .map_err(AppError::from_wc_error)?;
-        }
-    }
-    let identities = runtime
-        .renderer_identity_snapshot()
-        .map_err(AppError::from_wc_error)?;
-    let rows = storage
-        .display_state_list()
-        .map_err(AppError::from_wc_error)?;
-    // Validate the new request before preparing compensation. Both complete
-    // before any mutation; invalid new media must not be hidden by stale history.
-    timer.enter("prepare");
-    let prepared = prepare(storage, batch.steps, batch.known_outputs, runtime, &id)?;
-    timer.enter("prepare_recovery");
-    let mut before = Vec::new();
-    let mut recovery = Vec::new();
-    for output in batch.outputs {
-        let row = rows
-            .iter()
-            .find(|r| r.target == DisplayStateTarget::Output(output.clone()))
-            .or_else(|| {
-                rows.iter()
-                    .find(|r| r.target == DisplayStateTarget::AllDisplays)
-            });
-        // Validate even vacant assignments before any renderer or journal write.
-        let saved = row
-            .map(|r| storage.display_recipe(&r.target))
-            .transpose()
-            .map_err(AppError::from_wc_error)?
-            .flatten();
-        let observed = ownership
-            .outputs
-            .iter()
-            .find(|(name, _)| name == output)
-            .map(|(_, state)| state);
-        let previous = match observed {
-            Some(OutputOwnership::Vacant) => None,
-            Some(OutputOwnership::Occupied(backend)) => {
-                let recipe = saved.filter(|r| r.options.backend() == *backend).ok_or_else(||
-                    AppError::from_wc_error(WcError::Other(format!("{output} has a running renderer without a matching recovery recipe; stop it explicitly first"))))?;
-                runtime
-                    .verify_recipe(output, &recipe, batch.known_outputs)
-                    .map_err(AppError::from_wc_error)?;
-                let prepared = prepare(
-                    storage,
-                    &[scoped_recipe(output, &recipe)],
-                    batch.known_outputs,
-                    runtime,
-                    &id,
-                )?;
-                recovery.push((output.clone(), prepared));
-                Some(recipe)
-            }
-            _ => {
-                return Err(AppError::from_wc_error(WcError::Other(format!(
-                    "cannot establish recoverable ownership for {output}: {observed:?}"
-                ))))
-            }
-        };
-        before.push((output.clone(), previous));
-    }
-    timer.enter("revalidate");
-    prepared.verify_media().map_err(AppError::from_wc_error)?;
-    for (_, prepared_recovery) in &recovery {
-        prepared_recovery
-            .verify_media()
-            .map_err(AppError::from_wc_error)?;
-    }
-    topology_still_matches(runtime, batch.known_outputs)?;
-    assignment_revisions_unchanged(storage, &revisions)?;
-    if observe_output_ownership(batch.known_outputs, runtime) != ownership
-        || runtime
-            .renderer_identity_snapshot()
-            .map_err(AppError::from_wc_error)?
-            != identities
-    {
-        return Err(AppError::from_wc_error(WcError::Other(
-            "renderer ownership changed during preflight; retry".into(),
-        )));
-    }
+    let Preflight {
+        prepared,
+        before,
+        recovery,
+        revisions,
+        ownership,
+        identities,
+    } = preflight(storage, &batch, runtime, &id, &mut timer)?;
     timer.enter("journal_begin");
-    let conn = sqlite::open_runtime_connection(&storage.cd).map_err(AppError::from_wc_error)?;
-    let snapshot = serde_json::json!({"ownership":format!("{ownership:?}")}).to_string();
-    display_operations::reconcile_interrupted(&conn, &renderer_session_id(), &snapshot)
-        .map_err(AppError::from_wc_error)?;
-    let desired: Vec<_> = batch
-        .steps
-        .iter()
-        .map(|step| {
-            serde_json::json!({
-                "outputs": step.scope.named_outputs(), "recipe":step.recipe,
-            })
-        })
-        .collect();
-    display_operations::begin(&conn, &id, &renderer_session_id(), &serde_json::json!({
-        "requestId":batch.request_id,"outputs":batch.outputs,"before":before,"desired":desired,"instances":identities,
-    }).to_string()).map_err(AppError::from_wc_error)?;
-    drop(conn);
+    journal_begin(storage, &batch, &id, &before, &ownership, &identities)?;
     assignment_revisions_unchanged(storage, &revisions)?;
 
     timer.enter("execute");
@@ -348,6 +244,222 @@ where
         ),
     };
     timer.enter("compensate");
+    let mut result = compensate(
+        storage,
+        &batch,
+        runtime,
+        reporter,
+        Compensation {
+            id,
+            progress,
+            error,
+            uncertain,
+            before,
+            recovery,
+        },
+    );
+    result.timings = Some(timer.snapshot());
+    finish(storage, &result);
+    Err(OperationFailure {
+        error: report_error(&result),
+        report: Some(Box::new(result)),
+    })
+}
+
+struct Preflight {
+    prepared: PreparedTransitions,
+    before: Vec<(String, Option<RenderRecipe>)>,
+    recovery: Vec<(String, PreparedTransitions)>,
+    revisions: Vec<(String, i64)>,
+    ownership: wc_backend::runtime_observation::OutputOwnershipSnapshot,
+    identities: String,
+}
+
+fn preflight(
+    storage: &StorageApi,
+    batch: &OperationBatch<'_>,
+    runtime: &mut dyn BackendRuntime,
+    id: &str,
+    timer: &mut crate::operation_timing::OperationTimer,
+) -> Result<Preflight, AppError> {
+    crate::display_target::validate_known_outputs(batch.outputs)
+        .map_err(|e| AppError::from_wc_error(WcError::Other(e)))?;
+    if batch.outputs.is_empty() || batch.outputs.len() > 32 {
+        return Err(AppError::from_wc_error(WcError::Other(
+            "display operation requires 1 to 32 outputs".into(),
+        )));
+    }
+    topology_still_matches(runtime, batch.known_outputs)?;
+    let revisions = assignment_revisions(storage)?;
+    if batch
+        .steps
+        .iter()
+        .any(|step| step.target == wc_core::types::Backend::Feh)
+    {
+        return Err(AppError::from_wc_error(WcError::Other(
+            wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
+        )));
+    }
+    let ownership = observe_output_ownership(batch.known_outputs, runtime);
+    // Validate the environment for every surviving or newly planned sibling,
+    // not just the pair on the first output in a batch.
+    for step in batch.steps {
+        for (output, state) in &ownership.outputs {
+            if !step
+                .scope
+                .named_outputs()
+                .is_some_and(|names| names.contains(output))
+            {
+                if let OutputOwnership::Occupied(backend) = state {
+                    wc_backend::capability::preflight_pair(step.target, *backend, runtime)
+                        .map_err(AppError::from_wc_error)?;
+                }
+            }
+        }
+        for other in batch.steps {
+            wc_backend::capability::preflight_pair(step.target, other.target, runtime)
+                .map_err(AppError::from_wc_error)?;
+        }
+    }
+    let identities = runtime
+        .renderer_identity_snapshot()
+        .map_err(AppError::from_wc_error)?;
+    let rows = storage
+        .display_state_list()
+        .map_err(AppError::from_wc_error)?;
+    // Validate the new request before preparing compensation. Both complete
+    // before any mutation; invalid new media must not be hidden by stale history.
+    timer.enter("prepare");
+    let prepared = prepare(storage, batch.steps, batch.known_outputs, runtime, id)?;
+    timer.enter("prepare_recovery");
+    let mut before = Vec::new();
+    let mut recovery = Vec::new();
+    for output in batch.outputs {
+        let row = rows
+            .iter()
+            .find(|r| r.target == DisplayStateTarget::Output(output.clone()))
+            .or_else(|| {
+                rows.iter()
+                    .find(|r| r.target == DisplayStateTarget::AllDisplays)
+            });
+        // Validate even vacant assignments before any renderer or journal write.
+        let saved = row
+            .map(|r| storage.display_recipe(&r.target))
+            .transpose()
+            .map_err(AppError::from_wc_error)?
+            .flatten();
+        let observed = ownership
+            .outputs
+            .iter()
+            .find(|(name, _)| name == output)
+            .map(|(_, state)| state);
+        let previous = match observed {
+            Some(OutputOwnership::Vacant) => None,
+            Some(OutputOwnership::Occupied(backend)) => {
+                let recipe = saved.filter(|r| r.options.backend() == *backend).ok_or_else(||
+                    AppError::from_wc_error(WcError::Other(format!("{output} has a running renderer without a matching recovery recipe; stop it explicitly first"))))?;
+                runtime
+                    .verify_recipe(output, &recipe, batch.known_outputs)
+                    .map_err(AppError::from_wc_error)?;
+                let prepared = prepare(
+                    storage,
+                    &[scoped_recipe(output, &recipe)],
+                    batch.known_outputs,
+                    runtime,
+                    id,
+                )?;
+                recovery.push((output.clone(), prepared));
+                Some(recipe)
+            }
+            _ => {
+                return Err(AppError::from_wc_error(WcError::Other(format!(
+                    "cannot establish recoverable ownership for {output}: {observed:?}"
+                ))))
+            }
+        };
+        before.push((output.clone(), previous));
+    }
+    timer.enter("revalidate");
+    prepared.verify_media().map_err(AppError::from_wc_error)?;
+    for (_, prepared_recovery) in &recovery {
+        prepared_recovery
+            .verify_media()
+            .map_err(AppError::from_wc_error)?;
+    }
+    topology_still_matches(runtime, batch.known_outputs)?;
+    assignment_revisions_unchanged(storage, &revisions)?;
+    if observe_output_ownership(batch.known_outputs, runtime) != ownership
+        || runtime
+            .renderer_identity_snapshot()
+            .map_err(AppError::from_wc_error)?
+            != identities
+    {
+        return Err(AppError::from_wc_error(WcError::Other(
+            "renderer ownership changed during preflight; retry".into(),
+        )));
+    }
+    Ok(Preflight {
+        prepared,
+        before,
+        recovery,
+        revisions,
+        ownership,
+        identities,
+    })
+}
+
+fn journal_begin(
+    storage: &StorageApi,
+    batch: &OperationBatch<'_>,
+    id: &str,
+    before: &[(String, Option<RenderRecipe>)],
+    ownership: &wc_backend::runtime_observation::OutputOwnershipSnapshot,
+    identities: &str,
+) -> Result<(), AppError> {
+    let conn = sqlite::open_runtime_connection(&storage.cd).map_err(AppError::from_wc_error)?;
+    let snapshot = serde_json::json!({"ownership":format!("{ownership:?}")}).to_string();
+    display_operations::reconcile_interrupted(&conn, &renderer_session_id(), &snapshot)
+        .map_err(AppError::from_wc_error)?;
+    let desired: Vec<_> = batch
+        .steps
+        .iter()
+        .map(|step| {
+            serde_json::json!({
+                "outputs": step.scope.named_outputs(), "recipe":step.recipe,
+            })
+        })
+        .collect();
+    display_operations::begin(&conn, id, &renderer_session_id(), &serde_json::json!({
+        "requestId":batch.request_id,"outputs":batch.outputs,"before":before,"desired":desired,"instances":identities,
+    }).to_string()).map_err(AppError::from_wc_error)?;
+    drop(conn);
+    Ok(())
+}
+
+struct Compensation {
+    id: String,
+    progress: wc_backend::display_executor::DisplayExecReport,
+    error: AppError,
+    uncertain: bool,
+    before: Vec<(String, Option<RenderRecipe>)>,
+    recovery: Vec<(String, PreparedTransitions)>,
+}
+
+fn compensate(
+    storage: &StorageApi,
+    batch: &OperationBatch<'_>,
+    runtime: &mut dyn BackendRuntime,
+    reporter: &mut dyn ApplyStageReporter,
+    failure: Compensation,
+) -> SwitchReport {
+    let Compensation {
+        id,
+        progress,
+        error,
+        uncertain,
+        before,
+        mut recovery,
+    } = failure;
     let changed: BTreeSet<String> = progress
         .attempted
         .iter()
@@ -495,9 +607,7 @@ where
     } else {
         SwitchOutcome::RecoveryFailed
     };
-    result.timings = Some(timer.snapshot());
-    finish(storage, &result);
-    Err(report_error(result))
+    result
 }
 
 fn finish(storage: &StorageApi, report: &SwitchReport) {
@@ -513,7 +623,7 @@ fn finish(storage: &StorageApi, report: &SwitchReport) {
     }
 }
 
-fn report_error(report: SwitchReport) -> AppError {
+fn report_error(report: &SwitchReport) -> AppError {
     let (code, message) = match report.outcome {
         SwitchOutcome::Unchanged => (
             "display_unchanged",

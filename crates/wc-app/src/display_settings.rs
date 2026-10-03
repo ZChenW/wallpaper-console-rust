@@ -172,5 +172,6 @@ impl AppService {
                 sqlite::display_state_commit_distinct_recipes(&conn, &recipes)
             },
         )
+        .map_err(AppError::from)
     }
 }

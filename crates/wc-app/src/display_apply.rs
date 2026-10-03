@@ -6,16 +6,10 @@
 //! state is reconciled so it does not claim stopped renderers still run.
 
 use wc_backend::apply_stage::{self, ApplyStageReporter, NoopReporter};
-#[cfg(test)]
-use wc_backend::apply_transition::ApplyTransitionFailure;
 use wc_backend::apply_transition::TransitionStep;
 use wc_backend::display_executor::DisplayExecAction;
-#[cfg(test)]
-use wc_backend::display_executor::{CompletedEvent, DisplayExecFailure, DisplayExecReport};
 use wc_backend::runtime::{BackendRuntime, SystemBackendRuntime};
 use wc_backend::ExecutionScope;
-#[cfg(test)]
-use wc_config::ConfigDirExt;
 use wc_core::types::{Backend, FileType};
 use wc_storage::sqlite::{DisplayStateRow, DisplayStateTarget};
 
@@ -53,7 +47,7 @@ impl DisplayApplyExecutionResult {
     }
 }
 
-/// Optional knobs for [`AppService::apply_to_display_with_runtime`].
+/// Optional knobs for [`AppService::execute_apply_request_to_display_with_runtime`].
 #[derive(Default)]
 pub struct DisplayApplyRuntimeOpts {
     pub request_id: Option<String>,
@@ -78,39 +72,17 @@ impl AppService {
     ) -> Result<ApplyTarget, AppError> {
         let mut runtime = SystemBackendRuntime;
         let mut reporter = NoopReporter;
-        self.apply_to_display_with_runtime(
-            path,
+        self.execute_apply_request_to_display_with_runtime(
+            ApplyRequest {
+                kind: ApplyRequestKind::Apply,
+                path: path.into(),
+                request_id: None,
+            },
             target,
             known_outputs,
             &mut runtime,
             &mut reporter,
             DisplayApplyRuntimeOpts::default(),
-        )
-    }
-
-    /// Injectable seam for tests (fake runtime + stage reporter).
-    pub fn apply_to_display_with_runtime(
-        &self,
-        path: &str,
-        target: DisplayTarget,
-        known_outputs: &[String],
-        runtime: &mut dyn BackendRuntime,
-        reporter: &mut dyn ApplyStageReporter,
-        opts: DisplayApplyRuntimeOpts,
-    ) -> Result<ApplyTarget, AppError> {
-        let request = ApplyRequest {
-            kind: ApplyRequestKind::Apply,
-            path: path.to_string(),
-            request_id: opts.request_id.clone(),
-        };
-        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
-            request,
-            target,
-            known_outputs,
-            runtime,
-            reporter,
-            opts,
-            None,
         )
         .map(DisplayApplyExecutionResult::into_apply_target)
     }
@@ -128,7 +100,7 @@ impl AppService {
         reporter: &mut dyn ApplyStageReporter,
         opts: DisplayApplyRuntimeOpts,
     ) -> Result<DisplayApplyExecutionResult, AppError> {
-        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
+        self.execute_display_request(
             request,
             target,
             known_outputs,
@@ -139,38 +111,8 @@ impl AppService {
         )
     }
 
-    #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn apply_to_display_with_runtime_and_commit_seam(
-        &self,
-        path: &str,
-        target: DisplayTarget,
-        known_outputs: &[String],
-        runtime: &mut dyn BackendRuntime,
-        reporter: &mut dyn ApplyStageReporter,
-        opts: DisplayApplyRuntimeOpts,
-        before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
-    ) -> Result<ApplyTarget, AppError> {
-        let request = ApplyRequest {
-            kind: ApplyRequestKind::Apply,
-            path: path.to_string(),
-            request_id: opts.request_id.clone(),
-        };
-        self.execute_apply_request_to_display_with_runtime_and_commit_seam(
-            request,
-            target,
-            known_outputs,
-            runtime,
-            reporter,
-            opts,
-            before_state_commit,
-        )
-        .map(DisplayApplyExecutionResult::into_apply_target)
-    }
-
-    #[doc(hidden)]
-    #[allow(clippy::too_many_arguments)]
-    pub fn execute_apply_request_to_display_with_runtime_and_commit_seam(
+    fn execute_display_request(
         &self,
         request: ApplyRequest,
         target: DisplayTarget,
@@ -229,6 +171,7 @@ impl AppService {
             .storage
             .display_state_list()
             .map_err(AppError::from_wc_error)?;
+        let mut saved_recipes = std::collections::HashMap::new();
         for row in &previous_rows {
             let affected = match (&target, &row.target) {
                 (DisplayTarget::AllDisplays, DisplayStateTarget::AllDisplays) => true,
@@ -239,9 +182,11 @@ impl AppService {
                 _ => false,
             };
             if affected {
-                self.storage
+                let recipe = self
+                    .storage
                     .display_recipe(&row.target)
                     .map_err(AppError::from_wc_error)?;
+                saved_recipes.insert(row.target.storage_key().to_string(), recipe);
             }
         }
         // Conflict input comes from live renderer ownership, not persisted
@@ -364,11 +309,14 @@ impl AppService {
             for output in &applied_outputs {
                 let state_target = DisplayStateTarget::Output(output.clone());
                 let mut resolved_recipe = recipe.clone();
-                if let Some(saved) = self
-                    .storage
-                    .display_recipe(&state_target)
-                    .map_err(AppError::from_wc_error)?
-                {
+                let saved = match saved_recipes.remove(state_target.storage_key()) {
+                    Some(saved) => saved,
+                    None => self
+                        .storage
+                        .display_recipe(&state_target)
+                        .map_err(AppError::from_wc_error)?,
+                };
+                if let Some(saved) = saved {
                     if saved.options.backend() == recipe.options.backend() {
                         resolved_recipe.options = saved.options;
                     }
@@ -520,10 +468,9 @@ impl AppService {
                     post_apply,
                 })
             }
-            Err(error) => {
-                if let Some(report) = error.detail.as_deref().and_then(|detail| {
-                    serde_json::from_str::<crate::display_operation::SwitchReport>(detail).ok()
-                }) {
+            Err(failure) => {
+                let error = failure.error;
+                if let Some(report) = failure.report {
                     if apply_target.file_type == FileType::WeScene {
                         let cause = AppError {
                             code: report
@@ -587,150 +534,6 @@ impl AppService {
             }
         }
     }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    fn reconcile_commit_failure(
-        &self,
-        error: wc_core::error::WcError,
-        previous_rows: &[DisplayStateRow],
-        report: &DisplayExecReport,
-        known_outputs: &[String],
-        apply_target: &ApplyExecutionTarget,
-    ) -> AppError {
-        let reconciled = reconcile_display_state_from_report(previous_rows, report, known_outputs);
-        let _ = self.storage.runtime_state_clear();
-        if let Err(reconcile_error) = self.storage.display_state_replace_all(&reconciled) {
-            return AppError {
-                code: "display_state_uncertain".into(),
-                message: format!(
-                    "Wallpaper applied via {}, but both the state commit and reconciliation failed",
-                    apply_target.backend.as_str()
-                ),
-                detail: Some(format!(
-                    "commit_error={error}; reconciliation_error={reconcile_error}"
-                )),
-                recoverable: true,
-                suggestion: Some(
-                    "Refresh renderer status before applying another wallpaper.".into(),
-                ),
-            };
-        }
-        AppError {
-            code: "display_state_commit_failed".into(),
-            message: format!(
-                "Wallpaper applied via {} but persisting display state failed: {error}",
-                apply_target.backend.as_str()
-            ),
-            detail: Some(error.to_string()),
-            recoverable: true,
-            suggestion: Some(
-                "Re-apply the wallpaper or clear display state before retrying.".into(),
-            ),
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn handle_exec_failure(
-        &self,
-        failure: DisplayExecFailure,
-        previous_rows: &[DisplayStateRow],
-        known_outputs: &[String],
-        before_reconcile: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
-    ) -> Result<AppError, AppError> {
-        if failure.cleanup_uncertain {
-            // Confirmed progress in the ordered report is always reconciled,
-            // even when no stop post-condition failed: a confirmed stop must
-            // not remain persisted as a live assignment.
-            let clear_result = self.storage.runtime_state_clear();
-            let mut conservative_report = failure.report.clone();
-            if let Some(stop) = failure.uncertain_stop.clone().map(|stop| *stop) {
-                conservative_report.record_stop(stop);
-            }
-            let reconciled = reconcile_display_state_from_report(
-                previous_rows,
-                &conservative_report,
-                known_outputs,
-            );
-            let persist_result = match before_reconcile {
-                Some(seam) => self
-                    .storage
-                    .display_state_replace_all_seam(&reconciled, seam),
-                None => self.storage.display_state_replace_all(&reconciled),
-            };
-            let clear_note = clear_result
-                .err()
-                .map(|error| format!("runtime_state_clear_error={error}"));
-            if let Err(persist_error) = persist_result {
-                let mut detail = format!(
-                    "execution_error={}; reconciliation_error={persist_error}",
-                    failure.error
-                );
-                if let Some(note) = &clear_note {
-                    detail.push_str("; ");
-                    detail.push_str(note);
-                }
-                return Err(AppError {
-                    code: "display_state_uncertain".into(),
-                    message: "Renderer cleanup outcome and persisted display state are uncertain"
-                        .into(),
-                    detail: Some(detail),
-                    recoverable: true,
-                    suggestion: Some("Refresh renderer status before retrying.".into()),
-                });
-            }
-            let mut detail = failure.error.to_string();
-            if let Some(note) = &clear_note {
-                detail.push_str("; ");
-                detail.push_str(note);
-            }
-            return Ok(AppError {
-                code: "display_state_uncertain".into(),
-                message: "Renderer cleanup could not be verified".into(),
-                detail: Some(detail),
-                recoverable: true,
-                suggestion: Some("Refresh renderer status before retrying.".into()),
-            });
-        }
-        let after_stop = failure.after_destructive_stop();
-        let had_progress = after_stop || failure.report.completed_applies().next().is_some();
-        if had_progress {
-            let reconciled =
-                reconcile_display_state_from_report(previous_rows, &failure.report, known_outputs);
-            let persist_result = match before_reconcile {
-                Some(seam) => self
-                    .storage
-                    .display_state_replace_all_seam(&reconciled, seam),
-                None => self.storage.display_state_replace_all(&reconciled),
-            };
-            persist_result.map_err(|reconcile_error| AppError {
-                code: "display_state_uncertain".into(),
-                message:
-                    "Wallpaper execution changed live state, but persistence reconciliation failed"
-                        .into(),
-                detail: Some(format!(
-                    "execution_error={}; reconciliation_error={reconcile_error}",
-                    failure.error
-                )),
-                recoverable: true,
-                suggestion: Some("Refresh renderer status before retrying.".into()),
-            })?;
-        }
-        let stopped = failure.report.stopped_backends();
-        let applies = failure.report.completed_applies().count();
-        let mut app_err = AppError::from_wc_error(failure.error);
-        if after_stop {
-            app_err.code = "display_apply_failed_after_stop".into();
-            app_err.detail = Some(format!(
-                "destructive_stops={:?}; successful_applies={}",
-                stopped, applies
-            ));
-        } else if had_progress {
-            app_err.code = "display_apply_failed_after_partial_apply".into();
-            app_err.detail = Some(format!("successful_applies={applies}"));
-        }
-        Ok(app_err)
-    }
 }
 
 fn planned_apply_outputs(actions: &[PlannedAction]) -> Vec<String> {
@@ -785,29 +588,10 @@ fn record_compat_failure(target: &ApplyExecutionTarget, error: &AppError) {
     );
 }
 
-#[cfg(test)]
-fn compat_failure_error(
-    target: &ApplyExecutionTarget,
-    error: &wc_core::error::WcError,
-) -> Option<AppError> {
-    if target.file_type != FileType::WeScene || target.backend != Backend::LinuxWallpaperEngine {
-        return None;
-    }
-    let wc_core::error::WcError::LinuxWallpaperEngine { kind, detail } = error else {
-        return None;
-    };
-    Some(AppError::from_wc_error(
-        wc_core::error::WcError::LinuxWallpaperEngine {
-            kind: kind.clone(),
-            detail: detail.clone(),
-        },
-    ))
-}
-
 pub(crate) fn to_exec_action(
     action: PlannedAction,
     path: &str,
-    target: &DisplayTarget,
+    _target: &DisplayTarget,
     known_outputs: &[String],
     use_instant: bool,
 ) -> Result<DisplayExecAction, AppError> {
@@ -818,7 +602,7 @@ pub(crate) fn to_exec_action(
                 .map_err(AppError::from_wc_error)?,
         }),
         PlannedAction::Stop { backend, outputs } => {
-            let scope = stop_scope_for_action(target, &outputs, known_outputs)?;
+            let scope = ExecutionScope::named(outputs).map_err(AppError::from_wc_error)?;
             Ok(DisplayExecAction::Stop { backend, scope })
         }
         PlannedAction::Apply { backend, outputs } => {
@@ -846,36 +630,6 @@ pub(crate) fn transition_scope_for_target(
         }
         DisplayTarget::Outputs(outputs) => {
             ExecutionScope::named(outputs.clone()).map_err(AppError::from_wc_error)
-        }
-    }
-}
-
-#[cfg(test)]
-#[allow(dead_code)]
-pub(crate) fn display_exec_failure_from_transition(
-    failure: ApplyTransitionFailure,
-) -> DisplayExecFailure {
-    DisplayExecFailure {
-        report: failure.exec,
-        error: failure.error,
-        uncertain_stop: failure.uncertain_stop,
-        cleanup_uncertain: failure.cleanup_uncertain,
-    }
-}
-
-/// All-displays apply stops are intentionally global for the backend.
-/// Named-target stops preserve the planned output list (executor rejects partials).
-fn stop_scope_for_action(
-    target: &DisplayTarget,
-    outputs: &[String],
-    _known_outputs: &[String],
-) -> Result<ExecutionScope, AppError> {
-    match target {
-        DisplayTarget::AllDisplays => {
-            ExecutionScope::named(outputs.to_vec()).map_err(AppError::from_wc_error)
-        }
-        DisplayTarget::Output(_) | DisplayTarget::Outputs(_) => {
-            ExecutionScope::named(outputs.to_vec()).map_err(AppError::from_wc_error)
         }
     }
 }
@@ -1096,139 +850,6 @@ pub(crate) fn intended_display_state(
     }
 }
 
-/// Rebuild persisted display_state from the ordered execution report.
-///
-/// Completed destructive stops remove affected prior assignments; completed
-/// applies then materialize surviving live assignments by scope/path/backend.
-/// Unaffected and disconnected rows are preserved.
-#[cfg(test)]
-pub(crate) fn reconcile_display_state_from_report(
-    previous: &[DisplayStateRow],
-    report: &DisplayExecReport,
-    known_outputs: &[String],
-) -> Vec<(DisplayStateTarget, String, String)> {
-    let mut rows: Vec<(DisplayStateTarget, String, String)> = previous
-        .iter()
-        .map(|row| {
-            (
-                row.target.clone(),
-                row.wallpaper_path.clone(),
-                row.backend.clone(),
-            )
-        })
-        .collect();
-
-    expand_all_display_rows(&mut rows, known_outputs);
-
-    for event in &report.events {
-        match event {
-            CompletedEvent::Stop(stop) if stop.destructive => {
-                apply_completed_stop(&mut rows, stop, known_outputs)
-            }
-            CompletedEvent::Stop(_) => {}
-            CompletedEvent::Apply(apply) => apply_completed_apply(&mut rows, apply, known_outputs),
-        }
-    }
-    rows
-}
-
-#[cfg(test)]
-fn expand_all_display_rows(
-    rows: &mut Vec<(DisplayStateTarget, String, String)>,
-    known_outputs: &[String],
-) {
-    if !known_outputs.is_empty() {
-        if let Some((_, path, backend)) = rows
-            .iter()
-            .find(|(target, _, _)| matches!(target, DisplayStateTarget::AllDisplays))
-            .cloned()
-        {
-            rows.retain(|(target, _, _)| !matches!(target, DisplayStateTarget::AllDisplays));
-            for output in known_outputs {
-                if !rows
-                    .iter()
-                    .any(|(target, _, _)| target == &DisplayStateTarget::Output(output.clone()))
-                {
-                    rows.push((
-                        DisplayStateTarget::Output(output.clone()),
-                        path.clone(),
-                        backend.clone(),
-                    ));
-                }
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn apply_completed_stop(
-    rows: &mut Vec<(DisplayStateTarget, String, String)>,
-    stop: &wc_backend::display_executor::CompletedStop,
-    known_outputs: &[String],
-) {
-    let backend = stop.backend.as_str();
-    if matches!(stop.scope, ExecutionScope::Named(_)) {
-        expand_all_display_rows(rows, known_outputs);
-    }
-    match &stop.scope {
-        ExecutionScope::AllDisplays => {
-            // A process-wide stop only proves connected renderer ownership disappeared.
-            // Disconnected rows are restore preferences, not currently running processes.
-            rows.retain(|(target, _, row_backend)| {
-                row_backend != backend
-                    || match target {
-                        DisplayStateTarget::AllDisplays => false,
-                        DisplayStateTarget::Output(output) => !known_outputs.contains(output),
-                    }
-            });
-        }
-        ExecutionScope::Named(outputs) => {
-            rows.retain(|(target, _, row_backend)| {
-                if row_backend != backend {
-                    return true;
-                }
-                match target {
-                    DisplayStateTarget::AllDisplays => true,
-                    DisplayStateTarget::Output(output) => !outputs.contains(output),
-                }
-            });
-        }
-    }
-}
-
-#[cfg(test)]
-fn apply_completed_apply(
-    rows: &mut Vec<(DisplayStateTarget, String, String)>,
-    apply: &wc_backend::display_executor::CompletedApply,
-    known_outputs: &[String],
-) {
-    let backend = apply.backend.as_str().to_string();
-    let path = apply.path.clone();
-    if matches!(apply.scope, ExecutionScope::Named(_)) {
-        expand_all_display_rows(rows, known_outputs);
-    }
-    match &apply.scope {
-        ExecutionScope::AllDisplays => {
-            rows.retain(|(target, _, _)| match target {
-                DisplayStateTarget::AllDisplays => false,
-                DisplayStateTarget::Output(output) => !known_outputs.contains(output),
-            });
-            rows.insert(0, (DisplayStateTarget::AllDisplays, path, backend));
-        }
-        ExecutionScope::Named(outputs) => {
-            rows.retain(|(t, _, _)| !matches!(t, DisplayStateTarget::AllDisplays));
-            for output in outputs {
-                rows.retain(|(t, _, _)| t != &DisplayStateTarget::Output(output.clone()));
-                rows.push((
-                    DisplayStateTarget::Output(output.clone()),
-                    path.clone(),
-                    backend.clone(),
-                ));
-            }
-        }
-    }
-}
-
 pub(crate) fn rejection_to_app_error(reason: RejectionReason) -> AppError {
     let message = match &reason {
         RejectionReason::UnsupportedBackend => "Unsupported wallpaper backend.".into(),
@@ -1356,6 +977,61 @@ pub(crate) fn commit_legacy_apply_display_state_with_seam(
 
 #[cfg(test)]
 mod tests {
+    use wc_config::ConfigDirExt;
+    impl AppService {
+        fn apply_to_display_with_runtime(
+            &self,
+            path: &str,
+            target: DisplayTarget,
+            known_outputs: &[String],
+            runtime: &mut dyn BackendRuntime,
+            reporter: &mut dyn ApplyStageReporter,
+            opts: DisplayApplyRuntimeOpts,
+        ) -> Result<ApplyTarget, AppError> {
+            let request = ApplyRequest {
+                kind: ApplyRequestKind::Apply,
+                path: path.to_string(),
+                request_id: opts.request_id.clone(),
+            };
+            self.execute_display_request(
+                request,
+                target,
+                known_outputs,
+                runtime,
+                reporter,
+                opts,
+                None,
+            )
+            .map(DisplayApplyExecutionResult::into_apply_target)
+        }
+        fn apply_to_display_with_runtime_and_commit_seam(
+            &self,
+            path: &str,
+            target: DisplayTarget,
+            known_outputs: &[String],
+            runtime: &mut dyn BackendRuntime,
+            reporter: &mut dyn ApplyStageReporter,
+            opts: DisplayApplyRuntimeOpts,
+            before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
+        ) -> Result<ApplyTarget, AppError> {
+            let request = ApplyRequest {
+                kind: ApplyRequestKind::Apply,
+                path: path.to_string(),
+                request_id: opts.request_id.clone(),
+            };
+            self.execute_display_request(
+                request,
+                target,
+                known_outputs,
+                runtime,
+                reporter,
+                opts,
+                before_state_commit,
+            )
+            .map(DisplayApplyExecutionResult::into_apply_target)
+        }
+    }
+
     use super::*;
     use std::cell::RefCell;
     use std::path::Path;
@@ -1739,7 +1415,10 @@ mod tests {
         ) -> Result<(), WcError> {
             self.lwe_apply_calls += 1;
             if let Some(message) = &self.lwe_apply_error {
-                return Err(WcError::Other(message.clone()));
+                return Err(WcError::LinuxWallpaperEngine {
+                    kind: wc_core::error::BackendErrorKind::RendererLimitation,
+                    detail: message.clone(),
+                });
             }
             for output in outputs {
                 self.extra_command_lines.push(vec![
@@ -1885,7 +1564,14 @@ mod tests {
                 DisplayApplyRuntimeOpts::default(),
             );
             if fail {
-                assert_eq!(result.unwrap_err().code, "display_recovery_failed");
+                let error = result.unwrap_err();
+                assert_eq!(error.code, "display_recovery_failed");
+                let report: crate::display_operation::SwitchReport =
+                    serde_json::from_str(error.detail.as_deref().unwrap()).unwrap();
+                assert_eq!(
+                    report.original_error_code.as_deref(),
+                    Some("renderer_limitation")
+                );
             } else {
                 result.unwrap();
             }
@@ -2071,29 +1757,6 @@ mod tests {
             ),
             None
         );
-    }
-
-    #[test]
-    fn compat_failure_preserves_original_renderer_classification() {
-        let scene_target = crate::apply_execution::ApplyExecutionTarget {
-            recipe: None,
-            input_path: "/scene".into(),
-            resolved_path: "/scene".into(),
-            state_path: "/scene".into(),
-            file_type: wc_core::types::FileType::WeScene,
-            backend: Backend::LinuxWallpaperEngine,
-            preview: false,
-            fallback_path: None,
-        };
-        let stop_error = wc_core::error::WcError::Other("old backend stop failed".into());
-        let renderer_error = wc_core::error::WcError::LinuxWallpaperEngine {
-            kind: wc_core::error::BackendErrorKind::RendererLimitation,
-            detail: "renderer failed".into(),
-        };
-
-        assert!(compat_failure_error(&scene_target, &stop_error).is_none());
-        let compat_error = compat_failure_error(&scene_target, &renderer_error).unwrap();
-        assert_eq!(compat_error.code, "renderer_limitation");
     }
 
     #[test]
@@ -2334,107 +1997,6 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_from_report_materializes_surviving_apply_and_preserves_unrelated() {
-        use wc_backend::display_executor::{CompletedApply, CompletedStop, DisplayExecReport};
-
-        let previous = vec![
-            DisplayStateRow {
-                target: DisplayStateTarget::AllDisplays,
-                wallpaper_path: "/walls/old.jpg".into(),
-                backend: "awww".into(),
-                updated_at: "t".into(),
-            },
-            DisplayStateRow {
-                target: DisplayStateTarget::Output("DP-ghost".into()),
-                wallpaper_path: "/walls/ghost.mp4".into(),
-                backend: "mpvpaper".into(),
-                updated_at: "t".into(),
-            },
-            DisplayStateRow {
-                target: DisplayStateTarget::Output("HDMI-1".into()),
-                wallpaper_path: "/walls/still.jpg".into(),
-                backend: "awww".into(),
-                updated_at: "t".into(),
-            },
-        ];
-        let stop = CompletedStop {
-            backend: Backend::Awww,
-            scope: ExecutionScope::AllDisplays,
-            destructive: true,
-        };
-        let apply = CompletedApply {
-            backend: Backend::Mpvpaper,
-            scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
-            path: "/walls/clip.mp4".into(),
-        };
-        let report = DisplayExecReport {
-            attempted: Vec::new(),
-            events: vec![
-                CompletedEvent::Stop(stop.clone()),
-                CompletedEvent::Apply(apply.clone()),
-            ],
-        };
-
-        let reconciled = reconcile_display_state_from_report(
-            &previous,
-            &report,
-            &["eDP-1".into(), "HDMI-1".into()],
-        );
-        assert!(
-            reconciled
-                .iter()
-                .all(|(t, _, b)| !matches!(t, DisplayStateTarget::AllDisplays) && b != "awww"),
-            "destructive awww stop must clear awww claims: {reconciled:?}"
-        );
-        assert!(
-            reconciled.iter().any(|(t, p, b)| {
-                *t == DisplayStateTarget::Output("eDP-1".into())
-                    && p == "/walls/clip.mp4"
-                    && b == "mpvpaper"
-            }),
-            "surviving completed apply must be materialized: {reconciled:?}"
-        );
-        assert!(
-            reconciled.iter().any(|(t, p, b)| {
-                *t == DisplayStateTarget::Output("DP-ghost".into())
-                    && p == "/walls/ghost.mp4"
-                    && b == "mpvpaper"
-            }),
-            "unaffected disconnected row must be preserved: {reconciled:?}"
-        );
-        assert!(
-            !reconciled
-                .iter()
-                .any(|(t, _, _)| *t == DisplayStateTarget::Output("HDMI-1".into())),
-            "HDMI-1 awww assignment was destroyed by the stop and never re-applied: {reconciled:?}"
-        );
-
-        let cleanup = CompletedStop {
-            backend: Backend::Mpvpaper,
-            scope: ExecutionScope::AllDisplays,
-            destructive: true,
-        };
-        let ordered_cleanup_report = DisplayExecReport {
-            attempted: Vec::new(),
-            events: vec![
-                CompletedEvent::Apply(apply.clone()),
-                CompletedEvent::Stop(cleanup.clone()),
-            ],
-        };
-        let after_cleanup = reconcile_display_state_from_report(
-            &previous,
-            &ordered_cleanup_report,
-            &["eDP-1".into(), "HDMI-1".into()],
-        );
-        assert!(!after_cleanup.iter().any(|(target, _, backend)| {
-            target == &DisplayStateTarget::Output("eDP-1".into()) && backend == "mpvpaper"
-        }));
-        assert!(after_cleanup.iter().any(|(target, _, backend)| {
-            target == &DisplayStateTarget::Output("DP-ghost".into()) && backend == "mpvpaper"
-        }));
-    }
-
-    #[test]
     fn missing_recovery_media_rejects_before_renderer_and_commit() {
         let (tmp, service) = temp_service();
         let image = write_image(tmp.path(), "next.jpg");
@@ -2537,32 +2099,6 @@ mod tests {
                 .as_deref(),
             Some("/walls/stale-runtime.mp4")
         );
-    }
-
-    #[test]
-    fn uncertain_target_cleanup_invalidates_legacy_runtime_evidence() {
-        let (_tmp, service) = temp_service();
-        service
-            .storage_for_tests()
-            .current_write("/walls/stale-runtime.mp4")
-            .unwrap();
-
-        let error = service
-            .handle_exec_failure(
-                DisplayExecFailure {
-                    report: DisplayExecReport::default(),
-                    error: WcError::Other("target cleanup probe failed".into()),
-                    uncertain_stop: None,
-                    cleanup_uncertain: true,
-                },
-                &[],
-                &["eDP-1".into()],
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(error.code, "display_state_uncertain");
-        assert_eq!(service.storage_for_tests().current_read().unwrap(), None);
     }
 
     #[test]
@@ -2922,98 +2458,6 @@ mod tests {
         assert_eq!(rt.stop_mpvpaper_count, 0);
         assert!(rt.command_status_args.is_empty());
         assert!(rt.command_output_args.is_empty());
-    }
-
-    #[test]
-    fn uncertain_cleanup_without_uncertain_stop_still_drops_confirmed_stop() {
-        let (_tmp, service) = temp_service();
-        service
-            .storage_for_tests()
-            .display_state_replace_all(&[
-                (
-                    DisplayStateTarget::Output("eDP-1".into()),
-                    "/walls/old.mp4".into(),
-                    "mpvpaper".into(),
-                ),
-                (
-                    DisplayStateTarget::Output("DP-8".into()),
-                    "/walls/sibling.mp4".into(),
-                    "mpvpaper".into(),
-                ),
-            ])
-            .unwrap();
-
-        let mut report = DisplayExecReport::default();
-        report.record_stop(wc_backend::display_executor::CompletedStop {
-            backend: Backend::Mpvpaper,
-            scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
-            destructive: true,
-        });
-        let error = service
-            .handle_exec_failure(
-                DisplayExecFailure {
-                    report,
-                    error: WcError::Other("launch failed; cleanup unverifiable".into()),
-                    uncertain_stop: None,
-                    cleanup_uncertain: true,
-                },
-                &service.storage_for_tests().display_state_list().unwrap(),
-                &["eDP-1".into(), "DP-8".into()],
-                None,
-            )
-            .unwrap();
-
-        assert_eq!(error.code, "display_state_uncertain");
-        let rows = service.storage_for_tests().display_state_list().unwrap();
-        assert!(
-            !rows
-                .iter()
-                .any(|row| row.target == DisplayStateTarget::Output("eDP-1".into())),
-            "confirmed-stopped old video must not remain recorded: {rows:?}"
-        );
-        assert!(rows.iter().any(|row| {
-            row.target == DisplayStateTarget::Output("DP-8".into())
-                && row.wallpaper_path == "/walls/sibling.mp4"
-                && row.backend == "mpvpaper"
-        }));
-    }
-
-    #[test]
-    fn uncertain_cleanup_persist_failure_reports_both_causes() {
-        let (_tmp, service) = temp_service();
-        let previous = vec![DisplayStateRow {
-            target: DisplayStateTarget::Output("eDP-1".into()),
-            wallpaper_path: "/walls/old.mp4".into(),
-            backend: "mpvpaper".into(),
-            updated_at: "t".into(),
-        }];
-        let mut report = DisplayExecReport::default();
-        report.record_stop(wc_backend::display_executor::CompletedStop {
-            backend: Backend::Mpvpaper,
-            scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
-            destructive: true,
-        });
-        let mut fail_reconcile = || Err(WcError::Other("reconcile commit failed".into()));
-        let error = service
-            .handle_exec_failure(
-                DisplayExecFailure {
-                    report,
-                    error: WcError::Other("launch failed; cleanup unverifiable".into()),
-                    uncertain_stop: None,
-                    cleanup_uncertain: true,
-                },
-                &previous,
-                &["eDP-1".into()],
-                Some(&mut fail_reconcile),
-            )
-            .unwrap_err();
-
-        assert_eq!(error.code, "display_state_uncertain");
-        let detail = error.detail.unwrap_or_default();
-        assert!(
-            detail.contains("execution_error=") && detail.contains("reconciliation_error="),
-            "both causes must be reported: {detail}"
-        );
     }
 
     #[test]
@@ -3871,35 +3315,6 @@ mod tests {
         assert!(rt.stop_mpvpaper_outputs_calls.is_empty());
         let after = service.storage_for_tests().display_state_list().unwrap();
         assert_eq!(before.len(), after.len());
-    }
-
-    #[test]
-    fn reconcile_named_stop_removes_only_named_outputs() {
-        use wc_backend::display_executor::CompletedStop;
-
-        let mut rows = vec![
-            (
-                DisplayStateTarget::Output("eDP-1".into()),
-                "/a.mp4".into(),
-                "mpvpaper".into(),
-            ),
-            (
-                DisplayStateTarget::Output("HDMI-1".into()),
-                "/b.mp4".into(),
-                "mpvpaper".into(),
-            ),
-        ];
-        apply_completed_stop(
-            &mut rows,
-            &CompletedStop {
-                backend: Backend::Mpvpaper,
-                scope: ExecutionScope::named(vec!["eDP-1".into()]).unwrap(),
-                destructive: true,
-            },
-            &["eDP-1".into(), "HDMI-1".into()],
-        );
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].0, DisplayStateTarget::Output("HDMI-1".into()));
     }
 
     #[test]
