@@ -40,27 +40,6 @@ pub(crate) fn lwe_pgrep_pattern() -> &'static str {
     r"^(\S*/)?linux-wallpaperengine( |$)"
 }
 
-/// True when `cmdline` looks like an actual linux-wallpaperengine invocation.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn cmdline_looks_like_lwe(cmdline: &str) -> bool {
-    if cmdline.contains('\0') {
-        return cmdline.split('\0').any(token_is_lwe_program);
-    }
-    cmdline.split_whitespace().any(token_is_lwe_program)
-}
-
-/// True when `cmdline` looks like an actual mpvpaper invocation.
-#[cfg_attr(not(test), allow(dead_code))]
-pub(crate) fn cmdline_looks_like_mpvpaper(cmdline: &str) -> bool {
-    if cmdline.contains('\0') {
-        return cmdline.split('\0').any(token_is_mpvpaper_program);
-    }
-    let Some(argv0) = cmdline.split_whitespace().next() else {
-        return false;
-    };
-    token_is_mpvpaper_program(argv0)
-}
-
 #[cfg(unix)]
 pub(crate) fn read_proc_cmdline_tokens(pid: i32) -> Option<Vec<String>> {
     let raw = std::fs::read(format!("/proc/{pid}/cmdline")).ok()?;
@@ -728,29 +707,6 @@ pub(crate) mod test_support {
 
         assert!(pc.termed().is_empty());
         assert!(pc.killed().is_empty());
-    }
-
-    #[test]
-    fn cmdline_pattern_rejects_less_viewing_mpvpaper_log() {
-        assert!(!super::cmdline_looks_like_mpvpaper(
-            "less /tmp/mpvpaper.log"
-        ));
-        assert!(!super::cmdline_looks_like_lwe(
-            "less /tmp/linux-wallpaperengine.log"
-        ));
-    }
-
-    #[test]
-    fn cmdline_pattern_accepts_real_renderer_invocations() {
-        assert!(super::cmdline_looks_like_mpvpaper(
-            "/usr/bin/mpvpaper HDMI-A-1 -- /walls/night.mp4"
-        ));
-        assert!(super::cmdline_looks_like_lwe(
-            "/usr/bin/linux-wallpaperengine --screen-root eDP-1 --bg 123"
-        ));
-        assert!(super::cmdline_looks_like_lwe(
-            "setsid /usr/bin/linux-wallpaperengine --bg 123"
-        ));
     }
 
     #[test]

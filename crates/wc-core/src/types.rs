@@ -38,6 +38,7 @@ pub enum Backend {
     Mpvpaper,
     Swaybg,
     /// Read-only legacy identity. No driver or new selection is supported.
+    // Compatibility-only until 0.2.0: retain old saved assignments and the migration error.
     Feh,
     #[serde(rename = "linux-wallpaperengine")]
     LinuxWallpaperEngine,
