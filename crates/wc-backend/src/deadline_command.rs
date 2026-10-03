@@ -6,7 +6,7 @@
 
 use std::io::Read;
 use std::process::{Command, ExitStatus, Output, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use wc_core::error::WcError;
@@ -30,8 +30,13 @@ pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output,
     let status = wait_until_deadline(&mut child, pid, &label, timeout);
     match status {
         Ok(status) => {
+            let drained = wait_for_drainers(&stdout, &stderr);
             kill_process_group(pid);
-            std::thread::sleep(POLL_INTERVAL);
+            if !drained {
+                // Descendants can hold the pipes open after the direct child
+                // exits. Cleanup gets one more bounded drain, then a snapshot.
+                wait_for_drainers(&stdout, &stderr);
+            }
             Ok(Output {
                 status,
                 stdout: snapshot(&stdout),
@@ -65,6 +70,7 @@ fn wait_until_deadline(
     timeout: Duration,
 ) -> Result<ExitStatus, WcError> {
     let started = Instant::now();
+    let mut poll_interval = Duration::from_millis(1);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return Ok(status),
@@ -78,7 +84,8 @@ fn wait_until_deadline(
                 )));
             }
             Ok(None) => {
-                std::thread::sleep(POLL_INTERVAL.min(timeout.saturating_sub(started.elapsed())))
+                std::thread::sleep(poll_interval.min(timeout.saturating_sub(started.elapsed())));
+                poll_interval = (poll_interval * 2).min(POLL_INTERVAL);
             }
             Err(error) => {
                 kill_process_group(pid);
@@ -92,14 +99,20 @@ fn wait_until_deadline(
     }
 }
 
-fn spawn_drainer(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> {
+struct Drainer {
+    captured: Arc<Mutex<Vec<u8>>>,
+    finished: mpsc::Receiver<()>,
+}
+
+fn spawn_drainer(mut stream: impl Read + Send + 'static) -> Drainer {
     let captured = Arc::new(Mutex::new(Vec::with_capacity(OUTPUT_CAP)));
     let writer = Arc::clone(&captured);
+    let (done, finished) = mpsc::channel();
     std::thread::spawn(move || {
         let mut chunk = [0_u8; 4096];
         loop {
             match stream.read(&mut chunk) {
-                Ok(0) | Err(_) => return,
+                Ok(0) | Err(_) => break,
                 Ok(read) => {
                     let mut captured = writer.lock().unwrap_or_else(|error| error.into_inner());
                     let remaining = OUTPUT_CAP.saturating_sub(captured.len());
@@ -107,12 +120,31 @@ fn spawn_drainer(mut stream: impl Read + Send + 'static) -> Arc<Mutex<Vec<u8>>> 
                 }
             }
         }
+        let _ = done.send(());
     });
-    captured
+    Drainer { captured, finished }
 }
 
-fn snapshot(captured: &Arc<Mutex<Vec<u8>>>) -> Vec<u8> {
-    captured
+fn wait_for_drainers(stdout: &Drainer, stderr: &Drainer) -> bool {
+    // Both streams share the original 10 ms budget; completed drainers return
+    // immediately. A disconnected channel also means the thread has ended.
+    let deadline = Instant::now() + POLL_INTERVAL;
+    for drainer in [stdout, stderr] {
+        if matches!(
+            drainer
+                .finished
+                .recv_timeout(deadline.saturating_duration_since(Instant::now())),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ) {
+            return false;
+        }
+    }
+    true
+}
+
+fn snapshot(drainer: &Drainer) -> Vec<u8> {
+    drainer
+        .captured
         .lock()
         .unwrap_or_else(|error| error.into_inner())
         .clone()
@@ -144,6 +176,87 @@ fn kill_process_group(_pid: u32) {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn short_command_has_complete_output_without_fixed_wait() {
+        let mut samples = Vec::new();
+        for _ in 0..20 {
+            let started = Instant::now();
+            let result = output(
+                Command::new("/bin/sh").args(["-c", "printf hello"]),
+                Duration::from_secs(1),
+            )
+            .unwrap();
+            samples.push(started.elapsed());
+            assert!(result.status.success());
+            assert_eq!(result.stdout, b"hello");
+            assert!(result.stderr.is_empty());
+        }
+        samples.sort();
+        let median = (samples[9] + samples[10]) / 2;
+        assert!(median < Duration::from_millis(10), "median {median:?}");
+    }
+
+    #[test]
+    fn final_output_is_complete_on_both_streams_repeatedly() {
+        for _ in 0..50 {
+            let result = output(
+                Command::new("/bin/sh").args([
+                    "-c",
+                    r"head -c 30000 /dev/zero | tr '\0' x; head -c 30000 /dev/zero | tr '\0' y >&2",
+                ]),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+            assert!(result.status.success());
+            assert_eq!(result.stdout, vec![b'x'; 30000]);
+            assert_eq!(result.stderr, vec![b'y'; 30000]);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn descendant_holding_stdout_is_cleaned_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let pid_file = dir.path().join("child.pid");
+        let started = Instant::now();
+        let result = output(
+            Command::new("/bin/sh")
+                .args(["-c", "sleep 30 & echo $! > \"$1\"; echo done", "test"])
+                .arg(&pid_file),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        let pid: i32 = std::fs::read_to_string(pid_file)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let running = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+                !stat
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, fields)| fields.starts_with('Z') || fields.starts_with('X'))
+            })
+        };
+        let cleanup_started = Instant::now();
+        while running() && cleanup_started.elapsed() < Duration::from_millis(100) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let survived = running();
+        if survived {
+            // SAFETY: cleanup targets only the PID written by this test's child.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(
+            !survived,
+            "descendant still running after process-group cleanup"
+        );
+        assert!(result.status.success());
+        assert_eq!(result.stdout, b"done\n");
+        assert!(elapsed < Duration::from_millis(100), "elapsed {elapsed:?}");
+    }
 
     #[test]
     fn large_output_is_drained_without_deadlock_and_is_bounded() {
