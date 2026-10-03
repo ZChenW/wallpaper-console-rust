@@ -368,7 +368,7 @@ fn restored_display_state(
 }
 
 fn restore_fallback_path(path: &str) -> Option<String> {
-    let entry = wc_scan::make_entry(path)?;
+    let entry = wc_scan::classify_entry(path)?;
     match entry.file_type {
         wc_core::types::FileType::Image | wc_core::types::FileType::Gif => {
             Some(entry.path.to_string())

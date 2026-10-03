@@ -27,7 +27,7 @@ pub(crate) fn restore_clean_with_runtime(
         return Err(WcError::WallpaperMissing(p.to_path_buf()));
     }
 
-    let entry = wc_scan::make_entry(&current)
+    let entry = wc_scan::classify_entry(&current)
         .ok_or_else(|| WcError::UnsupportedFileType(current.clone()))?;
     let backend = backend_for_restore_entry(s, &entry);
     let fallback_path = fallback_for_restore_entry(&entry, p);
@@ -45,12 +45,12 @@ pub(crate) fn restore_clean_with_runtime(
     )
 }
 
-fn backend_for_restore_entry(s: &StorageApi, entry: &wc_core::types::WallpaperEntry) -> Backend {
+fn backend_for_restore_entry(s: &StorageApi, entry: &wc_scan::EntryClassification) -> Backend {
     s.backend_routing().backend_for(entry.file_type)
 }
 
 fn fallback_for_restore_entry(
-    entry: &wc_core::types::WallpaperEntry,
+    entry: &wc_scan::EntryClassification,
     _path: &std::path::Path,
 ) -> Option<String> {
     match entry.file_type {
@@ -67,18 +67,15 @@ fn fallback_for_restore_entry(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wc_core::types::{FileType, WallpaperEntry};
+    use wc_core::types::FileType;
+    use wc_scan::EntryClassification;
 
-    fn entry(file_type: FileType) -> WallpaperEntry {
-        WallpaperEntry {
+    fn entry(file_type: FileType) -> EntryClassification {
+        EntryClassification {
             path: "/tmp/wallpaper".into(),
             file_type,
             ext: String::new(),
             backend: Backend::Unsupported,
-            size: 0,
-            mtime: 0,
-            resolution: String::new(),
-            project: None,
         }
     }
 

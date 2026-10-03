@@ -201,7 +201,7 @@ impl AppService {
         {
             return Err(AppError::user_unsupported());
         }
-        let entry = wc_scan::make_entry(&resolved_path)
+        let entry = wc_scan::classify_entry(&resolved_path)
             .ok_or_else(|| AppError::unsupported_path(&resolved_path))?;
         let backend = self.backend_for_entry(&entry)?;
         if backend == Backend::Unsupported {
@@ -285,7 +285,7 @@ impl AppService {
                 let preview = info
                     .preview_path
                     .ok_or_else(|| AppError::preview_missing(&request.path))?;
-                let preview_entry = wc_scan::make_entry(&preview)
+                let preview_entry = wc_scan::classify_entry(&preview)
                     .ok_or_else(|| AppError::unsupported_path(&preview))?;
                 let backend = self.backend_for_entry(&preview_entry)?;
                 Ok(apply_execution::ApplyExecutionTarget {
@@ -302,7 +302,7 @@ impl AppService {
         }
     }
 
-    fn backend_for_entry(&self, entry: &WallpaperEntry) -> Result<Backend, AppError> {
+    fn backend_for_entry(&self, entry: &wc_scan::EntryClassification) -> Result<Backend, AppError> {
         let backend = self
             .storage
             .backend_routing()

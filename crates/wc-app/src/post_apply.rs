@@ -526,7 +526,7 @@ pub(crate) fn file_type_from_str(raw: &str) -> FileType {
 }
 
 pub(crate) fn detect_file_type_string(wallpaper_path: &str) -> String {
-    wc_scan::make_entry(wallpaper_path)
+    wc_scan::classify_entry(wallpaper_path)
         .map(|entry| entry.file_type.as_str().to_string())
         .unwrap_or_else(|| "image".to_string())
 }
@@ -574,7 +574,7 @@ fn resolve_we_scene_preview(project_path: &str) -> Result<PathBuf, String> {
             project_dir.display()
         )
     })?;
-    let entry = wc_scan::make_entry(&preview).ok_or_else(|| {
+    let entry = wc_scan::classify_entry(&preview).ok_or_else(|| {
         format!(
             "Wallpaper Engine scene preview is not a supported image: {}",
             preview

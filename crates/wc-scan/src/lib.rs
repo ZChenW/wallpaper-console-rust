@@ -9,8 +9,9 @@ mod resolution;
 mod walk;
 pub(crate) use project::make_we_project_entry_from_info;
 pub use project::{
-    make_entry, make_entry_cached, read_we_project_info, read_we_project_json, safe_join,
-    we_project_info_from_json, workshop_id_from_path, WeProjectInfo,
+    classify_entry, make_entry, make_entry_cached, read_we_project_info, read_we_project_json,
+    safe_join, we_project_info_from_json, workshop_id_from_path, EntryClassification,
+    WeProjectInfo,
 };
 pub use walk::{
     dedupe_sources, is_wallpaper_engine_source, normalize_source_path, scan_wallpapers,

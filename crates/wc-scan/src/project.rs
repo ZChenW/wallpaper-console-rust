@@ -336,6 +336,67 @@ fn project_entry_size_hint(project_dir: &Path, preview_path: Option<&str>) -> u6
     size
 }
 
+/// Routing metadata without subprocesses or dimension probes. Indexing callers
+/// should keep using `make_entry` for size, resolution and project metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntryClassification {
+    pub path: Utf8PathBuf,
+    pub file_type: FileType,
+    pub ext: String,
+    pub backend: Backend,
+}
+
+pub fn classify_entry(path: &str) -> Option<EntryClassification> {
+    let p = Path::new(path);
+    if p.is_dir() {
+        let canonical = p.canonicalize().ok()?;
+        let info = read_we_project_info(&canonical)?;
+        let (path, ext) = match info.entry_type {
+            FileType::Image | FileType::Gif | FileType::Video => {
+                let file = info.file.as_ref()?;
+                let media = safe_join(&canonical, file).ok()?.canonicalize().ok()?;
+                if !media.is_file() {
+                    return None;
+                }
+                fs::metadata(&media).ok()?;
+                (
+                    media.to_string_lossy().to_string(),
+                    formats::get_extension(file)?,
+                )
+            }
+            FileType::WeScene | FileType::WeWeb | FileType::WeApplication => {
+                fs::metadata(canonical.join("project.json"))
+                    .or_else(|_| fs::metadata(&canonical))
+                    .ok()?;
+                let ext = match info.entry_type {
+                    FileType::WeScene => "scene",
+                    FileType::WeWeb => "web",
+                    _ => "application",
+                };
+                (info.project_entry_path(), ext.into())
+            }
+        };
+        return Some(EntryClassification {
+            path: path.into(),
+            file_type: info.entry_type,
+            ext,
+            backend: info.backend,
+        });
+    }
+    if !p.is_file() {
+        return None;
+    }
+    let ext = formats::get_extension(path)?;
+    let (file_type, backend) = formats::classify_media_path(p)?;
+    fs::metadata(p).ok()?;
+    Some(EntryClassification {
+        path: path.into(),
+        file_type,
+        ext,
+        backend,
+    })
+}
+
 pub fn make_entry(path: &str) -> Option<WallpaperEntry> {
     let p = Path::new(path);
     if p.is_dir() {

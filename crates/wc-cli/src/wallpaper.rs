@@ -634,7 +634,7 @@ fn scan_paths(
         Ok(all
             .into_iter()
             .filter(|p| {
-                wc_scan::make_entry(p)
+                wc_scan::classify_entry(p)
                     .map(|entry| entry.file_type == ft)
                     .unwrap_or(false)
             })
