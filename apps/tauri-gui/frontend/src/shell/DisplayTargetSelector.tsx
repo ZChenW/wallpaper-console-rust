@@ -10,6 +10,7 @@ export interface DisplayTargetSelectorProps {
   readonly connectedOutputs: readonly string[];
   readonly value: DisplayTarget;
   readonly onChange: (target: DisplayTarget) => void;
+  readonly onCommit?: () => void;
   readonly ariaLabel?: string;
   readonly disabled?: boolean;
 }
@@ -18,6 +19,7 @@ export default function DisplayTargetSelector({
   connectedOutputs,
   value,
   onChange,
+  onCommit,
   ariaLabel = 'Display target',
   disabled = false,
 }: DisplayTargetSelectorProps) {
@@ -43,6 +45,7 @@ export default function DisplayTargetSelector({
       value={displayTargetToSelectValue(model.selectedTarget)}
       options={options}
       onValueChange={(next) => onChange(displayTargetFromSelectValue(next))}
+      onCommit={onCommit}
       variant="compact"
     />
   );

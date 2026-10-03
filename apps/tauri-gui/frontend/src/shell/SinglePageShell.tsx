@@ -578,6 +578,16 @@ export default function SinglePageShell() {
     browser.debouncedSearch,
   ].join('|');
 
+  // Choosing a filter or sort ends that errand, exactly like picking a display
+  // target: hand the arrow keys back to the wallpapers instead of leaving them
+  // on the select trigger, where they would keep changing the same control.
+  const returnFocusToLibrary = useCallback(() => {
+    setLibraryReturnFocusToken((token) => token + 1);
+  }, []);
+  const dismissLibraryFilters = useCallback(() => {
+    setFiltersOpen(false);
+    returnFocusToLibrary();
+  }, [returnFocusToLibrary]);
   const rememberLibraryAnchor = useCallback((wallpaperId: number, settled = true) => {
     if (libraryMetricsEnabled()) recordMetric(settled ? "library.anchor.commit" : "library.anchor.preview", wallpaperId);
     libraryViewportAnchorRef.current = wallpaperId;
@@ -653,11 +663,11 @@ export default function SinglePageShell() {
           value={preferences.displayTarget}
           onChange={(displayTarget) => {
             updatePreferences((current) => ({ ...current, displayTarget }));
-            // Picking a target is the end of that errand. Leaving focus on the
-            // trigger makes the next arrow key reopen this menu instead of
-            // moving through wallpapers.
-            setLibraryReturnFocusToken((token) => token + 1);
           }}
+          // Picking a target is the end of that errand. Leaving focus on the
+          // trigger makes the next arrow key reopen this menu instead of
+          // moving through wallpapers.
+          onCommit={returnFocusToLibrary}
           disabled={!catalog.ready || Boolean(catalog.errors.displays)}
         />
         <button
@@ -700,7 +710,7 @@ export default function SinglePageShell() {
             effectiveSrcFilter={effectiveSrcFilter}
             preferences={preferences}
             updatePreferences={updatePreferences}
-            onDismiss={() => setFiltersOpen(false)}
+            onDismiss={dismissLibraryFilters}
           />
         </OverflowStrip>
         <Popover.Root open={filtersOpen} onOpenChange={setFiltersOpen}>
@@ -723,7 +733,7 @@ export default function SinglePageShell() {
             effectiveSrcFilter={effectiveSrcFilter}
             preferences={preferences}
             updatePreferences={updatePreferences}
-            onDismiss={() => setFiltersOpen(false)}
+            onDismiss={dismissLibraryFilters}
           />
               </div>
               <Popover.Arrow className="single-page-filter-popover__arrow" />

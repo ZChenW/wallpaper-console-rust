@@ -147,6 +147,7 @@ function WallpaperGridImpl({
   const initialAnchorAppliedRef = useRef(false);
   const lastHandledFocusTokenRef = useRef(0);
   const lastHandledReturnFocusTokenRef = useRef(0);
+  const keyboardReturnedRef = useRef(false);
   const entriesRef = useRef(entries);
   const activeIndexRef = useRef(activeIndex);
   entriesRef.current = entries;
@@ -477,13 +478,17 @@ function WallpaperGridImpl({
   }, [onSelect]);
 
   const focusGridIndex = useCallback((index: number) => {
-    const entry = entriesRef.current[index];
-    if (!entry) return;
+    if (!entriesRef.current[index]) return;
     setActiveIndex(index);
     virtualizer.scrollToIndex(Math.floor(index / Math.max(1, colCountRef.current)), {
       align: 'auto',
     });
     requestAnimationFrame(() => requestAnimationFrame(() => {
+      // Resolve the card when focusing, not when asked: a filter or sort change
+      // can replace the entries in between.
+      const current = entriesRef.current;
+      const entry = current[Math.min(index, current.length - 1)];
+      if (!entry) return;
       document.getElementById(`wallpaper-grid-option-${entry.wallpaperId}`)?.focus({
         preventScroll: true,
       });
@@ -498,8 +503,34 @@ function WallpaperGridImpl({
       returnFocusToken,
     )) return;
     lastHandledReturnFocusTokenRef.current = returnFocusToken;
+    keyboardReturnedRef.current = true;
     focusGridIndex(activeIndexRef.current);
   }, [active, focusGridIndex, returnFocusToken]);
+
+  // The control that handed focus back may also have replaced the results
+  // (filter, sort), unmounting the card that was just focused. Keep the keyboard
+  // in the grid until the user deliberately focuses something else.
+  useEffect(() => {
+    const leave = (event: Event) => {
+      const target = event.target;
+      if (target instanceof Node && !containerRef.current?.contains(target)) {
+        keyboardReturnedRef.current = false;
+      }
+    };
+    document.addEventListener('focusin', leave);
+    document.addEventListener('pointerdown', leave);
+    return () => {
+      document.removeEventListener('focusin', leave);
+      document.removeEventListener('pointerdown', leave);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!active || !keyboardReturnedRef.current || entries.length === 0) return;
+    const focused = document.activeElement;
+    if (focused && focused !== document.body) return;
+    focusGridIndex(Math.min(activeIndex, entries.length - 1));
+  }, [active, activeIndex, entries, focusGridIndex]);
 
   const handleGridKeyDown = useCallback((event: React.KeyboardEvent<HTMLDivElement>) => {
     const target = event.target;

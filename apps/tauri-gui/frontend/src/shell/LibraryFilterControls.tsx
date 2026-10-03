@@ -47,8 +47,8 @@ export default function LibraryFilterControls({
         onValueChange={(value) => {
           const sourceFilter = sourceFilterFromValue(value);
           updatePreferences((current) => ({ ...current, sourceFilter }));
-          onDismiss();
         }}
+        onCommit={onDismiss}
         variant="compact"
       />
       <SelectField
@@ -65,8 +65,8 @@ export default function LibraryFilterControls({
         onValueChange={(value) => {
           const typeFilter = value as LibraryTypeFilter;
           updatePreferences((current) => ({ ...current, typeFilter }));
-          onDismiss();
         }}
+        onCommit={onDismiss}
         variant="compact"
       />
       <label
@@ -99,8 +99,8 @@ export default function LibraryFilterControls({
         onValueChange={(value) => {
           const sort = value as LibrarySort;
           updatePreferences((current) => ({ ...current, sort }));
-          onDismiss();
         }}
+        onCommit={onDismiss}
         variant="compact"
       />
       {preferences.libraryViewMode === 'grid' ? (
@@ -115,8 +115,8 @@ export default function LibraryFilterControls({
           onValueChange={(value) => {
             const cardSize = value as typeof preferences.cardSize;
             updatePreferences((current) => ({ ...current, cardSize }));
-            onDismiss();
           }}
+          onCommit={onDismiss}
           variant="compact"
         />
       ) : null}
