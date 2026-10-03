@@ -127,6 +127,7 @@ impl AppService {
             apply_stage::ApplyStage::ResolveTarget,
             request.request_id.as_deref(),
         );
+        let resolve_started = std::time::Instant::now();
         let apply_target = self.resolve_apply_request_target(&request)?;
         self.execute_resolved_display_apply(
             request,
@@ -138,6 +139,7 @@ impl AppService {
             before_state_commit,
             apply_target,
             AssignmentUpdate::Apply,
+            Some(resolve_started),
         )
     }
 
@@ -155,10 +157,22 @@ impl AppService {
         before_state_commit: Option<&mut dyn FnMut() -> Result<(), wc_core::error::WcError>>,
         apply_target: ApplyExecutionTarget,
         update_assignment: AssignmentUpdate,
+        resolve_started: Option<std::time::Instant>,
     ) -> Result<DisplayApplyExecutionResult, AppError> {
-        let apply_started = std::time::Instant::now();
-        let _guard = crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
-            .map_err(AppError::from_wc_error)?;
+        use crate::operation_timing::measure_detail;
+        let entered = std::time::Instant::now();
+        let apply_started = resolve_started.unwrap_or(entered);
+        let mut details = std::collections::BTreeMap::new();
+        if let Some(started) = resolve_started {
+            details.insert(
+                "resolve_plan.resolve_target".into(),
+                crate::operation_timing::micros(entered.duration_since(started)),
+            );
+        }
+        let _guard = measure_detail(&mut details, "resolve_plan.guard", || {
+            crate::output_recovery::RendererMutationGuard::acquire(&self.storage)
+        })
+        .map_err(AppError::from_wc_error)?;
         let request_id = request.request_id.as_deref();
 
         if let Some(on_resolved) = opts.on_target_resolved.as_mut() {
@@ -167,10 +181,10 @@ impl AppService {
                 backend: apply_target.backend,
             });
         }
-        let previous_rows = self
-            .storage
-            .display_state_list()
-            .map_err(AppError::from_wc_error)?;
+        let previous_rows = measure_detail(&mut details, "resolve_plan.display_state_list", || {
+            self.storage.display_state_list()
+        })
+        .map_err(AppError::from_wc_error)?;
         let mut saved_recipes = std::collections::HashMap::new();
         for row in &previous_rows {
             let affected = match (&target, &row.target) {
@@ -182,18 +196,19 @@ impl AppService {
                 _ => false,
             };
             if affected {
-                let recipe = self
-                    .storage
-                    .display_recipe(&row.target)
-                    .map_err(AppError::from_wc_error)?;
+                let recipe = measure_detail(&mut details, "resolve_plan.display_recipe", || {
+                    self.storage.display_recipe(&row.target)
+                })
+                .map_err(AppError::from_wc_error)?;
                 saved_recipes.insert(row.target.storage_key().to_string(), recipe);
             }
         }
         // Conflict input comes from live renderer ownership, not persisted
         // rows: saved assignments are restore preferences and may describe
         // renderers that have since stopped (e.g. after a global Stop).
-        let ownership =
-            wc_backend::runtime_observation::observe_output_ownership(known_outputs, runtime);
+        let ownership = measure_detail(&mut details, "resolve_plan.ownership", || {
+            wc_backend::runtime_observation::observe_output_ownership(known_outputs, runtime)
+        });
         let running = running_assignments_from_observation(
             &target,
             &previous_rows,
@@ -210,12 +225,14 @@ impl AppService {
             known_outputs: known_outputs.to_vec(),
             running,
         };
-        let plan = match opts.capability {
-            Some(cap) => {
-                crate::display_plan::plan_display_apply_with_capability(&plan_request, cap)
+        let plan = measure_detail(&mut details, "resolve_plan.plan", || {
+            match opts.capability {
+                Some(cap) => {
+                    crate::display_plan::plan_display_apply_with_capability(&plan_request, cap)
+                }
+                None => plan_display_apply(&plan_request),
             }
-            None => plan_display_apply(&plan_request),
-        }
+        })
         .map_err(rejection_to_app_error)?;
         let applied_outputs = planned_apply_outputs(&plan.actions);
 
@@ -279,15 +296,15 @@ impl AppService {
 
         let recipe = match &apply_target.recipe {
             Some(recipe) => recipe.clone(),
-            None => self
-                .storage
-                .capture_recipe(
+            None => measure_detail(&mut details, "resolve_plan.capture_recipe", || {
+                self.storage.capture_recipe(
                     &apply_target.input_path,
                     &apply_target.resolved_path,
                     apply_target.backend,
                     apply_target.preview,
                 )
-                .map_err(AppError::from_wc_error)?,
+            })
+            .map_err(AppError::from_wc_error)?,
         };
         let transition_scope = transition_scope_for_target(&target, known_outputs)?;
         let intended = intended_display_state(
@@ -311,10 +328,10 @@ impl AppService {
                 let mut resolved_recipe = recipe.clone();
                 let saved = match saved_recipes.remove(state_target.storage_key()) {
                     Some(saved) => saved,
-                    None => self
-                        .storage
-                        .display_recipe(&state_target)
-                        .map_err(AppError::from_wc_error)?,
+                    None => measure_detail(&mut details, "resolve_plan.display_recipe", || {
+                        self.storage.display_recipe(&state_target)
+                    })
+                    .map_err(AppError::from_wc_error)?,
                 };
                 if let Some(saved) = saved {
                     if saved.options.backend() == recipe.options.backend() {
@@ -417,30 +434,44 @@ impl AppService {
                     if let Some(path) =
                         compat_failure_path_after_success(&request.kind, &apply_target)
                     {
-                        let _ = wc_storage::we_compat::clear_failure(path);
+                        let _ = measure_detail(&mut details, "post_apply.clear_failure", || {
+                            wc_storage::we_compat::clear_failure(path)
+                        });
                     }
-                    let post_apply_ctx = crate::post_apply::build_theme_context(
-                        &self.storage,
-                        &crate::post_apply::ThemePublishRequest {
-                            intended: &intended,
-                            known_outputs,
-                            changed_outputs: &applied_outputs,
-                            applied: Some(crate::post_apply::AppliedThemeSource {
-                                wallpaper: &apply_target.resolved_path,
-                                backend: apply_target.backend,
-                                file_type: apply_target.file_type,
-                            }),
+                    let post_apply_ctx =
+                        measure_detail(&mut details, "post_apply.build_theme_context", || {
+                            crate::post_apply::build_theme_context(
+                                &self.storage,
+                                &crate::post_apply::ThemePublishRequest {
+                                    intended: &intended,
+                                    known_outputs,
+                                    changed_outputs: &applied_outputs,
+                                    applied: Some(crate::post_apply::AppliedThemeSource {
+                                        wallpaper: &apply_target.resolved_path,
+                                        backend: apply_target.backend,
+                                        file_type: apply_target.file_type,
+                                    }),
+                                },
+                            )
+                        });
+                    post_apply = Some(measure_detail(
+                        &mut details,
+                        "post_apply.publish_theme_and_run_hook",
+                        || {
+                            crate::post_apply::publish_theme_and_run_hook(
+                                &self.storage,
+                                &post_apply_ctx,
+                            )
                         },
-                    );
-                    post_apply = Some(crate::post_apply::publish_theme_and_run_hook(
-                        &self.storage,
-                        &post_apply_ctx,
                     ));
                 }
                 if runtime.supports_output_recovery() {
-                    crate::output_recovery::ensure_watcher(&self.storage);
+                    measure_detail(&mut details, "post_apply.ensure_watcher", || {
+                        crate::output_recovery::ensure_watcher(&self.storage)
+                    });
                 }
                 if let Some(timings) = switch_report.timings.as_mut() {
+                    timings.details.extend(details);
                     timings
                         .stages
                         .insert("resolve_plan".into(), planning_micros);

@@ -438,6 +438,7 @@ impl AppService {
             None,
             resolved,
             crate::display_apply::AssignmentUpdate::Restore,
+            None,
         )
         .map(|_| ())
     }

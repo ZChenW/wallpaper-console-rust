@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub struct SwitchTimings {
     pub total_micros: u64,
     pub stages: BTreeMap<String, u64>,
+    /// Non-overlapping subspans keyed by `stage.call`, in microseconds.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub details: BTreeMap<String, u64>,
 }
 
 pub(crate) struct OperationTimer {
@@ -17,6 +20,7 @@ pub(crate) struct OperationTimer {
     checkpoint: Instant,
     stage: &'static str,
     stages: BTreeMap<String, u64>,
+    details: BTreeMap<String, u64>,
 }
 
 impl OperationTimer {
@@ -28,6 +32,7 @@ impl OperationTimer {
             checkpoint: now,
             stage: "preflight",
             stages: BTreeMap::new(),
+            details: BTreeMap::new(),
         }
     }
 
@@ -39,6 +44,10 @@ impl OperationTimer {
         self.stage = stage;
     }
 
+    pub(crate) fn measure<T>(&mut self, call: &str, action: impl FnOnce() -> T) -> T {
+        measure_detail(&mut self.details, &format!("{}.{call}", self.stage), action)
+    }
+
     pub(crate) fn snapshot(&self) -> SwitchTimings {
         let now = Instant::now();
         let mut stages = self.stages.clone();
@@ -47,6 +56,7 @@ impl OperationTimer {
         SwitchTimings {
             total_micros: micros(now.duration_since(self.started)),
             stages,
+            details: self.details.clone(),
         }
     }
 }
@@ -59,6 +69,18 @@ impl Drop for OperationTimer {
 
 pub(crate) fn micros(duration: std::time::Duration) -> u64 {
     duration.as_micros().min(u64::MAX as u128) as u64
+}
+
+/// Callers measure sibling calls only; nested spans would count elapsed time twice.
+pub(crate) fn measure_detail<T>(
+    details: &mut BTreeMap<String, u64>,
+    key: &str,
+    action: impl FnOnce() -> T,
+) -> T {
+    let started = Instant::now();
+    let result = action();
+    *details.entry(key.into()).or_default() += micros(started.elapsed());
+    result
 }
 
 pub(crate) fn log_timings(id: &str, event: &str, timings: &SwitchTimings) {

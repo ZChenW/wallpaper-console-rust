@@ -145,6 +145,7 @@ impl AppService {
                             fallback_path: None,
                         },
                         crate::display_apply::AssignmentUpdate::RenderingOnly,
+                        None,
                     )
                 });
             match outcome {

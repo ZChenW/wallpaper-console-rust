@@ -289,7 +289,9 @@ fn preflight(
             "display operation requires 1 to 32 outputs".into(),
         )));
     }
-    topology_still_matches(runtime, batch.known_outputs)?;
+    timer.measure("topology", || {
+        topology_still_matches(runtime, batch.known_outputs)
+    })?;
     let revisions = assignment_revisions(storage)?;
     if batch
         .steps
@@ -300,7 +302,9 @@ fn preflight(
             wc_core::types::Backend::FEH_REMOVED_MESSAGE.into(),
         )));
     }
-    let ownership = observe_output_ownership(batch.known_outputs, runtime);
+    let ownership = timer.measure("ownership", || {
+        observe_output_ownership(batch.known_outputs, runtime)
+    });
     // Validate the environment for every surviving or newly planned sibling,
     // not just the pair on the first output in a batch.
     for step in batch.steps {
@@ -321,8 +325,8 @@ fn preflight(
                 .map_err(AppError::from_wc_error)?;
         }
     }
-    let identities = runtime
-        .renderer_identity_snapshot()
+    let identities = timer
+        .measure("identity", || runtime.renderer_identity_snapshot())
         .map_err(AppError::from_wc_error)?;
     let rows = storage
         .display_state_list()
@@ -330,7 +334,9 @@ fn preflight(
     // Validate the new request before preparing compensation. Both complete
     // before any mutation; invalid new media must not be hidden by stale history.
     timer.enter("prepare");
-    let prepared = prepare(storage, batch.steps, batch.known_outputs, runtime, id)?;
+    let prepared = timer.measure("request", || {
+        prepare(storage, batch.steps, batch.known_outputs, runtime, id)
+    })?;
     timer.enter("prepare_recovery");
     let mut before = Vec::new();
     let mut recovery = Vec::new();
@@ -358,16 +364,20 @@ fn preflight(
             Some(OutputOwnership::Occupied(backend)) => {
                 let recipe = saved.filter(|r| r.options.backend() == *backend).ok_or_else(||
                     AppError::from_wc_error(WcError::Other(format!("{output} has a running renderer without a matching recovery recipe; stop it explicitly first"))))?;
-                runtime
-                    .verify_recipe(output, &recipe, batch.known_outputs)
+                timer
+                    .measure("verify_recipe", || {
+                        runtime.verify_recipe(output, &recipe, batch.known_outputs)
+                    })
                     .map_err(AppError::from_wc_error)?;
-                let prepared = prepare(
-                    storage,
-                    &[scoped_recipe(output, &recipe)],
-                    batch.known_outputs,
-                    runtime,
-                    id,
-                )?;
+                let prepared = timer.measure("prepare", || {
+                    prepare(
+                        storage,
+                        &[scoped_recipe(output, &recipe)],
+                        batch.known_outputs,
+                        runtime,
+                        id,
+                    )
+                })?;
                 recovery.push((output.clone(), prepared));
                 Some(recipe)
             }
@@ -380,17 +390,23 @@ fn preflight(
         before.push((output.clone(), previous));
     }
     timer.enter("revalidate");
-    prepared.verify_media().map_err(AppError::from_wc_error)?;
+    timer
+        .measure("verify_media", || prepared.verify_media())
+        .map_err(AppError::from_wc_error)?;
     for (_, prepared_recovery) in &recovery {
-        prepared_recovery
-            .verify_media()
+        timer
+            .measure("verify_media", || prepared_recovery.verify_media())
             .map_err(AppError::from_wc_error)?;
     }
-    topology_still_matches(runtime, batch.known_outputs)?;
+    timer.measure("topology", || {
+        topology_still_matches(runtime, batch.known_outputs)
+    })?;
     assignment_revisions_unchanged(storage, &revisions)?;
-    if observe_output_ownership(batch.known_outputs, runtime) != ownership
-        || runtime
-            .renderer_identity_snapshot()
+    if timer.measure("ownership", || {
+        observe_output_ownership(batch.known_outputs, runtime)
+    }) != ownership
+        || timer
+            .measure("identity", || runtime.renderer_identity_snapshot())
             .map_err(AppError::from_wc_error)?
             != identities
     {
