@@ -70,7 +70,7 @@ interface Props {
   initialAnchorWallpaperId?: number | null;
   focusToken?: number;
   returnFocusToken?: number;
-  onAnchorChange?: (wallpaperId: number) => void;
+  onAnchorChange?: (wallpaperId: number, settled?: boolean) => void;
 }
 
 const SCROLL_IDLE_MS = 180;
@@ -133,6 +133,8 @@ function WallpaperGridImpl({
   const colCount = gridLayout.colCount;
   const isScrollingRef = useRef(false);
   const activeRef = useRef(active);
+  const scrollFrameRef = useRef<number | null>(null);
+  const publishViewportCenterRef = useRef<(settled?: boolean) => void>(() => {});
   const scrollIdleTimerRef = useRef<number | null>(null);
   const pendingScrollTopRef = useRef<number | null>(null);
   const lastEnqueueKeyRef = useRef('');
@@ -221,6 +223,7 @@ function WallpaperGridImpl({
       scrollIdleTimerRef.current = null;
       isScrollingRef.current = false;
       setScrolling(false);
+      publishViewportCenterRef.current(true);
     }, SCROLL_IDLE_MS);
   }, [setScrolling]);
 
@@ -237,7 +240,7 @@ function WallpaperGridImpl({
     }
   }, [updateGridLayoutFromWidth]);
 
-  const publishViewportCenter = useCallback(() => {
+  const publishViewportCenter = useCallback((settled = !isScrollingRef.current) => {
     const el = containerRef.current;
     if (!el) return;
     const wallpaperId = wallpaperIdNearestGridViewportCenter({
@@ -247,8 +250,9 @@ function WallpaperGridImpl({
       scrollTop: el.scrollTop,
       viewportHeight: el.clientHeight,
     });
-    if (wallpaperId !== null) onAnchorChange?.(wallpaperId);
+    if (wallpaperId !== null) onAnchorChange?.(wallpaperId, settled);
   }, [colCount, entries, gridLayout.rowHeight, onAnchorChange]);
+  publishViewportCenterRef.current = publishViewportCenter;
 
   useEffect(() => {
     const el = containerRef.current;
@@ -268,7 +272,7 @@ function WallpaperGridImpl({
 
   useEffect(() => {
     if (!active || entries.length === 0) return undefined;
-    const frame = window.requestAnimationFrame(publishViewportCenter);
+    const frame = window.requestAnimationFrame(() => publishViewportCenter());
     return () => window.cancelAnimationFrame(frame);
   }, [active, entries, publishViewportCenter]);
 
@@ -434,6 +438,7 @@ function WallpaperGridImpl({
   }, [active, hasMore, loadingMore, onLoadMore, rowCount, virtualizer.range?.endIndex]);
 
   useEffect(() => () => {
+    if (scrollFrameRef.current !== null) window.cancelAnimationFrame(scrollFrameRef.current);
     if (scrollIdleTimerRef.current !== null) {
       window.clearTimeout(scrollIdleTimerRef.current);
     }
@@ -443,17 +448,17 @@ function WallpaperGridImpl({
 
   const handleScroll = useCallback(() => {
     if (suppressScrollPauseRef.current) return;
-    const el = containerRef.current;
-    if (el) {
-      viewportAnchorRef.current = captureStableViewportAnchor(
-        entries,
-        colCount,
-        gridLayout.rowHeight,
-        el.scrollTop,
-      );
-      publishViewportCenter();
-    }
     beginScrolling();
+    if (scrollFrameRef.current !== null) return;
+    scrollFrameRef.current = window.requestAnimationFrame(() => {
+      scrollFrameRef.current = null;
+      const el = containerRef.current;
+      if (!el) return;
+      viewportAnchorRef.current = captureStableViewportAnchor(
+        entries, colCount, gridLayout.rowHeight, el.scrollTop,
+      );
+      publishViewportCenter(false);
+    });
   }, [beginScrolling, colCount, entries, gridLayout.rowHeight, publishViewportCenter]);
 
   const isScrolling = useCallback(() => isScrollingRef.current, []);
@@ -660,7 +665,8 @@ function WallpaperGridImpl({
                     )}
                     isScrolling={isScrolling}
                     thumbnailHeight={gridLayout.thumbnailHeight}
-                    onFocus={() => setActiveIndex(entryIndex)}
+                    index={entryIndex}
+                    onFocus={setActiveIndex}
                     tabIndex={active && entryIndex === activeIndex ? 0 : -1}
                   />
                 );

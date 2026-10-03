@@ -1,4 +1,5 @@
 import { Heart } from 'lucide-react';
+import { libraryMetricsEnabled, recordMetric } from '../perf/metrics';
 import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 import { memo, useState, type CSSProperties } from 'react';
 import type { LibraryBrowserItemDTO } from '../api/bridge';
@@ -30,6 +31,7 @@ import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 
 interface CardProps {
   entry: LibraryBrowserItemDTO;
+  index?: number;
   ordinal?: string;
   posInSet?: number;
   columnIndex?: number;
@@ -51,13 +53,14 @@ interface CardProps {
   thumbnailHeight?: number;
   id?: string;
   tabIndex?: number;
-  onFocus?: () => void;
+  onFocus?: (index: number) => void;
 }
 
 const neverScrolling = () => false;
 
 function WallpaperCardImpl({
   entry,
+  index = 0,
   ordinal,
   posInSet,
   columnIndex,
@@ -81,6 +84,7 @@ function WallpaperCardImpl({
   tabIndex,
   onFocus,
 }: CardProps) {
+  if (libraryMetricsEnabled()) recordMetric('library.card.render', entry.wallpaperId);
   const [hovered, setHovered] = useState(false);
   const reducedMotion = useReducedMotion();
   const animatedPreview = animatedPreviewPath(
@@ -199,7 +203,7 @@ function WallpaperCardImpl({
         className="wallpaper-card__primary"
         id={id}
         onClick={handleClick}
-        onFocus={onFocus}
+        onFocus={() => onFocus?.(index)}
         onKeyDown={handleKeyDown}
         tabIndex={tabIndex}
         title={hoverTitle}

@@ -1,4 +1,5 @@
 import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
+import { libraryMetricsEnabled, recordMetric } from '../perf/metrics';
 import {
   useCallback,
   useEffect,
@@ -113,6 +114,7 @@ function selectedDescription(entry: LibraryBrowserItemDTO | null): string {
 }
 
 export default function SinglePageShell() {
+  if (libraryMetricsEnabled()) recordMetric('library.shell.render', 1);
   const [search, setSearch] = useState('');
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -657,9 +659,10 @@ export default function SinglePageShell() {
     browser.debouncedSearch,
   ].join('|');
 
-  const rememberLibraryAnchor = useCallback((wallpaperId: number) => {
+  const rememberLibraryAnchor = useCallback((wallpaperId: number, settled = true) => {
+    if (libraryMetricsEnabled()) recordMetric(settled ? "library.anchor.commit" : "library.anchor.preview", wallpaperId);
     libraryViewportAnchorRef.current = wallpaperId;
-    setLibraryViewportAnchorId((current) => current === wallpaperId ? current : wallpaperId);
+    if (settled) setLibraryViewportAnchorId((current) => current === wallpaperId ? current : wallpaperId);
   }, []);
   const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
     if (mode === preferences.libraryViewMode) return;
@@ -839,7 +842,7 @@ export default function SinglePageShell() {
             applyGesture={preferences.applyGesture}
             cardSize={preferences.cardSize}
             focusToken={libraryViewFocusToken}
-            initialAnchorWallpaperId={libraryViewportAnchorId ?? libraryModeAnchorId}
+            initialAnchorWallpaperId={libraryModeAnchorId}
             mode={preferences.libraryViewMode}
             model={libraryViewModel}
             onAnchorChange={rememberLibraryAnchor}

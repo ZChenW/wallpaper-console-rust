@@ -19,7 +19,7 @@ export interface LibraryViewportProps {
   // Bumped when another region hands keyboard control back to the library.
   // Unlike focusToken it must not re-anchor or scroll the view.
   readonly returnFocusToken: number;
-  readonly onAnchorChange: (wallpaperId: number) => void;
+  readonly onAnchorChange: (wallpaperId: number, settled?: boolean) => void;
 }
 
 function LibraryViewportImpl({
