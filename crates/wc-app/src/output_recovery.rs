@@ -469,6 +469,73 @@ fn report_watch_pacing(interval: Duration, reason: &str) {
     }
 }
 
+type FileIdentity = (u64, u64);
+
+fn file_identity(metadata: &std::fs::Metadata) -> FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+    (metadata.dev(), metadata.ino())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ImageState {
+    Current,
+    Replaced,
+    Missing,
+}
+
+/// The executable this watcher is running from. An upgrade renames a new file
+/// over the installed path while this process keeps executing the old inode.
+struct RunningImage {
+    path: PathBuf,
+    running: FileIdentity,
+}
+
+impl RunningImage {
+    fn current() -> Option<Self> {
+        // /proc/self/exe resolves to the executing inode even after unlinking;
+        // its link text gains a " (deleted)" suffix that the install path lacks.
+        let running = file_identity(&std::fs::metadata("/proc/self/exe").ok()?);
+        let link = std::fs::read_link("/proc/self/exe").ok()?;
+        let text = link.to_str()?;
+        let path = PathBuf::from(text.strip_suffix(" (deleted)").unwrap_or(text));
+        Some(Self { path, running })
+    }
+
+    fn state(&self) -> ImageState {
+        match std::fs::metadata(&self.path) {
+            Ok(metadata) if !metadata.is_file() => ImageState::Missing,
+            Ok(metadata) if file_identity(&metadata) == self.running => ImageState::Current,
+            Ok(_) => ImageState::Replaced,
+            Err(_) => ImageState::Missing,
+        }
+    }
+}
+
+/// Hand the watcher over to a reinstalled executable. An old watcher that
+/// keeps running would hold the database's shared schema lock and block the
+/// new version's schema migration, so it never outlives its executable.
+fn hand_over_watcher(image: &RunningImage, state: ImageState, lock: File) -> Result<(), AppError> {
+    // Release every lock before the new image starts and migrates the schema.
+    wc_storage::sqlite::invalidate_cached_connections();
+    drop(lock);
+    if state == ImageState::Missing {
+        eprintln!("Output recovery stopped: its executable was removed");
+        return Ok(());
+    }
+    eprintln!(
+        "Output recovery restarting from reinstalled {}",
+        image.path.display()
+    );
+    use std::os::unix::process::CommandExt;
+    let error = Command::new(&image.path)
+        .args(std::env::args_os().skip(1))
+        .exec();
+    // The old image cannot safely continue against a newer schema; the next
+    // GUI start or CLI apply spawns a watcher from the installed executable.
+    eprintln!("Output recovery could not restart: {error}");
+    Ok(())
+}
+
 fn transient_recovery_error(error: &AppError) -> bool {
     let text = format!(
         "{} {} {}",
@@ -571,7 +638,14 @@ impl AppService {
             self.storage.cd.path.join("wallpapers.db-wal"),
         ];
         let mut previous_interval = WATCH_ACTIVE_INTERVAL;
+        let image = RunningImage::current();
         loop {
+            if let Some(image) = &image {
+                let state = image.state();
+                if state != ImageState::Current {
+                    return hand_over_watcher(image, state, lock);
+                }
+            }
             let mut round = RoundFacts::default();
             if let Ok(snapshot) = adapter.snapshot() {
                 failures = 0;
@@ -792,6 +866,9 @@ impl AppService {
                 report_watch_pacing(interval, "round_facts");
             }
             previous_interval = interval;
+            // Never hold the database's shared locks while waiting: another
+            // version must be able to take the exclusive schema lock to migrate.
+            wc_storage::sqlite::invalidate_cached_connections();
             if wait_for_watch(interval, std::thread::sleep, || {
                 watch_fingerprint(&watch_paths)
             }) {
@@ -938,6 +1015,47 @@ mod tests {
             |_| panic!("unknown signals must wake immediately"),
             || watch_fingerprint(&paths)
         ));
+    }
+
+    fn image_at(path: &Path) -> RunningImage {
+        RunningImage {
+            path: path.to_path_buf(),
+            running: file_identity(&std::fs::metadata(path).unwrap()),
+        }
+    }
+
+    #[test]
+    fn running_image_is_current_until_the_install_path_is_replaced() {
+        let temp = tempfile::tempdir().unwrap();
+        let installed = temp.path().join("wallpaper-console-rust");
+        std::fs::write(&installed, b"old").unwrap();
+        let image = image_at(&installed);
+        assert_eq!(image.state(), ImageState::Current);
+
+        // Installers publish with a same-filesystem rename over the old path.
+        let staged = temp.path().join("staged");
+        std::fs::write(&staged, b"new").unwrap();
+        std::fs::rename(&staged, &installed).unwrap();
+        assert_eq!(image.state(), ImageState::Replaced);
+    }
+
+    #[test]
+    fn running_image_is_missing_after_uninstall() {
+        let temp = tempfile::tempdir().unwrap();
+        let installed = temp.path().join("wallpaper-console-rust");
+        std::fs::write(&installed, b"old").unwrap();
+        let image = image_at(&installed);
+        std::fs::remove_file(&installed).unwrap();
+        assert_eq!(image.state(), ImageState::Missing);
+        std::fs::create_dir(&installed).unwrap();
+        assert_eq!(image.state(), ImageState::Missing);
+    }
+
+    #[test]
+    fn running_image_resolves_the_test_executable() {
+        let image = RunningImage::current().expect("/proc/self/exe is readable");
+        assert_eq!(image.state(), ImageState::Current);
+        assert_eq!(image.path, std::env::current_exe().unwrap());
     }
 
     #[test]

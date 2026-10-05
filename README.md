@@ -208,6 +208,12 @@ git pull --ff-only && ./install.sh
 
 Settings and the wallpaper library are preserved when uninstalling.
 
+Close Wallpaper Console before upgrading. The installer stops the background
+display watcher before replacing files and restarts it from the new version,
+which upgrades the wallpaper library on its first start. A window left open
+from the old version keeps the library locked; close and reopen it to finish
+the upgrade.
+
 ## License
 
 [MIT](LICENSE)
