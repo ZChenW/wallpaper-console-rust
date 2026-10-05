@@ -20,6 +20,9 @@
 #   $PREFIX/share/licenses/wallpaper-console-rust/LICENSE
 #   $PREFIX/share/wallpaper-console-rust/install-manifest-v1
 #
+# Running `wallpaper-console-rust watch-displays` processes are stopped before
+# the files are replaced and restarted from the installed CLI afterwards.
+#
 # Does NOT touch or replace:
 #   wallpaper-console        (Bash)
 #   wallpaper-console-gui    (Python GTK)
@@ -260,6 +263,171 @@ acquire_install_lock() {
   chmod 0600 "$INSTALL_LOCK_OWNER"
 }
 
+# ── Running display watcher handoff ───────────────────────────────────────
+# A `watch-displays` process keeps executing the binary it started from after
+# that file is replaced. Watchers from v0.1.6 and earlier also hold the
+# database's shared schema lock for their whole lifetime, so the new version
+# cannot migrate the schema while they run. Stop them before publishing and
+# restart them from the installed CLI afterwards (or after a rollback).
+WATCHER_PIDS=()
+WATCHER_CONFIG_DIRS=()
+STOPPED_WATCHER_CONFIG_DIRS=()
+WATCHER_STATE_DIR=""
+# Exceeds the 5 s schema lock deadline, so a surviving watcher has migrated.
+WATCHER_START_GRACE_SECONDS=6
+
+running_installed_executable() {
+  local pid="$1"
+  local expected="$2"
+  local exe=""
+  exe="$(readlink -- "/proc/$pid/exe" 2>/dev/null)" || return 1
+  [[ "${exe% (deleted)}" == "$expected" ]]
+}
+
+find_installed_watchers() {
+  local cli="$BIN_DIR/$CLI_BIN_NAME"
+  local proc="" pid="" config_dir="" cwd="" index=0
+  local args=()
+  WATCHER_PIDS=()
+  WATCHER_CONFIG_DIRS=()
+  for proc in /proc/[0-9]*; do
+    pid="${proc#/proc/}"
+    running_installed_executable "$pid" "$cli" || continue
+    mapfile -d '' -t args 2>/dev/null < "$proc/cmdline" || continue
+    [[ "${args[1]:-}" == "watch-displays" ]] || continue
+    config_dir=""
+    for ((index = 2; index < ${#args[@]}; index++)); do
+      case "${args[$index]}" in
+        --config-dir) config_dir="${args[$((index + 1))]:-}"; break ;;
+        --config-dir=*) config_dir="${args[$index]#--config-dir=}"; break ;;
+      esac
+    done
+    [[ -n "$config_dir" ]] || continue
+    if [[ "$config_dir" != /* ]]; then
+      cwd="$(readlink -- "$proc/cwd" 2>/dev/null)" || continue
+      config_dir="$cwd/$config_dir"
+    fi
+    WATCHER_PIDS+=("$pid")
+    WATCHER_CONFIG_DIRS+=("$config_dir")
+  done
+}
+
+# Usage: stop_installed_watchers restart|forget
+stop_installed_watchers() {
+  local mode="$1"
+  local cli="$BIN_DIR/$CLI_BIN_NAME"
+  local index="" pid="" step=0 remaining=()
+
+  find_installed_watchers
+  (( ${#WATCHER_PIDS[@]} > 0 )) || return 0
+  if [[ "$mode" == restart ]]; then
+    WATCHER_STATE_DIR="$(mktemp -d)"
+  fi
+  for index in "${!WATCHER_PIDS[@]}"; do
+    pid="${WATCHER_PIDS[$index]}"
+    if [[ "$mode" == restart ]]; then
+      # Keep the compositor session variables for the replacement watcher.
+      cat -- "/proc/$pid/environ" > "$WATCHER_STATE_DIR/$index.environ" 2>/dev/null \
+        || : > "$WATCHER_STATE_DIR/$index.environ"
+      STOPPED_WATCHER_CONFIG_DIRS+=("${WATCHER_CONFIG_DIRS[$index]}")
+    fi
+    info "Stopping display watcher PID $pid (${WATCHER_CONFIG_DIRS[$index]})"
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+
+  for ((step = 0; step < 100; step++)); do
+    remaining=()
+    for pid in "${WATCHER_PIDS[@]}"; do
+      if running_installed_executable "$pid" "$cli"; then
+        remaining+=("$pid")
+      fi
+    done
+    (( ${#remaining[@]} > 0 )) || return 0
+    sleep 0.05
+  done
+  err "Display watcher did not stop (PID ${remaining[*]}). Stop it, then rerun the installer."
+}
+
+restart_stopped_watchers() {
+  (( ${#STOPPED_WATCHER_CONFIG_DIRS[@]} > 0 )) || return 0
+  local cli="$BIN_DIR/$CLI_BIN_NAME"
+  local index="" config_dir="" entry="" found=false
+  local started=("${STOPPED_WATCHER_CONFIG_DIRS[@]}")
+  local saved=() environment=() launcher=()
+
+  if command -v setsid >/dev/null 2>&1; then
+    # Detach like the GUI does, so closing this terminal leaves it running.
+    launcher=("$(command -v setsid)")
+  else
+    launcher=(/bin/sh -c 'exec "$0" "$@"')
+  fi
+  for index in "${!STOPPED_WATCHER_CONFIG_DIRS[@]}"; do
+    config_dir="${STOPPED_WATCHER_CONFIG_DIRS[$index]}"
+    if [[ ! -x "$cli" ]]; then
+      warn "Display watcher was not restarted: $cli is missing."
+      continue
+    fi
+    saved=()
+    environment=()
+    mapfile -d '' -t saved 2>/dev/null < "$WATCHER_STATE_DIR/$index.environ" || true
+    for entry in "${saved[@]}"; do
+      if [[ "$entry" =~ ^[A-Za-z_][A-Za-z0-9_]*= ]]; then
+        environment+=("$entry")
+      fi
+    done
+    if (( ${#environment[@]} > 0 )); then
+      env -i "${environment[@]}" "${launcher[@]}" "$cli" watch-displays --config-dir "$config_dir" \
+        </dev/null >/dev/null 2>>"$config_dir/output-recovery.log" &
+    else
+      "${launcher[@]}" "$cli" watch-displays --config-dir "$config_dir" \
+        </dev/null >/dev/null 2>>"$config_dir/output-recovery.log" &
+    fi
+  done
+  STOPPED_WATCHER_CONFIG_DIRS=()
+
+  # The new watcher opens the database first, which runs any schema upgrade.
+  info "Waiting for the display watcher to open the library and start..."
+  sleep "$WATCHER_START_GRACE_SECONDS"
+  find_installed_watchers
+  for config_dir in "${started[@]}"; do
+    found=false
+    for index in "${!WATCHER_CONFIG_DIRS[@]}"; do
+      if [[ "${WATCHER_CONFIG_DIRS[$index]}" == "$config_dir" ]]; then
+        info "Display watcher restarted (PID ${WATCHER_PIDS[$index]}, $config_dir)"
+        found=true
+        break
+      fi
+    done
+    if ! $found; then
+      warn "Display watcher for $config_dir exited after restart; see $config_dir/output-recovery.log."
+      warn "Wallpaper Console starts it again the next time the GUI opens."
+    fi
+  done
+}
+
+discard_watcher_state() {
+  if [[ -n "$WATCHER_STATE_DIR" ]]; then
+    rm -rf -- "$WATCHER_STATE_DIR"
+    WATCHER_STATE_DIR=""
+  fi
+}
+
+warn_running_gui() {
+  local proc="" pid="" exe="" pids=()
+  local cache_root="${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper-console/appimage/"
+  for proc in /proc/[0-9]*; do
+    pid="${proc#/proc/}"
+    exe="$(readlink -- "$proc/exe" 2>/dev/null)" || continue
+    exe="${exe% (deleted)}"
+    if [[ "$exe" == "$LIBEXEC_DIR/wallpaper-console-gui-rust" || "$exe" == "$cache_root"* ]]; then
+      pids+=("$pid")
+    fi
+  done
+  (( ${#pids[@]} > 0 )) || return 0
+  warn "Wallpaper Console is still open from the previous install (PID ${pids[*]})."
+  warn "Close and reopen it; the old window keeps the library locked and cannot finish the upgrade."
+}
+
 load_install_manifest() {
   local header=""
   local hash=""
@@ -371,6 +539,7 @@ uninstall_owned_files() {
   fi
 
   load_install_manifest
+  stop_installed_watchers forget
   local relative=""
   local target=""
   local actual=""
@@ -708,6 +877,8 @@ cleanup_install_process() {
   local status=$?
   set +e
   cleanup_install_stage "$status"
+  restart_stopped_watchers
+  discard_watcher_state
   release_install_lock
   if [[ -n "$RELEASE_STAGE" ]]; then rm -rf -- "$RELEASE_STAGE"; fi
   return "$status"
@@ -860,6 +1031,8 @@ done
 } > "$STAGING_DIR/$MANIFEST_REL"
 chmod 0644 "$STAGING_DIR/$MANIFEST_REL"
 
+stop_installed_watchers restart
+
 # Publish each complete file with a same-filesystem rename. The ownership
 # manifest is deliberately last, so it never describes a partially staged set.
 PUBLISH_STARTED=true
@@ -870,6 +1043,9 @@ publish_staged_file "$MANIFEST_REL"
 PUBLISH_COMPLETE=true
 cleanup_install_stage 0
 STAGING_DIR=""
+warn_running_gui
+restart_stopped_watchers
+discard_watcher_state
 release_install_lock
 if [[ -n "$RELEASE_STAGE" ]]; then rm -rf -- "$RELEASE_STAGE"; RELEASE_STAGE=""; fi
 trap - EXIT
