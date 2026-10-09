@@ -3,7 +3,8 @@ import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { useThumbnail } from '../state/ThumbnailStoreContext.tsx';
 import { useAuthorizedPreviewAsset } from './useAuthorizedPreviewAsset.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
-import { attachVideoDecoder, staticFallbackAssetPath, staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
+import { attachVideoDecoder } from './wallpaperPreviewMedia.ts';
+import { bookStaticSource } from './wallpaperBookModel.ts';
 import { decodeBookStill, watchBookVideoReady } from './wallpaperBookZoomMedia.ts';
 
 export function bookZoomLiveAsset(entry: LibraryBrowserItemDTO) {
@@ -50,10 +51,11 @@ export default function BookZoomPicture({ entry, active, reducedMotion, moving, 
     // Once mounted, loss of focus or a close cannot remove/re-hide a live frame.
     if (!moving && mayUpdateStill() && active && !reducedMotion && live) setLiveEntry(entry.path);
   }, [active, entry.path, live, mayUpdateStill, moving, reducedMotion]);
-  const fallback = staticFallbackAssetPath(entry, true);
+  const { failure } = useThumbnail(bookStaticSource(entry).thumbnailPath);
+  const { thumbnailPath, fallbackPath: fallback } = bookStaticSource(entry, Boolean(failure));
   const staticPath = fallback && (!live || !stillSrc) && !/\.(gif|apng)$/i.test(fallback) ? fallback : null;
   const authorized = useAuthorizedPreviewAsset(staticPath, entry.path);
-  const { thumbnail } = useThumbnail(staticPreviewAssetPath(entry));
+  const { thumbnail } = useThumbnail(thumbnailPath);
   const staticSource = authorized.path ?? (!stillSrc ? thumbnail : null);
   useEffect(() => {
     if (moving || !staticSource || !mayUpdateStill()) return;

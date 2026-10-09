@@ -34,7 +34,7 @@ const ThumbnailStoreContext = createContext<ThumbnailSessionValue | null>(null);
 export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
   const storeRef = useRef<ThumbnailSession | null>(null);
   if (!storeRef.current) {
-    storeRef.current = new ThumbnailSession(2, async (path) => {
+    storeRef.current = new ThumbnailSession(4, async (path) => {
       const r = await api.thumbnailFor(path);
       recordMetric(r.cacheHit ? 'thumbnail.cache.hit' : 'thumbnail.cache.miss', 1);
       return r;

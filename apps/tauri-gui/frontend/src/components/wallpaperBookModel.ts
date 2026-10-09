@@ -1,5 +1,19 @@
 import { isContextMenuKey } from '../shell/keyboardInteraction.ts';
 import { resolveCardPointerInteraction, type CardPointerInteractionInput } from '../shell/cardInteraction.ts';
+import type { WallpaperDTO } from '../api/types.ts';
+import { staticFallbackAssetPath, staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
+
+/** Book prefers a full-colour video frame; a failed extraction restores the project preview. */
+export function bookStaticSource(entry: WallpaperDTO, videoFrameFailed = false) {
+  return entry.type === 'video' && !videoFrameFailed
+    ? { thumbnailPath: entry.path, fallbackPath: null }
+    : { thumbnailPath: staticPreviewAssetPath(entry), fallbackPath: staticFallbackAssetPath(entry, true) };
+}
+
+export type BookTravelDirection = -1 | 0 | 1;
+
+/** Turning needs arrived pictures immediately; only a live pointer drag pauses reveals. */
+export function bookRevealPaused(dragging: boolean): boolean { return dragging; }
 
 export const BOOK_FAN_ANGLE = 14;
 // Deeper pile leaves flatten away from the viewer, behind the open page.
@@ -259,17 +273,21 @@ export function bookZoomTransform(origin: BookZoomOrigin, destination: BookRect)
 }
 
 export const BOOK_PREVIEW_AHEAD_LEAVES = 24;
+export const BOOK_MOVING_AHEAD_LEAVES = 40;
+export const BOOK_MOVING_BEHIND_LEAVES = 8;
 
 /**
  * Wallpaper indices whose previews are worth having, nearest the open spread first: the pages on
  * screen, then pages the reader is about to turn to, so they are ready before they arrive.
  */
-export function bookPreviewOrder(position: number, count: number): number[] {
+export function bookPreviewOrder(position: number, count: number, direction: BookTravelDirection = 0): number[] {
   const spread = Math.round(clampBookPosition(position, bookLeafCount(count)));
   const centre = spread * 2 - 0.5;
-  const first = Math.max(0, (spread - BOOK_PREVIEW_AHEAD_LEAVES) * 2);
-  const last = Math.min(count - 1, (spread + BOOK_PREVIEW_AHEAD_LEAVES) * 2 - 1);
+  const left = direction < 0 ? BOOK_MOVING_AHEAD_LEAVES : direction > 0 ? BOOK_MOVING_BEHIND_LEAVES : BOOK_PREVIEW_AHEAD_LEAVES;
+  const right = direction > 0 ? BOOK_MOVING_AHEAD_LEAVES : direction < 0 ? BOOK_MOVING_BEHIND_LEAVES : BOOK_PREVIEW_AHEAD_LEAVES;
+  const first = Math.max(0, (spread - left) * 2);
+  const last = Math.min(count - 1, (spread + right) * 2 - 1);
   const indices: number[] = [];
   for (let index = first; index <= last; index += 1) indices.push(index);
-  return indices.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b);
+  return indices.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || (direction > 0 ? b - a : a - b));
 }

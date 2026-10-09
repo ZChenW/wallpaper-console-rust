@@ -7,13 +7,14 @@ import { flushSync } from 'react-dom';
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 import type { ApplyGesture } from '../shell/shellPreferences.ts';
-import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
+import { useThumbnailFailureCount, useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type LibraryViewModel } from './libraryViewModel.ts';
 import {
   accumulateBookWheel, classifyBookWheel, bookWheelTarget, bookSpringStep, bookDragVelocity,
   type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
-  bookPreviewOrder, bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
+  bookPreviewOrder, bookRevealPaused, bookStaticSource, type BookTravelDirection,
+  bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
   planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
   resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
 } from './wallpaperBookModel.ts';
@@ -21,7 +22,6 @@ import { api } from '../api/bridge.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
 import { bookZoomTimeline, BOOK_ZOOM_REST, bookZoomReveal, bookZoomSwapTimeline } from './wallpaperBookZoom.ts';
 import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
-import { staticFallbackAssetPath, staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
 export interface WallpaperBookProps {
   readonly model: LibraryViewModel;
@@ -52,6 +52,9 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const [leafKeyOffset, setLeafKeyOffset] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(initial);
   const [settled, setSettled] = useState(true);
+  const [previewTravel, setPreviewTravel] = useState<{ spread: number; direction: BookTravelDirection }>(() => ({ spread, direction: 0 }));
+  const previewTravelRef = useRef(previewTravel);
+  const previewPathsRef = useRef<string[] | null>(null);
   const [zoomIndex, setZoomIndex] = useState<number | null>(null);
   const [zoomMoving, setZoomMoving] = useState(false);
   const [zoomStillSrc, setZoomStillSrc] = useState<string | null>(null);
@@ -103,8 +106,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const crossFadeAnimationRef = useRef<Animation | null>(null);
   const latest = useRef({ props, reducedMotion, zoomIndex });
   latest.current = { props, reducedMotion, zoomIndex };
-  const { observeVisible, setScrolling, setInteracting, get: getThumbnail } = useThumbnailStore();
-  const leafCount = bookLeafCount(model.entries.length);
+  const { observeVisible, setScrolling, setInteracting, get: getThumbnail, getFailure } = useThumbnailStore();
+  const thumbnailFailureCount = useThumbnailFailureCount();
   const lastPosition = bookLastPosition(model.entries.length);
   const openIndices = openBookWallpapers(spread, model.entries.length);
   const selectedEntry = model.entries[zoomIndex ?? selectedIndex] ?? null;
@@ -119,9 +122,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current);
     dragFrameRef.current = null;
     stageRef.current?.removeAttribute('data-dragging');
+    setScrolling(false);
     if (drag?.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
     return drag;
-  }, []);
+  }, [setScrolling]);
 
   const cancelZoomFade = useCallback(() => {
     if (zoomFadeRef.current) {
@@ -218,7 +222,16 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const updatePosition = useCallback((position: number, isSettled: boolean) => {
     const current = latest.current.props.model;
     const next = clampBookPosition(position, bookLastPosition(current.entries.length));
+    const direction = Math.sign(next - positionRef.current) as BookTravelDirection;
+    const previewSpread = Math.round(next);
+    // Follow the physical spread during repeated turns, without enqueueing per frame.
+    if (previewSpread !== previewTravelRef.current.spread || (isSettled && previewTravelRef.current.direction !== 0)) {
+      const travel = { spread: previewSpread, direction: isSettled ? 0 as const : direction || previewTravelRef.current.direction };
+      previewTravelRef.current = travel;
+      setPreviewTravel(travel);
+    }
     positionRef.current = next;
+    setScrolling(bookRevealPaused(Boolean(dragRef.current?.moved)));
     const window = bookVisibleWindow(next, bookLeafCount(current.entries.length));
     if (window.length !== windowRef.current.length || window.some((leaf, i) => leaf !== windowRef.current[i])) {
       windowRef.current = window;
@@ -254,7 +267,6 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     if (settlingChanged) {
       settledRef.current = isSettled;
       setSettled(isSettled);
-      setScrolling(!isSettled);
     }
     if (isSettled || settlingChanged) publishAnchor(index, isSettled);
     if (isSettled && current.entries[index]) current.onSelect(current.entries[index]);
@@ -682,12 +694,20 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     // Pages are on screen whether or not the stage has keyboard focus or a menu is open, so
     // previews must not wait for either. The store keeps only the latest call: send one list,
     // open spread first.
-    if (!model.active || !visible) return;
-    observeVisible(
-      bookPreviewOrder(spread, model.entries.length).map((index) => staticPreviewAssetPath(model.entries[index])),
-      { priority: 'front' },
-    );
-  }, [leafCount, model.active, model.entries, observeVisible, spread, visible]);
+    if (!model.active || !visible) {
+      previewPathsRef.current = null;
+      return;
+    }
+    const paths = [...new Set(bookPreviewOrder(previewTravel.spread, model.entries.length, previewTravel.direction)
+      .map((index) => {
+        const entry = model.entries[index];
+        return bookStaticSource(entry, Boolean(getFailure(entry.path))).thumbnailPath;
+      }))];
+    const previous = previewPathsRef.current;
+    if (previous && previous.length === paths.length && paths.every((path, index) => path === previous[index])) return;
+    previewPathsRef.current = paths;
+    observeVisible(paths, { priority: 'front' });
+  }, [getFailure, model.active, model.entries, observeVisible, previewTravel, thumbnailFailureCount, visible]);
 
   useEffect(() => {
     const key = `${model.resetKey}:${model.replaceCount}:${model.entries.length}`;
@@ -883,9 +903,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       zoomPendingNavigationRef.current = null;
       return;
     }
-    const asset = staticPreviewAssetPath(entry);
+    const { thumbnailPath: asset, fallbackPath: fallback } = bookStaticSource(entry, Boolean(getFailure(entry.path)));
     const thumbnail = getThumbnail(asset);
-    const fallback = staticFallbackAssetPath(entry, true);
     const request = ++zoomNavigationRef.current;
     const current = () => request === zoomNavigationRef.current && latest.current.zoomIndex !== null && !zoomClosingRef.current;
     let accepted = false;

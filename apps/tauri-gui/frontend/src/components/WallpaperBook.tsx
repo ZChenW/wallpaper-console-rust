@@ -7,9 +7,10 @@ import { ApplyIndicator } from './ApplyIndicator.tsx';
 import ContextMenu from './ContextMenu.tsx';
 import LibraryState from './LibraryState.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
+import { useThumbnail } from '../state/ThumbnailStoreContext.tsx';
 import BookZoomPicture from './BookZoomPicture.tsx';
 import { libraryEntryApplyAvailable, libraryEntryApplyDisabledReason } from './libraryViewModel.ts';
-import { bookLeafTransform, bookWallpaperIndex, type BookFace } from './wallpaperBookModel.ts';
+import { bookLeafTransform, bookStaticSource, bookWallpaperIndex, type BookFace } from './wallpaperBookModel.ts';
 import { flowStateLabels } from './wallpaperFlowModel.ts';
 import { displayName } from './wallpaperCardHelpers.ts';
 import { useWallpaperBookController, type WallpaperBookProps } from './useWallpaperBookController.ts';
@@ -20,11 +21,13 @@ export type { WallpaperBookProps } from './useWallpaperBookController.ts';
 const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, active, reducedMotion }: {
   entry: LibraryBrowserItemDTO; open: boolean; selected: boolean; active: boolean; reducedMotion: boolean; moving: boolean;
 }) {
+  const { failure } = useThumbnail(bookStaticSource(entry).thumbnailPath);
+  const source = bookStaticSource(entry, Boolean(failure));
   const eligibility = useMemo<EnhancedMediaEligibility>(() => ({
     active, centered: open && selected, selected: open && selected, settled: true, reducedMotion,
   }), [active, open, selected, reducedMotion]);
   return <WallpaperPreviewMedia entry={entry} alt="" eligibility={eligibility}
-    loading="eager" staticFallback={open} stabilizeEntranceDuringMotion captureFrame />;
+    loading="eager" staticFallback={open} staticSource={source} stabilizeEntranceDuringMotion captureFrame />;
 }, (previous, next) => previous.entry === next.entry && (next.moving || (
   previous.open === next.open && previous.selected === next.selected
   && previous.active === next.active && previous.reducedMotion === next.reducedMotion
@@ -85,7 +88,6 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         data-open={open || undefined}
         data-selected={selected || undefined}
         data-zoom-source={zoomed && index === zoomIndex || undefined}
-        data-resting={open && !selected && spread > 0 && spread * 2 < model.entries.length || undefined}
         data-current={current || undefined}
         data-applying={pageApplying || undefined}
         data-pending={pagePending || undefined}

@@ -2381,7 +2381,6 @@ select:focus, input:focus { border-color: var(--primary); }
   -webkit-backface-visibility: hidden;
   cursor: grab;
   outline: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
-  transition: box-shadow 160ms ease;
 }
 
 .book-leaf__face[data-open] { cursor: pointer; }
@@ -2462,23 +2461,19 @@ select:focus, input:focus { border-color: var(--primary); }
   pointer-events: none;
 }
 .book-leaf__states:empty { display: none; }
-/* A lit page and bookmark accent, never a frame on a turning sheet. */
+/* Persistent selection layers cross-fade without covering the picture. */
 .book-leaf__face::before {
   content: '';
   position: absolute;
   inset: 0;
-  z-index: 2;
   border-radius: inherit;
-  background: var(--book-stage-bg);
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--text) 18%, transparent);
   opacity: 0;
-  transition: opacity 160ms ease;
+  transform: translateY(2px);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
   pointer-events: none;
 }
-.book-leaf__face[data-resting]::before { opacity: 0.16; }
-.book-leaf__face[data-open][data-selected] {
-  box-shadow: 0 5px 16px color-mix(in srgb, var(--text) 18%, transparent);
-}
-.book-leaf__face[data-open][data-selected]::after {
+.book-leaf__face::after {
   content: '';
   position: absolute;
   width: 22%;
@@ -2488,7 +2483,15 @@ select:focus, input:focus { border-color: var(--primary); }
   z-index: 5;
   border-radius: 2px;
   background: var(--primary);
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
   pointer-events: none;
+}
+.book-leaf__face[data-open][data-selected]::before,
+.book-leaf__face[data-open][data-selected]::after {
+  opacity: 1;
+  transform: translateY(0);
 }
 /* Keep the sheet in place while its picture, lift and bookmark travel in zoom. */
 .book-leaf__face[data-zoom-source] {
@@ -2499,9 +2502,11 @@ select:focus, input:focus { border-color: var(--primary); }
   outline-offset: -1.5px;
 }
 .wallpaper-book__stage[data-moving] .book-leaf__face::before,
-.wallpaper-book__stage[data-moving] .book-leaf__face[data-selected]::after,
+.wallpaper-book__stage[data-moving] .book-leaf__face::after {
+  opacity: 0;
+  transform: translateY(2px);
+}
 .wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
-.wallpaper-book__stage[data-moving] .book-leaf__face[data-selected] { box-shadow: none; transition: none; }
 .wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
 .wallpaper-book .context-menu {
   transform-origin: var(--context-pointer-x, 0px) var(--context-pointer-y, 0px);
@@ -2515,6 +2520,17 @@ select:focus, input:focus { border-color: var(--primary); }
 /* The shared preview error badge otherwise peeks out under the state label. */
 .wallpaper-book .wallpaper-thumb-error { display: none; }
 .wallpaper-book .wallpaper-preview-image { animation: none; }
+.wallpaper-book :is(.book-leaf__print, .wallpaper-book__zoom-print) img {
+  image-rendering: auto;
+}
+.wallpaper-book .wallpaper-thumb-placeholder { background: var(--panel-alt); }
+.book-leaf__face:not([data-open]) .wallpaper-type-icon { display: none; }
+.wallpaper-preview-video--handoff {
+  z-index: 2;
+  transition: opacity 160ms ease-out;
+}
+.wallpaper-preview-video--handoff[data-preview-fading] { opacity: 0; }
+.wallpaper-book[data-reduced-motion] .wallpaper-preview-video--handoff { transition: none; }
 .book-leaf__indicator {
   position: absolute;
   inset: 0;
@@ -2614,7 +2630,7 @@ select:focus, input:focus { border-color: var(--primary); }
   z-index: 2;
 }
 .wallpaper-book__zoom-decoration .book-leaf__print { background: transparent; }
-.wallpaper-book[data-reduced-motion] :is(.book-leaf__face, .book-leaf__face::before) { transition: none; }
+.wallpaper-book[data-reduced-motion] :is(.book-leaf__face::before, .book-leaf__face::after) { transition: none; }
 
 .wallpaper-book[data-reduced-motion] .wallpaper-book__spread { transform: translate(-50%, -50%); }
 .wallpaper-book__outgoing-spread { pointer-events: none; }

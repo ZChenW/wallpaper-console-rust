@@ -15,6 +15,7 @@ import {
   enhancedMediaActivationPlan,
   enhancedMediaCandidates,
   previewImagePath,
+  previewVideoHandoff,
   staticFallbackAssetPath,
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
@@ -41,6 +42,8 @@ export interface WallpaperPreviewMediaProps {
   readonly transientImagePath?: string | null;
   readonly loading?: 'eager' | 'lazy';
   readonly staticFallback?: boolean;
+  /** Optional Book source choice; other views keep their existing preview paths. */
+  readonly staticSource?: { readonly thumbnailPath: string; readonly fallbackPath: string | null };
   readonly stabilizeEntranceDuringMotion?: boolean;
   /** Book zoom captures the displayed frame through a canvas. */
   readonly captureFrame?: boolean;
@@ -56,15 +59,18 @@ export default function WallpaperPreviewMedia({
   transientImagePath = null,
   loading = 'lazy',
   staticFallback = false,
+  staticSource,
   stabilizeEntranceDuringMotion = false,
   onEnhancedError,
   onReady,
   captureFrame = false,
 }: WallpaperPreviewMediaProps) {
-  const assetPath = staticPreviewAssetPath(entry);
+  const assetPath = staticSource?.thumbnailPath ?? staticPreviewAssetPath(entry);
   const { thumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
   const [staticFallbackLoadFailed, setStaticFallbackLoadFailed] = useState(false);
-  const fallbackAssetPath = staticFallbackAssetPath(entry, staticFallback);
+  const fallbackAssetPath = staticSource
+    ? staticFallback ? staticSource.fallbackPath : null
+    : staticFallbackAssetPath(entry, staticFallback);
   const authorizedStaticFallback = useAuthorizedPreviewAsset(
     thumbnail || staticFallbackLoadFailed ? null : fallbackAssetPath,
     entry.path,
@@ -87,13 +93,16 @@ export default function WallpaperPreviewMedia({
     );
     return () => window.clearTimeout(timer);
   }, [activationPlan.retain, activationPlan.schedule, entry.path]);
+  const bookVideo = staticSource !== undefined && entry.type === 'video';
   const candidates = useMemo(() => {
     if (transientImagePath) return [{ kind: 'image' as const, path: transientImagePath }];
-    return enhancedMediaCandidates(entry, {
+    const media = enhancedMediaCandidates(entry, {
       ...eligibility,
       settled: activationPlan.retain,
     });
-  }, [activationPlan.retain, eligibility, entry, transientImagePath]);
+    // A playback error must not replace a healthy video-frame still with preview.gif.
+    return bookVideo ? media.filter((candidate) => candidate.kind === 'video') : media;
+  }, [activationPlan.retain, bookVideo, eligibility, entry, transientImagePath]);
   const candidateKey = candidates.map((candidate) => `${candidate.kind}:${candidate.path}`).join('\0');
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
@@ -136,12 +145,10 @@ export default function WallpaperPreviewMedia({
     entry.path,
   );
   const [readyVideoSource, setReadyVideoSource] = useState<string | null>(null);
+  const [retainedVideo, setRetainedVideo] = useState<{ entryPath: string; source: string } | null>(null);
   const activeVideoSource = activeCandidate?.kind === 'video' && authorizedCandidate.path
     ? safeFileSrc(authorizedCandidate.path)
     : null;
-  const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
-    videoRef.current = attachVideoDecoder(videoRef.current, video, activeVideoSource);
-  }, [activeVideoSource]);
   const handleEnhancedError = useCallback(() => {
     const nextIndex = candidateIndex + 1;
     const message = `Enhanced preview unavailable for ${entry.title || entry.path}`;
@@ -160,8 +167,9 @@ export default function WallpaperPreviewMedia({
   }, [authorizedCandidate.error, handleEnhancedError]);
 
   const imagePath = previewImagePath({
-    candidateKind: activeCandidate?.kind ?? null,
-    authorizedCandidatePath: authorizedCandidate.path,
+    // Decode the Book still under its live video using the existing image handoff.
+    candidateKind: staticSource && activeCandidate?.kind === 'video' ? null : activeCandidate?.kind ?? null,
+    authorizedCandidatePath: activeCandidate?.kind === 'video' && staticSource ? null : authorizedCandidate.path,
     authorizedStaticFallbackPath: authorizedStaticFallback.path,
     staticFallbackLoadFailed,
     thumbnail,
@@ -173,6 +181,30 @@ export default function WallpaperPreviewMedia({
   const imageLoaded = imagePath !== null
     && imagePath !== undefined
     && displayedImage?.path === imagePath;
+  const handoff = previewVideoHandoff(
+    activeVideoSource,
+    retainedVideo?.entryPath === entry.path ? retainedVideo.source : null,
+    imageLoaded,
+    staticSource !== undefined,
+  );
+  const retainVideoForStill = staticSource !== undefined;
+  const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
+    videoRef.current = attachVideoDecoder(videoRef.current, video, handoff.source);
+  }, [handoff.source]);
+  useLayoutEffect(() => {
+    if (retainVideoForStill && activeVideoSource) setRetainedVideo({ entryPath: entry.path, source: activeVideoSource });
+  }, [activeVideoSource, entry.path, retainVideoForStill]);
+  useEffect(() => {
+    if (!handoff.source || activeVideoSource) return undefined;
+    // Freeze the last sharp frame while the still is decoding, then fade it away.
+    videoRef.current?.pause();
+    if (!handoff.fading) return undefined;
+    const timer = window.setTimeout(() => setRetainedVideo(null), eligibility.reducedMotion ? 0 : 160);
+    return () => window.clearTimeout(timer);
+  }, [activeVideoSource, eligibility.reducedMotion, handoff.fading, handoff.source]);
+  useEffect(() => {
+    if (retainVideoForStill && activeVideoSource) void videoRef.current?.play().catch(() => {});
+  }, [activeVideoSource, retainVideoForStill]);
   useLayoutEffect(() => {
     onReady?.(activeVideoSource !== null ? readyVideoSource === activeVideoSource : imageLoaded);
   }, [activeVideoSource, imageLoaded, onReady, readyVideoSource]);
@@ -183,9 +215,9 @@ export default function WallpaperPreviewMedia({
       current?.entryPath === entry.path && current.path === failedPath ? null : current
     ));
     if (failedPath !== imagePath) return;
-    if (authorizedCandidate.path) {
+    if (failedPath === authorizedCandidate.path) {
       handleEnhancedError();
-    } else if (authorizedStaticFallback.path) {
+    } else if (failedPath === authorizedStaticFallback.path) {
       setStaticFallbackLoadFailed(true);
     } else {
       setThumbnailLoadFailed(true);
@@ -217,26 +249,30 @@ export default function WallpaperPreviewMedia({
     });
   };
 
-  if (activeCandidate?.kind === 'video' && authorizedCandidate.path) {
+  const video = handoff.source ? (
+    <video
+      aria-hidden="true"
+      autoPlay
+      crossOrigin={captureFrame ? 'anonymous' : undefined}
+      className={[className, staticSource ? 'wallpaper-preview-video--handoff' : ''].filter(Boolean).join(' ')}
+      data-enhanced-preview="video"
+      data-preview-fading={handoff.fading || undefined}
+      key={`video:${entry.path}`}
+      loop
+      muted
+      onLoadedData={() => setReadyVideoSource(handoff.source)}
+      onError={activeVideoSource ? handleEnhancedError : undefined}
+      playsInline
+      poster={videoPosterPath ? safeFileSrc(videoPosterPath) : undefined}
+      preload="metadata"
+      ref={setVideoRef}
+      src={handoff.source}
+    />
+  ) : null;
+  if (video && !staticSource) {
     return (
       <>
-        <video
-          aria-hidden="true"
-          autoPlay
-          crossOrigin={captureFrame ? 'anonymous' : undefined}
-          className={className}
-          data-enhanced-preview="video"
-          key={`${activeCandidate.kind}:${activeCandidate.path}`}
-          loop
-          muted
-          onLoadedData={() => setReadyVideoSource(activeVideoSource)}
-          onError={handleEnhancedError}
-          playsInline
-          poster={videoPosterPath ? safeFileSrc(videoPosterPath) : undefined}
-          preload="metadata"
-          ref={setVideoRef}
-          src={activeVideoSource ?? undefined}
-        />
+        {video}
         {enhancedError && !thumbnail ? (
           <span aria-label="Preview unavailable" className="wallpaper-thumb-error" title="Preview unavailable">!</span>
         ) : null}
@@ -244,10 +280,11 @@ export default function WallpaperPreviewMedia({
     );
   }
 
-  if (imagePath) {
+  if (imagePath || (staticSource && (displayedImage || video))) {
     const imageClassName = ['wallpaper-preview-image', className].filter(Boolean).join(' ');
     return (
       <>
+        {video}
         {!displayedImage ? (
           <span
             aria-hidden="true"
@@ -310,7 +347,7 @@ export default function WallpaperPreviewMedia({
 
   return (
     <div
-      className={`wallpaper-thumb-placeholder${className ? ` ${className}` : ''}`}
+      className={`wallpaper-thumb-placeholder${staticSource ? ' wallpaper-thumb-placeholder--loading' : ''}${className ? ` ${className}` : ''}`}
     >
       <span className="wallpaper-type-icon">{typeIcon(entry.type)}</span>
       {enhancedError || thumbnailFailure || thumbnailLoadFailed ? (
