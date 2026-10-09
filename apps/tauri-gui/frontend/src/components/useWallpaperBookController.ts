@@ -3,16 +3,18 @@ import {
   useCallback, useEffect, useLayoutEffect, useRef, useState,
   type KeyboardEvent, type MouseEvent, type PointerEvent,
 } from 'react';
+import { flushSync } from 'react-dom';
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 import type { ApplyGesture } from '../shell/shellPreferences.ts';
 import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type LibraryViewModel } from './libraryViewModel.ts';
 import {
-  accumulateBookWheel, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS, BOOK_WINDOW_RADIUS, BOOK_ZOOM_DURATION_MS,
+  accumulateBookWheel, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS, BOOK_ZOOM_DURATION_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
   bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
-  resolveBookKey, resolveBookPointerInteraction, resolveBookSelectedIndex, resolveBookWheelIntent, type BookRect,
+  planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
+  resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
 } from './wallpaperBookModel.ts';
 import { staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
@@ -43,6 +45,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const reducedMotion = useReducedMotion();
   const [initial] = useState(() => resolveLibraryFlowStartupAnchor(model.entries, props.initialAnchorWallpaperId, model.currentPath)?.index ?? 0);
   const [spread, setSpread] = useState(() => bookPositionForWallpaper(initial));
+  const [leafKeyOffset, setLeafKeyOffset] = useState(0);
   const [selectedIndex, setSelectedIndex] = useState(initial);
   const [settled, setSettled] = useState(true);
   const [zoomIndex, setZoomIndex] = useState<number | null>(null);
@@ -66,8 +69,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const resetRef = useRef({ key: model.resetKey, replacement: model.replaceCount });
   const appendClaimRef = useRef('');
   const anchorRef = useRef('');
-  const zoomOriginRef = useRef<BookRect | null>(null);
-  const zoomAnimationRef = useRef<Animation | null>(null);
+  const restoredAnchorRef = useRef(props.initialAnchorWallpaperId);
+  const pendingMenuRef = useRef<{ wallpaperId: number; x: number; y: number } | null>(null);
+  const zoomOriginRef = useRef<BookZoomOrigin | null>(null);
+  const zoomAnimationsRef = useRef<Animation[]>([]);
   const zoomClosingRef = useRef(false);
   const crossFadeRef = useRef<HTMLElement | null>(null);
   const crossFadeAnimationRef = useRef<Animation | null>(null);
@@ -91,12 +96,11 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, []);
 
   const cancelZoomAnimation = useCallback(() => {
-    const animation = zoomAnimationRef.current;
-    zoomAnimationRef.current = null;
-    if (animation) {
+    for (const animation of zoomAnimationsRef.current) {
       animation.onfinish = null;
       animation.cancel();
     }
+    zoomAnimationsRef.current = [];
   }, []);
 
   const cancelCrossFade = useCallback(() => {
@@ -181,10 +185,19 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     }
     publishAnchor(index, isSettled);
     if (isSettled && current.entries[index]) current.onSelect(current.entries[index]);
+    const pendingMenu = pendingMenuRef.current;
+    if (isSettled && pendingMenu) {
+      pendingMenuRef.current = null;
+      const entry = current.entries[index];
+      if (entry?.wallpaperId === pendingMenu.wallpaperId) {
+        setContextMenu({ entry, x: pendingMenu.x, y: pendingMenu.y });
+      }
+    }
     paint();
   }, [cancelCrossFade, paint, publishAnchor, setScrolling]);
 
   const cancelMotion = useCallback(() => {
+    pendingMenuRef.current = null;
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current);
     frameRef.current = null;
     targetRef.current = null;
@@ -196,13 +209,44 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     cancelMotion();
     const count = bookLastPosition(latest.current.props.model.entries.length);
     const destination = Math.round(clampBookPosition(target, count));
-    // Far navigation replaces the bounded window without traversing the entire result.
-    if (instant || latest.current.reducedMotion || Math.abs(destination - positionRef.current) > BOOK_WINDOW_RADIUS || Math.abs(destination - positionRef.current) < 0.001) {
+    if (instant || latest.current.reducedMotion || Math.abs(destination - positionRef.current) < 0.001) {
       updatePosition(destination, true);
       return;
     }
     updatePosition(positionRef.current, false);
     targetRef.current = destination;
+    const segments = planBookMove(positionRef.current, destination, count);
+    if (segments.length > 1) {
+      const startedAt = performance.now();
+      const first = segments[0];
+      const last = segments[1];
+      let swapped = false;
+      const tick = (at: number) => {
+        const elapsed = Math.max(0, at - startedAt);
+        if (elapsed >= first.durationMs && !swapped) {
+          // Render the exact midpoint before transplanting: the keys retain the
+          // moving sheet and its media, with the same pose on both sides of the skip.
+          flushSync(() => updatePosition(first.to, false));
+          flushSync(() => {
+            setLeafKeyOffset((offset) => offset + last.from - first.to);
+            updatePosition(last.from, false);
+          });
+          swapped = true;
+        }
+        const segment = swapped ? last : first;
+        const progress = Math.min(1, (elapsed - (swapped ? first.durationMs : 0)) / segment.durationMs);
+        // Fast, steady departure; a gentle arrival with zero final velocity.
+        const eased = swapped ? 1 - (1 - progress) ** 1.5 : progress;
+        const finished = swapped && progress === 1;
+        updatePosition(segment.from + (segment.to - segment.from) * eased, finished);
+        if (finished) {
+          frameRef.current = null;
+          targetRef.current = null;
+        } else frameRef.current = requestAnimationFrame(tick);
+      };
+      frameRef.current = requestAnimationFrame(tick);
+      return;
+    }
     let lastAt = performance.now();
     let speed = Math.min(18, Math.max(-18, velocity));
     const startedAt = lastAt;
@@ -234,41 +278,52 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     publishAnchor(index, settledRef.current);
   }, [publishAnchor]);
 
+  const setZoomDirection = useCallback((closing: boolean) => {
+    zoomClosingRef.current = closing;
+    setZoomMoving(true);
+    // Keep one timeline in both directions, including after its open endpoint.
+    for (const animation of zoomAnimationsRef.current) {
+      animation.playbackRate = closing ? -1 : 1;
+      animation.play();
+    }
+  }, []);
+
   const closeZoom = useCallback(() => {
     if (latest.current.zoomIndex === null || zoomClosingRef.current) return;
     focusStage();
-    const element = zoomRef.current;
-    const option = stageRef.current?.querySelector<HTMLElement>(`#book-option-${latest.current.props.model.entries[selectedRef.current]?.wallpaperId}`);
-    const origin = option?.getBoundingClientRect();
-    cancelZoomAnimation();
-    const finish = () => {
-      zoomClosingRef.current = false;
-      zoomAnimationRef.current = null;
-      changeZoomIndex(null);
-      setZoomMoving(false);
-      stageRef.current?.focus({ preventScroll: true });
-    };
-    if (!element || !origin || latest.current.reducedMotion) { finish(); return; }
-    zoomClosingRef.current = true;
-    setZoomMoving(true);
-    const animation = element.animate([
-      { transform: 'none' }, { transform: bookZoomTransform(origin, element.getBoundingClientRect()) },
-    ], { duration: BOOK_ZOOM_DURATION_MS, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', fill: 'forwards' });
-    zoomAnimationRef.current = animation;
-    animation.onfinish = finish;
-  }, [cancelZoomAnimation, changeZoomIndex, focusStage]);
+    if (latest.current.reducedMotion || zoomAnimationsRef.current.length === 0) {
+      resetZoom();
+      return;
+    }
+    setZoomDirection(true);
+  }, [focusStage, resetZoom, setZoomDirection]);
 
   const toggleZoom = useCallback(() => {
-    if (latest.current.zoomIndex !== null) { closeZoom(); return; }
+    pendingMenuRef.current = null;
+    if (latest.current.zoomIndex !== null) {
+      if (zoomClosingRef.current) setZoomDirection(false);
+      else closeZoom();
+      return;
+    }
     if (!settledRef.current) return;
     const index = selectedRef.current;
     const entry = latest.current.props.model.entries[index];
-    if (!entry) return;
-    zoomOriginRef.current = stageRef.current?.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`)?.getBoundingClientRect() ?? null;
+    const stage = stageRef.current;
+    if (!entry || !stage) return;
+    const option = stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`);
+    const spread = stage.querySelector<HTMLElement>('.wallpaper-book__spread');
+    const rect = stage.getBoundingClientRect();
+    zoomOriginRef.current = option && spread ? {
+      spineX: rect.left + spread.offsetLeft,
+      spineY: rect.top + spread.offsetTop,
+      width: option.offsetWidth,
+      face: wallpaperBookAddress(index).face,
+      paperMargin: Number.parseFloat(getComputedStyle(option).paddingLeft) || 0,
+    } : null;
     changeZoomIndex(index);
     setZoomMoving(!latest.current.reducedMotion);
-    stageRef.current?.focus({ preventScroll: true });
-  }, [changeZoomIndex, closeZoom]);
+    focusStage();
+  }, [changeZoomIndex, closeZoom, focusStage, setZoomDirection]);
 
   useLayoutEffect(() => {
     paint();
@@ -277,22 +332,48 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   useLayoutEffect(() => {
     const element = zoomRef.current;
     const origin = zoomOriginRef.current;
+    const stage = stageRef.current;
     if (zoomIndex === null) return;
     zoomOriginRef.current = null;
-    if (!element || !origin || reducedMotion) {
+    if (!element || !origin || !stage || reducedMotion) {
       setZoomMoving(false);
       return;
     }
-    const animation = element.animate([
-      { transform: bookZoomTransform(origin, element.getBoundingClientRect()) }, { transform: 'none' },
-    ], { duration: BOOK_ZOOM_DURATION_MS, easing: 'cubic-bezier(0.22, 1, 0.36, 1)' });
-    zoomAnimationRef.current = animation;
-    animation.onfinish = () => {
-      zoomAnimationRef.current = null;
+    const pose = bookZoomTransform(origin, element.getBoundingClientRect());
+    const timing = {
+      duration: BOOK_ZOOM_DURATION_MS,
+      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
+      fill: 'both' as const,
+    };
+    const animations: Animation[] = [];
+    const animate = (target: Element | null, frames: Keyframe[]) => {
+      if (target) animations.push(target.animate(frames, timing));
+    };
+    animate(element, [
+      { transform: pose.transform, borderRadius: pose.paperBorderRadius },
+      { transform: 'translate3d(0px, 0px, 0px) rotateX(0deg) rotateY(0deg) scale(1)', borderRadius: '0.5rem' },
+    ]);
+    animate(element.querySelector('.wallpaper-book__zoom-print'), [
+      { inset: pose.paperInset, borderRadius: pose.paperRadius },
+      { inset: '0px', borderRadius: '0px' },
+    ]);
+    animate(stage.querySelector('.wallpaper-book__scene'), [
+      { opacity: 1, transform: 'scale(1)' },
+      { opacity: 0, transform: 'scale(0.96)' },
+    ]);
+    animate(stage.querySelector('.wallpaper-book__zoom-backdrop'), [{ opacity: 0 }, { opacity: 1 }]);
+    zoomAnimationsRef.current = animations;
+    animations[0].onfinish = () => {
+      if (zoomClosingRef.current) {
+        cancelZoomAnimation();
+        zoomClosingRef.current = false;
+        changeZoomIndex(null);
+        focusStage();
+      }
       setZoomMoving(false);
     };
     return cancelZoomAnimation;
-  }, [cancelZoomAnimation, zoomIndex, reducedMotion]);
+  }, [cancelZoomAnimation, changeZoomIndex, focusStage, zoomIndex, reducedMotion]);
 
   useLayoutEffect(() => {
     const previous = resetRef.current;
@@ -304,6 +385,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       appendClaimRef.current = '';
       anchorRef.current = '';
       setContextMenu(null);
+      pendingMenuRef.current = null;
       selectedRef.current = 0;
       preferredIndexRef.current = 0;
       setSelectedIndex(0);
@@ -313,6 +395,24 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       updatePosition(positionRef.current, settledRef.current);
     }
   }, [cancelCrossFade, model.entries, model.resetKey, model.replaceCount, moveTo, releaseDrag, resetZoom, updatePosition]);
+
+  useEffect(() => {
+    const anchor = props.initialAnchorWallpaperId;
+    if (anchor == null || restoredAnchorRef.current === anchor) return;
+    // The shell echoes our anchor reports back as the initial anchor prop.
+    // A report from the current moving selection must not restart its motion.
+    if (model.entries[selectedRef.current]?.wallpaperId === anchor) {
+      restoredAnchorRef.current = anchor;
+      return;
+    }
+    const index = model.entries.findIndex((entry) => entry.wallpaperId === anchor);
+    if (index < 0) return;
+    restoredAnchorRef.current = anchor;
+    releaseDrag();
+    resetZoom();
+    preferredIndexRef.current = index;
+    moveTo(bookPositionForWallpaper(index));
+  }, [model.entries, props.initialAnchorWallpaperId, moveTo, releaseDrag, resetZoom]);
 
   useEffect(() => {
     if (focusToken <= 0 && returnFocusToken <= 0) return;
@@ -355,7 +455,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       releaseDrag();
       cancelZoomAnimation();
       zoomOriginRef.current = null;
-      if (zoomClosingRef.current) changeZoomIndex(null);
+      if (zoomClosingRef.current || !latest.current.props.model.active) changeZoomIndex(null);
       zoomClosingRef.current = false;
       setZoomMoving(false);
       moveTo(bookSnapTarget(positionRef.current, 0, lastPosition), true);
@@ -364,22 +464,25 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, [cancelCrossFade, cancelZoomAnimation, changeZoomIndex, interactionActive, lastPosition, moveTo, releaseDrag]);
 
   useEffect(() => {
-    if (!interactionActive) return;
+    // Pages are on screen whether or not the stage has keyboard focus or a menu is open, so
+    // previews must not wait for either. The store keeps only the latest call: send one list,
+    // open spread first.
+    if (!model.active || !visible) return;
     const nearby = model.entries.slice(Math.max(0, spread * 2 - 3), spread * 2 + 4);
-    observeVisible(nearby.map(staticPreviewAssetPath), { priority: 'front' });
     const rest = bookVisibleWindow(spread, leafCount).flatMap((leaf) => model.entries.slice(leaf * 2, leaf * 2 + 2));
-    observeVisible(rest.map(staticPreviewAssetPath), { priority: 'back' });
-  }, [interactionActive, leafCount, model.entries, observeVisible, spread]);
+    observeVisible([...nearby, ...rest].map(staticPreviewAssetPath), { priority: 'front' });
+  }, [leafCount, model.active, model.entries, observeVisible, spread, visible]);
 
   useEffect(() => {
     const key = `${model.resetKey}:${model.replaceCount}:${model.entries.length}`;
     const approach = bookAppendApproach(appendClaimRef.current, key, lastPosition - spread <= BOOK_APPEND_DISTANCE,
-      interactionActive && model.canAutoAppend && !model.loadingMore && !model.refreshing);
+      model.active && visible && model.canAutoAppend && !model.loadingMore && !model.refreshing);
     appendClaimRef.current = approach.claim;
     if (approach.request) void model.onRequestMoreIfNeeded();
-  }, [interactionActive, lastPosition, spread, model]);
+  }, [lastPosition, spread, model, visible]);
 
   const handleWheel = useCallback((event: globalThis.WheelEvent) => {
+    pendingMenuRef.current = null;
     event.preventDefault();
     if (!latest.current.props.model.active || document.hidden) return;
     const intent = resolveBookWheelIntent(event, dragRef.current !== null, latest.current.zoomIndex !== null);
@@ -415,6 +518,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, [cancelCrossFade, cancelMotion, cancelZoomAnimation, releaseDrag, setScrolling, setInteracting]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
+    pendingMenuRef.current = null;
     if (event.button !== 0 || !model.active || zoomIndex !== null || !event.isPrimary) return;
     cancelMotion();
     releaseDrag();
@@ -463,6 +567,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   };
 
   const handlePageClick = (event: MouseEvent<HTMLDivElement>, index: number) => {
+    pendingMenuRef.current = null;
     if (!model.active || zoomIndex !== null) return;
     const entry = model.entries[index];
     if (!entry) return;
@@ -481,17 +586,28 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   };
 
   const openContextMenu = (index: number, x: number, y: number) => {
-    const entry = model.entries[index];
+    const entry = latest.current.props.model.entries[index];
     if (!entry || !model.active) return;
     releaseDrag();
+    pendingMenuRef.current = null;
     preferredIndexRef.current = index;
-    if (zoomIndex === null) moveTo(bookPositionForWallpaper(index), true);
-    else selectIndex(index);
     stageRef.current?.focus({ preventScroll: true });
-    setContextMenu({ entry, x, y });
+    const decision = resolveBookContextMenu(
+      openBookWallpapers(positionRef.current, model.entries.length).includes(index),
+      latest.current.zoomIndex !== null,
+    );
+    if (decision === 'open') {
+      selectIndex(index);
+      setContextMenu({ entry, x, y });
+    } else {
+      moveTo(bookPositionForWallpaper(index));
+      if (settledRef.current) setContextMenu({ entry, x, y });
+      else pendingMenuRef.current = { wallpaperId: entry.wallpaperId, x, y };
+    }
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
+    pendingMenuRef.current = null;
     if (event.target !== event.currentTarget || !interactionActive) return;
     if (event.altKey || event.metaKey || event.ctrlKey) return;
     const intent = resolveBookKey(event.key, event.shiftKey);
@@ -540,10 +656,11 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
 
   return {
     elements: { stageRef, zoomRef, leavesRef },
-    snapshot: { spread, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, contextMenu, reducedMotion, interactionActive, openIndices, visibleLeaves },
+    snapshot: { spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, contextMenu, reducedMotion, interactionActive, openIndices, visibleLeaves },
     actions: {
       handlePointerDown, handlePointerMove, finishPointer, handleKeyDown, handlePageClick,
       openContextMenu, applySelected, toggleZoom, closeZoom, focusStage,
+      cancelPendingMenu: () => { pendingMenuRef.current = null; },
       closeContextMenu: () => { setContextMenu(null); focusStage(); },
     },
   };

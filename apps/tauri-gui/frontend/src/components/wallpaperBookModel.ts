@@ -12,7 +12,7 @@ export const BOOK_WINDOW_RADIUS = 10;
 export const BOOK_TURN_LIFT = 24;
 export const BOOK_WHEEL_PIXELS_PER_LEAF = 160;
 export const BOOK_WHEEL_IDLE_MS = 160;
-export const BOOK_ZOOM_DURATION_MS = 280;
+export const BOOK_ZOOM_DURATION_MS = 320;
 export const BOOK_APPEND_DISTANCE = 6;
 
 export type BookFace = 'front' | 'back';
@@ -21,6 +21,33 @@ export const bookLeafCount = (wallpaperCount: number) => Math.ceil(Math.max(0, w
 export const bookLastPosition = (wallpaperCount: number) => Math.floor(Math.max(0, wallpaperCount) / 2);
 export const clampBookPosition = (position: number, leafCount: number) =>
   Math.min(leafCount, Math.max(0, Number.isFinite(position) ? position : 0));
+
+export interface BookPositionSegment {
+  readonly from: number;
+  readonly to: number;
+  /** Zero means use the normal interruptible spring. */
+  readonly durationMs: number;
+}
+
+/** Skip the middle at matching half-turn poses; never render the skipped leaves. */
+export function planBookMove(from: number, to: number, leafCount: number): readonly BookPositionSegment[] {
+  const start = clampBookPosition(from, leafCount);
+  const destination = Math.round(clampBookPosition(to, leafCount));
+  if (Math.abs(destination - start) <= BOOK_WINDOW_RADIUS) {
+    return [{ from: start, to: destination, durationMs: 0 }];
+  }
+  const direction = Math.sign(destination - start);
+  const departure = direction > 0 ? Math.floor(start) + 2.5 : Math.ceil(start) - 2.5;
+  const arrival = destination - direction * 2.5;
+  return [
+    { from: start, to: departure, durationMs: 260 },
+    { from: arrival, to: destination, durationMs: 260 },
+  ];
+}
+
+export function resolveBookContextMenu(open: boolean, zoomed: boolean): 'open' | 'turn' {
+  return zoomed || open ? 'open' : 'turn';
+}
 
 export function wallpaperBookAddress(index: number): { leaf: number; face: BookFace } {
   return { leaf: Math.floor(index / 2), face: index % 2 === 0 ? 'front' : 'back' };
@@ -157,6 +184,36 @@ export function resolveBookPointerInteraction(input: CardPointerInteractionInput
 
 export interface BookRect { readonly left: number; readonly top: number; readonly width: number; readonly height: number }
 
-export function bookZoomTransform(origin: BookRect, destination: BookRect): string {
-  return `translate(${origin.left - destination.left}px, ${origin.top - destination.top}px) scale(${origin.width / Math.max(1, destination.width)}, ${origin.height / Math.max(1, destination.height)})`;
+export interface BookZoomOrigin {
+  readonly spineX: number;
+  readonly spineY: number;
+  readonly width: number;
+  readonly face: BookFace;
+  readonly paperMargin: number;
+}
+
+/** Match the unprojected paper centre, including the face's translateZ(0.3px).
+ * The zoom layer supplies the same perspective as the book, so projection is
+ * applied once, after this pose. One scale preserves the 16:10 picture box.
+ */
+export function bookZoomTransform(origin: BookZoomOrigin, destination: BookRect) {
+  const tiltX = 7;
+  const x = tiltX * Math.PI / 180;
+  const y = BOOK_FAN_ANGLE * Math.PI / 180;
+  const direction = origin.face === 'front' ? 1 : -1;
+  const halfWidth = Math.max(0, origin.width) / 2;
+  const depth = halfWidth * Math.sin(y) + 0.3 * Math.cos(y);
+  const centerX = origin.spineX + direction * (halfWidth * Math.cos(y) - 0.3 * Math.sin(y));
+  const centerY = origin.spineY - depth * Math.sin(x);
+  const scale = Math.max(0.001, origin.width / Math.max(1, destination.width));
+  const margin = Math.max(0, origin.paperMargin) / scale;
+  return {
+    transform: `translate3d(${centerX - destination.left - destination.width / 2}px, ${centerY - destination.top - destination.height / 2}px, ${depth * Math.cos(x)}px) rotateX(${tiltX}deg) rotateY(${-direction * BOOK_FAN_ANGLE}deg) scale(${scale})`,
+    scale,
+    paperInset: `${margin * 10 / 16}px ${margin}px`,
+    paperRadius: `${4 / scale}px`,
+    paperBorderRadius: origin.face === 'front'
+      ? `${1 / scale}px ${9.6 / scale}px ${9.6 / scale}px ${1 / scale}px`
+      : `${9.6 / scale}px ${1 / scale}px ${1 / scale}px ${9.6 / scale}px`,
+  };
 }

@@ -18,13 +18,13 @@ function WallpaperBookReady(props: WallpaperBookProps) {
   const {
     elements: { stageRef, zoomRef, leavesRef },
     snapshot: {
-      spread, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving,
+      spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving,
       contextMenu, reducedMotion, interactionActive, visibleLeaves,
     },
     actions: {
       handlePointerDown, handlePointerMove, finishPointer, handleKeyDown,
       handlePageClick, openContextMenu, applySelected, toggleZoom, closeZoom,
-      closeContextMenu, focusStage,
+      closeContextMenu, focusStage, cancelPendingMenu,
     },
   } = useWallpaperBookController(props);
   const zoomed = zoomIndex !== null;
@@ -81,6 +81,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         <div className="book-leaf__print">
           {entry ? (
             <WallpaperPreviewMedia
+              key={entry.path}
               alt=""
               eligibility={{
                 active: interactionActive && settled && !zoomed,
@@ -124,6 +125,10 @@ function WallpaperBookReady(props: WallpaperBookProps) {
       aria-label="Book wallpaper browser"
       className={`wallpaper-book${model.refreshing ? ' is-refreshing' : ''}`}
       data-reduced-motion={reducedMotion || undefined}
+      onClickCapture={cancelPendingMenu}
+      onPointerDownCapture={cancelPendingMenu}
+      onKeyDownCapture={cancelPendingMenu}
+      onWheelCapture={cancelPendingMenu}
     >
       <header className="wallpaper-book__heading">
         <h3>Library</h3>
@@ -163,29 +168,32 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         role="listbox"
         tabIndex={0}
       >
-        <div aria-hidden="true" className="wallpaper-book__contact-shadow" />
-        <div className="wallpaper-book__spread">
-          {visibleLeaves.map((leaf) => {
-            const transform = bookLeafTransform(leaf, spread, reducedMotion);
-            return (
-              <div
-                className="book-leaf"
-                data-turned={leaf < spread || undefined}
-                key={leaf}
-                ref={(element) => {
-                  if (element) leavesRef.current.set(leaf, element);
-                  else leavesRef.current.delete(leaf);
-                }}
-                style={{ transform: transform.transform, opacity: transform.opacity }}
-              >
-                {face(leaf, 'front')}
-                {face(leaf, 'back')}
-              </div>
-            );
-          })}
+        <div className="wallpaper-book__scene">
+          <div aria-hidden="true" className="wallpaper-book__contact-shadow" />
+          <div className="wallpaper-book__spread">
+            {visibleLeaves.map((leaf) => {
+              const transform = bookLeafTransform(leaf, spread, reducedMotion);
+              return (
+                <div
+                  className="book-leaf"
+                  data-turned={leaf < spread || undefined}
+                  key={leaf - leafKeyOffset}
+                  ref={(element) => {
+                    if (element) leavesRef.current.set(leaf, element);
+                    else leavesRef.current.delete(leaf);
+                  }}
+                  style={{ transform: transform.transform, opacity: transform.opacity }}
+                >
+                  {face(leaf, 'front')}
+                  {face(leaf, 'back')}
+                </div>
+              );
+            })}
+          </div>
         </div>
         {zoomed && selectedEntry ? (
-          <div className="wallpaper-book__zoom-backdrop" onClick={closeZoom}>
+          <div className="wallpaper-book__zoom-layer">
+            <div aria-hidden="true" className="wallpaper-book__zoom-backdrop" onClick={closeZoom} />
             <div
               aria-current={model.currentPath === selectedEntry.path ? 'true' : undefined}
               aria-label={displayName(selectedEntry)}
@@ -202,19 +210,21 @@ function WallpaperBookReady(props: WallpaperBookProps) {
               ref={zoomRef}
               role="option"
             >
-              <WallpaperPreviewMedia
-                alt=""
-                eligibility={{
-                  active: interactionActive && settled && !zoomMoving,
-                  centered: true,
-                  selected: true,
-                  settled: settled && !zoomMoving,
-                  reducedMotion,
-                }}
-                entry={selectedEntry}
-                loading="eager"
-                staticFallback
-              />
+              <div className="wallpaper-book__zoom-print">
+                <WallpaperPreviewMedia
+                  alt=""
+                  eligibility={{
+                    active: interactionActive && settled && !zoomMoving,
+                    centered: true,
+                    selected: true,
+                    settled: settled && !zoomMoving,
+                    reducedMotion,
+                  }}
+                  entry={selectedEntry}
+                  loading="eager"
+                  staticFallback
+                />
+              </div>
               <span className="book-leaf__states">
                 {flowStateLabels({
                   selected: true,
@@ -262,7 +272,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         <button
           aria-label={zoomed ? 'Leave zoom' : 'Zoom'}
           aria-pressed={zoomed}
-          disabled={controlsDisabled}
+          disabled={!selectedEntry || !model.active || !settled}
           onClick={toggleZoom}
           title={zoomed ? 'Leave zoom' : 'Zoom'}
           type="button"
