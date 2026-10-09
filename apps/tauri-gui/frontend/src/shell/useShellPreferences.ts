@@ -351,8 +351,7 @@ export function createShellPreferencesLoader(): ShellPreferencesLoader {
             if (!isCurrent()) return;
             options.onSuccess(prefs);
           } catch {
-            // Retry failed — do not retry again automatically.
-            // The caller can choose to retry manually.
+            scheduleRetry();
           }
         }, options.retryDelayMs);
       };
@@ -394,6 +393,8 @@ export function useShellPreferences(
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [saveError, setSaveError] = useState<Error | null>(null);
   const persistedSnapshotRef = useRef<string | null>(null);
+  const pendingSnapshotRef = useRef<string | null>(null);
+  const [saveRetry, setSaveRetry] = useState(0);
   const loaderRef = useRef(createShellPreferencesLoader());
   const sessionRef = useRef(new ShellPreferencesSessionController(preferences));
   const saveQueue = useMemo(
@@ -403,6 +404,7 @@ export function useShellPreferences(
 
   useEffect(() => {
     persistedSnapshotRef.current = null;
+    pendingSnapshotRef.current = null;
     sessionRef.current.beginLoading();
     setReady(false);
     setLoadError(null);
@@ -414,7 +416,7 @@ export function useShellPreferences(
       onDefaults: (err) => {
         const fallback = defaultShellPreferences();
         // Ensure defaults are the render baseline but never auto-persisted.
-        persistedSnapshotRef.current = serializeShellPreferences(fallback);
+        persistedSnapshotRef.current = null;
         setPreferences(sessionRef.current.enterDegraded(fallback));
         setLoadError(err);
         setReady(true);
@@ -424,8 +426,7 @@ export function useShellPreferences(
         const next = accepted.preferences;
         // The transport only confirmed `loaded`. If loading/degraded edits were
         // rebased into `next`, leave the disk snapshot as the comparison
-        // baseline so the normal effect queues the merged state after any
-        // earlier user write.
+        // baseline so the normal effect queues the merged state.
         persistedSnapshotRef.current = serializeShellPreferences(loaded);
         setPreferences(next);
         setLoadError(null);
@@ -443,10 +444,27 @@ export function useShellPreferences(
     // initial defaults are render-only and must never be written back.
     if (!ready || persistedSnapshotRef.current === null) return;
     const snapshot = serializeShellPreferences(preferences);
-    if (snapshot === persistedSnapshotRef.current) return;
-    persistedSnapshotRef.current = snapshot;
-    void saveQueue.enqueue(preferences).catch(() => {});
-  }, [preferences, ready, saveQueue]);
+    if (snapshot === persistedSnapshotRef.current && pendingSnapshotRef.current === null) return;
+    let active = true;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
+    pendingSnapshotRef.current = snapshot;
+    void saveQueue.enqueue(preferences).then(
+      () => {
+        if (!active) return;
+        persistedSnapshotRef.current = snapshot;
+        pendingSnapshotRef.current = null;
+      },
+      () => {
+        if (!active) return;
+        pendingSnapshotRef.current = null;
+        retryTimer = setTimeout(() => setSaveRetry((value) => value + 1), retryDelayMs);
+      },
+    );
+    return () => {
+      active = false;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
+  }, [preferences, ready, retryDelayMs, saveQueue, saveRetry]);
 
   const updatePreferences = useCallback((update: ShellPreferencesUpdate) => {
     setPreferences(sessionRef.current.update(update));

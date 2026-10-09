@@ -28,7 +28,7 @@ export function DeferredNumberInput({
   const inputKey = useMemo(() => String(confirmed), [confirmed]);
 
   const commitFromInput = (input: HTMLInputElement) => {
-    const next = committedNumberDraft(input.value, confirmed);
+    const next = committedNumberDraft(input.value, confirmed, min, max, step);
     input.value = String(confirmed);
     if (next !== confirmed) onCommit(next);
   };

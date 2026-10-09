@@ -529,7 +529,7 @@ pub(crate) mod test_support {
 }
 
 mod awww;
-mod deadline_command;
+pub mod deadline_command;
 mod debug_log;
 mod mpvpaper;
 mod restore;
@@ -899,6 +899,7 @@ mod tests {
     #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn apply_wallpaper_lwe_updates_state_without_appending_history() {
         use std::os::unix::fs::PermissionsExt;
+        let _session = crate::runtime_observation::AssumeSessionWithoutDisplay::enable();
 
         let (tmp, s) = temp_storage();
         s.last_backend_write("awww").unwrap();
@@ -2051,6 +2052,7 @@ mod tests {
     #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn scene_after_video_stops_mpvpaper_before_lwe_without_preview_fallback() {
         use std::os::unix::fs::PermissionsExt;
+        let _session = crate::runtime_observation::AssumeSessionWithoutDisplay::enable();
 
         let (tmp, s) = temp_storage();
         let scene = tmp
@@ -2151,6 +2153,7 @@ mod tests {
     #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn apply_lwe_success_emits_expected_stages() {
         use std::os::unix::fs::PermissionsExt;
+        let _session = crate::runtime_observation::AssumeSessionWithoutDisplay::enable();
 
         let (tmp, s) = temp_storage();
         s.last_backend_write("awww").unwrap();

@@ -590,6 +590,9 @@ fn resolve_we_scene_preview(project_path: &str) -> Result<PathBuf, String> {
     Ok(PathBuf::from(preview))
 }
 
+const THEME_STILL_DEADLINE: Duration = Duration::from_secs(10);
+const THEME_STILL_PROBE_DEADLINE: Duration = Duration::from_secs(2);
+
 fn path_cache_key(path: &str) -> String {
     // Stable non-crypto fingerprint for cache filenames.
     let mut h: u128 = 0xcbf2_9ce4_8422_2325;
@@ -600,50 +603,131 @@ fn path_cache_key(path: &str) -> String {
     format!("{h:032x}")
 }
 
-fn extract_video_still(storage: &StorageApi, video_path: &str) -> Result<PathBuf, String> {
-    let video = Path::new(video_path);
-    if !video.is_file() {
-        return Err(format!("video path is not a file: {video_path}"));
+fn still_cache_key(path: &str) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("video path is not a file: {path}: {error}"))?;
+    if !metadata.is_file() {
+        return Err(format!("video path is not a file: {path}"));
     }
+    let modified = metadata
+        .modified()
+        .map_err(|error| format!("cannot read video mtime for {path}: {error}"))?;
+    let mtime = modified
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    #[cfg(unix)]
+    let (dev, ino) = {
+        use std::os::unix::fs::MetadataExt;
+        (metadata.dev(), metadata.ino())
+    };
+    #[cfg(not(unix))]
+    let (dev, ino) = (0u64, 0u64);
+    Ok(path_cache_key(&format!(
+        "{path}\0{}\0{}\0{}\0{dev}\0{ino}",
+        metadata.len(),
+        mtime.as_secs(),
+        mtime.subsec_nanos(),
+    )))
+}
 
+/// Seek one second into clips that are at least that long. Shorter or unknown clips start at 0.
+fn still_seek_arg(duration_seconds: Option<f64>) -> &'static str {
+    match duration_seconds {
+        Some(duration) if duration >= 1.0 => "1",
+        _ => "0",
+    }
+}
+
+fn parse_duration_seconds(text: &str) -> Option<f64> {
+    let token = text.split_whitespace().next()?;
+    if token.eq_ignore_ascii_case("N/A") {
+        return None;
+    }
+    let value = token.parse::<f64>().ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+
+fn probe_duration_seconds(path: &str) -> Option<f64> {
+    let mut command = Command::new("ffprobe");
+    command.args([
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "csv=p=0",
+        path,
+    ]);
+    let output =
+        wc_backend::deadline_command::output(&mut command, THEME_STILL_PROBE_DEADLINE).ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    parse_duration_seconds(&String::from_utf8_lossy(&output.stdout))
+}
+
+fn run_bounded_ffmpeg(
+    command: &mut Command,
+    video_path: &str,
+    deadline: Duration,
+) -> Result<(), String> {
+    match wc_backend::deadline_command::status(command, deadline) {
+        Ok(status) if status.success() => Ok(()),
+        Ok(status) => Err(format!(
+            "ffmpeg failed to extract a frame from {video_path} (exit {status})"
+        )),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+fn extract_video_still(storage: &StorageApi, video_path: &str) -> Result<PathBuf, String> {
+    extract_video_still_with(storage, video_path, probe_duration_seconds, |command| {
+        run_bounded_ffmpeg(command, video_path, THEME_STILL_DEADLINE)
+    })
+}
+
+fn extract_video_still_with<D, R>(
+    storage: &StorageApi,
+    video_path: &str,
+    mut duration: D,
+    mut run: R,
+) -> Result<PathBuf, String>
+where
+    D: FnMut(&str) -> Option<f64>,
+    R: FnMut(&mut Command) -> Result<(), String>,
+{
+    let key = still_cache_key(video_path)?;
     let cache_dir = storage.cd.theme_stills_cache_dir();
     std::fs::create_dir_all(&cache_dir)
         .map_err(|e| format!("failed to create theme-stills cache: {e}"))?;
 
-    let dest = cache_dir.join(format!("{}.jpg", path_cache_key(video_path)));
+    let dest = cache_dir.join(format!("{key}.jpg"));
     if dest.is_file() {
         return Ok(dest);
     }
 
-    let tmp = cache_dir.join(format!(
-        "{}.tmp.{}.jpg",
-        path_cache_key(video_path),
-        std::process::id()
-    ));
-
-    let status = Command::new("ffmpeg")
-        .args([
-            "-y",
-            "-ss",
-            "1",
-            "-i",
-            video_path,
-            "-frames:v",
-            "1",
-            "-q:v",
-            "2",
-        ])
-        .arg(&tmp)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map_err(|e| format!("failed to spawn ffmpeg: {e}"))?;
-
-    if !status.success() {
+    let seek = still_seek_arg(duration(video_path));
+    let tmp = cache_dir.join(format!("{key}.tmp.{}.jpg", std::process::id()));
+    let mut command = Command::new("ffmpeg");
+    command.args([
+        "-y",
+        "-ss",
+        seek,
+        "-i",
+        video_path,
+        "-frames:v",
+        "1",
+        "-q:v",
+        "2",
+    ]);
+    command.arg(&tmp);
+    if let Err(error) = run(&mut command) {
         let _ = std::fs::remove_file(&tmp);
+        return Err(error);
+    }
+    if !tmp.is_file() {
         return Err(format!(
-            "ffmpeg failed to extract a frame from {video_path} (exit {status})"
+            "ffmpeg failed to extract a frame from {video_path}"
         ));
     }
 
@@ -1352,6 +1436,179 @@ mod tests {
             path_cache_key("/home/u/a.mp4"),
             path_cache_key("/home/u/b.mp4")
         );
+    }
+
+    fn pin_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    #[test]
+    fn still_cache_key_tracks_size_mtime_and_inode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("clip.mp4");
+        let mtime = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+        std::fs::write(&path, b"aaaa").unwrap();
+        pin_mtime(&path, mtime);
+        let path_str = path.to_string_lossy().into_owned();
+        let first = still_cache_key(&path_str).unwrap();
+        assert_eq!(still_cache_key(&path_str).unwrap(), first);
+
+        std::fs::write(&path, b"aaaa-more").unwrap();
+        pin_mtime(&path, mtime);
+        let resized = still_cache_key(&path_str).unwrap();
+        assert_ne!(resized, first);
+
+        pin_mtime(&path, mtime + std::time::Duration::from_secs(5));
+        let retimed = still_cache_key(&path_str).unwrap();
+        assert_ne!(retimed, resized);
+
+        let replacement = tmp.path().join("other.mp4");
+        std::fs::write(&replacement, b"aaaa-more").unwrap();
+        pin_mtime(&replacement, mtime + std::time::Duration::from_secs(5));
+        std::fs::rename(&replacement, &path).unwrap();
+        assert_ne!(still_cache_key(&path_str).unwrap(), retimed);
+    }
+
+    #[test]
+    fn still_seek_uses_zero_for_short_or_unknown_clips() {
+        assert_eq!(still_seek_arg(Some(0.99)), "0");
+        assert_eq!(still_seek_arg(Some(0.0)), "0");
+        assert_eq!(still_seek_arg(None), "0");
+        assert_eq!(still_seek_arg(Some(1.0)), "1");
+        assert_eq!(still_seek_arg(Some(4.5)), "1");
+        assert_eq!(parse_duration_seconds("1.25\n"), Some(1.25));
+        assert_eq!(parse_duration_seconds("N/A\n"), None);
+        assert_eq!(parse_duration_seconds(""), None);
+    }
+
+    fn write_still(command: &mut Command) -> Result<(), String> {
+        let dest = command
+            .get_args()
+            .last()
+            .ok_or_else(|| "ffmpeg command has no output path".to_string())?;
+        std::fs::write(dest, b"jpeg").map_err(|error| error.to_string())
+    }
+
+    fn seek_arg(command: &Command) -> String {
+        let args: Vec<String> = command
+            .get_args()
+            .map(|arg| arg.to_string_lossy().into_owned())
+            .collect();
+        args.windows(2)
+            .find(|pair| pair[0] == "-ss")
+            .map(|pair| pair[1].clone())
+            .unwrap_or_default()
+    }
+
+    #[test]
+    fn theme_still_cache_hit_skips_probe_and_ffmpeg() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("clip.mp4");
+        std::fs::write(&video, b"video-bytes").unwrap();
+        let video = video.to_string_lossy().into_owned();
+        let dest = storage
+            .cd
+            .theme_stills_cache_dir()
+            .join(format!("{}.jpg", still_cache_key(&video).unwrap()));
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, b"jpeg").unwrap();
+        let mut probed = false;
+        let mut ran = false;
+        let got = extract_video_still_with(
+            &storage,
+            &video,
+            |_| {
+                probed = true;
+                None
+            },
+            |_| {
+                ran = true;
+                Ok(())
+            },
+        )
+        .unwrap();
+        assert_eq!(got, dest);
+        assert!(!probed);
+        assert!(!ran);
+    }
+
+    #[test]
+    fn replaced_video_is_a_cache_miss_and_seek_follows_duration() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("clip.mp4");
+        std::fs::write(&video, b"short").unwrap();
+        let video = video.to_string_lossy().into_owned();
+        let mut seeks = Vec::new();
+        extract_video_still_with(
+            &storage,
+            &video,
+            |_| Some(0.4),
+            |command| {
+                seeks.push(seek_arg(command));
+                write_still(command)
+            },
+        )
+        .unwrap();
+        std::fs::write(&video, b"short-replaced-bytes").unwrap();
+        extract_video_still_with(
+            &storage,
+            &video,
+            |_| Some(3.0),
+            |command| {
+                seeks.push(seek_arg(command));
+                write_still(command)
+            },
+        )
+        .unwrap();
+        assert_eq!(seeks, ["0", "1"]);
+    }
+
+    #[test]
+    fn theme_still_failure_removes_the_partial_jpeg() {
+        let (tmp, storage) = temp_storage();
+        let video = tmp.path().join("clip.mp4");
+        std::fs::write(&video, b"video-bytes").unwrap();
+        let err = extract_video_still_with(
+            &storage,
+            &video.to_string_lossy(),
+            |_| Some(2.0),
+            |command| {
+                write_still(command)?;
+                Err(
+                    "ffmpeg timed out after 100 ms; the command process group was terminated"
+                        .into(),
+                )
+            },
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        let cache = storage.cd.theme_stills_cache_dir();
+        let leftover: Vec<_> = std::fs::read_dir(&cache)
+            .unwrap()
+            .map(|e| e.unwrap())
+            .collect();
+        assert!(leftover.is_empty(), "{leftover:?}");
+    }
+
+    #[test]
+    fn theme_still_ffmpeg_deadline_kills_the_process_group() {
+        let started = std::time::Instant::now();
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30"]);
+        let error =
+            run_bounded_ffmpeg(&mut command, "clip.mp4", Duration::from_millis(100)).unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "deadline took {:?}",
+            started.elapsed()
+        );
+        assert!(error.contains("timed out"), "{error}");
+        assert!(error.contains("process group was terminated"), "{error}");
     }
 
     #[test]

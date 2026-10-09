@@ -44,7 +44,7 @@ interface UsePagedWallpapersOptions<T extends WallpaperDTO = WallpaperDTO> {
   onPage?: (page: WallpaperPageDTO<T>) => void;
   /**
    * Query identity. A change resets pages, cursors and the exact total, and
-   * the next resolved page re-marks it via `resolvedQueryKey`.
+   * the next settled replacement re-marks it via `resolvedQueryKey`.
    */
   queryKey?: string;
   /**
@@ -280,6 +280,8 @@ export function usePagedWallpapers<T extends WallpaperDTO = WallpaperDTO>({
       }
       setLoadError(true);
       setLoadErrorDetail(formatLoadPageError(error));
+      // Old rows remain usable once a failed replacement has settled.
+      if (!append && queryKey !== undefined) setResolvedQueryKey(queryKey);
       if (append) {
         setAutomaticAppendPaused(shouldPauseAutomaticAppend({ kind: 'error' }));
       }

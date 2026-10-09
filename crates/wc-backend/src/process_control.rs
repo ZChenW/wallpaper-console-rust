@@ -62,7 +62,24 @@ pub(crate) fn read_proc_cmdline_tokens(_pid: i32) -> Option<Vec<String>> {
     None
 }
 
-/// True when `/proc/<pid>` still looks like linux-wallpaperengine (cmdline or exe).
+/// argv0 is `linux-wallpaperengine`, or argv0 is `setsid` and the next token is.
+/// Later arguments that merely mention the binary are not a match.
+fn cmdline_is_lwe(tokens: &[String]) -> bool {
+    let Some(argv0) = tokens.first() else {
+        return false;
+    };
+    if Path::new(argv0.trim())
+        .file_name()
+        .is_some_and(|name| name == "setsid")
+    {
+        return tokens
+            .get(1)
+            .is_some_and(|token| token_is_lwe_program(token));
+    }
+    token_is_lwe_program(argv0)
+}
+
+/// True when `/proc/<pid>` still looks like linux-wallpaperengine (argv0 or exe).
 pub(crate) fn pid_looks_like_lwe(pid: i32) -> bool {
     pid_looks_like_lwe_with(pid, read_proc_cmdline_tokens)
 }
@@ -74,8 +91,7 @@ where
     if pid <= 0 {
         return false;
     }
-    if read_tokens(pid).is_some_and(|tokens| tokens.iter().any(|token| token_is_lwe_program(token)))
-    {
+    if read_tokens(pid).is_some_and(|tokens| cmdline_is_lwe(&tokens)) {
         return true;
     }
     #[cfg(unix)]
@@ -108,6 +124,42 @@ pub(crate) fn pid_looks_like_swaybg(pid: i32) -> bool {
     read_proc_cmdline_tokens(pid)
         .and_then(|tokens| tokens.first().cloned())
         .is_some_and(|argv0| token_is_swaybg_program(&argv0))
+}
+
+pub(crate) fn argv0_matches_name(argv0: &str, name: &str) -> bool {
+    Path::new(argv0.trim())
+        .file_name()
+        .is_some_and(|file| file == name)
+}
+
+pub(crate) fn argv0_file_name_is(pid: u32, name: &str) -> bool {
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    if pid <= 0 {
+        return false;
+    }
+    read_proc_cmdline_tokens(pid)
+        .and_then(|tokens| tokens.into_iter().next())
+        .is_some_and(|argv0| argv0_matches_name(&argv0, name))
+}
+
+/// Keep PIDs that are both in this session and whose argv0 is exactly `name`.
+pub(crate) fn select_named_session_pids(
+    pids: impl IntoIterator<Item = u32>,
+    mut in_session: impl FnMut(u32) -> bool,
+    mut argv0_matches: impl FnMut(u32) -> bool,
+) -> Vec<u32> {
+    pids.into_iter()
+        .filter(|pid| in_session(*pid) && argv0_matches(*pid))
+        .collect()
+}
+
+pub(crate) fn exact_name_pgrep_command(user: &crate::ProcessUserScope, name: &str) -> Command {
+    let mut cmd = Command::new("pgrep");
+    crate::append_pgrep_user_scope(&mut cmd, user);
+    cmd.arg("-x").arg(name);
+    cmd
 }
 
 /// Send SIGTERM then SIGKILL to `pid`'s process group when it still looks like LWE.
@@ -321,6 +373,10 @@ pub(crate) fn terminate_spawned_process_group(mut child: Child) {
 pub(crate) trait ProcessControl {
     /// Return PIDs of processes whose command line matches `pattern` (pgrep -f).
     fn find_processes(&self, pattern: &str) -> Vec<u32>;
+    /// Return PIDs whose process name is exactly `name` (pgrep -x), in this session.
+    fn find_named_processes(&self, _name: &str) -> Vec<u32> {
+        Vec::new()
+    }
     /// Return PIDs that look like linux-wallpaperengine for the current user.
     fn find_lwe_processes(&self) -> Vec<u32>;
     /// Return the process group ID of `pid`, if the process still exists.
@@ -382,6 +438,36 @@ impl ProcessControl for RealProcessControl {
                 Vec::new()
             }
         }
+    }
+
+    fn find_named_processes(&self, name: &str) -> Vec<u32> {
+        let mut cmd = exact_name_pgrep_command(&self.user, name);
+        let listed = match crate::deadline_command::output(&mut cmd, Duration::from_secs(2)) {
+            Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| line.trim().parse::<u32>().ok())
+                .collect(),
+            Ok(output) => {
+                if output.status.code() != Some(1) {
+                    eprintln!(
+                        "wc-backend: pgrep -x {name} exited with status {} — daemon discovery skipped",
+                        output.status
+                    );
+                }
+                Vec::new()
+            }
+            Err(error) => {
+                eprintln!(
+                    "wc-backend: pgrep -x {name} unavailable ({error}) — daemon discovery skipped"
+                );
+                Vec::new()
+            }
+        };
+        select_named_session_pids(
+            listed,
+            crate::runtime_observation::process_in_current_session,
+            |pid| argv0_file_name_is(pid, name),
+        )
     }
 
     fn find_lwe_processes(&self) -> Vec<u32> {
@@ -711,17 +797,81 @@ pub(crate) mod test_support {
 
     #[test]
     fn pid_looks_like_lwe_with_injected_cmdline() {
-        assert!(super::pid_looks_like_lwe_with(100, |pid| match pid {
-            100 => Some(vec![
+        // PIDs that do not exist, so the /proc exe check cannot accept them.
+        let absent = 2_100_000_000;
+        assert!(super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec![
                 "setsid".to_string(),
                 "/usr/bin/linux-wallpaperengine".to_string(),
             ]),
             _ => None,
         }));
-        assert!(!super::pid_looks_like_lwe_with(200, |pid| match pid {
-            200 => Some(vec!["bash".to_string()]),
+        assert!(super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec![
+                "/usr/bin/setsid".to_string(),
+                "linux-wallpaperengine".to_string(),
+                "--bg".to_string(),
+                "1".to_string(),
+            ]),
+            _ => None,
+        }));
+        assert!(super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec![
+                "/usr/local/bin/linux-wallpaperengine".to_string(),
+                "--screen-root".to_string(),
+                "eDP-1".to_string(),
+            ]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec!["bash".to_string()]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec!["rg".to_string(), "linux-wallpaperengine".to_string(),]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec![
+                "vim".to_string(),
+                "/usr/bin/linux-wallpaperengine".to_string(),
+            ]),
+            _ => None,
+        }));
+        assert!(!super::pid_looks_like_lwe_with(absent, |pid| match pid {
+            2100000000 => Some(vec![
+                "setsid".to_string(),
+                "-f".to_string(),
+                "linux-wallpaperengine".to_string(),
+            ]),
             _ => None,
         }));
         assert!(!super::pid_looks_like_lwe_with(0, |_pid| None));
+    }
+
+    #[test]
+    fn argv0_match_is_the_exact_file_name() {
+        assert!(super::argv0_matches_name("awww-daemon", "awww-daemon"));
+        assert!(super::argv0_matches_name(
+            "/usr/bin/awww-daemon",
+            "awww-daemon"
+        ));
+        assert!(!super::argv0_matches_name(
+            "/usr/bin/awww-daemon-helper",
+            "awww-daemon"
+        ));
+        assert!(!super::argv0_matches_name("rg", "awww-daemon"));
+        assert!(!super::argv0_matches_name("awww", "awww-daemon"));
+        assert!(!super::argv0_file_name_is(u32::MAX, "awww-daemon"));
+    }
+
+    #[test]
+    fn select_named_session_pids_keeps_only_in_session_argv0_matches() {
+        let selected = super::select_named_session_pids(
+            [1, 2, 3, 4],
+            |pid| pid != 2,
+            |pid| pid == 1 || pid == 4 || pid == 2,
+        );
+        assert_eq!(selected, vec![1, 4]);
     }
 }

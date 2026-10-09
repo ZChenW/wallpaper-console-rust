@@ -33,20 +33,29 @@ pub(crate) fn append_pgrep_user_scope(cmd: &mut std::process::Command, scope: &P
 }
 
 fn resolve_process_user() -> ProcessUserScope {
-    for key in ["USER", "LOGNAME"] {
-        if let Ok(user) = std::env::var(key) {
-            let trimmed = user.trim();
-            if !trimmed.is_empty() {
-                return ProcessUserScope::Name(trimmed.to_string());
-            }
+    resolve_process_user_with(
+        std::env::var("USER").ok(),
+        std::env::var("LOGNAME").ok(),
+        || unsafe { libc::getuid() },
+        passwd_name_for_uid,
+    )
+}
+
+fn resolve_process_user_with(
+    user: Option<String>,
+    logname: Option<String>,
+    uid: impl FnOnce() -> u32,
+    passwd_name: impl FnOnce(u32) -> Option<String>,
+) -> ProcessUserScope {
+    for user in [user, logname].into_iter().flatten() {
+        let trimmed = user.trim();
+        if !trimmed.is_empty() {
+            return ProcessUserScope::Name(trimmed.to_string());
         }
     }
 
-    let uid = unsafe { libc::getuid() };
-    if let Some(name) = passwd_name_for_uid(uid) {
-        return ProcessUserScope::Name(name);
-    }
-    if let Some(name) = passwd_name_from_proc_status() {
+    let uid = uid();
+    if let Some(name) = passwd_name(uid) {
         return ProcessUserScope::Name(name);
     }
 
@@ -86,15 +95,50 @@ fn passwd_name_for_uid(uid: u32) -> Option<String> {
     }
 }
 
-fn passwd_name_from_proc_status() -> Option<String> {
-    let status = std::fs::read_to_string("/proc/self/status").ok()?;
-    for line in status.lines() {
-        if let Some(name) = line.strip_prefix("Name:\t") {
-            let trimmed = name.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
-            }
-        }
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_env_is_preferred_over_passwd_and_uid() {
+        let scope = resolve_process_user_with(
+            Some("alice".to_string()),
+            Some("bob".to_string()),
+            || 7,
+            |_| Some("carol".to_string()),
+        );
+        assert_eq!(scope, ProcessUserScope::Name("alice".to_string()));
     }
-    None
+
+    #[test]
+    fn empty_user_falls_through_to_logname_then_passwd() {
+        let from_logname = resolve_process_user_with(
+            Some("  ".to_string()),
+            Some("bob".to_string()),
+            || 7,
+            |_| None,
+        );
+        assert_eq!(from_logname, ProcessUserScope::Name("bob".to_string()));
+
+        let from_passwd =
+            resolve_process_user_with(None, Some(String::new()), || 7, |_| Some("carol".into()));
+        assert_eq!(from_passwd, ProcessUserScope::Name("carol".to_string()));
+    }
+
+    #[test]
+    fn missing_passwd_entry_uses_numeric_uid_not_process_comm() {
+        let comm = std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("Name:\t"))
+                    .map(|name| name.trim().to_string())
+            })
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "wallpaper-conso".to_string());
+        let scope = resolve_process_user_with(None, None, || 4242, |_| None);
+        assert_eq!(scope, ProcessUserScope::Uid(4242));
+        assert_ne!(scope, ProcessUserScope::Name(comm));
+    }
 }
