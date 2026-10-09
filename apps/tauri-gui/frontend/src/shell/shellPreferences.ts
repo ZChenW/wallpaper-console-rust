@@ -16,7 +16,7 @@ export type LibraryTypeFilter =
   | 'unsupported';
 
 export type LibrarySort = 'recentlyAdded' | 'nameAsc' | 'nameDesc';
-export type LibraryViewMode = 'grid' | 'flow';
+export type LibraryViewMode = 'grid' | 'flow' | 'book';
 
 export type DisplayTarget =
   | { readonly kind: 'allDisplays' }
@@ -63,7 +63,7 @@ const TYPE_FILTERS = new Set<LibraryTypeFilter>([
 const SORTS = new Set<LibrarySort>(['recentlyAdded', 'nameAsc', 'nameDesc']);
 const CARD_SIZES = new Set<WallpaperCardSize>(['small', 'medium', 'large']);
 const APPLY_GESTURES = new Set<ApplyGesture>(['single', 'double']);
-const LIBRARY_VIEW_MODES = new Set<LibraryViewMode>(['grid', 'flow']);
+const LIBRARY_VIEW_MODES = new Set<LibraryViewMode>(['grid', 'flow', 'book']);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);

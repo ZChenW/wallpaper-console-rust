@@ -1,6 +1,6 @@
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 
-export type LibraryAdapterMode = 'grid' | 'flow';
+export type LibraryAdapterMode = 'grid' | 'flow' | 'book';
 
 export const DISPLAY_APPLY_DISABLED_REASON = 'The selected display is unavailable.';
 
@@ -17,6 +17,7 @@ interface LibraryAnchorEntry {
 interface LibraryAdapterFactories<T> {
   readonly grid: () => T;
   readonly flow: () => T;
+  readonly book: () => T;
 }
 
 /**
@@ -29,15 +30,19 @@ export function instantiateActiveLibraryAdapter<T>(
   mode: LibraryAdapterMode,
   factories: LibraryAdapterFactories<T>,
 ): T {
-  return mode === 'flow' ? factories.flow() : factories.grid();
+  return factories[mode]();
 }
 
-/** Resolve a mode switch by stable ID: Selected, outgoing center, then first. */
+/** Book reports its selected open page even during a turn; other views prefer Selected. */
 export function resolveLibraryModeSwitchAnchor(
   entries: readonly LibraryAnchorEntry[],
   selectedWallpaperId: number | null | undefined,
   outgoingWallpaperId: number | null | undefined,
+  outgoingMode?: LibraryAdapterMode,
 ): LibraryStableAnchor | null {
+  if (outgoingMode === 'book') {
+    return resolveLibraryAnchor(entries, [outgoingWallpaperId, selectedWallpaperId]);
+  }
   return resolveLibraryAnchor(entries, [selectedWallpaperId, outgoingWallpaperId]);
 }
 

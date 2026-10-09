@@ -3,6 +3,7 @@ import { memo } from 'react';
 import type { ApplyGesture, LibraryViewMode } from '../shell/shellPreferences.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
 import WallpaperFlow from './WallpaperFlow.tsx';
+import WallpaperBook from './WallpaperBook.tsx';
 import WallpaperGrid from './WallpaperGrid.tsx';
 import {
   instantiateActiveLibraryAdapter,
@@ -33,6 +34,16 @@ function LibraryViewportImpl({
   onAnchorChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
+    book: () => (
+      <WallpaperBook
+        applyGesture={applyGesture}
+        focusToken={focusToken}
+        initialAnchorWallpaperId={initialAnchorWallpaperId}
+        model={model}
+        onAnchorChange={onAnchorChange}
+        returnFocusToken={returnFocusToken}
+      />
+    ),
     flow: () => (
       <WallpaperFlow
         applyGesture={applyGesture}

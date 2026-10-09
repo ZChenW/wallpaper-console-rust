@@ -594,17 +594,19 @@ export default function SinglePageShell() {
     libraryViewportAnchorRef.current = wallpaperId;
     if (settled) setLibraryViewportAnchorId((current) => current === wallpaperId ? current : wallpaperId);
   }, []);
-  const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
-    if (mode === preferences.libraryViewMode) return;
+  const outgoingLibraryMode = preferences.libraryViewMode;
+  const changeLibraryViewMode = useCallback((mode: typeof outgoingLibraryMode) => {
+    if (mode === outgoingLibraryMode) return;
     const anchor = resolveLibraryModeSwitchAnchor(
       browser.entries,
       selectedEntry?.wallpaperId,
       libraryViewportAnchorRef.current,
+      outgoingLibraryMode,
     );
     setLibraryModeAnchorId(anchor?.wallpaperId ?? null);
     setLibraryViewFocusToken((token) => token + 1);
     updatePreferences((current) => ({ ...current, libraryViewMode: mode }));
-  }, [browser.entries, preferences.libraryViewMode, selectedEntry, updatePreferences]);
+  }, [browser.entries, outgoingLibraryMode, selectedEntry, updatePreferences]);
 
   const libraryViewModel = useLibraryViewModel({
     browser, runtimeWallpaper, favoritePendingPaths, scanRunning, resetKey,
@@ -823,10 +825,10 @@ export default function SinglePageShell() {
 
       <footer className="single-page-statusbar">
         <span className="single-page-statusbar__selection">
-          {preferences.libraryViewMode === 'flow'
+          {preferences.libraryViewMode !== 'grid'
             ? flowAnchorEntry
               ? `Viewing: ${displayName(flowAnchorEntry)}`
-              : 'Flow is positioning the current wallpaper…'
+              : `${preferences.libraryViewMode === 'book' ? 'Book' : 'Flow'} is positioning the current wallpaper…`
             : selectedDescription(selectedEntry)}
         </span>
         <span className="single-page-statusbar__current">{currentWallpaperLabel(currentWallpaper)}</span>
