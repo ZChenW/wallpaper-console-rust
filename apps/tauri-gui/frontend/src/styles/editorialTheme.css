@@ -76,10 +76,7 @@
   padding: 0;
 }
 :root[data-theme="editorial"] .single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
-  position: fixed;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
+  display: none;
 }
 
 :root[data-theme="editorial"] .single-page-topbar {

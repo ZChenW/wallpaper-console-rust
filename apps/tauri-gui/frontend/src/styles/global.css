@@ -4,6 +4,7 @@ html, body, #root { height: 100%; }
 
 /* Overlay stacking order, lowest to highest. */
 :root {
+  --z-book-zoom: 80;
   --z-context-menu: 100;
   --z-index-dialog: 180;
   --z-details-overlay: 850;
@@ -672,25 +673,13 @@ select:focus, input:focus { border-color: var(--primary); }
   grid-area: status;
 }
 
-/* Session-only Book layout. Chrome leaves the grid immediately but fades in place;
-   inert + aria-hidden on those regions exclude it from keyboard/AT immediately. */
-.single-page-shell > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
-  transition: opacity 260ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s;
-}
+/* Chrome leaves layout only in the synchronous, fully hidden switch. */
 .single-page-shell[data-book-immersive] {
   grid-template-areas: "library";
   grid-template-rows: minmax(0, 1fr);
 }
 .single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
-  position: fixed;
-  left: var(--book-chrome-left, 0px);
-  top: var(--book-chrome-top, 0px);
-  width: var(--book-chrome-width, 100%);
-  z-index: 10;
-  opacity: 0;
-  visibility: hidden;
-  pointer-events: none;
-  transition-delay: 0s, 260ms;
+  display: none;
 }
 .single-page-shell[data-book-immersive] > .single-page-library {
   position: relative;
@@ -707,12 +696,6 @@ select:focus, input:focus { border-color: var(--primary); }
   bottom: 4.5rem;
   inset-inline: 0;
 }
-@media (prefers-reduced-motion: reduce) {
-  .single-page-shell > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
-    transition: none;
-  }
-}
-
 .shell-notifications {
   position: fixed;
   z-index: var(--z-notifications);
@@ -2515,7 +2498,7 @@ select:focus, input:focus { border-color: var(--primary); }
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: 0 5px 16px color-mix(in srgb, var(--text) 18%, transparent);
+  box-shadow: 0 5px 24px color-mix(in srgb, var(--text) 10%, transparent);
   opacity: 0;
   transform: translateY(2px);
   transition: opacity 160ms ease-out, transform 160ms ease-out;
@@ -2553,10 +2536,26 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-book__stage[data-moving] .book-leaf__face::after {
   opacity: 0;
   transform: translateY(2px);
+  transition-duration: 100ms;
+  transition-delay: 0ms;
+}
+.wallpaper-book__stage[data-settling] .book-leaf__face::before,
+.wallpaper-book__stage[data-settling] .book-leaf__face::after {
+  transition-duration: 320ms;
+  transition-timing-function: ease-out;
+  transition-delay: 80ms;
 }
 .wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
 .wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
-.wallpaper-book .context-menu {
+/* Escape Library's container stacking context, above the window zoom. */
+.wallpaper-book__menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-context-menu);
+  pointer-events: none;
+}
+.wallpaper-book__menu-layer .context-menu {
+  pointer-events: auto;
   transform-origin: var(--context-pointer-x, 0px) var(--context-pointer-y, 0px);
   animation: book-menu-enter 120ms ease-out;
 }
@@ -2564,14 +2563,14 @@ select:focus, input:focus { border-color: var(--primary); }
   from { opacity: 0; transform: translateY(4px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.wallpaper-book[data-reduced-motion] .context-menu { animation: none; }
+.wallpaper-book__menu-layer[data-reduced-motion] .context-menu { animation: none; }
 /* The shared preview error badge otherwise peeks out under the state label. */
-.wallpaper-book .wallpaper-thumb-error { display: none; }
-.wallpaper-book .wallpaper-preview-image { animation: none; }
-.wallpaper-book :is(.book-leaf__print, .wallpaper-book__zoom-print) img {
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-thumb-error { display: none; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-preview-image { animation: none; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) :is(.book-leaf__print, .wallpaper-book__zoom-print) img {
   image-rendering: auto;
 }
-.wallpaper-book .wallpaper-thumb-placeholder { background: var(--panel-alt); }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-thumb-placeholder { background: var(--panel-alt); }
 .book-leaf__face:not([data-open]) .wallpaper-type-icon { display: none; }
 .wallpaper-preview-video--handoff {
   z-index: 2;
@@ -2597,6 +2596,9 @@ select:focus, input:focus { border-color: var(--primary); }
   gap: 0.65rem;
   padding: 0.6rem 1rem 1rem;
 }
+/* Portaling controls must not resize the real stage or its landing page. */
+.wallpaper-book__actions-reserve { height: 4.1rem; pointer-events: none; }
+.wallpaper-book__reason-reserve { opacity: 0; }
 .wallpaper-book__actions button {
   display: grid;
   place-items: center;
@@ -2661,13 +2663,37 @@ select:focus, input:focus { border-color: var(--primary); }
   pointer-events: none;
 }
 
+.wallpaper-book[data-zoomed] .wallpaper-book__heading { opacity: 0; }
 .wallpaper-book__zoom-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-book-zoom);
+  color: var(--text);
+}
+.wallpaper-book__zoom-content { position: absolute; inset: 0; pointer-events: none; }
+.wallpaper-book__zoom-content .wallpaper-book__actions { pointer-events: auto; }
+/* The camera matrix is calibrated from the real projected quad. Keep it out of
+   the page animation so interpolation is a rigid rotation and uniform scale. */
+.wallpaper-book__zoom-projection {
   position: absolute;
   inset: 0;
   display: grid;
   place-items: center;
-  perspective: var(--book-perspective);
-  perspective-origin: 50% 50%;
+  padding-bottom: 4rem;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+.wallpaper-book__zoom-layer .wallpaper-book__actions {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+}
+.wallpaper-book__zoom-layer .wallpaper-book__disabled-reason {
+  position: absolute;
+  inset-inline: 0.5rem;
+  bottom: 4.2rem;
+  margin: 0;
+  pointer-events: none;
 }
 .wallpaper-book__zoom-backdrop {
   position: absolute;
@@ -2677,13 +2703,14 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-book__zoom-page {
   position: relative;
-  width: min(94cqw, 144cqh);
+  width: max(1px, min(92vw, calc((100vh - 7rem) * 1.6)));
   aspect-ratio: 16 / 10;
   transform-origin: center;
   background: var(--panel);
   border-radius: 0.5rem;
   overflow: visible;
   cursor: default;
+  pointer-events: auto;
 }
 .wallpaper-book__zoom-print {
   position: absolute;
@@ -2724,19 +2751,27 @@ select:focus, input:focus { border-color: var(--primary); }
   z-index: 2;
 }
 .wallpaper-book__zoom-decoration .book-leaf__print { background: transparent; }
-.wallpaper-book[data-reduced-motion] :is(.book-leaf__face::before, .book-leaf__face::after) { transition: none; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer)[data-reduced-motion] :is(.book-leaf__face::before, .book-leaf__face::after) { transition: none; }
 
 .wallpaper-book[data-reduced-motion] .wallpaper-book__spread { transform: translate(-50%, -50%); }
 .wallpaper-book__outgoing-spread { pointer-events: none; }
 .wallpaper-book[data-reduced-motion] .book-leaf { transform-style: flat; }
 .wallpaper-book[data-reduced-motion] .book-leaf__face { display: none; transform: none; }
 .wallpaper-book[data-reduced-motion] .book-leaf__face[data-open] { display: block; animation: book-spread-fade 140ms ease-out; }
-.wallpaper-book[data-reduced-motion] .wallpaper-book__zoom-decoration { animation: none; }
+.wallpaper-book__zoom-layer[data-reduced-motion] .wallpaper-book__zoom-decoration { animation: none; }
 .wallpaper-book[data-reduced-motion] :is(.book-leaf__shade, .book-leaf__highlight) { display: none; }
 @keyframes book-spread-fade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .wallpaper-book .book-leaf__face[data-open] { animation-duration: 140ms !important; }
-  .wallpaper-book .context-menu { animation: none; }
+  /* Escape Library's container stacking context, above the window zoom. */
+.wallpaper-book__menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-context-menu);
+  pointer-events: none;
+}
+.wallpaper-book__menu-layer .context-menu {
+  pointer-events: auto; animation: none; }
 }
 @media (forced-colors: active) {
   .wallpaper-book__stage:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }

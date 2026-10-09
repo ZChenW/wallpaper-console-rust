@@ -20,7 +20,8 @@ import LibraryFilterControls, { sourceFilterValue } from './LibraryFilterControl
 import { useLibrarySelection } from './useLibrarySelection.ts';
 import { useLibraryViewModel } from './useLibraryViewModel.ts';
 import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
-import { captureBookLayout, animateBookLayout, type BookLayoutSnapshot } from './bookImmersiveLayout.ts';
+import { createBookImmersiveTransition } from './bookImmersiveLayout.ts';
+import { flushSync } from 'react-dom';
 import { shouldEndBookImmersive } from '../components/wallpaperBookModel.ts';
 import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 
@@ -96,7 +97,8 @@ export default function SinglePageShell() {
   const [search, setSearch] = useState('');
   const [bookImmersive, setBookImmersive] = useState(false);
   const shellRef = useRef<HTMLDivElement>(null);
-  const bookLayoutRef = useRef<BookLayoutSnapshot | null>(null);
+  const bookTransitionRef = useRef<ReturnType<typeof createBookImmersiveTransition> | null>(null);
+  const bookActiveRef = useRef(false);
   const reducedMotion = useReducedMotion();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
@@ -627,34 +629,37 @@ export default function SinglePageShell() {
       onDetails: openLibraryDetails, buildContextActions,
     },
   });
-  const changeBookImmersive = useCallback((immersive: boolean) => {
-    if (immersive === bookImmersive) return;
+  bookActiveRef.current = libraryViewModel.active;
+  useLayoutEffect(() => {
     const shell = shellRef.current;
-    bookLayoutRef.current = shell ? captureBookLayout(shell) : null;
-    // Inactive books must not steal focus from the dialog that just opened.
-    if (libraryViewModel.active) {
-      shell?.querySelector<HTMLElement>('.wallpaper-book__stage')?.focus({ preventScroll: true });
-    }
-    if (immersive) setFiltersOpen(false);
-    setBookImmersive(immersive);
-  }, [bookImmersive, libraryViewModel.active]);
+    if (!shell) return;
+    const transition = createBookImmersiveTransition(shell, (value, synchronous = true) => {
+      const update = () => {
+        if (value) setFiltersOpen(false);
+        setBookImmersive(value);
+      };
+      if (synchronous) flushSync(update);
+      else update();
+    }, () => {
+      if (bookActiveRef.current) shell.querySelector<HTMLElement>('.wallpaper-book__stage')?.focus({ preventScroll: true });
+    });
+    bookTransitionRef.current = transition;
+    return () => { transition.dispose(); bookTransitionRef.current = null; };
+  }, []);
+  const changeBookImmersive = useCallback((immersive: boolean) => {
+    bookTransitionRef.current?.request(immersive, reducedMotion);
+  }, [reducedMotion]);
   const immersiveQueryRef = useRef({ resetKey, replaceCount: browser.replaceCount });
   useEffect(() => {
     const previous = immersiveQueryRef.current;
     immersiveQueryRef.current = { resetKey, replaceCount: browser.replaceCount };
     const queryReset = previous.resetKey !== resetKey || previous.replaceCount !== browser.replaceCount;
     const active = libraryViewModel.active && browser.entries.length > 0 && !browser.initialLoading && !firstRunEligible;
-    if (bookImmersive && shouldEndBookImmersive(preferences.libraryViewMode, active, queryReset)) {
+    if (shouldEndBookImmersive(preferences.libraryViewMode, active, queryReset)) {
       changeBookImmersive(false);
     }
   }, [bookImmersive, browser.entries.length, browser.initialLoading, browser.replaceCount,
     changeBookImmersive, firstRunEligible, libraryViewModel.active, preferences.libraryViewMode, resetKey]);
-  useLayoutEffect(() => {
-    const previous = bookLayoutRef.current;
-    bookLayoutRef.current = null;
-    const shell = shellRef.current;
-    if (shell) return animateBookLayout(shell, previous, reducedMotion);
-  }, [bookImmersive, reducedMotion]);
   const flowAnchorEntry = useMemo(
     () => browser.entries.find((entry) => entry.wallpaperId === libraryViewportAnchorId) ?? null,
     [browser.entries, libraryViewportAnchorId],

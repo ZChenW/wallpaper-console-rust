@@ -28,8 +28,6 @@ export const BOOK_WHEEL_PIXELS_PER_LEAF = 160;
 export const BOOK_WHEEL_IDLE_MS = 160;
 export const BOOK_ZOOM_DURATION_MS = 320;
 export const BOOK_APPEND_DISTANCE = 6;
-export const BOOK_IMMERSIVE_DURATION_MS = 260;
-export const BOOK_IMMERSIVE_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
 
 /** The fan was tuned on a 480px page (the former 60rem spread). */
 export function bookPageScale(pageWidth: number): number {
@@ -253,48 +251,6 @@ export function resolveBookPointerInteraction(input: CardPointerInteractionInput
 }
 
 export interface BookRect { readonly left: number; readonly top: number; readonly width: number; readonly height: number }
-
-/** A uniform scene scale preserves the book's aspect even when the stage changes shape. */
-export function bookSceneFlip(from: BookRect, to: BookRect, oldSpreadWidth: number, newSpreadWidth: number) {
-  const x = from.left + from.width / 2 - to.left - to.width / 2;
-  const y = from.top + from.height / 2 - to.top - to.height / 2;
-  const scale = oldSpreadWidth / Math.max(1, newSpreadWidth);
-  return `translate(${x}px, ${y}px) scale(${scale})`;
-}
-
-export interface BookZoomOrigin {
-  readonly spineX: number;
-  readonly spineY: number;
-  readonly width: number;
-  readonly face: BookFace;
-  readonly paperMargin: number;
-}
-
-/** Match the unprojected paper centre, including the face's translateZ(0.3px).
- * The zoom layer supplies the same perspective as the book, so projection is
- * applied once, after this pose. One scale preserves the 16:10 picture box.
- */
-export function bookZoomTransform(origin: BookZoomOrigin, destination: BookRect) {
-  const tiltX = 7;
-  const x = tiltX * Math.PI / 180;
-  const y = BOOK_FAN_ANGLE * Math.PI / 180;
-  const direction = origin.face === 'front' ? 1 : -1;
-  const halfWidth = Math.max(0, origin.width) / 2;
-  const depth = halfWidth * Math.sin(y) + 0.3 * Math.cos(y);
-  const centerX = origin.spineX + direction * (halfWidth * Math.cos(y) - 0.3 * Math.sin(y));
-  const centerY = origin.spineY - depth * Math.sin(x);
-  const scale = Math.max(0.001, origin.width / Math.max(1, destination.width));
-  const margin = Math.max(0, origin.paperMargin) / scale;
-  return {
-    transform: `translate3d(${centerX - destination.left - destination.width / 2}px, ${centerY - destination.top - destination.height / 2}px, ${depth * Math.cos(x)}px) rotateX(${tiltX}deg) rotateY(${-direction * BOOK_FAN_ANGLE}deg) scale(${scale})`,
-    scale,
-    paperInset: `${margin * 10 / 16}px ${margin}px`,
-    paperRadius: `${4 / scale}px`,
-    paperBorderRadius: origin.face === 'front'
-      ? `${1 / scale}px ${9.6 / scale}px ${9.6 / scale}px ${1 / scale}px`
-      : `${9.6 / scale}px ${1 / scale}px ${1 / scale}px ${9.6 / scale}px`,
-  };
-}
 
 export const BOOK_PREVIEW_AHEAD_LEAVES = 24;
 export const BOOK_MOVING_AHEAD_LEAVES = 40;

@@ -14,13 +14,16 @@ import {
   type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
   bookPreviewOrder, bookRevealPaused, bookStaticSource, bookPageScale, resolveBookEscape, shouldEndBookImmersive, type BookTravelDirection,
-  bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
+  bookVisibleWindow, clampBookPosition, openBookWallpapers,
   planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
-  resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
+  resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress,
 } from './wallpaperBookModel.ts';
 import { api } from '../api/bridge.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
-import { bookZoomTimeline, BOOK_ZOOM_REST, bookZoomReveal, bookZoomSwapTimeline } from './wallpaperBookZoom.ts';
+import {
+  bookZoomTimeline, bookZoomTransform, captureBookZoomOrigin, type BookZoomOrigin,
+  BOOK_ZOOM_REST, bookZoomReveal, bookZoomSwapTimeline,
+} from './wallpaperBookZoom.ts';
 import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
 
 export interface WallpaperBookProps {
@@ -70,6 +73,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const zoomStillRef = useRef<HTMLImageElement>(null);
   const zoomDecorationRef = useRef<HTMLDivElement>(null);
   const zoomPendingNavigationRef = useRef<(() => void) | null>(null);
+  const zoomRestRef = useRef(BOOK_ZOOM_REST);
   const zoomPoseRef = useRef<string | null>(null);
   const zoomMovingRef = useRef(false);
   const zoomReadyRef = useRef(false);
@@ -224,7 +228,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, []);
 
   // Layout reads happen at resize/toggle boundaries, never in the motion loop.
-  // On a toggle this child layout effect paints before the shell starts its FLIP.
+  // At the hidden layout switch, repaint leaves before the shell fades back in.
   useLayoutEffect(() => {
     const element = spreadElementRef.current;
     if (!element) return;
@@ -292,6 +296,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     }
     const settlingChanged = settledRef.current !== isSettled;
     if (settlingChanged) {
+      stageRef.current?.removeAttribute('data-settling');
+      if (isSettled) stageRef.current?.setAttribute('data-settling', 'true');
       settledRef.current = isSettled;
       setSettled(isSettled);
     }
@@ -385,6 +391,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, [cancelMotion, updatePosition]);
 
   const selectIndex = useCallback((index: number) => {
+    stageRef.current?.removeAttribute('data-settling');
     const entry = latest.current.props.model.entries[index];
     if (!entry || !openBookWallpapers(positionRef.current, latest.current.props.model.entries.length).includes(index)) return;
     selectedRef.current = index;
@@ -408,12 +415,64 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     zoomFadeRef.current = fade;
   }, [cancelZoomFade, mayUpdateZoomStill]);
 
+  const configureZoomPose = useCallback((origin: BookZoomOrigin) => {
+    const element = zoomRef.current;
+    const stage = stageRef.current;
+    if (!element || !stage) return null;
+    // getBoundingClientRect must see the untransformed destination on navigation.
+    element.style.transform = BOOK_ZOOM_REST;
+    const pose = bookZoomTransform(origin, element.getBoundingClientRect());
+    zoomPoseRef.current = pose.transform;
+    zoomRestRef.current = pose.rest;
+    element.style.transform = pose.rest;
+    const projection = element.parentElement;
+    if (projection) {
+      projection.style.transform = pose.projection;
+      projection.style.transformOrigin = pose.projectionOrigin;
+    }
+    const entry = latest.current.props.model.entries[latest.current.zoomIndex ?? -1];
+    const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
+    const realPrint = option?.querySelector<HTMLElement>('.book-leaf__print');
+    const radius = (target: HTMLElement | null | undefined, fallback: string) => {
+      if (!target) return fallback;
+      const css = getComputedStyle(target);
+      const values = [css.borderTopLeftRadius, css.borderTopRightRadius, css.borderBottomRightRadius, css.borderBottomLeftRadius];
+      return values.every((value) => value?.endsWith('px'))
+        ? values.map((value) => `${Number.parseFloat(value) / pose.scale}px`).join(' ') : fallback;
+    };
+    element.style.borderRadius = radius(option, pose.paperBorderRadius);
+    const decoration = zoomDecorationRef.current;
+    if (decoration) {
+      // Original page coordinates keep its marker, shadows and labels exactly
+      // aligned at both endpoints, without changing those styles or any media.
+      decoration.style.setProperty('--book-paper-margin', `${origin.paperMargin}px`);
+      decoration.style.width = `${origin.width}px`;
+      decoration.style.height = `${origin.width * 10 / 16}px`;
+      decoration.style.transform = `scale(${1 / pose.scale})`;
+      decoration.style.padding = `${origin.paperMargin * 10 / 16}px ${origin.paperMargin}px`;
+      const decorationPrint = decoration.querySelector<HTMLElement>('.book-leaf__print');
+      if (decorationPrint) decorationPrint.style.borderRadius = realPrint ? getComputedStyle(realPrint).borderRadius : '4px';
+      if (option) {
+        const css = getComputedStyle(option);
+        decoration.style.borderRadius = css.borderRadius;
+        decoration.style.boxShadow = css.boxShadow;
+        decoration.style.outline = css.outline;
+      }
+    }
+    const print = element.querySelector<HTMLElement>('.wallpaper-book__zoom-print');
+    if (print) {
+      print.style.inset = pose.paperInset;
+      print.style.borderRadius = radius(realPrint, pose.paperRadius);
+    }
+    return { pose, print };
+  }, []);
+
   const setZoomDirection = useCallback((closing: boolean, initial = false) => {
     const page = zoomRef.current;
     const stage = stageRef.current;
-    const pose = zoomPoseRef.current;
+    let pose = zoomPoseRef.current;
     const scene = stage?.querySelector<HTMLElement>('.wallpaper-book__scene');
-    const backdrop = stage?.querySelector<HTMLElement>('.wallpaper-book__zoom-backdrop');
+    const backdrop = page?.closest('.wallpaper-book__zoom-layer')?.querySelector<HTMLElement>('.wallpaper-book__zoom-backdrop');
     if (!page || !stage || !scene || !backdrop || !pose) return;
     // Sample BEFORE canceling any filled animation, including the still reveal.
     const sample = initial ? undefined : {
@@ -429,8 +488,17 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     zoomNavigationTargetRef.current = latest.current.zoomIndex;
     cancelZoomDecodeTimer();
     cancelZoomAnimation();
+    if (closing) {
+      const index = latest.current.zoomIndex;
+      const entry = latest.current.props.model.entries[index ?? -1];
+      const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
+      if (option && index !== null) {
+        configureZoomPose(captureBookZoomOrigin(option, scene, wallpaperBookAddress(index).face));
+        pose = zoomPoseRef.current ?? pose;
+      }
+    }
     setZoomMoving(true);
-    const timeline = bookZoomTimeline(closing ? 'close' : 'open', pose, sample);
+    const timeline = bookZoomTimeline(closing ? 'close' : 'open', pose, sample, zoomRestRef.current);
     const timing = { duration: timeline.duration, easing: 'linear', fill: 'both' as const };
     const animations = [
       page.animate(timeline.page, timing),
@@ -456,7 +524,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
         else if (zoomReadyRef.current) revealZoomLive();
       }
     };
-  }, [cancelZoomAnimation, cancelZoomDecodeTimer, focusStage, resetZoom, revealZoomLive]);
+  }, [cancelZoomAnimation, cancelZoomDecodeTimer, configureZoomPose, focusStage, resetZoom, revealZoomLive]);
 
   const closeZoom = useCallback(() => {
     if (latest.current.zoomIndex === null) {
@@ -487,15 +555,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     const stage = stageRef.current;
     if (!entry || !stage) return;
     const option = stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`);
-    const spread = stage.querySelector<HTMLElement>('.wallpaper-book__spread');
-    const rect = stage.getBoundingClientRect();
-    zoomOriginRef.current = option && spread ? {
-      spineX: rect.left + (Number.parseFloat(getComputedStyle(spread).left) || spread.offsetLeft),
-      spineY: rect.top + (Number.parseFloat(getComputedStyle(spread).top) || spread.offsetTop),
-      width: Number.parseFloat(getComputedStyle(option).width) || option.offsetWidth,
-      face: wallpaperBookAddress(index).face,
-      paperMargin: Number.parseFloat(getComputedStyle(option).paddingLeft) || 0,
-    } : null;
+    const scene = stage.querySelector<HTMLElement>('.wallpaper-book__scene');
+    zoomOriginRef.current = option && scene ? captureBookZoomOrigin(option, scene, wallpaperBookAddress(index).face) : null;
     const image = option?.querySelector<HTMLImageElement>('img[data-preview-loaded="true"]');
     const launch = (source: string | null) => {
       setZoomStillSrc(source);
@@ -529,60 +590,30 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     let origin = zoomOriginRef.current;
     const stage = stageRef.current;
     if (zoomIndex === null) return;
+    // This effect runs again only at navigation/layout/motion boundaries.
+    // A close interrupted by the hidden immersive switch must not leave a
+    // filled flight or a permanently closing zoom behind in the new layout.
+    if (zoomClosingRef.current) {
+      const entry = latest.current.props.model.entries[zoomIndex];
+      const realImage = entry ? stage?.querySelector<HTMLImageElement>(`#book-option-${entry.wallpaperId} img[data-preview-loaded="true"]`) : null;
+      if (realImage && zoomStillRef.current?.src) realImage.src = zoomStillRef.current.src;
+      resetZoom();
+      return;
+    }
     zoomOriginRef.current = null;
     if (!origin && stage) {
       const entry = latest.current.props.model.entries[zoomIndex];
       const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
-      const spread = stage.querySelector<HTMLElement>('.wallpaper-book__spread');
-      const rect = stage.getBoundingClientRect();
-      if (option && spread) origin = {
-        spineX: rect.left + (Number.parseFloat(getComputedStyle(spread).left) || spread.offsetLeft), spineY: rect.top + (Number.parseFloat(getComputedStyle(spread).top) || spread.offsetTop),
-        width: Number.parseFloat(getComputedStyle(option).width) || option.offsetWidth, face: wallpaperBookAddress(zoomIndex).face,
-        paperMargin: Number.parseFloat(getComputedStyle(option).paddingLeft) || 0,
-      };
+      const scene = stage.querySelector<HTMLElement>('.wallpaper-book__scene');
+      if (option && scene) origin = captureBookZoomOrigin(option, scene, wallpaperBookAddress(zoomIndex).face);
     }
     if (!element || !origin || !stage) {
       zoomMovingRef.current = false;
       setZoomMoving(false);
       return;
     }
-    // getBoundingClientRect must see the untransformed destination on navigation.
-    element.style.transform = BOOK_ZOOM_REST;
-    const pose = bookZoomTransform(origin, element.getBoundingClientRect());
-    zoomPoseRef.current = pose.transform;
-    const entry = latest.current.props.model.entries[zoomIndex];
-    const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
-    const realPrint = option?.querySelector<HTMLElement>('.book-leaf__print');
-    const radius = (target: HTMLElement | null | undefined, fallback: string) => {
-      if (!target) return fallback;
-      const css = getComputedStyle(target);
-      const values = [css.borderTopLeftRadius, css.borderTopRightRadius, css.borderBottomRightRadius, css.borderBottomLeftRadius];
-      return values.every((value) => value?.endsWith('px'))
-        ? values.map((value) => `${Number.parseFloat(value) / pose.scale}px`).join(' ') : fallback;
-    };
-    element.style.borderRadius = radius(option, pose.paperBorderRadius);
-    const decoration = zoomDecorationRef.current;
-    if (decoration) {
-      // Original page coordinates keep its marker, shadows and labels exactly
-      // aligned at both endpoints, without changing those styles or any media.
-      decoration.style.width = `${origin.width}px`;
-      decoration.style.height = `${origin.width * 10 / 16}px`;
-      decoration.style.transform = `scale(${1 / pose.scale})`;
-      decoration.style.padding = `${origin.paperMargin * 10 / 16}px ${origin.paperMargin}px`;
-      const decorationPrint = decoration.querySelector<HTMLElement>('.book-leaf__print');
-      if (decorationPrint) decorationPrint.style.borderRadius = realPrint ? getComputedStyle(realPrint).borderRadius : '4px';
-      if (option) {
-        const css = getComputedStyle(option);
-        decoration.style.borderRadius = css.borderRadius;
-        decoration.style.boxShadow = css.boxShadow;
-        decoration.style.outline = css.outline;
-      }
-    }
-    const print = element.querySelector<HTMLElement>('.wallpaper-book__zoom-print');
-    if (print) {
-      print.style.inset = pose.paperInset;
-      print.style.borderRadius = radius(realPrint, pose.paperRadius);
-    }
+    const geometry = configureZoomPose(origin);
+    const print = geometry?.print;
     if (opening && !reducedMotion) setZoomDirection(false, true);
     else if (zoomSwapRef.current && !reducedMotion) {
       const { outgoing, direction } = zoomSwapRef.current;
@@ -613,7 +644,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       setZoomMoving(false);
     }
     return cancelZoomAnimation;
-  }, [cancelZoomAnimation, cancelZoomSwap, revealZoomLive, setZoomDirection, zoomIndex, reducedMotion, immersive]);
+  }, [cancelZoomAnimation, cancelZoomSwap, configureZoomPose, resetZoom, revealZoomLive, setZoomDirection, zoomIndex, reducedMotion, immersive]);
 
   useLayoutEffect(() => {
     const previous = resetRef.current;
@@ -785,6 +816,27 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     stage?.addEventListener('wheel', handleWheel, { passive: false });
     return () => stage?.removeEventListener('wheel', handleWheel);
   }, [handleWheel]);
+
+  useEffect(() => {
+    if (zoomIndex === null) return;
+    const stage = stageRef.current;
+    const chrome = [...(stage?.closest('.single-page-shell')?.querySelectorAll<HTMLElement>(
+      '.single-page-topbar, .single-page-library-controls, .single-page-statusbar, .single-page-discovery-error, .library-repair-prompt, .single-page-stale-results, .single-page-load-more',
+    ) ?? [])];
+    const previous = chrome.map((element) => element.inert);
+    chrome.forEach((element) => { element.inert = true; });
+    const wheel = (event: globalThis.WheelEvent) => {
+      if ((event.target as HTMLElement | null)?.closest?.('.context-menu, [role="dialog"]')) return;
+      if (!stage?.contains(event.target as Node)) handleWheel(event);
+    };
+    document.addEventListener('wheel', wheel, { passive: false });
+    return () => {
+      document.removeEventListener('wheel', wheel);
+      chrome.forEach((element, index) => {
+        element.inert = previous[index] || Boolean(element.closest('.single-page-shell[data-book-immersive]'));
+      });
+    };
+  }, [zoomIndex, immersive, handleWheel]);
 
   useEffect(() => () => {
     cancelMotion();

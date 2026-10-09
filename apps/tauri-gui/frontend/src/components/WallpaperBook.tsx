@@ -1,4 +1,5 @@
 import { memo, useMemo } from 'react';
+import { createPortal } from 'react-dom';
 import { Check, Heart, Info, Maximize2, Minimize2, SearchX, ZoomIn, ZoomOut } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
@@ -131,18 +132,145 @@ function WallpaperBookReady(props: WallpaperBookProps) {
     );
   };
 
+  const actions = (
+    <div aria-label="Selected page actions" className="wallpaper-book__actions">
+      <button
+        aria-label="Apply"
+        aria-busy={applying || pending || undefined}
+        aria-describedby={disabledReason ? 'book-apply-disabled' : undefined}
+        disabled={controlsDisabled || !applyAvailable}
+        onClick={applySelected}
+        title={disabledReason ?? 'Apply'}
+        type="button"
+      >
+        <Check aria-hidden="true" size={18} />
+      </button>
+      <button
+        aria-label="Favorite"
+        aria-busy={favoritePending || undefined}
+        aria-pressed={selectedEntry?.favorite ?? false}
+        disabled={controlsDisabled || favoritePending}
+        onClick={() => {
+          if (selectedEntry) void model.onToggleFavorite(selectedEntry);
+          focusStage();
+        }}
+        title={favoritePending ? 'Saving favorite…' : 'Favorite'}
+        type="button"
+      >
+        <Heart aria-hidden="true" size={18} />
+      </button>
+      <button
+        aria-label={zoomed ? 'Leave zoom' : 'Zoom'}
+        aria-pressed={zoomed}
+        disabled={!selectedEntry || !model.active || !settled}
+        onClick={toggleZoom}
+        title={zoomed ? 'Leave zoom' : 'Zoom'}
+        type="button"
+      >
+        {zoomed ? <ZoomOut aria-hidden="true" size={18} /> : <ZoomIn aria-hidden="true" size={18} />}
+      </button>
+      <button
+        aria-label="Details"
+        disabled={controlsDisabled}
+        onClick={() => {
+          focusStage();
+          if (selectedEntry) model.onDetails(selectedEntry, stageRef.current);
+        }}
+        title="Details"
+        type="button"
+      >
+        <Info aria-hidden="true" size={18} />
+      </button>
+      <button
+        aria-label={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
+        aria-pressed={props.immersive ?? false}
+        disabled={!model.active || !props.onImmersiveChange}
+        onClick={() => {
+          props.onImmersiveChange?.(!props.immersive);
+          focusStage();
+        }}
+        title={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
+        type="button"
+      >
+        {props.immersive ? <Minimize2 aria-hidden="true" size={18} /> : <Maximize2 aria-hidden="true" size={18} />}
+      </button>
+    </div>
+  );
+  const disabledReasonLabel = disabledReason ? (
+    <p className="wallpaper-book__disabled-reason" id="book-apply-disabled">{disabledReason}</p>
+  ) : null;
+  const zoomLayer = selectedEntry ? (
+    <div className="wallpaper-book__zoom-layer" data-reduced-motion={reducedMotion || undefined}>
+      <div aria-hidden="true" className="wallpaper-book__zoom-backdrop" onClick={closeZoom} />
+      <div className="wallpaper-book__zoom-content">
+        <div className="wallpaper-book__zoom-projection">
+          <div
+            aria-current={model.currentPath === selectedEntry.path ? 'true' : undefined}
+            aria-label={displayName(selectedEntry)}
+            aria-posinset={(zoomIndex ?? selectedIndex) + 1}
+            aria-selected="true"
+            aria-setsize={model.totalKnown && model.total !== null ? model.total : undefined}
+            className="wallpaper-book__zoom-page"
+            data-moving={zoomMoving || undefined}
+            id={activeId}
+            onClick={(event) => event.stopPropagation()}
+            onContextMenu={(event) => {
+              event.preventDefault();
+              openContextMenu(zoomIndex ?? selectedIndex, event.clientX, event.clientY);
+            }}
+            ref={zoomRef}
+            role="option"
+          >
+            <div className="wallpaper-book__zoom-print">
+              <div className="wallpaper-book__zoom-picture">
+                <BookZoomPicture entry={selectedEntry}
+                  active={interactionActive} reducedMotion={reducedMotion} moving={zoomMoving}
+                  stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} stillRef={zoomStillRef}
+                  onLiveReady={revealZoomLive} mayUpdateStill={mayUpdateZoomStill} />
+              </div>
+            </div>
+            <div aria-hidden="true" className="book-leaf__face wallpaper-book__zoom-decoration"
+              data-open data-selected ref={zoomDecorationRef}>
+              <div className="book-leaf__print" />
+              <span className="book-leaf__spine-shadow" style={{
+                background: `linear-gradient(to ${((zoomIndex ?? selectedIndex) % 2 === 0) ? 'right' : 'left'}, color-mix(in srgb, var(--text) 11%, transparent), transparent 9%)`,
+              }} />
+              <span className="book-leaf__states">
+                {flowStateLabels({
+                  selected: false,
+                  current: model.currentPath === selectedEntry.path,
+                  applying,
+                  pending,
+                  favorite: selectedEntry.favorite,
+                }).join(' · ')}
+              </span>
+              {applying || pending ? (
+                <div aria-hidden="true" className="book-leaf__indicator">
+                  <ApplyIndicator state={applying ? 'applying' : 'pending'} />
+                </div>
+              ) : null}
+            </div>
+          </div>
+        </div>
+        {actions}
+        {disabledReasonLabel}
+      </div>
+    </div>
+  ) : null;
+
   return (
     <section
       aria-label="Book wallpaper browser"
       className={`wallpaper-book${model.refreshing ? ' is-refreshing' : ''}`}
       data-reduced-motion={reducedMotion || undefined}
+      data-zoomed={zoomed || undefined}
       onClickCapture={cancelPendingMenu}
       onPointerDownCapture={cancelPendingMenu}
       onKeyDownCapture={cancelPendingMenu}
       onKeyDown={handleEscape}
       onWheelCapture={cancelPendingMenu}
     >
-      <header className="wallpaper-book__heading">
+      <header className="wallpaper-book__heading" inert={zoomed} aria-hidden={zoomed || undefined}>
         <h3>Library</h3>
         <p>{model.totalKnown && model.total !== null ? model.total : model.entries.length} wallpapers</p>
         {model.loadingMore ? (
@@ -165,6 +293,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
       </header>
       <div
         aria-activedescendant={activeId}
+        aria-owns={zoomed ? activeId : undefined}
         aria-label="Wallpaper Book"
         aria-multiselectable={false}
         className="wallpaper-book__stage"
@@ -208,132 +337,20 @@ function WallpaperBookReady(props: WallpaperBookProps) {
             })}
           </div>
         </div>
-        {zoomed && selectedEntry ? (
-          <div className="wallpaper-book__zoom-layer">
-            <div aria-hidden="true" className="wallpaper-book__zoom-backdrop" onClick={closeZoom} />
-            <div
-              aria-current={model.currentPath === selectedEntry.path ? 'true' : undefined}
-              aria-label={displayName(selectedEntry)}
-              aria-posinset={(zoomIndex ?? selectedIndex) + 1}
-              aria-selected="true"
-              aria-setsize={model.totalKnown && model.total !== null ? model.total : undefined}
-              className="wallpaper-book__zoom-page"
-              data-moving={zoomMoving || undefined}
-              id={activeId}
-              onClick={(event) => event.stopPropagation()}
-              onContextMenu={(event) => {
-                event.preventDefault();
-                openContextMenu(zoomIndex, event.clientX, event.clientY);
-              }}
-              ref={zoomRef}
-              role="option"
-            >
-              <div className="wallpaper-book__zoom-print">
-                <div className="wallpaper-book__zoom-picture">
-                  <BookZoomPicture entry={selectedEntry}
-                    active={interactionActive} reducedMotion={reducedMotion} moving={zoomMoving}
-                    stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} stillRef={zoomStillRef}
-                    onLiveReady={revealZoomLive} mayUpdateStill={mayUpdateZoomStill} />
-                </div>
-              </div>
-              <div aria-hidden="true" className="book-leaf__face wallpaper-book__zoom-decoration"
-                data-open data-selected ref={zoomDecorationRef}>
-                <div className="book-leaf__print" />
-                <span className="book-leaf__spine-shadow" style={{
-                  background: `linear-gradient(to ${((zoomIndex ?? selectedIndex) % 2 === 0) ? 'right' : 'left'}, color-mix(in srgb, var(--text) 11%, transparent), transparent 9%)`,
-                }} />
-                <span className="book-leaf__states">
-                  {flowStateLabels({
-                    selected: false,
-                    current: model.currentPath === selectedEntry.path,
-                    applying,
-                    pending,
-                    favorite: selectedEntry.favorite,
-                  }).join(' · ')}
-                </span>
-                {applying || pending ? (
-                  <div aria-hidden="true" className="book-leaf__indicator">
-                    <ApplyIndicator state={applying ? 'applying' : 'pending'} />
-                  </div>
-                ) : null}
-              </div>
-            </div>
-          </div>
-        ) : null}
+        {zoomed && selectedEntry ? createPortal(zoomLayer, document.body) : null}
       </div>
-      <div aria-label="Selected page actions" className="wallpaper-book__actions">
-        <button
-          aria-label="Apply"
-          aria-busy={applying || pending || undefined}
-          aria-describedby={disabledReason ? 'book-apply-disabled' : undefined}
-          disabled={controlsDisabled || !applyAvailable}
-          onClick={applySelected}
-          title={disabledReason ?? 'Apply'}
-          type="button"
-        >
-          <Check aria-hidden="true" size={18} />
-        </button>
-        <button
-          aria-label="Favorite"
-          aria-busy={favoritePending || undefined}
-          aria-pressed={selectedEntry?.favorite ?? false}
-          disabled={controlsDisabled || favoritePending}
-          onClick={() => {
-            if (selectedEntry) void model.onToggleFavorite(selectedEntry);
-            focusStage();
-          }}
-          title={favoritePending ? 'Saving favorite…' : 'Favorite'}
-          type="button"
-        >
-          <Heart aria-hidden="true" size={18} />
-        </button>
-        <button
-          aria-label={zoomed ? 'Leave zoom' : 'Zoom'}
-          aria-pressed={zoomed}
-          disabled={!selectedEntry || !model.active || !settled}
-          onClick={toggleZoom}
-          title={zoomed ? 'Leave zoom' : 'Zoom'}
-          type="button"
-        >
-          {zoomed ? <ZoomOut aria-hidden="true" size={18} /> : <ZoomIn aria-hidden="true" size={18} />}
-        </button>
-        <button
-          aria-label="Details"
-          disabled={controlsDisabled}
-          onClick={() => {
-            focusStage();
-            if (selectedEntry) model.onDetails(selectedEntry, stageRef.current);
-          }}
-          title="Details"
-          type="button"
-        >
-          <Info aria-hidden="true" size={18} />
-        </button>
-        <button
-          aria-label={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
-          aria-pressed={props.immersive ?? false}
-          disabled={!model.active || !props.onImmersiveChange}
-          onClick={() => {
-            props.onImmersiveChange?.(!props.immersive);
-            focusStage();
-          }}
-          title={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
-          type="button"
-        >
-          {props.immersive ? <Minimize2 aria-hidden="true" size={18} /> : <Maximize2 aria-hidden="true" size={18} />}
-        </button>
-      </div>
-      {disabledReason ? (
-        <p className="wallpaper-book__disabled-reason" id="book-apply-disabled">{disabledReason}</p>
-      ) : null}
-      {contextMenu ? (
-        <ContextMenu
-          actions={model.buildContextActions(contextMenu.entry)}
-          onClose={closeContextMenu}
-          path={contextMenu.entry.path}
-          x={contextMenu.x}
-          y={contextMenu.y}
-        />
+      {zoomed ? <div aria-hidden="true" className="wallpaper-book__actions wallpaper-book__actions-reserve" /> : actions}
+      {zoomed && disabledReason ? <p aria-hidden="true" className="wallpaper-book__disabled-reason wallpaper-book__reason-reserve">{disabledReason}</p> : disabledReasonLabel}
+      {contextMenu ? createPortal(
+        <div className="wallpaper-book__menu-layer" data-reduced-motion={reducedMotion || undefined}>
+          <ContextMenu
+            actions={model.buildContextActions(contextMenu.entry)}
+            onClose={closeContextMenu}
+            path={contextMenu.entry.path}
+            x={contextMenu.x}
+            y={contextMenu.y}
+          />
+        </div>, document.body,
       ) : null}
     </section>
   );
