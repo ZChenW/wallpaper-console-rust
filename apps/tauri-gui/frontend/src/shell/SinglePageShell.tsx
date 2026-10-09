@@ -873,7 +873,7 @@ export default function SinglePageShell() {
           {preferences.libraryViewMode !== 'grid'
             ? flowAnchorEntry
               ? `Viewing: ${displayName(flowAnchorEntry)}`
-              : `${preferences.libraryViewMode === 'book' ? 'Book' : 'Flow'} is positioning the current wallpaper…`
+              : `${preferences.libraryViewMode === 'book' ? 'Book' : preferences.libraryViewMode === 'knot' ? 'Knot' : 'Flow'} is positioning the current wallpaper…`
             : selectedDescription(selectedEntry)}
         </span>
         <span className="single-page-statusbar__current">{currentWallpaperLabel(currentWallpaper)}</span>

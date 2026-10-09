@@ -33,6 +33,7 @@ export function LibraryViewSwitchView({
       {button('grid', 'Grid')}
       {button('flow', 'Flow')}
       {button('book', 'Book')}
+      {button('knot', 'Knot')}
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { memo } from 'react';
+import { lazy, memo, Suspense } from 'react';
 
 import type { ApplyGesture, LibraryViewMode } from '../shell/shellPreferences.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
@@ -9,6 +9,8 @@ import {
   instantiateActiveLibraryAdapter,
   type LibraryViewModel,
 } from './libraryViewModel.ts';
+
+const WallpaperKnot = lazy(() => import('./knot/WallpaperKnot.tsx'));
 
 export interface LibraryViewportProps {
   readonly mode: LibraryViewMode;
@@ -38,6 +40,12 @@ function LibraryViewportImpl({
   onImmersiveChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
+    knot: () => (
+      <Suspense fallback={<div className="wallpaper-knot__stage" role="status">Preparing Knot…</div>}>
+        <WallpaperKnot model={model} initialAnchorWallpaperId={initialAnchorWallpaperId}
+          focusToken={focusToken} returnFocusToken={returnFocusToken} onAnchorChange={onAnchorChange} />
+      </Suspense>
+    ),
     book: () => (
       <WallpaperBook
         applyGesture={applyGesture}
