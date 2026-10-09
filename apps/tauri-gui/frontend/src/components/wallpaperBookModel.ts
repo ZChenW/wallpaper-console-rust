@@ -144,12 +144,52 @@ export interface BookWheelInput {
   readonly deltaMode: number;
 }
 
-/** Line/page-mode mouse notches are discrete; pixel trackpads remain continuous. */
-export function accumulateBookWheel(position: number, input: BookWheelInput, leafCount: number) {
+export interface BookWheelSample { readonly magnitude: number; readonly at: number; readonly continuousUntil: number }
+
+/** Canonical notches work on the first event; a recent irregular/small stream
+ * stays continuous even when a trackpad's acceleration reaches mouse sizes. */
+export function classifyBookWheel(input: BookWheelInput, at: number, previous?: BookWheelSample) {
   const delta = Math.abs(input.deltaX) > Math.abs(input.deltaY) ? input.deltaX : input.deltaY;
-  const discrete = input.deltaMode !== 0 || (Number.isInteger(delta) && Math.abs(delta) >= 80);
-  const travel = discrete ? Math.sign(delta) : delta / BOOK_WHEEL_PIXELS_PER_LEAF;
-  return clampBookPosition(position + travel, leafCount);
+  const magnitude = Math.abs(delta);
+  const recent = previous !== undefined && at - previous.at < 180;
+  const regular = recent && Math.abs(magnitude - previous.magnitude) <= Math.max(1, magnitude * 0.025);
+  const canonical = [53, 60, 100, 120].some((notch) => Math.abs(magnitude - notch) <= 2);
+  const continuous = recent && previous.continuousUntil > at;
+  const diagonal = Math.min(Math.abs(input.deltaX), Math.abs(input.deltaY)) > Math.max(2, magnitude * 0.15);
+  const discrete = magnitude > 0 && (input.deltaMode !== 0
+    || (!continuous && !diagonal && magnitude >= 50 && (canonical || regular)));
+  return {
+    delta, discrete,
+    sample: { magnitude, at, continuousUntil: discrete || magnitude === 0 || (!recent && magnitude >= 50 && !diagonal) ? 0 : at + 180 },
+  };
+}
+
+export function accumulateBookWheel(position: number, input: BookWheelInput, leafCount: number, discrete = classifyBookWheel(input, 0).discrete) {
+  const delta = Math.abs(input.deltaX) > Math.abs(input.deltaY) ? input.deltaX : input.deltaY;
+  return clampBookPosition(position + (discrete ? Math.sign(delta) : delta / BOOK_WHEEL_PIXELS_PER_LEAF), leafCount);
+}
+
+/** Bound queued notches to three leaves beyond the hand, including reversal. */
+export function bookWheelTarget(position: number, target: number | null, delta: number, last: number) {
+  const next = (target ?? Math.round(position)) + Math.sign(delta);
+  return Math.round(clampBookPosition(Math.min(Math.floor(position) + 3, Math.max(Math.ceil(position) - 3, next)), last));
+}
+
+export function bookSpringStep(position: number, velocity: number, target: number, seconds: number) {
+  const stiffness = 190 * (1 + Math.min(3, Math.abs(target - position)) * 0.5);
+  const damping = 2 * Math.sqrt(stiffness);
+  const dt = Math.min(0.032, Math.max(0, seconds));
+  const speed = velocity + ((target - position) * stiffness - velocity * damping) * dt;
+  return { position: position + speed * dt, velocity: speed };
+}
+
+export interface BookDragSample { readonly position: number; readonly at: number }
+/** The last 80ms, including a stationary release, determines momentum. */
+export function bookDragVelocity(samples: readonly BookDragSample[], at: number): number {
+  const recent = samples.filter((sample) => at - sample.at <= 80);
+  const first = recent[0];
+  const last = recent.at(-1);
+  return first && last && at > first.at ? (last.position - first.position) / ((at - first.at) / 1000) : 0;
 }
 
 export type BookKeyIntent = 'next' | 'previous' | 'first' | 'last' | 'select-left'

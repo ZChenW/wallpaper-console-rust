@@ -2246,6 +2246,7 @@ select:focus, input:focus { border-color: var(--primary); }
 
 /* Book shares Library media/state tokens with Flow. */
 .wallpaper-book {
+  --book-stage-bg: color-mix(in srgb, var(--surface) 78%, var(--panel));
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
   width: 100%;
@@ -2253,7 +2254,7 @@ select:focus, input:focus { border-color: var(--primary); }
   min-height: 0;
   overflow: hidden;
   color: var(--text);
-  background: color-mix(in srgb, var(--surface) 78%, var(--panel));
+  background: var(--book-stage-bg);
   border: 1px solid var(--border-subtle);
 }
 
@@ -2302,7 +2303,8 @@ select:focus, input:focus { border-color: var(--primary); }
   container-type: size;
 }
 
-.wallpaper-book__stage[data-moving] { cursor: grabbing; }
+.wallpaper-book__stage[data-dragging],
+.wallpaper-book__stage[data-dragging] .book-leaf__face { cursor: grabbing; }
 .wallpaper-book__scene {
   position: absolute;
   inset: 0;
@@ -2340,7 +2342,6 @@ select:focus, input:focus { border-color: var(--primary); }
   transform-style: preserve-3d;
 }
 
-.wallpaper-book__stage[data-moving] .book-leaf { will-change: transform; }
 .book-leaf__face {
   position: absolute;
   inset: 0;
@@ -2349,11 +2350,12 @@ select:focus, input:focus { border-color: var(--primary); }
   background: var(--panel);
   backface-visibility: hidden;
   -webkit-backface-visibility: hidden;
-  overflow: hidden;
-  cursor: pointer;
+  cursor: grab;
   outline: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
+  transition: box-shadow 160ms ease;
 }
 
+.book-leaf__face[data-open] { cursor: pointer; }
 .book-leaf__face--front { transform: translateZ(0.3px); }
 .book-leaf__face--back {
   transform: rotateY(180deg) translateZ(0.3px);
@@ -2370,7 +2372,8 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 
 .book-leaf__print > :is(img, video, .wallpaper-thumb-placeholder),
-.wallpaper-book__zoom-print > :is(img, video, .wallpaper-thumb-placeholder) {
+.wallpaper-book__zoom-print > :is(img, video, .wallpaper-thumb-placeholder),
+.wallpaper-book__zoom-media > :is(img, video, .wallpaper-thumb-placeholder) {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -2405,13 +2408,14 @@ select:focus, input:focus { border-color: var(--primary); }
   top: 58%;
   left: 13%;
   border-radius: 50%;
-  background: color-mix(in srgb, var(--text) 16%, transparent);
-  filter: blur(24px);
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--text) 16%, transparent), transparent 70%);
+  transform: translateZ(0);
   pointer-events: none;
 }
 
 .book-leaf__states {
   position: absolute;
+  z-index: 4;
   bottom: 0.65rem;
   inset-inline-start: 0.75rem;
   max-width: calc(100% - 1.5rem);
@@ -2424,24 +2428,59 @@ select:focus, input:focus { border-color: var(--primary); }
   pointer-events: none;
 }
 .book-leaf__states:empty { display: none; }
-/* The ring and badge belong to a page at rest; on a turning leaf they read as a stray frame. */
-.wallpaper-book__stage[data-moving] .book-leaf__face[data-selected]::after,
-.wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
-.book-leaf__face[data-open][data-selected]::after {
+/* A lit page and bookmark accent, never a frame on a turning sheet. */
+.book-leaf__face::before {
   content: '';
   position: absolute;
   inset: 0;
-  z-index: 5;
-  border: 2px solid var(--primary);
+  z-index: 2;
   border-radius: inherit;
+  background: var(--book-stage-bg);
+  opacity: 0;
+  transition: opacity 160ms ease;
   pointer-events: none;
 }
+.book-leaf__face[data-resting]::before { opacity: 0.16; }
+.book-leaf__face[data-open][data-selected] {
+  box-shadow: 0 5px 16px color-mix(in srgb, var(--text) 18%, transparent);
+}
+.book-leaf__face[data-open][data-selected]::after {
+  content: '';
+  position: absolute;
+  width: 22%;
+  height: 3px;
+  bottom: max(1px, calc(var(--book-paper-margin) * 0.3125 - 1.5px));
+  left: 39%;
+  z-index: 5;
+  border-radius: 2px;
+  background: var(--primary);
+  pointer-events: none;
+}
+.wallpaper-book__stage:focus-visible .book-leaf__face[data-open][data-selected] .book-leaf__print {
+  outline: 1.5px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: -1.5px;
+}
+.wallpaper-book__stage[data-moving] .book-leaf__face::before,
+.wallpaper-book__stage[data-moving] .book-leaf__face[data-selected]::after,
+.wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
+.wallpaper-book__stage[data-moving] .book-leaf__face[data-selected] { box-shadow: none; transition: none; }
+.wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
+.wallpaper-book .context-menu {
+  transform-origin: var(--context-pointer-x, 0px) var(--context-pointer-y, 0px);
+  animation: book-menu-enter 120ms ease-out;
+}
+@keyframes book-menu-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.wallpaper-book[data-reduced-motion] .context-menu { animation: none; }
 /* The shared preview error badge otherwise peeks out under the state label. */
 .wallpaper-book .wallpaper-thumb-error { display: none; }
-.book-leaf__face[data-open][data-current] .book-leaf__print { box-shadow: inset 0 -2px var(--primary); }
+.wallpaper-book .wallpaper-preview-image { animation: none; }
 .book-leaf__indicator {
   position: absolute;
   inset: 0;
+  z-index: 4;
   display: grid;
   place-items: center;
   pointer-events: none;
@@ -2506,6 +2545,18 @@ select:focus, input:focus { border-color: var(--primary); }
   background: var(--surface-muted);
 }
 
+.wallpaper-book__zoom-media {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 100ms ease-out;
+}
+.wallpaper-book__zoom-media[data-visible] { opacity: 1; }
+.wallpaper-book__zoom-media[data-has-still] .wallpaper-thumb-placeholder { visibility: hidden; }
+.wallpaper-book__zoom-page[data-moving] .book-leaf__states,
+.wallpaper-book__zoom-page[data-moving] .book-leaf__indicator { visibility: hidden; }
+.wallpaper-book[data-reduced-motion] :is(.book-leaf__face, .book-leaf__face::before, .wallpaper-book__zoom-media) { transition: none; }
+
 .wallpaper-book[data-reduced-motion] .wallpaper-book__spread { transform: translate(-50%, -50%); }
 .wallpaper-book__outgoing-spread { pointer-events: none; }
 .wallpaper-book[data-reduced-motion] .book-leaf { transform-style: flat; }
@@ -2515,10 +2566,11 @@ select:focus, input:focus { border-color: var(--primary); }
 @keyframes book-spread-fade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {
   .wallpaper-book .book-leaf__face[data-open] { animation-duration: 140ms !important; }
+  .wallpaper-book .context-menu { animation: none; }
 }
 @media (forced-colors: active) {
   .book-leaf__face { outline-color: CanvasText; }
-  .book-leaf__face[data-open][data-selected]::after { border-color: Highlight; }
+  .wallpaper-book__stage:not([data-moving]) .book-leaf__face[data-open][data-selected] { outline: 1.5px solid Highlight; outline-offset: -2px; }
 }
 
 .wallpaper-flow {

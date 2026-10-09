@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useLayoutEffect,
   useRef,
   useState,
 } from 'react';
@@ -41,6 +42,7 @@ export interface WallpaperPreviewMediaProps {
   readonly loading?: 'eager' | 'lazy';
   readonly staticFallback?: boolean;
   readonly stabilizeEntranceDuringMotion?: boolean;
+  readonly onReady?: (ready: boolean) => void;
   readonly onEnhancedError?: (message: string) => void;
 }
 
@@ -54,6 +56,7 @@ export default function WallpaperPreviewMedia({
   staticFallback = false,
   stabilizeEntranceDuringMotion = false,
   onEnhancedError,
+  onReady,
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticPreviewAssetPath(entry);
   const { thumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
@@ -129,6 +132,7 @@ export default function WallpaperPreviewMedia({
     activeCandidate?.path ?? null,
     entry.path,
   );
+  const [readyVideoSource, setReadyVideoSource] = useState<string | null>(null);
   const activeVideoSource = activeCandidate?.kind === 'video' && authorizedCandidate.path
     ? safeFileSrc(authorizedCandidate.path)
     : null;
@@ -166,6 +170,9 @@ export default function WallpaperPreviewMedia({
   const imageLoaded = imagePath !== null
     && imagePath !== undefined
     && displayedImage?.path === imagePath;
+  useLayoutEffect(() => {
+    onReady?.(activeVideoSource !== null ? readyVideoSource === activeVideoSource : imageLoaded);
+  }, [activeVideoSource, imageLoaded, onReady, readyVideoSource]);
   const pendingImagePath = imagePath && !imageLoaded ? imagePath : null;
 
   const handleImageError = (failedPath: string) => {
@@ -218,6 +225,7 @@ export default function WallpaperPreviewMedia({
           key={`${activeCandidate.kind}:${activeCandidate.path}`}
           loop
           muted
+          onLoadedData={() => setReadyVideoSource(activeVideoSource)}
           onError={handleEnhancedError}
           playsInline
           poster={videoPosterPath ? safeFileSrc(videoPosterPath) : undefined}
