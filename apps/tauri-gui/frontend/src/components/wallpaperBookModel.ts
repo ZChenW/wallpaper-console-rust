@@ -127,7 +127,8 @@ export function bookVisibleWindow(position: number, leafCount: number): readonly
   const leaves: number[] = [];
   for (let leaf = start; leaf <= end; leaf += 1) {
     const depth = leaf < center ? Math.max(0, center - leaf - 1) : leaf - center;
-    if (depth < BOOK_VISIBLE_PILE_LEAVES) leaves.push(leaf);
+    // One leaf beyond the visible pile stays mounted, transparent, so it can fade in during a turn.
+    if (depth < BOOK_VISIBLE_PILE_LEAVES + 1) leaves.push(leaf);
   }
   return leaves;
 }
@@ -137,7 +138,8 @@ export function bookLeafTransform(leaf: number, position: number, reducedMotion 
   const turned = progress === 1;
   const depth = progress > 0 && progress < 1 ? 0
     : turned ? Math.max(0, position - leaf - 1) : Math.max(0, leaf - position);
-  const visible = depth < BOOK_VISIBLE_PILE_LEAVES;
+  // The deepest pile leaf fades over its last step instead of vanishing when the turn lands.
+  const pileOpacity = Math.min(1, Math.max(0, BOOK_VISIBLE_PILE_LEAVES - depth));
   const eased = progress * progress * (3 - 2 * progress);
   const fanAngle = BOOK_FAN_ANGLE + BOOK_FAN_ANGLE_STEP * depth;
   const angle = progress > 0 && progress < 1
@@ -150,7 +152,7 @@ export function bookLeafTransform(leaf: number, position: number, reducedMotion 
     progress,
     depth,
     angle,
-    opacity: visible && (!reducedMotion || depth === 0) ? 1 : 0,
+    opacity: reducedMotion ? (depth === 0 ? 1 : 0) : pileOpacity,
     shade: lift * 0.28,
     highlight: lift * 0.2,
     transform: reducedMotion
