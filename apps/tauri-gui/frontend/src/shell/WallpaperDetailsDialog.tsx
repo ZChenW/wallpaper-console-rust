@@ -1,9 +1,12 @@
 import {
   useEffect,
+  useRef,
   useState,
   type KeyboardEvent,
 } from 'react';
 import { X } from 'lucide-react';
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
+import { useAbortExitWhenReducedMotion } from '../hooks/useAbortExitWhenReducedMotion.ts';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import { displayName } from '../components/wallpaperCardHelpers.ts';
@@ -23,6 +26,9 @@ export interface WallpaperDetailsDialogProps {
 
 interface WallpaperDetailsDialogViewProps extends WallpaperDetailsDialogProps {
   readonly onPreviewError?: () => void;
+  readonly presentationPhase?: 'open' | 'exiting';
+  readonly reducedMotion?: boolean;
+  readonly presentationKey?: number;
 }
 
 function wallpaperTypeLabel(type: string): string {
@@ -45,6 +51,9 @@ export function WallpaperDetailsDialogView({
   previewPending = false,
   onPreviewError,
   onClose,
+  presentationPhase = 'open',
+  reducedMotion = false,
+  presentationKey = 0,
 }: WallpaperDetailsDialogViewProps) {
   if (!open || wallpaper === null) return null;
 
@@ -56,6 +65,7 @@ export function WallpaperDetailsDialogView({
     .join(', ');
   const compatibility = presentWallpaper(wallpaper).compatibility;
   const handleKeyDown = (event: KeyboardEvent<HTMLElement>) => {
+    if (presentationPhase === 'exiting') return;
     if (event.key === 'Tab') {
       trapDialogFocus(event, event.currentTarget);
       return;
@@ -68,8 +78,15 @@ export function WallpaperDetailsDialogView({
 
   return (
     <div
+      key={presentationKey}
       className="wallpaper-details__overlay"
-      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      data-presentation-phase={presentationPhase}
+      data-reduced-motion={reducedMotion || undefined}
+      aria-hidden={presentationPhase === 'exiting' || undefined}
+      inert={presentationPhase === 'exiting'}
+      onMouseDown={(event) => {
+        if (presentationPhase === 'open' && event.target === event.currentTarget) onClose();
+      }}
     >
       <section
         aria-labelledby="wallpaper-details-title"
@@ -91,7 +108,7 @@ export function WallpaperDetailsDialogView({
             aria-label="Close wallpaper details"
             className="wallpaper-details__close"
             data-icon-button={true}
-            onClick={onClose}
+            onClick={() => { if (presentationPhase === 'open') onClose(); }}
             title="Close"
             type="button"
           >
@@ -156,13 +173,56 @@ export function WallpaperDetailsDialogView({
 
 export default function WallpaperDetailsDialog(props: WallpaperDetailsDialogProps) {
   const { fallbackPreviewSrc = null, previewSrc = null } = props;
+  const reducedMotion = useReducedMotion();
+  const [prevOpen, setPrevOpen] = useState(props.open);
+  const [shouldRender, setShouldRender] = useState(props.open);
+  const [presentationPhase, setPresentationPhase] = useState<'open' | 'exiting'>('open');
+  const [presentationKey, setPresentationKey] = useState(0);
+  const [retainedWallpaper, setRetainedWallpaper] = useState(props.wallpaper);
   const [currentSrc, setCurrentSrc] = useState(previewSrc ?? fallbackPreviewSrc);
-  useEffect(() => {
+  const exitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Match the other overlays: close the owning state immediately, retain only
+  // inert presentation for exit, and cancel that exit on reopen/reduced motion.
+  if (props.open && props.wallpaper !== retainedWallpaper) {
+    setRetainedWallpaper(props.wallpaper);
     setCurrentSrc(previewSrc ?? fallbackPreviewSrc);
-  }, [fallbackPreviewSrc, previewSrc]);
+  }
+  if (props.open !== prevOpen) {
+    setPrevOpen(props.open);
+    if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+    exitTimerRef.current = null;
+    if (props.open) {
+      setShouldRender(true);
+      setPresentationPhase('open');
+      // Remount on a quick reopen too, preserving the title's native autofocus.
+      setPresentationKey((key) => key + 1);
+      setCurrentSrc(previewSrc ?? fallbackPreviewSrc);
+    } else {
+      setPresentationPhase('exiting');
+      if (reducedMotion) setShouldRender(false);
+      else exitTimerRef.current = setTimeout(() => {
+        exitTimerRef.current = null;
+        setShouldRender(false);
+      }, 100);
+    }
+  }
+  useAbortExitWhenReducedMotion(props.open, reducedMotion, exitTimerRef, setShouldRender);
+  useEffect(() => () => {
+    if (exitTimerRef.current !== null) clearTimeout(exitTimerRef.current);
+  }, []);
+  useEffect(() => {
+    if (!props.open) return;
+    setCurrentSrc(previewSrc ?? fallbackPreviewSrc);
+  }, [fallbackPreviewSrc, previewSrc, props.open]);
 
   return WallpaperDetailsDialogView({
     ...props,
+    open: shouldRender,
+    wallpaper: retainedWallpaper,
+    presentationPhase,
+    presentationKey,
+    reducedMotion,
     fallbackPreviewSrc: null,
     previewSrc: currentSrc,
     onPreviewError: () => {

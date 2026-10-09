@@ -19,7 +19,7 @@ export function bookZoomTimeline(direction: 'open' | 'close', pagePose: string, 
   const closing = direction === 'close';
   const sceneStops = closing
     ? [[0, 0], [0.35, 0.6], [0.8, 1], [1, 1]]
-    : [[0, 1], [0.2, 1], [0.65, 0.4], [1, 0]];
+    : [[0, 1], [0.4, 0.15], [0.6, 0], [1, 0]];
   const startScene = current?.sceneOpacity ?? (closing ? 0 : 1);
   // Rebase the whole opacity curve on interruption so every segment remains
   // monotone, even if interrupted before the book has begun to fade.
@@ -55,5 +55,16 @@ export function bookZoomReveal(opacity: number, reducedMotion = false) {
   return {
     duration: reducedMotion ? 0 : BOOK_ZOOM_REVEAL_MS,
     frames: [{ offset: 0, opacity, easing: 'ease-out' }, { offset: 1, opacity: 0 }],
+  };
+}
+
+/** Forward navigation leaves to the left; backward leaves to the right. */
+export function bookZoomSwapTimeline(direction: number, reducedMotion = false) {
+  const travel = direction < 0 ? 12 : -12;
+  return {
+    duration: reducedMotion ? 0 : 200,
+    outgoing: [{ transform: 'translateX(0%)', opacity: 1 }, { transform: `translateX(${travel}%)`, opacity: 0 }],
+    incoming: [{ transform: `translateX(${-travel}%)`, opacity: 0 }, { transform: 'translateX(0%)', opacity: 1 }],
+    easing: 'cubic-bezier(0.16, 1, 0.3, 1)',
   };
 }

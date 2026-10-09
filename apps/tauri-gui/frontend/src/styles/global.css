@@ -343,6 +343,31 @@ select:focus, input:focus { border-color: var(--primary); }
   place-items: center;
   padding: clamp(0.75rem, 3vw, 2rem);
   background: rgb(0 0 0 / 58%);
+  animation: wallpaper-details-overlay-enter 140ms ease-out;
+}
+.wallpaper-details__overlay .wallpaper-details {
+  animation: wallpaper-details-panel-enter 140ms ease-out;
+}
+.wallpaper-details__overlay[data-presentation-phase="exiting"] {
+  pointer-events: none;
+  animation: wallpaper-details-overlay-exit 100ms ease-out forwards;
+}
+.wallpaper-details__overlay[data-presentation-phase="exiting"] .wallpaper-details {
+  animation: wallpaper-details-panel-exit 100ms ease-out forwards;
+}
+@keyframes wallpaper-details-overlay-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wallpaper-details-overlay-exit { from { opacity: 1; } to { opacity: 0; } }
+@keyframes wallpaper-details-panel-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wallpaper-details-panel-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(6px) scale(0.985); }
+}
+.wallpaper-details__overlay[data-reduced-motion],
+.wallpaper-details__overlay[data-reduced-motion] .wallpaper-details {
+  animation: none;
 }
 
 .wallpaper-details__header {
@@ -571,6 +596,8 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .wallpaper-details__overlay,
+  .wallpaper-details__overlay .wallpaper-details { animation: none; }
   *,
   *::before,
   *::after {
@@ -2317,8 +2344,11 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-book.is-refreshing { cursor: progress; }
 .wallpaper-book__stage:focus-visible {
-  outline: 2px solid var(--primary);
-  outline-offset: -4px;
+  outline: none;
+}
+.wallpaper-book__stage:focus-visible:not([data-selectable]) {
+  outline: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  outline-offset: -2px;
 }
 
 .wallpaper-book__spread {
@@ -2409,8 +2439,13 @@ select:focus, input:focus { border-color: var(--primary); }
   border-radius: 50%;
   background: radial-gradient(ellipse, color-mix(in srgb, var(--text) 16%, transparent), transparent 70%);
   transform: translateZ(0);
+  transition: transform 220ms ease-out;
   pointer-events: none;
 }
+/* On the first and last spread only one page lies open: keep the shadow under that half. */
+.wallpaper-book__contact-shadow[data-side="right"] { transform: translateZ(0) scaleX(0.5); transform-origin: right center; }
+.wallpaper-book__contact-shadow[data-side="left"] { transform: translateZ(0) scaleX(0.5); transform-origin: left center; }
+.wallpaper-book[data-reduced-motion] .wallpaper-book__contact-shadow { transition: none; }
 
 .book-leaf__states {
   position: absolute;
@@ -2454,6 +2489,10 @@ select:focus, input:focus { border-color: var(--primary); }
   border-radius: 2px;
   background: var(--primary);
   pointer-events: none;
+}
+/* Keep the sheet in place while its picture, lift and bookmark travel in zoom. */
+.book-leaf__face[data-zoom-source] {
+  visibility: hidden;
 }
 .wallpaper-book__stage:focus-visible .book-leaf__face[data-open][data-selected] .book-leaf__print {
   outline: 1.5px solid color-mix(in srgb, var(--primary) 55%, transparent);
@@ -2549,6 +2588,20 @@ select:focus, input:focus { border-color: var(--primary); }
   inset: 0;
   opacity: 1;
 }
+.wallpaper-book__zoom-picture,
+.wallpaper-book__zoom-outgoing {
+  position: absolute;
+  inset: 0;
+}
+.wallpaper-book__zoom-picture > :is(img, video, .wallpaper-thumb-placeholder),
+.wallpaper-book__zoom-outgoing > :is(img, video, .wallpaper-thumb-placeholder) {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.wallpaper-book__zoom-outgoing { pointer-events: none; z-index: 2; }
 .wallpaper-book__zoom-still { z-index: 1; }
 .wallpaper-book__zoom-decoration {
   position: absolute;
@@ -2576,6 +2629,8 @@ select:focus, input:focus { border-color: var(--primary); }
   .wallpaper-book .context-menu { animation: none; }
 }
 @media (forced-colors: active) {
+  .wallpaper-book__stage:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }
+  .wallpaper-book__stage:focus-visible:not([data-selectable]) { outline-color: Highlight; }
   .book-leaf__face { outline-color: CanvasText; }
   .wallpaper-book__stage:not([data-moving]) .book-leaf__face[data-open][data-selected] { outline: 1.5px solid Highlight; outline-offset: -2px; }
 }

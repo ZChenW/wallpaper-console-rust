@@ -19,7 +19,7 @@ import {
 } from './wallpaperBookModel.ts';
 import { api } from '../api/bridge.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
-import { bookZoomTimeline, BOOK_ZOOM_REST, bookZoomReveal } from './wallpaperBookZoom.ts';
+import { bookZoomTimeline, BOOK_ZOOM_REST, bookZoomReveal, bookZoomSwapTimeline } from './wallpaperBookZoom.ts';
 import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
 import { staticFallbackAssetPath, staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
@@ -70,6 +70,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const zoomNavigationTargetRef = useRef<number | null>(null);
   const zoomResumePageVideoRef = useRef<(() => void) | null>(null);
   const zoomFadeRef = useRef<Animation | null>(null);
+  const zoomSwapAnimationsRef = useRef<Animation[]>([]);
+  const zoomOutgoingRef = useRef<HTMLElement | null>(null);
+  const zoomSwapRef = useRef<{ outgoing: HTMLElement; direction: number } | null>(null);
+  const zoomDecodeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const zoomRef = useRef<HTMLDivElement>(null);
   const leavesRef = useRef(new Map<number, HTMLDivElement>());
   const [visibleLeaves, setVisibleLeaves] = useState(() => bookVisibleWindow(spread, bookLeafCount(model.entries.length)));
@@ -127,14 +131,30 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     }
   }, []);
 
+  const cancelZoomSwap = useCallback(() => {
+    for (const animation of zoomSwapAnimationsRef.current) {
+      animation.onfinish = null;
+      animation.cancel();
+    }
+    zoomSwapAnimationsRef.current = [];
+    zoomOutgoingRef.current?.remove();
+    zoomOutgoingRef.current = null;
+  }, []);
+
+  const cancelZoomDecodeTimer = useCallback(() => {
+    if (zoomDecodeTimerRef.current !== null) clearTimeout(zoomDecodeTimerRef.current);
+    zoomDecodeTimerRef.current = null;
+  }, []);
+
   const cancelZoomAnimation = useCallback(() => {
+    cancelZoomSwap();
     cancelZoomFade();
     for (const animation of zoomAnimationsRef.current) {
       animation.onfinish = null;
       animation.cancel();
     }
     zoomAnimationsRef.current = [];
-  }, [cancelZoomFade]);
+  }, [cancelZoomFade, cancelZoomSwap]);
 
   const cancelCrossFade = useCallback(() => {
     const animation = crossFadeAnimationRef.current;
@@ -154,10 +174,12 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   }, []);
 
   const resetZoom = useCallback(() => {
+    cancelZoomDecodeTimer();
     cancelZoomAnimation();
     zoomResumePageVideoRef.current?.();
     zoomResumePageVideoRef.current = null;
     zoomOriginRef.current = null;
+    zoomSwapRef.current = null;
     zoomPoseRef.current = null;
     zoomMovingRef.current = false;
     zoomReadyRef.current = false;
@@ -168,7 +190,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     changeZoomIndex(null);
     setZoomStillSrc(null);
     setZoomMoving(false);
-  }, [cancelZoomAnimation, changeZoomIndex]);
+  }, [cancelZoomAnimation, cancelZoomDecodeTimer, changeZoomIndex]);
 
   const publishAnchor = useCallback((index: number, isSettled: boolean) => {
     const { props: current } = latest.current;
@@ -366,6 +388,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     zoomNavigationRef.current += 1;
     zoomPendingNavigationRef.current = null;
     zoomNavigationTargetRef.current = latest.current.zoomIndex;
+    cancelZoomDecodeTimer();
     cancelZoomAnimation();
     setZoomMoving(true);
     const timeline = bookZoomTimeline(closing ? 'close' : 'open', pose, sample);
@@ -394,7 +417,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
         else if (zoomReadyRef.current) revealZoomLive();
       }
     };
-  }, [cancelZoomAnimation, focusStage, resetZoom, revealZoomLive]);
+  }, [cancelZoomAnimation, cancelZoomDecodeTimer, focusStage, resetZoom, revealZoomLive]);
 
   const closeZoom = useCallback(() => {
     if (latest.current.zoomIndex === null) {
@@ -522,12 +545,36 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       print.style.borderRadius = radius(realPrint, pose.paperRadius);
     }
     if (opening && !reducedMotion) setZoomDirection(false, true);
-    else {
+    else if (zoomSwapRef.current && !reducedMotion) {
+      const { outgoing, direction } = zoomSwapRef.current;
+      zoomSwapRef.current = null;
+      const incoming = element.querySelector<HTMLElement>('.wallpaper-book__zoom-picture');
+      if (incoming && print) {
+        print.append(outgoing);
+        zoomOutgoingRef.current = outgoing;
+        const swap = bookZoomSwapTimeline(direction);
+        const timing = { duration: swap.duration, easing: swap.easing, fill: 'both' as const };
+        const animations = [outgoing.animate(swap.outgoing, timing), incoming.animate(swap.incoming, timing)];
+        zoomSwapAnimationsRef.current = animations;
+        zoomMovingRef.current = true;
+        setZoomMoving(true);
+        animations[1].onfinish = () => {
+          cancelZoomSwap();
+          zoomMovingRef.current = false;
+          setZoomMoving(false);
+          if (zoomReadyRef.current) revealZoomLive();
+        };
+      } else {
+        zoomMovingRef.current = false;
+        setZoomMoving(false);
+      }
+    } else {
+      zoomSwapRef.current = null;
       zoomMovingRef.current = false;
       setZoomMoving(false);
     }
     return cancelZoomAnimation;
-  }, [cancelZoomAnimation, setZoomDirection, zoomIndex, reducedMotion]);
+  }, [cancelZoomAnimation, cancelZoomSwap, revealZoomLive, setZoomDirection, zoomIndex, reducedMotion]);
 
   useLayoutEffect(() => {
     const previous = resetRef.current;
@@ -694,13 +741,14 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     zoomNavigationRef.current += 1;
     zoomPendingNavigationRef.current = null;
     zoomMovingRef.current = true;
+    cancelZoomDecodeTimer();
     cancelZoomAnimation();
     zoomResumePageVideoRef.current?.();
     zoomResumePageVideoRef.current = null;
     cancelCrossFade();
     setScrolling(false);
     setInteracting(true);
-  }, [cancelCrossFade, cancelMotion, cancelZoomAnimation, releaseDrag, setScrolling, setInteracting]);
+  }, [cancelCrossFade, cancelMotion, cancelZoomAnimation, cancelZoomDecodeTimer, releaseDrag, setScrolling, setInteracting]);
 
   const handlePointerDown = (event: PointerEvent<HTMLDivElement>) => {
     pendingMenuRef.current = null;
@@ -821,6 +869,14 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const navigateZoom = (index: number) => {
     const entry = latest.current.props.model.entries[index];
     if (!entry || zoomClosingRef.current) return;
+    // Finish the incoming picture immediately before accepting another input.
+    if (zoomSwapAnimationsRef.current.length) {
+      cancelZoomSwap();
+      zoomMovingRef.current = false;
+      setZoomMoving(false);
+    }
+    cancelZoomDecodeTimer();
+    zoomPendingNavigationRef.current = null;
     zoomNavigationTargetRef.current = index;
     if (index === latest.current.zoomIndex) {
       zoomNavigationRef.current += 1;
@@ -832,34 +888,67 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     const fallback = staticFallbackAssetPath(entry, true);
     const request = ++zoomNavigationRef.current;
     const current = () => request === zoomNavigationRef.current && latest.current.zoomIndex !== null && !zoomClosingRef.current;
+    let accepted = false;
+    const accept = (source: string | null) => {
+      if (!current() || accepted) return;
+      accepted = true;
+      cancelZoomDecodeTimer();
+      const commit = () => {
+        if (!current() || zoomMovingRef.current) return;
+        const direction = index - (latest.current.zoomIndex ?? index);
+        const picture = zoomRef.current?.querySelector<HTMLElement>('.wallpaper-book__zoom-picture');
+        const outgoing = !latest.current.reducedMotion && picture ? picture.cloneNode(true) as HTMLElement : null;
+        if (outgoing && picture) {
+          outgoing.className = 'wallpaper-book__zoom-outgoing';
+          outgoing.setAttribute('aria-hidden', 'true');
+          const oldStill = picture.querySelector<HTMLElement>('.wallpaper-book__zoom-still');
+          const clonedStill = outgoing.querySelector<HTMLElement>('.wallpaper-book__zoom-still');
+          if (oldStill && clonedStill) clonedStill.style.opacity = getComputedStyle(oldStill).opacity;
+          const video = picture.querySelector<HTMLVideoElement>('video');
+          const clonedVideo = outgoing.querySelector<HTMLVideoElement>('video');
+          if (video && clonedVideo) {
+            const frame = captureBookVideoStill(video);
+            clonedVideo.removeAttribute('autoplay');
+            clonedVideo.removeAttribute('src');
+            if (frame) { clonedVideo.poster = frame.source; frame.resume(); }
+          }
+        }
+        cancelZoomAnimation();
+        zoomResumePageVideoRef.current?.();
+        zoomResumePageVideoRef.current = null;
+        zoomReadyRef.current = false;
+        zoomPoseRef.current = null;
+        zoomSwapRef.current = outgoing ? { outgoing, direction } : null;
+        zoomMovingRef.current = Boolean(outgoing);
+        preferredIndexRef.current = index;
+        // Source, hidden real face, spread and landing pose change together.
+        flushSync(() => {
+          moveTo(bookPositionForWallpaper(index), true);
+          selectIndex(index);
+          setZoomStillSrc(source);
+          changeZoomIndex(index);
+          setZoomMoving(Boolean(outgoing));
+        });
+      };
+      if (zoomMovingRef.current) zoomPendingNavigationRef.current = commit;
+      else commit();
+    };
+    // Bound authorization + decoding together; a slow original never stalls input.
+    zoomDecodeTimerRef.current = setTimeout(() => {
+      zoomDecodeTimerRef.current = null;
+      const page = stageRef.current?.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`);
+      const image = page?.querySelector<HTMLImageElement>('img[data-preview-loaded="true"]');
+      const paintedSource = image?.currentSrc || image?.src;
+      const cachedThumbnail = getThumbnail(asset);
+      accept(paintedSource || (cachedThumbnail ? safeFileSrc(cachedThumbnail) : null));
+    }, 120);
     const source = thumbnail ? Promise.resolve(thumbnail) : fallback
       ? api.previewAssetAuthorize(fallback, entry.path)
       : api.thumbnailFor(asset).then((thumbnail) => thumbnail.path);
     void source.then((authorized) => {
-      if (!current()) return;
-      return decodeBookStill(safeFileSrc(authorized), (image) => {
-        const commit = () => {
-          if (!current() || zoomMovingRef.current) return;
-          cancelZoomAnimation();
-          zoomResumePageVideoRef.current?.();
-          zoomResumePageVideoRef.current = null;
-          zoomReadyRef.current = false;
-          zoomMovingRef.current = false;
-          zoomPoseRef.current = null;
-          preferredIndexRef.current = index;
-          // One React commit replaces source, selection, spread and landing pose.
-          flushSync(() => {
-            moveTo(bookPositionForWallpaper(index), true);
-            selectIndex(index);
-            setZoomStillSrc(image.src);
-            changeZoomIndex(index);
-            setZoomMoving(false);
-          });
-        };
-        if (zoomMovingRef.current) zoomPendingNavigationRef.current = commit;
-        else commit();
-      }, current);
-    }).catch(() => { /* The current picture remains usable on failure. */ });
+      if (!current() || accepted) return;
+      return decodeBookStill(safeFileSrc(authorized), (image) => accept(image.src), () => current() && !accepted);
+    }).catch(() => { /* The bounded thumbnail fallback still runs. */ });
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {

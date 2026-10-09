@@ -84,6 +84,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         data-book-index={index ?? undefined}
         data-open={open || undefined}
         data-selected={selected || undefined}
+        data-zoom-source={zoomed && index === zoomIndex || undefined}
         data-resting={open && !selected && spread > 0 && spread * 2 < model.entries.length || undefined}
         data-current={current || undefined}
         data-applying={pageApplying || undefined}
@@ -166,6 +167,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         className="wallpaper-book__stage"
         data-moving={!settled || undefined}
         data-zoomed={zoomed || undefined}
+        data-selectable={selectedEntry !== null || undefined}
         onKeyDown={handleKeyDown}
         onPointerDown={handlePointerDown}
         onPointerMove={handlePointerMove}
@@ -177,7 +179,11 @@ function WallpaperBookReady(props: WallpaperBookProps) {
         tabIndex={0}
       >
         <div className="wallpaper-book__scene">
-          <div aria-hidden="true" className="wallpaper-book__contact-shadow" />
+          <div
+            aria-hidden="true"
+            className="wallpaper-book__contact-shadow"
+            data-side={spread === 0 ? 'right' : spread * 2 >= model.entries.length ? 'left' : undefined}
+          />
           <div className="wallpaper-book__spread">
             {visibleLeaves.map((leaf) => {
               const transform = bookLeafTransform(leaf, spread, reducedMotion);
@@ -220,10 +226,12 @@ function WallpaperBookReady(props: WallpaperBookProps) {
               role="option"
             >
               <div className="wallpaper-book__zoom-print">
-                <BookZoomPicture entry={selectedEntry}
-                  active={interactionActive} reducedMotion={reducedMotion} moving={zoomMoving}
-                  stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} stillRef={zoomStillRef}
-                  onLiveReady={revealZoomLive} mayUpdateStill={mayUpdateZoomStill} />
+                <div className="wallpaper-book__zoom-picture">
+                  <BookZoomPicture entry={selectedEntry}
+                    active={interactionActive} reducedMotion={reducedMotion} moving={zoomMoving}
+                    stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} stillRef={zoomStillRef}
+                    onLiveReady={revealZoomLive} mayUpdateStill={mayUpdateZoomStill} />
+                </div>
               </div>
               <div aria-hidden="true" className="book-leaf__face wallpaper-book__zoom-decoration"
                 data-open data-selected ref={zoomDecorationRef}>
@@ -318,17 +326,19 @@ function WallpaperBookReady(props: WallpaperBookProps) {
 function WallpaperBookImpl(props: WallpaperBookProps) {
   if (props.model.entries.length === 0) {
     return (
-      <LibraryState
-        description="Try clearing the active filters or changing your search."
-        icon={<SearchX aria-hidden="true" size={28} />}
-        role="status"
-        title="No wallpapers found"
-      />
+      <div aria-label="Wallpaper Book" className="wallpaper-book__stage" tabIndex={0}>
+        <LibraryState
+          description="Try clearing the active filters or changing your search."
+          icon={<SearchX aria-hidden="true" size={28} />}
+          role="status"
+          title="No wallpapers found"
+        />
+      </div>
     );
   }
   if (props.initialAnchorWallpaperId == null && !props.model.currentObservationReady) {
     return (
-      <section className="wallpaper-book wallpaper-book--preparing">
+      <section aria-label="Wallpaper Book" className="wallpaper-book wallpaper-book--preparing wallpaper-book__stage" tabIndex={0}>
         <p role="status">Preparing Book preview…</p>
       </section>
     );
