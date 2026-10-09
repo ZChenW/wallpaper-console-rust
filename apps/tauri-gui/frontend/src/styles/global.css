@@ -2547,18 +2547,19 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
 .wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
-/* Knot prototype. Its transparent WebGL canvas inherits the Library's theme. */
+/* Knot gallery: the canvas fog resolves to this same page background. */
 .wallpaper-knot {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
   width: 100%;
   height: 100%;
   min-height: 0;
   color: var(--text);
-  background: var(--surface);
+  background: var(--bg);
 }
 .wallpaper-knot__heading {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
   gap: 0.8rem;
   padding: 1rem 1.4rem 0;
@@ -2566,6 +2567,28 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-knot__heading h3 { margin: 0; font-size: 0.95rem; font-weight: 500; }
 .wallpaper-knot__heading p { margin: 0; color: var(--text-muted); font-size: 0.78rem; }
 .wallpaper-knot__heading button { margin-inline-start: auto; }
+.wallpaper-knot__controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.25rem 0.65rem;
+  padding: 0.6rem 1.4rem;
+}
+.wallpaper-knot__controls button {
+  padding: 0.35rem 0.5rem;
+  border: 0;
+  border-radius: 0.3rem;
+  background: transparent;
+  color: var(--text-muted);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.wallpaper-knot__controls button:hover:not(:disabled) { background: var(--surface-muted); color: var(--text); }
+.wallpaper-knot__controls button[aria-pressed="true"] { color: var(--primary-foreground); background: var(--primary-bg); }
+.wallpaper-knot__controls button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
+.wallpaper-knot__controls button:disabled { opacity: 0.55; cursor: default; }
+.wallpaper-knot__controls button:last-child { margin-inline-start: auto; }
 .wallpaper-knot__stage {
   position: relative;
   display: grid;
@@ -2576,8 +2599,9 @@ select:focus, input:focus { border-color: var(--primary); }
   overflow: hidden;
   touch-action: none;
   cursor: grab;
-  background: var(--surface);
-  border: 0 solid var(--border-strong);
+  background: var(--bg);
+  /* Resolve the muted theme token for WebGL without a visible border. */
+  border: 0 solid var(--surface-muted);
 }
 .wallpaper-knot__stage:active { cursor: grabbing; }
 .wallpaper-knot__stage:focus-visible { outline: 1px solid var(--primary); outline-offset: -2px; }
@@ -2586,21 +2610,20 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-knot__message { position: relative; max-width: 28rem; padding: 1.5rem; color: var(--text-muted); text-align: center; }
 .wallpaper-knot__caption {
   position: absolute;
-  top: calc(50% + var(--knot-picture-half-height, 12%) + 0.9rem);
+  bottom: 1.25rem;
   left: 50%;
   transform: translateX(-50%);
   margin: 0;
-  max-width: 65%;
+  max-width: 80%;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 0.85rem;
-  color: var(--text);
-  background: var(--surface);
+  color: var(--text-muted);
+  background: var(--bg);
   padding: 0.2rem 0.5rem;
   pointer-events: none;
 }
-.wallpaper-knot__stage:not([data-settled]) .wallpaper-knot__caption { visibility: hidden; }
 .wallpaper-knot__hint { margin: 0; padding: 0.75rem 1.4rem 1rem; color: var(--text-muted); font-size: 0.72rem; text-align: center; }
 .wallpaper-knot__announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 
