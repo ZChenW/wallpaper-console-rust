@@ -71,6 +71,17 @@
   background: var(--bg);
 }
 
+/* Win over editorial gutters and chrome display rules at every breakpoint. */
+:root[data-theme="editorial"] .single-page-shell[data-book-immersive] > .single-page-library {
+  padding: 0;
+}
+:root[data-theme="editorial"] .single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+  position: fixed;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
 :root[data-theme="editorial"] .single-page-topbar {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));

@@ -28,6 +28,21 @@ export const BOOK_WHEEL_PIXELS_PER_LEAF = 160;
 export const BOOK_WHEEL_IDLE_MS = 160;
 export const BOOK_ZOOM_DURATION_MS = 320;
 export const BOOK_APPEND_DISTANCE = 6;
+export const BOOK_IMMERSIVE_DURATION_MS = 260;
+export const BOOK_IMMERSIVE_EASING = 'cubic-bezier(0.22, 1, 0.36, 1)';
+
+/** The fan was tuned on a 480px page (the former 60rem spread). */
+export function bookPageScale(pageWidth: number): number {
+  return Number.isFinite(pageWidth) ? Math.min(2.2, Math.max(0.6, pageWidth / 480)) : 1;
+}
+
+export function resolveBookEscape(contextMenuOpen: boolean, zoomed: boolean, immersive: boolean) {
+  return contextMenuOpen ? 'context' : zoomed ? 'zoom' : immersive ? 'immersive' : null;
+}
+
+export function shouldEndBookImmersive(mode: string, active: boolean, queryReset: boolean): boolean {
+  return mode !== 'book' || !active || queryReset;
+}
 
 export type BookFace = 'front' | 'back';
 export const bookLeafCount = (wallpaperCount: number) => Math.ceil(Math.max(0, wallpaperCount) / 2);
@@ -119,7 +134,7 @@ export function bookVisibleWindow(position: number, leafCount: number): readonly
   return leaves;
 }
 
-export function bookLeafTransform(leaf: number, position: number, reducedMotion = false) {
+export function bookLeafTransform(leaf: number, position: number, reducedMotion = false, scale = 1) {
   const progress = Math.min(1, Math.max(0, position - leaf));
   const turned = progress === 1;
   const depth = progress > 0 && progress < 1 ? 0
@@ -131,8 +146,8 @@ export function bookLeafTransform(leaf: number, position: number, reducedMotion 
     ? -BOOK_FAN_ANGLE - (180 - BOOK_FAN_ANGLE * 2) * eased
     : turned ? -180 + fanAngle : -fanAngle;
   const lift = Math.sin(Math.PI * progress);
-  const x = (turned ? -1 : 1) * BOOK_FAN_OUTWARD * depth;
-  const z = -BOOK_FAN_DEPTH * depth + BOOK_TURN_LIFT * lift;
+  const x = (turned ? -1 : 1) * BOOK_FAN_OUTWARD * depth * scale;
+  const z = (-BOOK_FAN_DEPTH * depth + BOOK_TURN_LIFT * lift) * scale;
   return {
     progress,
     depth,
@@ -142,7 +157,7 @@ export function bookLeafTransform(leaf: number, position: number, reducedMotion 
     highlight: lift * 0.2,
     transform: reducedMotion
       ? `translateX(${turned ? '-100%' : '0'})`
-      : `translate3d(${x}px, ${-lift * 8}px, ${z}px) rotateY(${angle}deg) scale(${1 - depth * BOOK_FAN_SCALE_STEP})`,
+      : `translate3d(${x}px, ${-lift * 8 * scale}px, ${z}px) rotateY(${angle}deg) scale(${1 - depth * BOOK_FAN_SCALE_STEP})`,
   };
 }
 
@@ -207,7 +222,7 @@ export function bookDragVelocity(samples: readonly BookDragSample[], at: number)
 }
 
 export type BookKeyIntent = 'next' | 'previous' | 'first' | 'last' | 'select-left'
-  | 'select-right' | 'apply' | 'zoom' | 'unzoom' | 'context';
+  | 'select-right' | 'apply' | 'zoom' | 'unzoom' | 'context' | 'immersive';
 
 export function resolveBookKey(key: string, shiftKey = false): BookKeyIntent | null {
   if (isContextMenuKey(key, shiftKey)) return 'context';
@@ -221,6 +236,7 @@ export function resolveBookKey(key: string, shiftKey = false): BookKeyIntent | n
     case 'Enter': return 'apply';
     case ' ': case 'z': case 'Z': return 'zoom';
     case 'Escape': return 'unzoom';
+    case 'f': case 'F': return 'immersive';
     default: return null;
   }
 }
@@ -237,6 +253,14 @@ export function resolveBookPointerInteraction(input: CardPointerInteractionInput
 }
 
 export interface BookRect { readonly left: number; readonly top: number; readonly width: number; readonly height: number }
+
+/** A uniform scene scale preserves the book's aspect even when the stage changes shape. */
+export function bookSceneFlip(from: BookRect, to: BookRect, oldSpreadWidth: number, newSpreadWidth: number) {
+  const x = from.left + from.width / 2 - to.left - to.width / 2;
+  const y = from.top + from.height / 2 - to.top - to.height / 2;
+  const scale = oldSpreadWidth / Math.max(1, newSpreadWidth);
+  return `translate(${x}px, ${y}px) scale(${scale})`;
+}
 
 export interface BookZoomOrigin {
   readonly spineX: number;

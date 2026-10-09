@@ -672,6 +672,47 @@ select:focus, input:focus { border-color: var(--primary); }
   grid-area: status;
 }
 
+/* Session-only Book layout. Chrome leaves the grid immediately but fades in place;
+   inert + aria-hidden on those regions exclude it from keyboard/AT immediately. */
+.single-page-shell > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+  transition: opacity 260ms cubic-bezier(0.22, 1, 0.36, 1), visibility 0s;
+}
+.single-page-shell[data-book-immersive] {
+  grid-template-areas: "library";
+  grid-template-rows: minmax(0, 1fr);
+}
+.single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+  position: fixed;
+  left: var(--book-chrome-left, 0px);
+  top: var(--book-chrome-top, 0px);
+  width: var(--book-chrome-width, 100%);
+  z-index: 10;
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition-delay: 0s, 260ms;
+}
+.single-page-shell[data-book-immersive] > .single-page-library {
+  position: relative;
+  padding: 0;
+}
+.single-page-shell[data-book-immersive] .single-page-library > :is(.single-page-discovery-error, .library-repair-prompt, .single-page-stale-results) {
+  position: relative;
+  z-index: 6;
+  margin: 0;
+}
+.single-page-shell[data-book-immersive] .single-page-load-more {
+  position: absolute;
+  z-index: 6;
+  bottom: 4.5rem;
+  inset-inline: 0;
+}
+@media (prefers-reduced-motion: reduce) {
+  .single-page-shell > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+    transition: none;
+  }
+}
+
 .shell-notifications {
   position: fixed;
   z-index: var(--z-notifications);
@@ -2249,6 +2290,11 @@ select:focus, input:focus { border-color: var(--primary); }
   container-type: inline-size;
 }
 
+.single-page-shell[data-book-immersive] .library-viewport {
+  position: absolute;
+  inset: 0;
+}
+
 .library-viewport__updating {
   position: absolute;
   z-index: 4;
@@ -2317,7 +2363,9 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .wallpaper-book__stage {
   --book-perspective: 1400px;
-  --book-paper-margin: clamp(3px, 0.65cqw, 10px);
+  /* Reserve the scaled fans horizontally and the lift/shadow vertically. */
+  --book-spread-width: max(1px, min(70cqw, calc(100cqw - 256px), 220cqh, 84rem));
+  --book-paper-margin: clamp(1px, calc(var(--book-spread-width) * 0.008), 18px);
   position: relative;
   min-width: 0;
   min-height: 0;
@@ -2353,7 +2401,7 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .wallpaper-book__spread {
   position: absolute;
-  width: min(60cqw, 220cqh, 60rem);
+  width: var(--book-spread-width);
   aspect-ratio: 32 / 10;
   left: 50%;
   top: 50%;
@@ -2431,10 +2479,10 @@ select:focus, input:focus { border-color: var(--primary); }
 
 .wallpaper-book__contact-shadow {
   position: absolute;
-  width: 74%;
-  height: 25%;
-  top: 58%;
-  left: 13%;
+  width: calc(var(--book-spread-width) * 1.25);
+  height: calc(var(--book-spread-width) * 0.15);
+  top: calc(50% + var(--book-spread-width) * 0.055);
+  left: calc(50% - var(--book-spread-width) * 0.625);
   border-radius: 50%;
   background: radial-gradient(ellipse, color-mix(in srgb, var(--text) 16%, transparent), transparent 70%);
   transform: translateZ(0);
@@ -2477,7 +2525,7 @@ select:focus, input:focus { border-color: var(--primary); }
   content: '';
   position: absolute;
   width: 22%;
-  height: 3px;
+  height: clamp(1.5px, calc(var(--book-paper-margin) * 0.39), 6px);
   bottom: max(1px, calc(var(--book-paper-margin) * 0.3125 - 1.5px));
   left: 39%;
   z-index: 5;
@@ -2566,6 +2614,52 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-book__actions button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
 .wallpaper-book__disabled-reason { margin: -0.4rem 1rem 0.6rem; color: var(--text-muted); text-align: center; font-size: 0.75rem; }
 .wallpaper-book--preparing { place-content: center; text-align: center; color: var(--text-muted); }
+
+.single-page-shell[data-book-immersive] .wallpaper-book {
+  position: relative;
+  display: block;
+  border: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__stage {
+  --book-spread-width: max(1px, min(70cqw, calc(100cqw - 256px), 220cqh));
+  position: absolute;
+  inset: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__heading {
+  position: absolute;
+  z-index: 5;
+  top: 0.75rem;
+  inset-inline: 0.75rem;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-muted);
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__heading h3 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__heading h3::after { content: ' ·'; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading :is(.wallpaper-book__loading, .wallpaper-book__load-more) { margin: 0; }
+.single-page-shell[data-book-immersive] .wallpaper-book__actions {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 0;
+  bottom: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__disabled-reason {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 0.5rem;
+  bottom: 4.2rem;
+  margin: 0;
+  pointer-events: none;
+}
 
 .wallpaper-book__zoom-layer {
   position: absolute;

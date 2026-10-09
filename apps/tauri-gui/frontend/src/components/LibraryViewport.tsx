@@ -21,6 +21,8 @@ export interface LibraryViewportProps {
   // Unlike focusToken it must not re-anchor or scroll the view.
   readonly returnFocusToken: number;
   readonly onAnchorChange: (wallpaperId: number, settled?: boolean) => void;
+  readonly immersive?: boolean;
+  readonly onImmersiveChange?: (immersive: boolean) => void;
 }
 
 function LibraryViewportImpl({
@@ -32,6 +34,8 @@ function LibraryViewportImpl({
   focusToken,
   returnFocusToken,
   onAnchorChange,
+  immersive,
+  onImmersiveChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
     book: () => (
@@ -42,6 +46,8 @@ function LibraryViewportImpl({
         model={model}
         onAnchorChange={onAnchorChange}
         returnFocusToken={returnFocusToken}
+        immersive={immersive}
+        onImmersiveChange={onImmersiveChange}
       />
     ),
     flow: () => (

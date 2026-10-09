@@ -13,7 +13,7 @@ import {
   accumulateBookWheel, classifyBookWheel, bookWheelTarget, bookSpringStep, bookDragVelocity,
   type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
-  bookPreviewOrder, bookRevealPaused, bookStaticSource, type BookTravelDirection,
+  bookPreviewOrder, bookRevealPaused, bookStaticSource, bookPageScale, resolveBookEscape, shouldEndBookImmersive, type BookTravelDirection,
   bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
   planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
   resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
@@ -30,6 +30,8 @@ export interface WallpaperBookProps {
   readonly focusToken?: number;
   readonly returnFocusToken?: number;
   readonly onAnchorChange?: (wallpaperId: number, settled?: boolean) => void;
+  readonly immersive?: boolean;
+  readonly onImmersiveChange?: (immersive: boolean) => void;
 }
 
 interface BookContextMenu { readonly entry: LibraryBrowserItemDTO; readonly x: number; readonly y: number }
@@ -45,7 +47,7 @@ interface BookDrag {
 }
 
 export function useWallpaperBookController(props: WallpaperBookProps) {
-  const { model, focusToken = 0, returnFocusToken = 0 } = props;
+  const { model, focusToken = 0, returnFocusToken = 0, immersive = false, onImmersiveChange } = props;
   const reducedMotion = useReducedMotion();
   const [initial] = useState(() => resolveLibraryFlowStartupAnchor(model.entries, props.initialAnchorWallpaperId, model.currentPath)?.index ?? 0);
   const [spread, setSpread] = useState(() => bookPositionForWallpaper(initial));
@@ -62,6 +64,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden);
   const [focused, setFocused] = useState(() => typeof document === 'undefined' || document.hasFocus());
   const stageRef = useRef<HTMLDivElement>(null);
+  const spreadElementRef = useRef<HTMLDivElement>(null);
+  const pageScaleRef = useRef(1);
   const zoomMediaRef = useRef<HTMLDivElement>(null);
   const zoomStillRef = useRef<HTMLImageElement>(null);
   const zoomDecorationRef = useRef<HTMLDivElement>(null);
@@ -209,7 +213,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const paint = useCallback(() => {
     const { reducedMotion: reduce } = latest.current;
     for (const [leaf, element] of leavesRef.current) {
-      const state = bookLeafTransform(leaf, reduce ? spreadRef.current : positionRef.current, reduce);
+      const state = bookLeafTransform(leaf, reduce ? spreadRef.current : positionRef.current, reduce, pageScaleRef.current);
       element.style.willChange = !settledRef.current && Math.abs(leaf - positionRef.current) <= 1.5 ? 'transform' : '';
       element.style.transform = state.transform;
       element.style.opacity = String(state.opacity);
@@ -218,6 +222,29 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       element.querySelectorAll<HTMLElement>('.book-leaf__highlight').forEach((highlight) => { highlight.style.opacity = String(state.highlight); });
     }
   }, []);
+
+  // Layout reads happen at resize/toggle boundaries, never in the motion loop.
+  // On a toggle this child layout effect paints before the shell starts its FLIP.
+  useLayoutEffect(() => {
+    const element = spreadElementRef.current;
+    if (!element) return;
+    pageScaleRef.current = bookPageScale((Number.parseFloat(getComputedStyle(element).width) || element.offsetWidth) / 2);
+    paint();
+  }, [paint, immersive]);
+
+  useLayoutEffect(() => {
+    const element = spreadElementRef.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(([entry]) => {
+      if (!entry) return;
+      const scale = bookPageScale(entry.contentRect.width / 2);
+      if (pageScaleRef.current === scale) return;
+      pageScaleRef.current = scale;
+      paint();
+    });
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, [paint]);
 
   const updatePosition = useCallback((position: number, isSettled: boolean) => {
     const current = latest.current.props.model;
@@ -586,7 +613,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       setZoomMoving(false);
     }
     return cancelZoomAnimation;
-  }, [cancelZoomAnimation, cancelZoomSwap, revealZoomLive, setZoomDirection, zoomIndex, reducedMotion]);
+  }, [cancelZoomAnimation, cancelZoomSwap, revealZoomLive, setZoomDirection, zoomIndex, reducedMotion, immersive]);
 
   useLayoutEffect(() => {
     const previous = resetRef.current;
@@ -680,6 +707,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   useEffect(() => {
     setInteracting(viewActive);
   }, [viewActive, setInteracting]);
+
+  useEffect(() => {
+    if (immersive && shouldEndBookImmersive('book', visible, false)) onImmersiveChange?.(false);
+  }, [immersive, onImmersiveChange, visible]);
 
   useEffect(() => {
     if (!viewActive) {
@@ -970,10 +1001,24 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     }).catch(() => { /* The bounded thumbnail fallback still runs. */ });
   };
 
+  const handleEscape = (event: KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Escape' || event.defaultPrevented || !viewActive || !focused
+      || event.altKey || event.metaKey || event.ctrlKey) return;
+    const escape = resolveBookEscape(contextMenu !== null, zoomIndex !== null, immersive);
+    if (!escape) return;
+    event.preventDefault();
+    event.stopPropagation();
+    if (escape === 'context') { setContextMenu(null); focusStage(); }
+    else if (escape === 'zoom') closeZoom();
+    else { onImmersiveChange?.(false); focusStage(); }
+  };
+
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     pendingMenuRef.current = null;
-    if (event.target !== event.currentTarget || !interactionActive) return;
+    if (event.target !== event.currentTarget || !viewActive || !focused) return;
     if (event.altKey || event.metaKey || event.ctrlKey) return;
+    if (event.key === 'Escape') { handleEscape(event); return; }
+    if (!interactionActive) return;
     const intent = resolveBookKey(event.key, event.shiftKey);
     if (!intent) return;
     event.preventDefault();
@@ -998,6 +1043,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     } else if (intent === 'apply') applySelected();
     else if (intent === 'zoom') toggleZoom();
     else if (intent === 'unzoom') closeZoom();
+    else if (intent === 'immersive') { onImmersiveChange?.(!immersive); focusStage(); }
     else if (intent === 'context') {
       const rect = (zoomRef.current ?? stageRef.current)?.getBoundingClientRect();
       openContextMenu(zoomIndex ?? selectedIndex, (rect?.left ?? 0) + 16, (rect?.top ?? 0) + 16);
@@ -1005,10 +1051,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   };
 
   return {
-    elements: { stageRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
-    snapshot: { spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, zoomStillSrc, contextMenu, reducedMotion, interactionActive, openIndices, visibleLeaves },
+    elements: { stageRef, spreadElementRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
+    snapshot: { spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, zoomStillSrc, contextMenu, reducedMotion, interactionActive, openIndices, visibleLeaves, pageScale: pageScaleRef.current },
     actions: {
-      handlePointerDown, handlePointerMove, finishPointer, handleKeyDown, handlePageClick,
+      handlePointerDown, handlePointerMove, finishPointer, handleKeyDown, handleEscape, handlePageClick,
       openContextMenu, applySelected, toggleZoom, closeZoom, focusStage, revealZoomLive, mayUpdateZoomStill,
       cancelPendingMenu: () => { pendingMenuRef.current = null; },
       closeContextMenu: () => { setContextMenu(null); focusStage(); },

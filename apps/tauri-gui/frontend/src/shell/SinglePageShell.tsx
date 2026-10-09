@@ -9,6 +9,7 @@ import { Popover } from 'radix-ui';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -19,6 +20,9 @@ import LibraryFilterControls, { sourceFilterValue } from './LibraryFilterControl
 import { useLibrarySelection } from './useLibrarySelection.ts';
 import { useLibraryViewModel } from './useLibraryViewModel.ts';
 import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
+import { captureBookLayout, animateBookLayout, type BookLayoutSnapshot } from './bookImmersiveLayout.ts';
+import { shouldEndBookImmersive } from '../components/wallpaperBookModel.ts';
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 
 import { api } from '../api/bridge.ts';
 import { commandErrorFeedback, commandResultMessage } from '../api/feedback.ts';
@@ -90,6 +94,10 @@ function selectedDescription(entry: LibraryBrowserItemDTO | null): string {
 export default function SinglePageShell() {
   if (libraryMetricsEnabled()) recordMetric('library.shell.render', 1);
   const [search, setSearch] = useState('');
+  const [bookImmersive, setBookImmersive] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const bookLayoutRef = useRef<BookLayoutSnapshot | null>(null);
+  const reducedMotion = useReducedMotion();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -619,6 +627,34 @@ export default function SinglePageShell() {
       onDetails: openLibraryDetails, buildContextActions,
     },
   });
+  const changeBookImmersive = useCallback((immersive: boolean) => {
+    if (immersive === bookImmersive) return;
+    const shell = shellRef.current;
+    bookLayoutRef.current = shell ? captureBookLayout(shell) : null;
+    // Inactive books must not steal focus from the dialog that just opened.
+    if (libraryViewModel.active) {
+      shell?.querySelector<HTMLElement>('.wallpaper-book__stage')?.focus({ preventScroll: true });
+    }
+    if (immersive) setFiltersOpen(false);
+    setBookImmersive(immersive);
+  }, [bookImmersive, libraryViewModel.active]);
+  const immersiveQueryRef = useRef({ resetKey, replaceCount: browser.replaceCount });
+  useEffect(() => {
+    const previous = immersiveQueryRef.current;
+    immersiveQueryRef.current = { resetKey, replaceCount: browser.replaceCount };
+    const queryReset = previous.resetKey !== resetKey || previous.replaceCount !== browser.replaceCount;
+    const active = libraryViewModel.active && browser.entries.length > 0 && !browser.initialLoading && !firstRunEligible;
+    if (bookImmersive && shouldEndBookImmersive(preferences.libraryViewMode, active, queryReset)) {
+      changeBookImmersive(false);
+    }
+  }, [bookImmersive, browser.entries.length, browser.initialLoading, browser.replaceCount,
+    changeBookImmersive, firstRunEligible, libraryViewModel.active, preferences.libraryViewMode, resetKey]);
+  useLayoutEffect(() => {
+    const previous = bookLayoutRef.current;
+    bookLayoutRef.current = null;
+    const shell = shellRef.current;
+    if (shell) return animateBookLayout(shell, previous, reducedMotion);
+  }, [bookImmersive, reducedMotion]);
   const flowAnchorEntry = useMemo(
     () => browser.entries.find((entry) => entry.wallpaperId === libraryViewportAnchorId) ?? null,
     [browser.entries, libraryViewportAnchorId],
@@ -630,6 +666,8 @@ export default function SinglePageShell() {
 
   return (
     <div
+      ref={shellRef}
+      data-book-immersive={bookImmersive || undefined}
       className={`single-page-shell library-view-${preferences.libraryViewMode}${
         settingsOpen ? ' settings-open' : ''
       }${shellNotificationsVisible ? ' has-notifications' : ''}${
@@ -649,7 +687,7 @@ export default function SinglePageShell() {
         event.preventDefault();
       }}
     >
-      <header className="single-page-topbar" data-tauri-drag-region="deep">
+      <header className="single-page-topbar" data-tauri-drag-region="deep" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
         <h1 className="single-page-brand">Wallpaper Console</h1>
         <label className="single-page-search">
           <Search size={16} aria-hidden="true" />
@@ -716,7 +754,7 @@ export default function SinglePageShell() {
         </button>
       </header>
 
-      <div className="single-page-library-controls">
+      <div className="single-page-library-controls" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
         <OverflowStrip className="single-page-filters" role="toolbar" aria-label="Library filters">
           <span aria-hidden="true" className="single-page-filters__label">01 / FILTER</span>
           <LibraryFilterControls
@@ -819,11 +857,13 @@ export default function SinglePageShell() {
             model: libraryViewModel,
             onAnchorChange: rememberLibraryAnchor,
             returnFocusToken: libraryReturnFocusToken,
+            immersive: bookImmersive,
+            onImmersiveChange: changeBookImmersive,
           }}
         />
       </main>
 
-      <footer className="single-page-statusbar">
+      <footer className="single-page-statusbar" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
         <span className="single-page-statusbar__selection">
           {preferences.libraryViewMode !== 'grid'
             ? flowAnchorEntry

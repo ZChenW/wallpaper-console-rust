@@ -1,5 +1,5 @@
 import { memo, useMemo } from 'react';
-import { Check, Heart, Info, SearchX, ZoomIn, ZoomOut } from 'lucide-react';
+import { Check, Heart, Info, Maximize2, Minimize2, SearchX, ZoomIn, ZoomOut } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
 import type { EnhancedMediaEligibility } from './wallpaperPreviewMedia.ts';
@@ -37,13 +37,13 @@ const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, activ
 function WallpaperBookReady(props: WallpaperBookProps) {
   const { model } = props;
   const {
-    elements: { stageRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
+    elements: { stageRef, spreadElementRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
     snapshot: {
       spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, zoomStillSrc,
-      contextMenu, reducedMotion, interactionActive, visibleLeaves,
+      contextMenu, reducedMotion, interactionActive, visibleLeaves, pageScale,
     },
     actions: {
-      handlePointerDown, handlePointerMove, finishPointer, handleKeyDown,
+      handlePointerDown, handlePointerMove, finishPointer, handleKeyDown, handleEscape,
       handlePageClick, openContextMenu, applySelected, toggleZoom, closeZoom,
       closeContextMenu, focusStage, cancelPendingMenu, revealZoomLive, mayUpdateZoomStill,
     },
@@ -139,6 +139,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
       onClickCapture={cancelPendingMenu}
       onPointerDownCapture={cancelPendingMenu}
       onKeyDownCapture={cancelPendingMenu}
+      onKeyDown={handleEscape}
       onWheelCapture={cancelPendingMenu}
     >
       <header className="wallpaper-book__heading">
@@ -186,9 +187,9 @@ function WallpaperBookReady(props: WallpaperBookProps) {
             className="wallpaper-book__contact-shadow"
             data-side={spread === 0 ? 'right' : spread * 2 >= model.entries.length ? 'left' : undefined}
           />
-          <div className="wallpaper-book__spread">
+          <div className="wallpaper-book__spread" ref={spreadElementRef}>
             {visibleLeaves.map((leaf) => {
-              const transform = bookLeafTransform(leaf, spread, reducedMotion);
+              const transform = bookLeafTransform(leaf, spread, reducedMotion, pageScale);
               return (
                 <div
                   className="book-leaf"
@@ -307,6 +308,19 @@ function WallpaperBookReady(props: WallpaperBookProps) {
           type="button"
         >
           <Info aria-hidden="true" size={18} />
+        </button>
+        <button
+          aria-label={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
+          aria-pressed={props.immersive ?? false}
+          disabled={!model.active || !props.onImmersiveChange}
+          onClick={() => {
+            props.onImmersiveChange?.(!props.immersive);
+            focusStage();
+          }}
+          title={props.immersive ? 'Exit immersive view' : 'Enter immersive view'}
+          type="button"
+        >
+          {props.immersive ? <Minimize2 aria-hidden="true" size={18} /> : <Maximize2 aria-hidden="true" size={18} />}
         </button>
       </div>
       {disabledReason ? (
