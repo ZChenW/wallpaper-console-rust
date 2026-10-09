@@ -42,6 +42,8 @@ export interface WallpaperPreviewMediaProps {
   readonly loading?: 'eager' | 'lazy';
   readonly staticFallback?: boolean;
   readonly stabilizeEntranceDuringMotion?: boolean;
+  /** Book zoom captures the displayed frame through a canvas. */
+  readonly captureFrame?: boolean;
   readonly onReady?: (ready: boolean) => void;
   readonly onEnhancedError?: (message: string) => void;
 }
@@ -57,6 +59,7 @@ export default function WallpaperPreviewMedia({
   stabilizeEntranceDuringMotion = false,
   onEnhancedError,
   onReady,
+  captureFrame = false,
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticPreviewAssetPath(entry);
   const { thumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
@@ -220,6 +223,7 @@ export default function WallpaperPreviewMedia({
         <video
           aria-hidden="true"
           autoPlay
+          crossOrigin={captureFrame ? 'anonymous' : undefined}
           className={className}
           data-enhanced-preview="video"
           key={`${activeCandidate.kind}:${activeCandidate.path}`}

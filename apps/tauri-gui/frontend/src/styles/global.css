@@ -2313,7 +2313,6 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-book__stage[data-zoomed] .wallpaper-book__scene {
   opacity: 0;
-  transform: scale(0.96);
   pointer-events: none;
 }
 .wallpaper-book.is-refreshing { cursor: progress; }
@@ -2534,7 +2533,7 @@ select:focus, input:focus { border-color: var(--primary); }
   transform-origin: center;
   background: var(--panel);
   border-radius: 0.5rem;
-  overflow: hidden;
+  overflow: visible;
   cursor: default;
 }
 .wallpaper-book__zoom-print {
@@ -2548,20 +2547,28 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-book__zoom-media {
   position: absolute;
   inset: 0;
-  opacity: 0;
-  transition: opacity 100ms ease-out;
+  opacity: 1;
 }
-.wallpaper-book__zoom-media[data-visible] { opacity: 1; }
-.wallpaper-book__zoom-media[data-has-still] .wallpaper-thumb-placeholder { visibility: hidden; }
-.wallpaper-book__zoom-page[data-moving] .book-leaf__states,
-.wallpaper-book__zoom-page[data-moving] .book-leaf__indicator { visibility: hidden; }
-.wallpaper-book[data-reduced-motion] :is(.book-leaf__face, .book-leaf__face::before, .wallpaper-book__zoom-media) { transition: none; }
+.wallpaper-book__zoom-still { z-index: 1; }
+.wallpaper-book__zoom-decoration {
+  position: absolute;
+  inset: auto;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  background: transparent;
+  pointer-events: none;
+  z-index: 2;
+}
+.wallpaper-book__zoom-decoration .book-leaf__print { background: transparent; }
+.wallpaper-book[data-reduced-motion] :is(.book-leaf__face, .book-leaf__face::before) { transition: none; }
 
 .wallpaper-book[data-reduced-motion] .wallpaper-book__spread { transform: translate(-50%, -50%); }
 .wallpaper-book__outgoing-spread { pointer-events: none; }
 .wallpaper-book[data-reduced-motion] .book-leaf { transform-style: flat; }
 .wallpaper-book[data-reduced-motion] .book-leaf__face { display: none; transform: none; }
 .wallpaper-book[data-reduced-motion] .book-leaf__face[data-open] { display: block; animation: book-spread-fade 140ms ease-out; }
+.wallpaper-book[data-reduced-motion] .wallpaper-book__zoom-decoration { animation: none; }
 .wallpaper-book[data-reduced-motion] :is(.book-leaf__shade, .book-leaf__highlight) { display: none; }
 @keyframes book-spread-fade { from { opacity: 0; } to { opacity: 1; } }
 @media (prefers-reduced-motion: reduce) {

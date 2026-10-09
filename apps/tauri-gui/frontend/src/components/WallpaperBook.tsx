@@ -1,4 +1,4 @@
-import { memo, useMemo, useRef, useState } from 'react';
+import { memo, useMemo } from 'react';
 import { Check, Heart, Info, SearchX, ZoomIn, ZoomOut } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
@@ -7,6 +7,7 @@ import { ApplyIndicator } from './ApplyIndicator.tsx';
 import ContextMenu from './ContextMenu.tsx';
 import LibraryState from './LibraryState.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
+import BookZoomPicture from './BookZoomPicture.tsx';
 import { libraryEntryApplyAvailable, libraryEntryApplyDisabledReason } from './libraryViewModel.ts';
 import { bookLeafTransform, bookWallpaperIndex, type BookFace } from './wallpaperBookModel.ts';
 import { flowStateLabels } from './wallpaperFlowModel.ts';
@@ -14,8 +15,6 @@ import { displayName } from './wallpaperCardHelpers.ts';
 import { useWallpaperBookController, type WallpaperBookProps } from './useWallpaperBookController.ts';
 
 export type { WallpaperBookProps } from './useWallpaperBookController.ts';
-
-const BookInteractiveMedia = memo(WallpaperPreviewMedia);
 
 /** Stable media props: motion/window renders cannot restart decode or eligibility. */
 const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, active, reducedMotion }: {
@@ -25,40 +24,17 @@ const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, activ
     active, centered: open && selected, selected: open && selected, settled: true, reducedMotion,
   }), [active, open, selected, reducedMotion]);
   return <WallpaperPreviewMedia entry={entry} alt="" eligibility={eligibility}
-    loading="eager" staticFallback={open} stabilizeEntranceDuringMotion />;
+    loading="eager" staticFallback={open} stabilizeEntranceDuringMotion captureFrame />;
 }, (previous, next) => previous.entry === next.entry && (next.moving || (
   previous.open === next.open && previous.selected === next.selected
   && previous.active === next.active && previous.reducedMotion === next.reducedMotion
   && previous.moving === next.moving
 )));
 
-function BookZoomMedia({ entry, active, reducedMotion, moving, stillSrc, mediaRef }: {
-  entry: LibraryBrowserItemDTO; active: boolean; reducedMotion: boolean; moving: boolean;
-  stillSrc: string | null; mediaRef: React.RefObject<HTMLDivElement | null>;
-}) {
-  const [ready, setReady] = useState(false);
-  // Moving never changes eligibility; a loaded preview stays underneath the
-  // already-painted picture for the entire shared zoom timeline.
-  const eligibility = useMemo<EnhancedMediaEligibility>(() => ({
-    active, centered: true, selected: true, settled: true, reducedMotion,
-  }), [active, reducedMotion]);
-  const heldEligibility = useRef(eligibility);
-  if (!moving) heldEligibility.current = eligibility;
-  return <>
-    {stillSrc ? <img alt="" className="wallpaper-book__zoom-still" src={stillSrc}
-      draggable={false} loading="eager" /> : null}
-    <div className="wallpaper-book__zoom-media" data-visible={(!stillSrc || (!moving && ready)) || undefined}
-      data-has-still={Boolean(stillSrc) || undefined} ref={mediaRef}>
-      <BookInteractiveMedia alt="" entry={entry} eligibility={heldEligibility.current}
-        loading="eager" staticFallback onReady={setReady} />
-    </div>
-  </>;
-}
-
 function WallpaperBookReady(props: WallpaperBookProps) {
   const { model } = props;
   const {
-    elements: { stageRef, zoomRef, zoomMediaRef, leavesRef },
+    elements: { stageRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
     snapshot: {
       spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, zoomStillSrc,
       contextMenu, reducedMotion, interactionActive, visibleLeaves,
@@ -66,7 +42,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
     actions: {
       handlePointerDown, handlePointerMove, finishPointer, handleKeyDown,
       handlePageClick, openContextMenu, applySelected, toggleZoom, closeZoom,
-      closeContextMenu, focusStage, cancelPendingMenu,
+      closeContextMenu, focusStage, cancelPendingMenu, revealZoomLive, mayUpdateZoomStill,
     },
   } = useWallpaperBookController(props);
   const zoomed = zoomIndex !== null;
@@ -244,24 +220,32 @@ function WallpaperBookReady(props: WallpaperBookProps) {
               role="option"
             >
               <div className="wallpaper-book__zoom-print">
-                <BookZoomMedia key={selectedEntry.path} entry={selectedEntry}
+                <BookZoomPicture entry={selectedEntry}
                   active={interactionActive} reducedMotion={reducedMotion} moving={zoomMoving}
-                  stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} />
+                  stillSrc={zoomStillSrc} mediaRef={zoomMediaRef} stillRef={zoomStillRef}
+                  onLiveReady={revealZoomLive} mayUpdateStill={mayUpdateZoomStill} />
               </div>
-              <span className="book-leaf__states">
-                {flowStateLabels({
-                  selected: false,
-                  current: model.currentPath === selectedEntry.path,
-                  applying,
-                  pending,
-                  favorite: selectedEntry.favorite,
-                }).join(' · ')}
-              </span>
-              {applying || pending ? (
-                <div aria-hidden="true" className="book-leaf__indicator">
-                  <ApplyIndicator state={applying ? 'applying' : 'pending'} />
-                </div>
-              ) : null}
+              <div aria-hidden="true" className="book-leaf__face wallpaper-book__zoom-decoration"
+                data-open data-selected ref={zoomDecorationRef}>
+                <div className="book-leaf__print" />
+                <span className="book-leaf__spine-shadow" style={{
+                  background: `linear-gradient(to ${((zoomIndex ?? selectedIndex) % 2 === 0) ? 'right' : 'left'}, color-mix(in srgb, var(--text) 11%, transparent), transparent 9%)`,
+                }} />
+                <span className="book-leaf__states">
+                  {flowStateLabels({
+                    selected: false,
+                    current: model.currentPath === selectedEntry.path,
+                    applying,
+                    pending,
+                    favorite: selectedEntry.favorite,
+                  }).join(' · ')}
+                </span>
+                {applying || pending ? (
+                  <div aria-hidden="true" className="book-leaf__indicator">
+                    <ApplyIndicator state={applying ? 'applying' : 'pending'} />
+                  </div>
+                ) : null}
+              </div>
             </div>
           </div>
         ) : null}

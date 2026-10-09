@@ -11,13 +11,17 @@ import { useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type LibraryViewModel } from './libraryViewModel.ts';
 import {
   accumulateBookWheel, classifyBookWheel, bookWheelTarget, bookSpringStep, bookDragVelocity,
-  type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS, BOOK_ZOOM_DURATION_MS,
+  type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
   bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
   planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
   resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
 } from './wallpaperBookModel.ts';
-import { staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
+import { api } from '../api/bridge.ts';
+import { safeFileSrc } from './safeFileSrc.ts';
+import { bookZoomTimeline, BOOK_ZOOM_REST, bookZoomReveal } from './wallpaperBookZoom.ts';
+import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
+import { staticFallbackAssetPath, staticPreviewAssetPath } from './wallpaperPreviewMedia.ts';
 
 export interface WallpaperBookProps {
   readonly model: LibraryViewModel;
@@ -56,6 +60,15 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const [focused, setFocused] = useState(() => typeof document === 'undefined' || document.hasFocus());
   const stageRef = useRef<HTMLDivElement>(null);
   const zoomMediaRef = useRef<HTMLDivElement>(null);
+  const zoomStillRef = useRef<HTMLImageElement>(null);
+  const zoomDecorationRef = useRef<HTMLDivElement>(null);
+  const zoomPendingNavigationRef = useRef<(() => void) | null>(null);
+  const zoomPoseRef = useRef<string | null>(null);
+  const zoomMovingRef = useRef(false);
+  const zoomReadyRef = useRef(false);
+  const zoomNavigationRef = useRef(0);
+  const zoomNavigationTargetRef = useRef<number | null>(null);
+  const zoomResumePageVideoRef = useRef<(() => void) | null>(null);
   const zoomFadeRef = useRef<Animation | null>(null);
   const zoomRef = useRef<HTMLDivElement>(null);
   const leavesRef = useRef(new Map<number, HTMLDivElement>());
@@ -86,7 +99,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   const crossFadeAnimationRef = useRef<Animation | null>(null);
   const latest = useRef({ props, reducedMotion, zoomIndex });
   latest.current = { props, reducedMotion, zoomIndex };
-  const { observeVisible, setScrolling, setInteracting } = useThumbnailStore();
+  const { observeVisible, setScrolling, setInteracting, get: getThumbnail } = useThumbnailStore();
   const leafCount = bookLeafCount(model.entries.length);
   const lastPosition = bookLastPosition(model.entries.length);
   const openIndices = openBookWallpapers(spread, model.entries.length);
@@ -142,7 +155,15 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
 
   const resetZoom = useCallback(() => {
     cancelZoomAnimation();
+    zoomResumePageVideoRef.current?.();
+    zoomResumePageVideoRef.current = null;
     zoomOriginRef.current = null;
+    zoomPoseRef.current = null;
+    zoomMovingRef.current = false;
+    zoomReadyRef.current = false;
+    zoomNavigationRef.current += 1;
+    zoomPendingNavigationRef.current = null;
+    zoomNavigationTargetRef.current = null;
     zoomClosingRef.current = false;
     changeZoomIndex(null);
     setZoomStillSrc(null);
@@ -312,38 +333,82 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     publishAnchor(index, settledRef.current);
   }, [publishAnchor]);
 
-  const setZoomDirection = useCallback((closing: boolean) => {
+  const mayUpdateZoomStill = useCallback(() => latest.current.zoomIndex !== null
+    && !zoomMovingRef.current && !zoomClosingRef.current, []);
+
+  const revealZoomLive = useCallback(() => {
+    zoomReadyRef.current = true;
+    if (!mayUpdateZoomStill() || !zoomStillRef.current) return;
+    const still = zoomStillRef.current;
+    const opacity = Number.parseFloat(getComputedStyle(still).opacity);
     cancelZoomFade();
+    const reveal = bookZoomReveal(opacity, latest.current.reducedMotion);
+    const fade = still.animate(reveal.frames, { duration: reveal.duration, easing: 'linear', fill: 'both' });
+    zoomFadeRef.current = fade;
+  }, [cancelZoomFade, mayUpdateZoomStill]);
+
+  const setZoomDirection = useCallback((closing: boolean, initial = false) => {
+    const page = zoomRef.current;
+    const stage = stageRef.current;
+    const pose = zoomPoseRef.current;
+    const scene = stage?.querySelector<HTMLElement>('.wallpaper-book__scene');
+    const backdrop = stage?.querySelector<HTMLElement>('.wallpaper-book__zoom-backdrop');
+    if (!page || !stage || !scene || !backdrop || !pose) return;
+    // Sample BEFORE canceling any filled animation, including the still reveal.
+    const sample = initial ? undefined : {
+      transform: getComputedStyle(page).transform,
+      sceneOpacity: Number.parseFloat(getComputedStyle(scene).opacity),
+      backdropOpacity: Number.parseFloat(getComputedStyle(backdrop).opacity),
+      stillOpacity: zoomStillRef.current ? Number.parseFloat(getComputedStyle(zoomStillRef.current).opacity) : 1,
+    };
     zoomClosingRef.current = closing;
-    const media = zoomMediaRef.current;
-    if (media) {
-      const still = media.hasAttribute('data-has-still');
-      media.style.transition = closing && still ? 'none' : '';
-      media.style.opacity = closing && still ? '0' : '';
-    }
+    zoomMovingRef.current = true;
+    zoomNavigationRef.current += 1;
+    zoomPendingNavigationRef.current = null;
+    zoomNavigationTargetRef.current = latest.current.zoomIndex;
+    cancelZoomAnimation();
     setZoomMoving(true);
-    // Keep one timeline in both directions, including after its open endpoint.
-    for (const animation of zoomAnimationsRef.current) {
-      animation.playbackRate = closing ? -1 : 1;
-      animation.play();
-    }
-  }, [cancelZoomFade]);
+    const timeline = bookZoomTimeline(closing ? 'close' : 'open', pose, sample);
+    const timing = { duration: timeline.duration, easing: 'linear', fill: 'both' as const };
+    const animations = [
+      page.animate(timeline.page, timing),
+      scene.animate(timeline.scene, timing),
+      backdrop.animate(timeline.backdrop, timing),
+    ];
+    if (zoomStillRef.current) animations.push(zoomStillRef.current.animate(timeline.still, timing));
+    zoomAnimationsRef.current = animations;
+    animations[0].onfinish = () => {
+      if (zoomClosingRef.current) {
+        // The real picture uses the same decoded source as the landing still.
+        const entry = latest.current.props.model.entries[latest.current.zoomIndex ?? -1];
+        const realImage = entry ? stage.querySelector<HTMLImageElement>(`#book-option-${entry.wallpaperId} img[data-preview-loaded="true"]`) : null;
+        if (realImage && zoomStillRef.current?.src) realImage.src = zoomStillRef.current.src;
+        flushSync(() => resetZoom());
+        focusStage();
+      } else {
+        zoomMovingRef.current = false;
+        setZoomMoving(false);
+        const navigate = zoomPendingNavigationRef.current;
+        zoomPendingNavigationRef.current = null;
+        if (navigate) navigate();
+        else if (zoomReadyRef.current) revealZoomLive();
+      }
+    };
+  }, [cancelZoomAnimation, focusStage, resetZoom, revealZoomLive]);
 
   const closeZoom = useCallback(() => {
-    if (latest.current.zoomIndex === null || zoomClosingRef.current) return;
+    if (latest.current.zoomIndex === null) {
+      if (zoomOriginRef.current) resetZoom(); // Cancel a pending video-frame decode.
+      return;
+    }
+    if (zoomClosingRef.current) return;
     focusStage();
-    if (latest.current.reducedMotion || zoomAnimationsRef.current.length === 0) {
+    if (latest.current.reducedMotion || !zoomPoseRef.current) {
       resetZoom();
       return;
     }
-    const media = zoomMediaRef.current;
-    const opacity = media ? Number.parseFloat(getComputedStyle(media).opacity) : 0;
-    if (media?.hasAttribute('data-has-still') && opacity > 0) {
-      zoomClosingRef.current = true;
-      const fade = media.animate([{ opacity }, { opacity: 0 }], { duration: 80, easing: 'ease-out', fill: 'forwards' });
-      zoomFadeRef.current = fade;
-      fade.onfinish = () => setZoomDirection(true);
-    } else setZoomDirection(true);
+    // No pre-fade, timer or decode: the new flight starts in this input frame.
+    setZoomDirection(true);
   }, [focusStage, resetZoom, setZoomDirection]);
 
   const toggleZoom = useCallback(() => {
@@ -353,6 +418,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       else closeZoom();
       return;
     }
+    if (zoomOriginRef.current) { resetZoom(); return; }
     if (!settledRef.current) return;
     const index = selectedRef.current;
     const entry = latest.current.props.model.entries[index];
@@ -362,18 +428,34 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     const spread = stage.querySelector<HTMLElement>('.wallpaper-book__spread');
     const rect = stage.getBoundingClientRect();
     zoomOriginRef.current = option && spread ? {
-      spineX: rect.left + spread.offsetLeft,
-      spineY: rect.top + spread.offsetTop,
-      width: option.offsetWidth,
+      spineX: rect.left + (Number.parseFloat(getComputedStyle(spread).left) || spread.offsetLeft),
+      spineY: rect.top + (Number.parseFloat(getComputedStyle(spread).top) || spread.offsetTop),
+      width: Number.parseFloat(getComputedStyle(option).width) || option.offsetWidth,
       face: wallpaperBookAddress(index).face,
       paperMargin: Number.parseFloat(getComputedStyle(option).paddingLeft) || 0,
     } : null;
     const image = option?.querySelector<HTMLImageElement>('img[data-preview-loaded="true"]');
-    setZoomStillSrc(image?.currentSrc || image?.src || null);
-    changeZoomIndex(index);
-    setZoomMoving(!latest.current.reducedMotion);
-    focusStage();
-  }, [changeZoomIndex, closeZoom, focusStage, setZoomDirection]);
+    const launch = (source: string | null) => {
+      setZoomStillSrc(source);
+      zoomMovingRef.current = !latest.current.reducedMotion;
+      zoomNavigationTargetRef.current = index;
+      zoomReadyRef.current = false;
+      changeZoomIndex(index);
+      setZoomMoving(zoomMovingRef.current);
+      focusStage();
+    };
+    const video = option?.querySelector<HTMLVideoElement>('video[data-enhanced-preview="video"]');
+    const frame = video && typeof video.pause === 'function' ? captureBookVideoStill(video) : null;
+    if (frame) {
+      zoomResumePageVideoRef.current = frame.resume;
+      const request = ++zoomNavigationRef.current;
+      const current = () => request === zoomNavigationRef.current && latest.current.zoomIndex === null
+        && latest.current.props.model.active && zoomOriginRef.current !== null;
+      void decodeBookStill(frame.source, (decoded) => launch(decoded.src), current).then(() => {
+        if (current()) resetZoom(); // Decode failed: leave the real page usable.
+      });
+    } else launch(image?.currentSrc || image?.src || video?.poster || null);
+  }, [changeZoomIndex, closeZoom, focusStage, resetZoom, setZoomDirection]);
 
   useLayoutEffect(() => {
     paint();
@@ -381,60 +463,71 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
 
   useLayoutEffect(() => {
     const element = zoomRef.current;
-    const origin = zoomOriginRef.current;
+    const opening = zoomOriginRef.current !== null;
+    let origin = zoomOriginRef.current;
     const stage = stageRef.current;
     if (zoomIndex === null) return;
     zoomOriginRef.current = null;
-    if (!element || !origin || !stage || reducedMotion) {
+    if (!origin && stage) {
+      const entry = latest.current.props.model.entries[zoomIndex];
+      const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
+      const spread = stage.querySelector<HTMLElement>('.wallpaper-book__spread');
+      const rect = stage.getBoundingClientRect();
+      if (option && spread) origin = {
+        spineX: rect.left + (Number.parseFloat(getComputedStyle(spread).left) || spread.offsetLeft), spineY: rect.top + (Number.parseFloat(getComputedStyle(spread).top) || spread.offsetTop),
+        width: Number.parseFloat(getComputedStyle(option).width) || option.offsetWidth, face: wallpaperBookAddress(zoomIndex).face,
+        paperMargin: Number.parseFloat(getComputedStyle(option).paddingLeft) || 0,
+      };
+    }
+    if (!element || !origin || !stage) {
+      zoomMovingRef.current = false;
       setZoomMoving(false);
       return;
     }
+    // getBoundingClientRect must see the untransformed destination on navigation.
+    element.style.transform = BOOK_ZOOM_REST;
     const pose = bookZoomTransform(origin, element.getBoundingClientRect());
-    const timing = {
-      duration: BOOK_ZOOM_DURATION_MS,
-      easing: 'cubic-bezier(0.22, 1, 0.36, 1)',
-      fill: 'both' as const,
+    zoomPoseRef.current = pose.transform;
+    const entry = latest.current.props.model.entries[zoomIndex];
+    const option = entry ? stage.querySelector<HTMLElement>(`#book-option-${entry.wallpaperId}`) : null;
+    const realPrint = option?.querySelector<HTMLElement>('.book-leaf__print');
+    const radius = (target: HTMLElement | null | undefined, fallback: string) => {
+      if (!target) return fallback;
+      const css = getComputedStyle(target);
+      const values = [css.borderTopLeftRadius, css.borderTopRightRadius, css.borderBottomRightRadius, css.borderBottomLeftRadius];
+      return values.every((value) => value?.endsWith('px'))
+        ? values.map((value) => `${Number.parseFloat(value) / pose.scale}px`).join(' ') : fallback;
     };
-    const animations: Animation[] = [];
-    const animate = (target: Element | null, frames: Keyframe[]) => {
-      if (target) animations.push(target.animate(frames, timing));
-    };
-    animate(element, [
-      { transform: pose.transform, borderRadius: pose.paperBorderRadius },
-      { transform: 'translate3d(0px, 0px, 0px) rotateX(0deg) rotateY(0deg) scale(1)', borderRadius: '0.5rem' },
-    ]);
-    animate(element.querySelector('.wallpaper-book__zoom-print'), [
-      { inset: pose.paperInset, borderRadius: pose.paperRadius },
-      { inset: '0px', borderRadius: '0px' },
-    ]);
-    animate(stage.querySelector('.wallpaper-book__scene'), [
-      { opacity: 1, transform: 'scale(1)' },
-      { opacity: 0, transform: 'scale(0.96)' },
-    ]);
-    animate(stage.querySelector('.wallpaper-book__zoom-backdrop'), [{ opacity: 0 }, { opacity: 1 }]);
-    zoomAnimationsRef.current = animations;
-    animations[0].onfinish = () => {
-      if (zoomClosingRef.current) {
-        // Cancel the filled scene animation and detach zoom in one synchronous
-        // commit: the unzoomed scene is fully opaque in that same paint.
-        flushSync(() => {
-          cancelZoomAnimation();
-          zoomClosingRef.current = false;
-          changeZoomIndex(null);
-          setZoomStillSrc(null);
-          setZoomMoving(false);
-        });
-        focusStage();
-      } else {
-        if (zoomMediaRef.current) {
-          zoomMediaRef.current.style.opacity = '';
-          zoomMediaRef.current.style.transition = '';
-        }
-        setZoomMoving(false);
+    element.style.borderRadius = radius(option, pose.paperBorderRadius);
+    const decoration = zoomDecorationRef.current;
+    if (decoration) {
+      // Original page coordinates keep its marker, shadows and labels exactly
+      // aligned at both endpoints, without changing those styles or any media.
+      decoration.style.width = `${origin.width}px`;
+      decoration.style.height = `${origin.width * 10 / 16}px`;
+      decoration.style.transform = `scale(${1 / pose.scale})`;
+      decoration.style.padding = `${origin.paperMargin * 10 / 16}px ${origin.paperMargin}px`;
+      const decorationPrint = decoration.querySelector<HTMLElement>('.book-leaf__print');
+      if (decorationPrint) decorationPrint.style.borderRadius = realPrint ? getComputedStyle(realPrint).borderRadius : '4px';
+      if (option) {
+        const css = getComputedStyle(option);
+        decoration.style.borderRadius = css.borderRadius;
+        decoration.style.boxShadow = css.boxShadow;
+        decoration.style.outline = css.outline;
       }
-    };
+    }
+    const print = element.querySelector<HTMLElement>('.wallpaper-book__zoom-print');
+    if (print) {
+      print.style.inset = pose.paperInset;
+      print.style.borderRadius = radius(realPrint, pose.paperRadius);
+    }
+    if (opening && !reducedMotion) setZoomDirection(false, true);
+    else {
+      zoomMovingRef.current = false;
+      setZoomMoving(false);
+    }
     return cancelZoomAnimation;
-  }, [cancelZoomAnimation, changeZoomIndex, focusStage, zoomIndex, reducedMotion]);
+  }, [cancelZoomAnimation, setZoomDirection, zoomIndex, reducedMotion]);
 
   useLayoutEffect(() => {
     const previous = resetRef.current;
@@ -511,15 +604,11 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   useEffect(() => {
     if (!viewActive) {
       releaseDrag();
-      cancelZoomAnimation();
-      zoomOriginRef.current = null;
-      if (zoomClosingRef.current || !latest.current.props.model.active) changeZoomIndex(null);
-      zoomClosingRef.current = false;
-      setZoomMoving(false);
+      resetZoom();
       moveTo(bookSnapTarget(positionRef.current, 0, lastPosition), true);
       cancelCrossFade();
     }
-  }, [cancelCrossFade, cancelZoomAnimation, changeZoomIndex, viewActive, lastPosition, moveTo, releaseDrag]);
+  }, [cancelCrossFade, resetZoom, viewActive, lastPosition, moveTo, releaseDrag]);
 
   useEffect(() => {
     // Pages are on screen whether or not the stage has keyboard focus or a menu is open, so
@@ -580,7 +669,12 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   useEffect(() => () => {
     cancelMotion();
     releaseDrag();
+    zoomNavigationRef.current += 1;
+    zoomPendingNavigationRef.current = null;
+    zoomMovingRef.current = true;
     cancelZoomAnimation();
+    zoomResumePageVideoRef.current?.();
+    zoomResumePageVideoRef.current = null;
     cancelCrossFade();
     setScrolling(false);
     setInteracting(true);
@@ -702,6 +796,50 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     }
   };
 
+  const navigateZoom = (index: number) => {
+    const entry = latest.current.props.model.entries[index];
+    if (!entry || zoomClosingRef.current) return;
+    zoomNavigationTargetRef.current = index;
+    if (index === latest.current.zoomIndex) {
+      zoomNavigationRef.current += 1;
+      zoomPendingNavigationRef.current = null;
+      return;
+    }
+    const asset = staticPreviewAssetPath(entry);
+    const thumbnail = getThumbnail(asset);
+    const fallback = staticFallbackAssetPath(entry, true);
+    const request = ++zoomNavigationRef.current;
+    const current = () => request === zoomNavigationRef.current && latest.current.zoomIndex !== null && !zoomClosingRef.current;
+    const source = thumbnail ? Promise.resolve(thumbnail) : fallback
+      ? api.previewAssetAuthorize(fallback, entry.path)
+      : api.thumbnailFor(asset).then((thumbnail) => thumbnail.path);
+    void source.then((authorized) => {
+      if (!current()) return;
+      return decodeBookStill(safeFileSrc(authorized), (image) => {
+        const commit = () => {
+          if (!current() || zoomMovingRef.current) return;
+          cancelZoomAnimation();
+          zoomResumePageVideoRef.current?.();
+          zoomResumePageVideoRef.current = null;
+          zoomReadyRef.current = false;
+          zoomMovingRef.current = false;
+          zoomPoseRef.current = null;
+          preferredIndexRef.current = index;
+          // One React commit replaces source, selection, spread and landing pose.
+          flushSync(() => {
+            moveTo(bookPositionForWallpaper(index), true);
+            selectIndex(index);
+            setZoomStillSrc(image.src);
+            changeZoomIndex(index);
+            setZoomMoving(false);
+          });
+        };
+        if (zoomMovingRef.current) zoomPendingNavigationRef.current = commit;
+        else commit();
+      }, current);
+    }).catch(() => { /* The current picture remains usable on failure. */ });
+  };
+
   const handleKeyDown = (event: KeyboardEvent<HTMLDivElement>) => {
     pendingMenuRef.current = null;
     if (event.target !== event.currentTarget || !interactionActive) return;
@@ -713,29 +851,13 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     if (intent === 'next' || intent === 'previous') {
       const direction = intent === 'next' ? 1 : -1;
       if (zoomIndex !== null) {
-        const index = Math.min(model.entries.length - 1, Math.max(0, zoomIndex + direction));
-        cancelZoomAnimation();
-        zoomClosingRef.current = false;
-        zoomOriginRef.current = null;
-        setZoomMoving(false);
-        preferredIndexRef.current = index;
-        moveTo(bookPositionForWallpaper(index), true);
-        selectIndex(index);
-        setZoomStillSrc(null);
-        changeZoomIndex(index);
+        const index = Math.min(model.entries.length - 1, Math.max(0, (zoomNavigationTargetRef.current ?? zoomIndex) + direction));
+        navigateZoom(index);
       } else moveTo((targetRef.current ?? Math.round(positionRef.current)) + direction);
     } else if (intent === 'first' || intent === 'last') {
       if (zoomIndex !== null) {
         const index = intent === 'first' ? 0 : model.entries.length - 1;
-        cancelZoomAnimation();
-        zoomClosingRef.current = false;
-        zoomOriginRef.current = null;
-        setZoomMoving(false);
-        preferredIndexRef.current = index;
-        moveTo(bookPositionForWallpaper(index), true);
-        selectIndex(index);
-        setZoomStillSrc(null);
-        changeZoomIndex(index);
+        navigateZoom(index);
       } else {
         preferredIndexRef.current = intent === 'first' ? 0 : model.entries.length - 1;
         moveTo(intent === 'first' ? 0 : lastPosition);
@@ -753,11 +875,11 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
   };
 
   return {
-    elements: { stageRef, zoomRef, zoomMediaRef, leavesRef },
+    elements: { stageRef, zoomRef, zoomMediaRef, zoomStillRef, zoomDecorationRef, leavesRef },
     snapshot: { spread, leafKeyOffset, selectedIndex, selectedEntry, settled, zoomIndex, zoomMoving, zoomStillSrc, contextMenu, reducedMotion, interactionActive, openIndices, visibleLeaves },
     actions: {
       handlePointerDown, handlePointerMove, finishPointer, handleKeyDown, handlePageClick,
-      openContextMenu, applySelected, toggleZoom, closeZoom, focusStage,
+      openContextMenu, applySelected, toggleZoom, closeZoom, focusStage, revealZoomLive, mayUpdateZoomStill,
       cancelPendingMenu: () => { pendingMenuRef.current = null; },
       closeContextMenu: () => { setContextMenu(null); focusStage(); },
     },
