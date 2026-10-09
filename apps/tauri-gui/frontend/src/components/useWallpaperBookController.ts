@@ -13,7 +13,7 @@ import {
   accumulateBookWheel, classifyBookWheel, bookWheelTarget, bookSpringStep, bookDragVelocity,
   type BookWheelSample, type BookDragSample, BOOK_APPEND_DISTANCE, BOOK_WHEEL_IDLE_MS,
   bookAppendApproach, bookLastPosition, bookLeafCount, bookLeafTransform, bookPositionForWallpaper, bookSnapTarget,
-  bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
+  bookPreviewOrder, bookVisibleWindow, bookZoomTransform, clampBookPosition, openBookWallpapers,
   planBookMove, resolveBookContextMenu, resolveBookKey, resolveBookPointerInteraction,
   resolveBookSelectedIndex, resolveBookWheelIntent, wallpaperBookAddress, type BookZoomOrigin,
 } from './wallpaperBookModel.ts';
@@ -574,6 +574,27 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     return () => cancelAnimationFrame(frame);
   }, [focusToken, returnFocusToken]);
 
+  // The book is the page's main control: when nothing else holds focus (a fresh window, or a
+  // closed dialog that left focus on the body) keys go to it without a click first.
+  useEffect(() => {
+    if (!model.active) return undefined;
+    const unfocused = () => document.body != null
+      && (document.activeElement == null || document.activeElement === document.body);
+    if (unfocused()) stageRef.current?.focus({ preventScroll: true });
+    const adopt = (event: globalThis.KeyboardEvent) => {
+      const stage = stageRef.current;
+      if (!stage || event.defaultPrevented || event.target !== document.body || !unfocused()) return;
+      if (resolveBookKey(event.key, event.shiftKey) === null) return;
+      stage.focus({ preventScroll: true });
+      event.preventDefault();
+      stage.dispatchEvent(new KeyboardEvent('keydown', {
+        key: event.key, code: event.code, shiftKey: event.shiftKey, bubbles: true, cancelable: true,
+      }));
+    };
+    document.addEventListener('keydown', adopt);
+    return () => document.removeEventListener('keydown', adopt);
+  }, [model.active]);
+
   useEffect(() => {
     const stopInteraction = () => {
       releaseDrag();
@@ -615,9 +636,10 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     // previews must not wait for either. The store keeps only the latest call: send one list,
     // open spread first.
     if (!model.active || !visible) return;
-    const nearby = model.entries.slice(Math.max(0, spread * 2 - 3), spread * 2 + 4);
-    const rest = bookVisibleWindow(spread, leafCount).flatMap((leaf) => model.entries.slice(leaf * 2, leaf * 2 + 2));
-    observeVisible([...nearby, ...rest].map(staticPreviewAssetPath), { priority: 'front' });
+    observeVisible(
+      bookPreviewOrder(spread, model.entries.length).map((index) => staticPreviewAssetPath(model.entries[index])),
+      { priority: 'front' },
+    );
   }, [leafCount, model.active, model.entries, observeVisible, spread, visible]);
 
   useEffect(() => {

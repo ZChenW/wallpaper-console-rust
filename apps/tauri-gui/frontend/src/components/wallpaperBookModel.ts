@@ -257,3 +257,19 @@ export function bookZoomTransform(origin: BookZoomOrigin, destination: BookRect)
       : `${9.6 / scale}px ${1 / scale}px ${1 / scale}px ${9.6 / scale}px`,
   };
 }
+
+export const BOOK_PREVIEW_AHEAD_LEAVES = 24;
+
+/**
+ * Wallpaper indices whose previews are worth having, nearest the open spread first: the pages on
+ * screen, then pages the reader is about to turn to, so they are ready before they arrive.
+ */
+export function bookPreviewOrder(position: number, count: number): number[] {
+  const spread = Math.round(clampBookPosition(position, bookLeafCount(count)));
+  const centre = spread * 2 - 0.5;
+  const first = Math.max(0, (spread - BOOK_PREVIEW_AHEAD_LEAVES) * 2);
+  const last = Math.min(count - 1, (spread + BOOK_PREVIEW_AHEAD_LEAVES) * 2 - 1);
+  const indices: number[] = [];
+  for (let index = first; index <= last; index += 1) indices.push(index);
+  return indices.sort((a, b) => Math.abs(a - centre) - Math.abs(b - centre) || a - b);
+}
