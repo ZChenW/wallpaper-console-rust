@@ -11,6 +11,7 @@ import { api } from '../api/bridge';
 import { recordMetric } from '../perf/metrics';
 import { ThumbnailSession } from './thumbnailStore';
 import type { EnqueueOptions } from '../hooks/thumbnailQueueCore';
+import { splitPreviewKey } from '../components/wallpaperPreviewMedia.ts';
 
 interface ThumbnailSessionValue {
   get: (path: string) => string | undefined;
@@ -34,8 +35,9 @@ const ThumbnailStoreContext = createContext<ThumbnailSessionValue | null>(null);
 export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
   const storeRef = useRef<ThumbnailSession | null>(null);
   if (!storeRef.current) {
-    storeRef.current = new ThumbnailSession(4, async (path) => {
-      const r = await api.thumbnailFor(path);
+    storeRef.current = new ThumbnailSession(4, async (key) => {
+      const { path, size } = splitPreviewKey(key);
+      const r = await api.thumbnailFor(path, size);
       recordMetric(r.cacheHit ? 'thumbnail.cache.hit' : 'thumbnail.cache.miss', 1);
       return r;
     });

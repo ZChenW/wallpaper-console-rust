@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import { Check, Heart, Info, Maximize2, Minimize2, SearchX, ZoomIn, ZoomOut } from 'lucide-react';
 
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
-import type { EnhancedMediaEligibility } from './wallpaperPreviewMedia.ts';
+import { largePreviewKey, type EnhancedMediaEligibility } from './wallpaperPreviewMedia.ts';
 import { ApplyIndicator } from './ApplyIndicator.tsx';
 import ContextMenu from './ContextMenu.tsx';
 import LibraryState from './LibraryState.tsx';
@@ -23,7 +23,13 @@ const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, activ
   entry: LibraryBrowserItemDTO; open: boolean; selected: boolean; active: boolean; reducedMotion: boolean; moving: boolean;
 }) {
   const { failure } = useThumbnail(bookStaticSource(entry).thumbnailPath);
-  const source = bookStaticSource(entry, Boolean(failure));
+  const base = bookStaticSource(entry, Boolean(failure));
+  // An open page is shown large: ask for the 1600 px preview. Pile strips keep the grid-size one.
+  const source = useMemo(() => ({
+    thumbnailPath: base.thumbnailPath,
+    fallbackPath: base.fallbackPath,
+    largeThumbnailPath: open ? largePreviewKey(base.thumbnailPath) : null,
+  }), [base.thumbnailPath, base.fallbackPath, open]);
   const eligibility = useMemo<EnhancedMediaEligibility>(() => ({
     active, centered: open && selected, selected: open && selected, settled: true, reducedMotion,
   }), [active, open, selected, reducedMotion]);

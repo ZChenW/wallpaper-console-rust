@@ -176,8 +176,8 @@ export const api = {
   importLegacyFlatFiles: (): Promise<CommandResult> =>
     invoke<CommandResult>('import_legacy_flat_files'),
 
-  thumbnailFor: (path: string): Promise<ThumbnailDTO> =>
-    invoke<ThumbnailDTO>('thumbnail_for', { path }).catch(() => ({ path, cacheHit: false })),
+  thumbnailFor: (path: string, size?: 'large'): Promise<ThumbnailDTO> =>
+    invoke<ThumbnailDTO>('thumbnail_for', size ? { path, size } : { path }).catch(() => ({ path, cacheHit: false })),
   previewAssetAuthorize: (path: string, wallpaperPath: string): Promise<string> =>
     invoke<string>('preview_asset_authorize', { path, wallpaperPath }),
 

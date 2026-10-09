@@ -43,7 +43,12 @@ export interface WallpaperPreviewMediaProps {
   readonly loading?: 'eager' | 'lazy';
   readonly staticFallback?: boolean;
   /** Optional Book source choice; other views keep their existing preview paths. */
-  readonly staticSource?: { readonly thumbnailPath: string; readonly fallbackPath: string | null };
+  readonly staticSource?: {
+    readonly thumbnailPath: string;
+    readonly fallbackPath: string | null;
+    /** Store key of a sharper preview to show instead of `thumbnailPath` once it has arrived. */
+    readonly largeThumbnailPath?: string | null;
+  };
   readonly stabilizeEntranceDuringMotion?: boolean;
   /** Book zoom captures the displayed frame through a canvas. */
   readonly captureFrame?: boolean;
@@ -66,7 +71,10 @@ export default function WallpaperPreviewMedia({
   captureFrame = false,
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticSource?.thumbnailPath ?? staticPreviewAssetPath(entry);
-  const { thumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
+  const { thumbnail: standardThumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
+  // The grid-size picture shows first; the large one replaces it when ready (decoded before the swap).
+  const { thumbnail: largeThumbnail } = useThumbnail(staticSource?.largeThumbnailPath ?? '');
+  const thumbnail = largeThumbnail ?? standardThumbnail;
   const [staticFallbackLoadFailed, setStaticFallbackLoadFailed] = useState(false);
   const fallbackAssetPath = staticSource
     ? staticFallback ? staticSource.fallbackPath : null

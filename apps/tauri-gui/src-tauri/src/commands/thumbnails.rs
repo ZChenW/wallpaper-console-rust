@@ -150,7 +150,16 @@ pub async fn preview_asset_authorize(
 }
 
 #[tauri::command]
-pub async fn thumbnail_for(app: tauri::AppHandle, path: String) -> Result<ThumbnailDto, String> {
+pub async fn thumbnail_for(
+    app: tauri::AppHandle,
+    path: String,
+    size: Option<String>,
+) -> Result<ThumbnailDto, String> {
+    // "large" is the preview for views that show one picture big; anything else is the grid size.
+    let tier = match size.as_deref() {
+        Some("large") => wc_preview::ThumbnailSize::Large,
+        _ => wc_preview::ThumbnailSize::Standard,
+    };
     tauri::async_runtime::spawn_blocking(move || {
         let s = storage()?;
         let canonical = path_guard::ensure_command_wallpaper_path(&path, s)?;
@@ -169,7 +178,7 @@ pub async fn thumbnail_for(app: tauri::AppHandle, path: String) -> Result<Thumbn
             .parse()
             .unwrap_or(900);
         let cache_dir = s.cd.gui_thumbnail_cache_dir();
-        let result = wc_preview::thumbnail_for_with_failure_ttl(&cache_dir, &canonical, ttl);
+        let result = wc_preview::thumbnail_for_sized(&cache_dir, &canonical, ttl, tier);
         let thumbnail =
             authorize_thumbnail_asset_with(result.thumbnail.as_deref(), &cache_dir, |thumbnail| {
                 allow_preview_asset(&app, thumbnail)

@@ -2498,7 +2498,7 @@ select:focus, input:focus { border-color: var(--primary); }
   position: absolute;
   inset: 0;
   border-radius: inherit;
-  box-shadow: 0 5px 24px color-mix(in srgb, var(--text) 10%, transparent);
+  /* No lift shadow: a dark patch under the picture read as a blob appearing. The bar marks selection. */
   opacity: 0;
   transform: translateY(2px);
   transition: opacity 160ms ease-out, transform 160ms ease-out;

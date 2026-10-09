@@ -393,7 +393,7 @@ export interface WallpaperConsoleApi {
   migrateToSqlite(): Promise<CommandResult>;
   importLegacyFlatFiles(): Promise<CommandResult>;
 
-  thumbnailFor(path: string): Promise<ThumbnailDTO>;
+  thumbnailFor(path: string, size?: 'large'): Promise<ThumbnailDTO>;
   previewAssetAuthorize(path: string, wallpaperPath: string): Promise<string>;
   thumbnailCacheStatus(): Promise<ThumbnailCacheDTO>;
   thumbnailCacheClear(): Promise<CommandResult>;

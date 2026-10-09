@@ -71,6 +71,22 @@ export interface AttachableVideo extends ReleasableVideo {
   setAttribute(name: string, value: string): void;
 }
 
+/**
+ * Thumbnail-store key for the large preview (up to 1600 px a side) of a path. The plain path is
+ * the grid-size preview (400 px). The two are separate entries in the store and on disk.
+ */
+export const LARGE_PREVIEW_PREFIX = 'large::';
+
+export function largePreviewKey(path: string): string {
+  return `${LARGE_PREVIEW_PREFIX}${path}`;
+}
+
+export function splitPreviewKey(key: string): { path: string; size?: 'large' } {
+  return key.startsWith(LARGE_PREVIEW_PREFIX)
+    ? { path: key.slice(LARGE_PREVIEW_PREFIX.length), size: 'large' }
+    : { path: key };
+}
+
 export function staticPreviewAssetPath(entry: WallpaperDTO): string {
   return entry.previewPath || entry.path;
 }

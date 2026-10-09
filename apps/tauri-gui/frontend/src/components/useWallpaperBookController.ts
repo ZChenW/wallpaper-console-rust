@@ -24,6 +24,8 @@ import {
   bookZoomTimeline, bookZoomTransform, captureBookZoomOrigin, type BookZoomOrigin,
   BOOK_ZOOM_REST, bookZoomReveal, bookZoomSwapTimeline,
 } from './wallpaperBookZoom.ts';
+import { largePreviewKey } from './wallpaperPreviewMedia.ts';
+import { driveAnimations } from './drivenAnimation.ts';
 import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
 
 export interface WallpaperBookProps {
@@ -413,6 +415,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
     const reveal = bookZoomReveal(opacity, latest.current.reducedMotion);
     const fade = still.animate(reveal.frames, { duration: reveal.duration, easing: 'linear', fill: 'both' });
     zoomFadeRef.current = fade;
+    driveAnimations([fade]);
   }, [cancelZoomFade, mayUpdateZoomStill]);
 
   const configureZoomPose = useCallback((origin: BookZoomOrigin) => {
@@ -524,6 +527,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
         else if (zoomReadyRef.current) revealZoomLive();
       }
     };
+    driveAnimations(animations);
   }, [cancelZoomAnimation, cancelZoomDecodeTimer, configureZoomPose, focusStage, resetZoom, revealZoomLive]);
 
   const closeZoom = useCallback(() => {
@@ -634,6 +638,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
           setZoomMoving(false);
           if (zoomReadyRef.current) revealZoomLive();
         };
+        driveAnimations(animations, animations[1]);
       } else {
         zoomMovingRef.current = false;
         setZoomMoving(false);
@@ -760,11 +765,15 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       previewPathsRef.current = null;
       return;
     }
-    const paths = [...new Set(bookPreviewOrder(previewTravel.spread, model.entries.length, previewTravel.direction)
+    const standard = [...new Set(bookPreviewOrder(previewTravel.spread, model.entries.length, previewTravel.direction)
       .map((index) => {
         const entry = model.entries[index];
         return bookStaticSource(entry, Boolean(getFailure(entry.path))).thumbnailPath;
       }))];
+    // The open spread and one leaf either side also get the large preview, right after their
+    // grid-size one, so a page is sharp when it opens instead of sharpening a moment later.
+    const nearby = Math.min(standard.length, 6);
+    const paths = [...standard.slice(0, nearby), ...standard.slice(0, nearby).map(largePreviewKey), ...standard.slice(nearby)];
     const previous = previewPathsRef.current;
     if (previous && previous.length === paths.length && paths.every((path, index) => path === previous[index])) return;
     previewPathsRef.current = paths;

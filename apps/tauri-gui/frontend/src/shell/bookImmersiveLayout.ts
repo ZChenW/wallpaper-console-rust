@@ -1,3 +1,5 @@
+import { driveAnimations } from '../components/drivenAnimation.ts';
+
 export type BookImmersivePhase = 'out' | 'in' | 'return';
 
 /** The only layout commit is between these phases, while all changing content
@@ -88,6 +90,7 @@ export function createBookImmersiveTransition(shell: HTMLElement, commit: (value
         if (queued !== current) request(queued, false);
       }
     };
+    driveAnimations([...animations], arrival);
   };
   const setOrigins = () => {
     const stage = shell.querySelector<HTMLElement>('.wallpaper-book__stage');
