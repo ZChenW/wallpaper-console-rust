@@ -21,6 +21,7 @@ interface ThumbnailSessionValue {
   subscribeFailures: (cb: () => void) => () => void;
   observeVisible: (paths: string[], options?: EnqueueOptions) => void;
   setScrolling: (scrolling: boolean) => void;
+  isScrolling: () => boolean;
   setInteracting: (interacting: boolean) => void;
   forget: (paths: string[]) => void;
   reset: () => void;
@@ -53,6 +54,7 @@ export function ThumbnailStoreProvider({ children }: { children: ReactNode }) {
       session.observeVisible(paths, options);
     },
     setScrolling: (scrolling: boolean) => session.setScrolling(scrolling),
+    isScrolling: () => session.isScrolling(),
     setInteracting: (interacting: boolean) => session.setInteracting(interacting),
     forget: (paths: string[]) => session.forget(paths),
     reset: () => session.reset(),

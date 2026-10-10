@@ -7,7 +7,7 @@ import {
   useState,
 } from 'react';
 import type { LibraryBrowserItemDTO } from '../api/types.ts';
-import { useThumbnail } from '../state/ThumbnailStoreContext.tsx';
+import { useThumbnail, useThumbnailStore } from '../state/ThumbnailStoreContext.tsx';
 import { typeIcon } from './wallpaperCardHelpers.ts';
 import {
   attachVideoDecoder,
@@ -72,6 +72,7 @@ export default function WallpaperPreviewMedia({
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticSource?.thumbnailPath ?? staticPreviewAssetPath(entry);
   const { thumbnail: standardThumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
+  const { isScrolling } = useThumbnailStore();
   // The grid-size picture shows first; the large one replaces it when ready (decoded before the swap).
   const { thumbnail: largeThumbnail } = useThumbnail(staticSource?.largeThumbnailPath ?? '');
   const thumbnail = largeThumbnail ?? standardThumbnail;
@@ -242,7 +243,11 @@ export default function WallpaperPreviewMedia({
       setLoadedImage({
         entryPath: entry.path,
         path: loadedPath,
-        stableEntry: replacingDisplayedImage || (
+        // A picture that turns up while the view is scrolling appears at once. Fading each one in
+        // kept a handful of opacity animations running throughout a scroll (measured in Grid: about
+        // 8% more CPU and 7 to 13 late frames in 6 s, against none). Decided per picture when it
+        // loads, so nothing replays when the scroll stops.
+        stableEntry: replacingDisplayedImage || isScrolling() || (
           entranceStabilityRef.current.entryPath === entry.path
           && entranceStabilityRef.current.stabilize
         ),

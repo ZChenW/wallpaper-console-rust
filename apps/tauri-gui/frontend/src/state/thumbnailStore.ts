@@ -141,6 +141,9 @@ export class ThumbnailSession {
     this.syncRevealPaused();
   }
 
+  /** Whether the viewport is moving right now; pictures arriving meanwhile skip their fade-in. */
+  isScrolling(): boolean { return this.scrolling; }
+
   /** Viewport / card interaction is active (Grid active, Flow interacting). */
   setInteracting(interacting: boolean): void {
     if (this.interacting === interacting) return;
