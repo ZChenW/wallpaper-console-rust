@@ -353,5 +353,944 @@ fn validate_clip(path: &Path) -> Result<(), ThumbnailFailure> {
 }
 
 #[cfg(test)]
-#[path = "clip_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use filetime::{set_file_mtime, FileTime};
+
+    const MP4_HEADER: &[u8] = b"\0\0\0\x18ftypisom\0\0\0\0isommp42";
+
+    fn mock_clip_with(
+        cache: &Path,
+        path: &str,
+        generate: impl FnMut(
+            &mut Command,
+            ThumbnailDeadline,
+        ) -> Result<DeadlineCommandOutput, DeadlineCommandError>,
+    ) -> Result<(PathBuf, bool), ThumbnailFailure> {
+        preview_clip_with(cache, path, |_, _, _, _, _| ClipInputs::default(), generate)
+    }
+
+    fn successful_output() -> DeadlineCommandOutput {
+        DeadlineCommandOutput {
+            success: true,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn output_path(command: &Command) -> PathBuf {
+        command.get_args().last().unwrap().into()
+    }
+
+    fn cached_path(cache: &Path, source: &Path) -> PathBuf {
+        let meta = fs::metadata(source).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        cache.join(preview_clip_cache_key(
+            source.to_str().unwrap(),
+            mtime,
+            meta.len(),
+        ))
+    }
+
+    #[test]
+    fn clip_ffmpeg_arguments_cap_duration_and_make_silent_compatible_video() {
+        let command = clip_command(
+            "/wallpapers/a movie.mp4",
+            Path::new("/cache/tmp.mp4"),
+            &ClipInputs::default(),
+        );
+        assert_eq!(command.get_program(), "ffmpeg");
+        let args: Vec<_> = command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-nostats",
+                "-y",
+                "-i",
+                "/wallpapers/a movie.mp4",
+                "-t",
+                "15",
+                "-map",
+                "0:v:0",
+                "-an",
+                "-sn",
+                "-dn",
+                "-vf",
+                "scale=-2:'trunc(min(576,ih)/2)*2':out_color_matrix=bt709:out_range=tv,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,setsar=1",
+                "-r",
+                "24",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+                "-x264-params",
+                "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+                "-preset",
+                "veryfast",
+                "-crf",
+                "27",
+                "-movflags",
+                "+faststart",
+                "-f",
+                "mp4",
+                "/cache/tmp.mp4",
+            ]
+        );
+        assert!(!args.contains(&"-ss"), "clips start at the beginning");
+    }
+
+    #[test]
+    fn clip_cache_hit_never_runs_a_helper() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.MP4");
+        fs::write(&source, b"source").unwrap();
+        let cache = tmp.path().join("cache");
+        let (clip, hit) = mock_clip_with(&cache, source.to_str().unwrap(), |command, _| {
+            let output = output_path(command);
+            assert!(output
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .ends_with(".tmp.mp4"));
+            fs::write(output, MP4_HEADER).unwrap();
+            Ok(successful_output())
+        })
+        .unwrap();
+        assert!(!hit);
+        assert_eq!(clip, cached_path(&cache, &source));
+        let second = mock_clip_with(&cache, source.to_str().unwrap(), |_, _| {
+            panic!("cache hit spawned ffmpeg")
+        })
+        .unwrap();
+        assert_eq!(second, (clip, true));
+        assert_eq!(crate::thumbnail_cache_info(&cache).entries, 1);
+    }
+
+    #[test]
+    fn changed_source_mtime_or_size_generates_a_new_clip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.mp4");
+        fs::write(&source, b"source").unwrap();
+        set_file_mtime(&source, FileTime::from_unix_time(1_700_000_000, 0)).unwrap();
+        let cache = tmp.path().join("cache");
+        let generate = || {
+            mock_clip_with(&cache, source.to_str().unwrap(), |command, _| {
+                fs::write(output_path(command), MP4_HEADER).unwrap();
+                Ok(successful_output())
+            })
+            .unwrap()
+        };
+        let (first, _) = generate();
+        set_file_mtime(&source, FileTime::from_unix_time(1_700_000_001, 0)).unwrap();
+        let (second, hit) = generate();
+        assert!(!hit);
+        assert_ne!(first, second);
+        fs::write(&source, b"larger source").unwrap();
+        set_file_mtime(&source, FileTime::from_unix_time(1_700_000_001, 0)).unwrap();
+        let (third, hit) = generate();
+        assert!(!hit);
+        assert_ne!(second, third);
+        assert_eq!(crate::thumbnail_cache_info(&cache).entries, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clip_keys_use_canonical_paths_and_their_own_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.mp4");
+        let alias = tmp.path().join("alias.mp4");
+        fs::write(&source, b"source").unwrap();
+        std::os::unix::fs::symlink(&source, &alias).unwrap();
+        let key = preview_clip_cache_key(source.to_str().unwrap(), 1, 2);
+        assert_eq!(key, preview_clip_cache_key(alias.to_str().unwrap(), 1, 2));
+        assert!(key.starts_with("v4-clip-") && key.ends_with(".mp4"));
+        assert_ne!(
+            key,
+            crate::gui_thumb_cache_key_v3(source.to_str().unwrap(), 1, 2)
+        );
+    }
+
+    #[test]
+    fn empty_and_oversize_outputs_are_rejected_and_removed_without_failure_markers() {
+        for (length, failure) in [
+            (0, ThumbnailFailure::EmptyClip),
+            (MAX_PREVIEW_CLIP_BYTES + 1, ThumbnailFailure::ClipTooLarge),
+        ] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("source.mp4");
+            fs::write(&source, b"source").unwrap();
+            let cache = tmp.path().join("cache");
+            let result = mock_clip_with(&cache, source.to_str().unwrap(), |command, _| {
+                fs::OpenOptions::new()
+                    .write(true)
+                    .open(output_path(command))
+                    .unwrap()
+                    .set_len(length)
+                    .unwrap();
+                Ok(successful_output())
+            });
+            assert_eq!(result, Err(failure));
+            assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+            assert_eq!(crate::thumbnail_cache_info(&cache).failure_entries, 0);
+        }
+    }
+
+    #[test]
+    fn invalid_cached_clips_are_removed_before_regeneration() {
+        for length in [0, MAX_PREVIEW_CLIP_BYTES + 1, 8] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("source.mp4");
+            fs::write(&source, b"source").unwrap();
+            let cache = tmp.path().join("cache");
+            fs::create_dir(&cache).unwrap();
+            let cached = cached_path(&cache, &source);
+            fs::File::create(&cached).unwrap().set_len(length).unwrap();
+            let result = mock_clip_with(&cache, source.to_str().unwrap(), |_, _| {
+                assert!(!cached.exists());
+                Err(DeadlineCommandError::Spawn("missing ffmpeg".into()))
+            });
+            assert_eq!(result, Err(ThumbnailFailure::ProbeFailed));
+            assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+        }
+    }
+
+    #[test]
+    fn helper_failure_and_timeout_remove_partial_output_and_allow_retry() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.mp4");
+        fs::write(&source, b"source").unwrap();
+        let cache = tmp.path().join("cache");
+        for timed_out in [false, true] {
+            let result = mock_clip_with(&cache, source.to_str().unwrap(), |command, _| {
+                fs::write(output_path(command), MP4_HEADER).unwrap();
+                if timed_out {
+                    Err(DeadlineCommandError::TimedOut)
+                } else {
+                    Ok(DeadlineCommandOutput {
+                        success: false,
+                        ..successful_output()
+                    })
+                }
+            });
+            assert_eq!(
+                result,
+                Err(if timed_out {
+                    ThumbnailFailure::TimedOut
+                } else {
+                    ThumbnailFailure::ProbeFailed
+                })
+            );
+            assert_eq!(fs::read_dir(&cache).unwrap().count(), 0);
+        }
+        assert!(
+            mock_clip_with(&cache, source.to_str().unwrap(), |command, _| {
+                fs::write(output_path(command), MP4_HEADER).unwrap();
+                Ok(successful_output())
+            })
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn non_video_inputs_are_unsupported_even_when_cached() {
+        let tmp = tempfile::tempdir().unwrap();
+        for name in [
+            "image.png",
+            "image.apng",
+            "image.webp",
+            "animation.gif",
+            "project.json",
+            "unknown.txt",
+        ] {
+            let source = tmp.path().join(name);
+            fs::write(&source, b"source").unwrap();
+            let cached = cached_path(tmp.path(), &source);
+            fs::write(cached, MP4_HEADER).unwrap();
+            assert_eq!(
+                mock_clip_with(tmp.path(), source.to_str().unwrap(), |_, _| {
+                    panic!("non-video spawned ffmpeg")
+                }),
+                Err(ThumbnailFailure::Unsupported)
+            );
+        }
+    }
+
+    #[test]
+    fn cache_status_clear_and_cleanup_old_include_clips_and_stale_clip_temps() {
+        let tmp = tempfile::tempdir().unwrap();
+        let old_clip = tmp.path().join("v1-clip-old.mp4");
+        let new_clip = tmp.path().join("v1-clip-new.mp4");
+        let thumb = tmp.path().join("thumbnail.webp");
+        let stale_temp = tmp.path().join(".v4-clip-key.mp4.1.1.tmp.mp4");
+        for file in [&old_clip, &new_clip, &thumb, &stale_temp] {
+            fs::write(file, MP4_HEADER).unwrap();
+        }
+        let old_time = FileTime::from_unix_time(1_600_000_000, 0);
+        set_file_mtime(&old_clip, old_time).unwrap();
+        set_file_mtime(&stale_temp, old_time).unwrap();
+        let info = crate::thumbnail_cache_info(tmp.path());
+        assert_eq!(info.entries, 4);
+        assert_eq!(info.total_bytes, (MP4_HEADER.len() * 4) as u64);
+        assert_eq!(crate::cleanup_stale_tmp_thumbnails(tmp.path(), 3600), 1);
+        assert_eq!(crate::thumbnail_cache_cleanup_old(tmp.path(), 30), 1);
+        assert!(!old_clip.exists());
+        assert!(new_clip.exists());
+        assert_eq!(crate::thumbnail_cache_cleanup_all(tmp.path()), 2);
+        assert_eq!(crate::thumbnail_cache_info(tmp.path()).entries, 0);
+    }
+
+    fn intro_inputs(tone_map: bool) -> ClipInputs {
+        let (width, height) = clip_output_size(1920, 1080, (1, 1)).unwrap();
+        ClipInputs {
+            intro: Some(ClipIntro {
+                still: "/cache/large preview.webp".into(),
+                width,
+                height,
+            }),
+            tone_map,
+        }
+    }
+
+    fn args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|arg| arg.to_str().unwrap().to_owned())
+            .collect()
+    }
+
+    fn filter(command: &Command) -> String {
+        args(command)
+            .windows(2)
+            .find(|pair| pair[0] == "-vf" || pair[0] == "-filter_complex")
+            .unwrap()[1]
+            .clone()
+    }
+
+    #[test]
+    fn intro_arguments_use_the_large_still_and_identical_video_geometry_and_timing() {
+        let command = clip_command(
+            "/wallpapers/a movie.mp4",
+            Path::new("/cache/tmp.mp4"),
+            &intro_inputs(false),
+        );
+        assert_eq!(args(&command), [
+            "-hide_banner", "-loglevel", "error", "-nostats", "-y",
+            "-loop", "1", "-framerate", "24", "-t", "1.3", "-i", "/cache/large preview.webp",
+            "-t", "15", "-i", "/wallpapers/a movie.mp4",
+            "-filter_complex",
+            "[0:v:0]scale=1024:576:out_color_matrix=bt709:out_range=pc,format=yuv444p,colorspace=iall=bt709:itrc=srgb:irange=pc:all=bt709:range=tv:format=yuv420p,fps=24,settb=1/24,setpts=PTS-STARTPTS,setsar=1[still];[1:v:0]scale=1024:576:out_color_matrix=bt709:out_range=tv,format=yuv420p,fps=24,settb=1/24,setpts=PTS-STARTPTS,setsar=1[video];[still][video]xfade=transition=fade:duration=0.5:offset=0.8,format=yuv420p,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,setsar=1[out]",
+            "-map", "[out]", "-t", "15.8", "-an", "-sn", "-dn",
+            "-r", "24", "-c:v", "libx264", "-pix_fmt", "yuv420p",
+            "-x264-params", "colorprim=bt709:transfer=bt709:colormatrix=bt709",
+            "-preset", "veryfast", "-crf", "27", "-movflags", "+faststart", "-f", "mp4", "/cache/tmp.mp4",
+        ]);
+    }
+
+    #[test]
+    fn clip_size_uses_even_dimensions_display_aspect_and_capped_source_height() {
+        for (width, height, sar, expected) in [
+            (1920, 1080, (1, 1), (1024, 576)),
+            (1080, 1920, (1, 1), (324, 576)),
+            (321, 241, (1, 1), (320, 240)),
+            (1919, 1079, (1, 1), (1024, 576)),
+            (640, 360, (1, 1), (640, 360)),
+            (720, 576, (16, 15), (768, 576)),
+        ] {
+            assert_eq!(clip_output_size(width, height, sar), Some(expected));
+        }
+        for (width, height, sar) in [(0, 1080, (1, 1)), (10, 1, (1, 1)), (10, 10, (1, 0))] {
+            assert_eq!(clip_output_size(width, height, sar), None);
+        }
+    }
+
+    #[test]
+    fn transfer_probe_only_tone_maps_pq_and_hlg_and_tolerates_missing_tags() {
+        for (tag, hdr) in [
+            ("", false),
+            ("color_space=bt709", false),
+            ("color_transfer=bt709", false),
+            ("color_transfer=smpte2084", true),
+            ("color_transfer=arib-std-b67", true),
+        ] {
+            let probe = parse_video_probe(&format!(
+                "width=1920\nheight=1080\nsample_aspect_ratio=N/A\n{tag}\n"
+            ));
+            assert_eq!(probe.size, Some((1024, 576)));
+            assert_eq!(probe.hdr, hdr);
+        }
+        assert_eq!(
+            parse_video_probe("width=720\nheight=576\nsample_aspect_ratio=16:15\n").size,
+            Some((768, 576))
+        );
+    }
+
+    #[test]
+    fn missing_failed_timed_out_or_undecodable_still_uses_the_original_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let broken = tmp.path().join("broken.webp");
+        fs::write(&broken, b"undecodable").unwrap();
+        for result in [
+            Err(ThumbnailFailure::ProbeFailed),
+            Err(ThumbnailFailure::TimedOut),
+            Ok(tmp.path().join("missing.webp")),
+            Ok(broken),
+        ] {
+            let intro = clip_intro_with(Some((1024, 576)), || result);
+            assert!(intro.is_none());
+            let command = clip_command(
+                "source.mp4",
+                Path::new("clip.mp4"),
+                &ClipInputs {
+                    intro,
+                    tone_map: false,
+                },
+            );
+            let arguments = args(&command);
+            assert_eq!(arguments.iter().filter(|arg| *arg == "-i").count(), 1);
+            assert!(!arguments
+                .iter()
+                .any(|arg| arg == "-filter_complex" || arg == "-loop"));
+            assert!(arguments.windows(2).any(|pair| pair == ["-t", "15"]));
+            assert_eq!(filter(&command), format!("{CLIP_SCALE},{CLIP_TAGS}"));
+        }
+    }
+
+    #[test]
+    fn hdr_arguments_tone_map_the_video_before_scaling_with_or_without_an_intro() {
+        for inputs in [
+            intro_inputs(true),
+            ClipInputs {
+                intro: None,
+                tone_map: true,
+            },
+        ] {
+            let command = clip_command("hdr.mp4", Path::new("clip.mp4"), &inputs);
+            let graph = filter(&command);
+            assert_eq!(graph.matches(HDR_TONEMAP).count(), 1);
+            assert!(graph.contains(&format!("{HDR_TONEMAP},scale=")));
+            if inputs.intro.is_some() {
+                assert!(graph.contains(&format!("[1:v:0]{HDR_TONEMAP}")));
+            }
+        }
+    }
+
+    #[test]
+    fn hdr_filter_failure_retries_once_without_tone_mapping_and_keeps_the_intro() {
+        for intro in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("hdr.mp4");
+            fs::write(&source, b"source").unwrap();
+            let mut attempts = 0;
+            let mut first_deadline = None;
+            let result = preview_clip_with(
+                tmp.path(),
+                source.to_str().unwrap(),
+                |_, _, _, _, _| {
+                    if intro {
+                        intro_inputs(true)
+                    } else {
+                        ClipInputs {
+                            intro: None,
+                            tone_map: true,
+                        }
+                    }
+                },
+                |command, deadline| {
+                    attempts += 1;
+                    let graph = filter(command);
+                    assert_eq!(graph.contains("xfade="), intro);
+                    if attempts == 1 {
+                        assert!(graph.contains(HDR_TONEMAP));
+                        first_deadline = Some(deadline);
+                        fs::write(output_path(command), b"partial").unwrap();
+                        Ok(DeadlineCommandOutput {
+                            success: false,
+                            stderr: b"No such filter: zscale".to_vec(),
+                            ..successful_output()
+                        })
+                    } else {
+                        assert!(!graph.contains("zscale") && !graph.contains("tonemap="));
+                        assert_eq!(deadline, first_deadline.unwrap());
+                        fs::write(output_path(command), MP4_HEADER).unwrap();
+                        Ok(successful_output())
+                    }
+                },
+            );
+            assert!(result.is_ok());
+            assert_eq!(attempts, 2);
+        }
+    }
+
+    #[test]
+    fn hdr_timeout_does_not_retry_and_failed_hdr_fallback_stops_after_two_attempts() {
+        for timeout in [false, true] {
+            let tmp = tempfile::tempdir().unwrap();
+            let source = tmp.path().join("hdr.mp4");
+            fs::write(&source, b"source").unwrap();
+            let mut attempts = 0;
+            let result = preview_clip_with(
+                tmp.path(),
+                source.to_str().unwrap(),
+                |_, _, _, _, _| ClipInputs {
+                    intro: None,
+                    tone_map: true,
+                },
+                |_, _| {
+                    attempts += 1;
+                    if timeout {
+                        Err(DeadlineCommandError::TimedOut)
+                    } else {
+                        Ok(DeadlineCommandOutput {
+                            success: false,
+                            ..successful_output()
+                        })
+                    }
+                },
+            );
+            assert_eq!(attempts, if timeout { 1 } else { 2 });
+            assert_eq!(
+                result,
+                Err(if timeout {
+                    ThumbnailFailure::TimedOut
+                } else {
+                    ThumbnailFailure::ProbeFailed
+                })
+            );
+            assert_eq!(fs::read_dir(tmp.path()).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn rejected_intro_retries_the_original_clip_without_the_still() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.mp4");
+        fs::write(&source, b"source").unwrap();
+        let mut attempts = 0;
+        preview_clip_with(
+            tmp.path(),
+            source.to_str().unwrap(),
+            |_, _, _, _, _| intro_inputs(false),
+            |command, _| {
+                attempts += 1;
+                if attempts == 1 {
+                    assert!(filter(command).contains("xfade="));
+                    Ok(DeadlineCommandOutput {
+                        success: false,
+                        ..successful_output()
+                    })
+                } else {
+                    assert_eq!(filter(command), format!("{CLIP_SCALE},{CLIP_TAGS}"));
+                    fs::write(output_path(command), MP4_HEADER).unwrap();
+                    Ok(successful_output())
+                }
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 2);
+    }
+
+    #[test]
+    #[ignore = "requires local ffmpeg/libx264 and ffprobe"]
+    fn real_ffmpeg_clips_preserve_short_duration_cap_long_duration_and_never_upscale() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join("cache");
+        for (width, height, seconds, expected_width, expected_height, expected_duration) in [
+            (1600, 900, 1, 1024, 576, 1.8),
+            (960, 1080, 1, 512, 576, 1.8),
+            (321, 241, 1, 320, 240, 1.8),
+            (320, 240, 16, 320, 240, 15.8),
+        ] {
+            let source = tmp.path().join(format!("{width}x{height}.mp4"));
+            let mut fixture = Command::new("ffmpeg");
+            fixture
+                .args([
+                    "-hide_banner",
+                    "-loglevel",
+                    "error",
+                    "-y",
+                    "-filter_threads",
+                    "1",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                ])
+                .arg(format!("testsrc=size={width}x{height}:rate=2"))
+                .args([
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:sample_rate=8000",
+                    "-t",
+                ])
+                .arg(seconds.to_string())
+                .args([
+                    "-c:v",
+                    "libx264",
+                    "-pix_fmt",
+                    "yuv444p",
+                    "-preset",
+                    "ultrafast",
+                    "-threads",
+                    "1",
+                    "-c:a",
+                    "aac",
+                ])
+                .arg(&source);
+            assert!(crate::command_succeeded(
+                &mut fixture,
+                std::time::Duration::from_secs(10),
+                "clip fixture"
+            ));
+            let (clip, hit) = preview_clip_for(&cache, source.to_str().unwrap()).unwrap();
+            assert!(!hit);
+            let mut probe = Command::new("ffprobe");
+            probe
+                .args([
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "stream=codec_type,codec_name,width,height,pix_fmt,r_frame_rate,sample_aspect_ratio,color_range,color_space,color_transfer,color_primaries:format=duration",
+                    "-of",
+                    "default",
+                ])
+                .arg(&clip);
+            let output =
+                crate::run_command_with_deadline(&mut probe, std::time::Duration::from_secs(3))
+                    .unwrap();
+            assert!(output.success);
+            let metadata = String::from_utf8(output.stdout).unwrap();
+            assert!(metadata.contains("codec_name=h264\n"));
+            assert!(metadata.contains("codec_type=video\n"));
+            assert!(!metadata.contains("codec_type=audio"));
+            assert!(
+                metadata.contains(&format!("width={expected_width}\n")),
+                "{metadata}"
+            );
+            assert!(
+                metadata.contains(&format!("height={expected_height}\n")),
+                "{metadata}"
+            );
+            assert!(metadata.contains("pix_fmt=yuv420p\n"));
+            assert!(metadata.contains("r_frame_rate=24/1\n"));
+            // Incomplete colour tags are what drew green on the NVIDIA desktop: all five must be there.
+            for tag in [
+                "color_range=tv\n",
+                "color_space=bt709\n",
+                "color_transfer=bt709\n",
+                "color_primaries=bt709\n",
+                "sample_aspect_ratio=1:1\n",
+            ] {
+                assert!(metadata.contains(tag), "{tag} missing in {metadata}");
+            }
+            let duration: f64 = metadata
+                .lines()
+                .find_map(|line| line.strip_prefix("duration="))
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert!((duration - expected_duration).abs() < 0.04, "{metadata}");
+            let meta = fs::metadata(&source).unwrap();
+            let mtime = meta
+                .modified()
+                .unwrap()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            let (still, hit) = crate::generate_gui_thumbnail_sized(
+                &cache,
+                source.to_str().unwrap(),
+                mtime,
+                meta.len(),
+                ThumbnailSize::Large,
+            )
+            .unwrap();
+            assert!(hit, "clip must generate/reuse the same Large cache entry");
+            let reference = tmp.path().join("reference.png");
+            decode_frame(&still, &reference, None, &format!("scale={expected_width}:{expected_height}:out_color_matrix=bt709:out_range=pc,format=rgb24"));
+            let first = tmp.path().join("first.png");
+            // Compare in sRGB, the colour space of the picture the views draw.
+            // Undo the video's BT.709 transfer before comparing RGB sample values.
+            let to_srgb = "colorspace=iall=bt709:all=bt709:trc=srgb:range=pc:format=yuv444p,scale=iw:ih:out_color_matrix=bt709:out_range=pc,format=rgb24";
+            decode_frame(&clip, &first, None, to_srgb);
+            let difference = mean_absolute_difference(&first, &reference);
+            assert!(
+                difference < 5.0,
+                "first frame/still sRGB MAD = {difference}"
+            );
+            if seconds > 1 {
+                let later = tmp.path().join("later.png");
+                // Past the 0.8 s still and the 0.5 s fade.
+                decode_frame(&clip, &later, Some("2.0"), to_srgb);
+                let difference = mean_absolute_difference(&later, &reference);
+                assert!(
+                    difference > 5.0,
+                    "video after 2 s still resembles intro: MAD = {difference}"
+                );
+            }
+            let bytes = fs::read(&clip).unwrap();
+            let moov = bytes.windows(4).position(|bytes| bytes == b"moov").unwrap();
+            let mdat = bytes.windows(4).position(|bytes| bytes == b"mdat").unwrap();
+            assert!(moov < mdat, "faststart metadata must precede video data");
+            assert_eq!(
+                preview_clip_for(&cache, source.to_str().unwrap()).unwrap(),
+                (clip, true)
+            );
+        }
+    }
+
+    fn decode_frame(source: &Path, output: &Path, seek: Option<&str>, filter: &str) {
+        let mut command = Command::new("ffmpeg");
+        command.args([
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-y",
+            "-filter_threads",
+            "1",
+        ]);
+        if let Some(seek) = seek {
+            command.args(["-ss", seek]);
+        }
+        command
+            .arg("-i")
+            .arg(source)
+            .args(["-frames:v", "1", "-vf", filter, "-threads", "1"])
+            .arg(output);
+        assert!(crate::command_succeeded(
+            &mut command,
+            std::time::Duration::from_secs(5),
+            "decode clip frame"
+        ));
+    }
+
+    fn mean_absolute_difference(a: &Path, b: &Path) -> f64 {
+        let a = image::open(a).unwrap().to_rgb8();
+        let b = image::open(b).unwrap().to_rgb8();
+        assert_eq!(a.dimensions(), b.dimensions());
+        a.as_raw()
+            .iter()
+            .zip(b.as_raw())
+            .map(|(a, b)| f64::from(a.abs_diff(*b)))
+            .sum::<f64>()
+            / a.as_raw().len() as f64
+    }
+
+    #[test]
+    #[ignore = "requires local ffmpeg/libx264, zscale and ffprobe; tries libx265 first"]
+    fn real_ffmpeg_pq_source_is_tone_mapped_and_tagged_bt709() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("hdr.mp4");
+        let mut made_fixture = false;
+        for codec in ["libx265", "libx264"] {
+            let mut fixture = Command::new("ffmpeg");
+            fixture.args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-filter_threads",
+                "1",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=192x108:rate=24",
+                "-t",
+                "2",
+                "-c:v",
+                codec,
+                "-pix_fmt",
+                if codec == "libx265" {
+                    "yuv420p10le"
+                } else {
+                    "yuv420p"
+                },
+                "-preset",
+                "ultrafast",
+                "-threads",
+                "1",
+                "-color_trc",
+                "smpte2084",
+                "-colorspace",
+                "bt2020nc",
+                "-color_primaries",
+                "bt2020",
+                "-color_range",
+                "tv",
+            ]);
+            if codec == "libx265" {
+                fixture.args(["-x265-params", "pools=1:frame-threads=1:log-level=error:colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc"]);
+            }
+            if codec == "libx264" {
+                fixture.args([
+                    "-x264-params",
+                    "colorprim=bt2020:transfer=smpte2084:colormatrix=bt2020nc",
+                ]);
+            }
+            fixture.arg(&source);
+            if crate::command_succeeded(
+                &mut fixture,
+                std::time::Duration::from_secs(10),
+                "HDR fixture",
+            ) {
+                made_fixture = true;
+                break;
+            }
+        }
+        assert!(made_fixture);
+        let mut source_probe = Command::new("ffprobe");
+        source_probe
+            .args([
+                "-v",
+                "error",
+                "-select_streams",
+                "v:0",
+                "-show_entries",
+                "stream=color_transfer",
+                "-of",
+                "default=noprint_wrappers=1",
+            ])
+            .arg(&source);
+        let output =
+            crate::run_command_with_deadline(&mut source_probe, std::time::Duration::from_secs(3))
+                .unwrap();
+        assert!(output.success);
+        assert!(
+            parse_video_probe(&String::from_utf8_lossy(&output.stdout)).hdr,
+            "fixture must actually be PQ-tagged"
+        );
+        let cache = tmp.path().join("cache");
+        let mut attempts = 0;
+        let (clip, _) = preview_clip_with(
+            &cache,
+            source.to_str().unwrap(),
+            prepare_clip_inputs,
+            |command, deadline| {
+                attempts += 1;
+                assert!(
+                    filter(command).contains(HDR_TONEMAP),
+                    "real fixture must succeed with tone mapping"
+                );
+                deadline.command_output(command)
+            },
+        )
+        .unwrap();
+        assert_eq!(attempts, 1, "fixture must not silently use HDR fallback");
+        let mut probe = Command::new("ffprobe");
+        probe
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "stream=color_range,color_space,color_transfer,color_primaries,sample_aspect_ratio",
+                "-of",
+                "default",
+            ])
+            .arg(&clip);
+        let output =
+            crate::run_command_with_deadline(&mut probe, std::time::Duration::from_secs(3))
+                .unwrap();
+        assert!(output.success);
+        let metadata = String::from_utf8(output.stdout).unwrap();
+        for tag in [
+            "color_range=tv\n",
+            "color_space=bt709\n",
+            "color_transfer=bt709\n",
+            "color_primaries=bt709\n",
+            "sample_aspect_ratio=1:1\n",
+        ] {
+            assert!(metadata.contains(tag), "{tag} missing in {metadata}");
+        }
+    }
+
+    #[test]
+    #[ignore = "requires local ffmpeg/libx264 and ffprobe"]
+    fn real_ffmpeg_undecodable_large_still_falls_back_to_a_15_second_clip() {
+        let tmp = tempfile::tempdir().unwrap();
+        let source = tmp.path().join("source.mp4");
+        let mut fixture = Command::new("ffmpeg");
+        fixture
+            .args([
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc2=size=96x80:rate=24",
+                "-t",
+                "16",
+                "-c:v",
+                "libx264",
+                "-preset",
+                "ultrafast",
+                "-threads",
+                "1",
+            ])
+            .arg(&source);
+        assert!(crate::command_succeeded(
+            &mut fixture,
+            std::time::Duration::from_secs(10),
+            "no-intro fixture"
+        ));
+        let meta = fs::metadata(&source).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let cache = tmp.path().join("cache");
+        fs::create_dir(&cache).unwrap();
+        let still = cache.join(crate::gui_thumb_cache_key(
+            source.to_str().unwrap(),
+            mtime,
+            meta.len(),
+            ThumbnailSize::Large,
+        ));
+        fs::write(still, b"invalid WebP").unwrap();
+        let (clip, _) = preview_clip_with(
+            &cache,
+            source.to_str().unwrap(),
+            prepare_clip_inputs,
+            |command, deadline| {
+                assert!(!filter(command).contains("xfade="));
+                deadline.command_output(command)
+            },
+        )
+        .unwrap();
+        let mut probe = Command::new("ffprobe");
+        probe
+            .args([
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "csv=p=0",
+            ])
+            .arg(clip);
+        let output =
+            crate::run_command_with_deadline(&mut probe, std::time::Duration::from_secs(3))
+                .unwrap();
+        assert!(output.success);
+        let duration: f64 = String::from_utf8(output.stdout)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        assert!((duration - 15.0).abs() < 0.04);
+    }
+}

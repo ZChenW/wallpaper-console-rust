@@ -285,5 +285,460 @@ impl ThumbnailDeadline {
 }
 
 #[cfg(test)]
-#[path = "generation_tests.rs"]
-mod tests;
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{mpsc, Barrier};
+    use std::thread;
+
+    fn wait_until(condition: impl Fn() -> bool) {
+        let stop = Instant::now() + Duration::from_secs(3);
+        while !condition() {
+            assert!(
+                Instant::now() < stop,
+                "concurrent callers did not reach the test gate"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn large_lane_caps_concurrent_generations_and_standard_bypasses_it() {
+        assert_eq!(LARGE_THUMBNAIL_CONCURRENCY, 3);
+        let coordinator = Arc::new(GenerationCoordinator::default());
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let gate = Arc::new((Mutex::new(false), Condvar::new()));
+        let start = Arc::new(Barrier::new(13));
+        let workers: Vec<_> = (0..12)
+            .map(|i| {
+                let coordinator = Arc::clone(&coordinator);
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                let gate = Arc::clone(&gate);
+                let start = Arc::clone(&start);
+                thread::spawn(move || {
+                    start.wait();
+                    coordinator
+                        .run(format!("large-{i}").into(), ThumbnailSize::Large, |_| {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            assert!(count <= LARGE_THUMBNAIL_CONCURRENCY);
+                            peak.fetch_max(count, Ordering::SeqCst);
+                            let (lock, ready) = &*gate;
+                            let mut open = lock.lock().unwrap();
+                            while !*open {
+                                open = ready.wait(open).unwrap();
+                            }
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            Ok((format!("large-{i}").into(), false))
+                        })
+                        .unwrap();
+                })
+            })
+            .collect();
+        start.wait();
+        wait_until(|| {
+            coordinator.flights.lock().unwrap().len() == 12
+                && active.load(Ordering::SeqCst) == LARGE_THUMBNAIL_CONCURRENCY
+        });
+        let (tx, rx) = mpsc::channel();
+        let standard = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || {
+                coordinator
+                    .run("standard".into(), ThumbnailSize::Standard, |_| {
+                        tx.send(()).unwrap();
+                        Ok(("standard".into(), false))
+                    })
+                    .unwrap();
+            })
+        };
+        let standard_result = rx.recv_timeout(Duration::from_secs(1));
+        *gate.0.lock().unwrap() = true;
+        gate.1.notify_all();
+        standard.join().unwrap();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+        assert!(
+            standard_result.is_ok(),
+            "Standard waited behind a full Large lane"
+        );
+        assert_eq!(peak.load(Ordering::SeqCst), LARGE_THUMBNAIL_CONCURRENCY);
+        assert!(coordinator.flights.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn same_key_callers_share_one_generation_including_failures() {
+        for kind in [
+            GenerationKind::Thumbnail(ThumbnailSize::Standard),
+            GenerationKind::Thumbnail(ThumbnailSize::Large),
+            GenerationKind::Clip,
+        ] {
+            for expected in [
+                Ok((PathBuf::from("same.webp"), false)),
+                Err(ThumbnailFailure::ProbeFailed),
+            ] {
+                let coordinator = Arc::new(GenerationCoordinator::default());
+                let gate = Arc::new((Mutex::new(false), Condvar::new()));
+                let calls = Arc::new(AtomicUsize::new(0));
+                let workers: Vec<_> = (0..8)
+                    .map(|_| {
+                        let coordinator = Arc::clone(&coordinator);
+                        let gate = Arc::clone(&gate);
+                        let calls = Arc::clone(&calls);
+                        let expected = expected.clone();
+                        thread::spawn(move || {
+                            coordinator.run_with_budget("same-preview".into(), kind, |_| {
+                                calls.fetch_add(1, Ordering::SeqCst);
+                                let mut open = gate.0.lock().unwrap();
+                                while !*open {
+                                    open = gate.1.wait(open).unwrap();
+                                }
+                                expected
+                            })
+                        })
+                    })
+                    .collect();
+                wait_until(|| {
+                    coordinator
+                        .flights
+                        .lock()
+                        .unwrap()
+                        .get(&PathBuf::from("same-preview"))
+                        .is_some_and(|flight| Arc::strong_count(flight) == 9)
+                });
+                *gate.0.lock().unwrap() = true;
+                gate.1.notify_all();
+                for worker in workers {
+                    assert_eq!(worker.join().unwrap(), expected);
+                }
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert!(coordinator.flights.lock().unwrap().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn deadline_is_tier_specific_and_large_helpers_share_the_budget() {
+        assert_eq!(
+            ThumbnailDeadline::new(ThumbnailSize::Standard).command_timeout(),
+            Duration::from_secs(8)
+        );
+        let large = ThumbnailDeadline::new(ThumbnailSize::Large);
+        assert_eq!(LARGE_THUMBNAIL_TIMEOUT, Duration::from_secs(30));
+        assert!(large.command_timeout() > Duration::from_secs(29));
+        assert!(large.command_timeout() <= Duration::from_secs(30));
+        assert_eq!(large.metadata_timeout(), METADATA_COMMAND_TIMEOUT);
+        let almost_expired = ThumbnailDeadline {
+            expires_at: Some(Instant::now() + Duration::from_millis(80)),
+        };
+        assert!(almost_expired.metadata_timeout() <= Duration::from_millis(80));
+        thread::sleep(Duration::from_millis(90));
+        assert!(almost_expired.command_timeout().is_zero());
+        assert!(
+            !almost_expired.command_succeeded(&mut Command::new("should-never-spawn"), "expired")
+        );
+    }
+
+    #[test]
+    fn clip_deadline_is_45_seconds_and_starts_after_its_own_lane_wait() {
+        let coordinator = Arc::new(GenerationCoordinator::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let first = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || {
+                coordinator.run_clip("first-clip".into(), |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(("first-clip".into(), false))
+                })
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let released_at = Arc::new(Mutex::new(None));
+        let second = {
+            let coordinator = Arc::clone(&coordinator);
+            let released_at = Arc::clone(&released_at);
+            thread::spawn(move || {
+                coordinator.run_clip("second-clip".into(), |deadline| {
+                    assert_eq!(PREVIEW_CLIP_TIMEOUT, Duration::from_secs(45));
+                    let release = released_at.lock().unwrap().unwrap();
+                    assert!(deadline.expires_at.unwrap() >= release + PREVIEW_CLIP_TIMEOUT);
+                    assert!(deadline.command_timeout() > Duration::from_secs(44));
+                    Ok(("second-clip".into(), false))
+                })
+            })
+        };
+        wait_until(|| coordinator.flights.lock().unwrap().len() == 2);
+        // Large/Standard must still be admitted while the clip lane is occupied.
+        for tier in [ThumbnailSize::Large, ThumbnailSize::Standard] {
+            coordinator
+                .run("other-preview".into(), tier, |_| {
+                    Ok(("other".into(), false))
+                })
+                .unwrap();
+        }
+        thread::sleep(Duration::from_millis(100));
+        *released_at.lock().unwrap() = Some(Instant::now());
+        release_tx.send(()).unwrap();
+        first.join().unwrap().unwrap();
+        second.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn generation_deadline_starts_after_lane_wait() {
+        let coordinator = Arc::new(GenerationCoordinator::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let workers: Vec<_> = (0..LARGE_THUMBNAIL_CONCURRENCY)
+            .map(|i| {
+                let coordinator = Arc::clone(&coordinator);
+                let entered_tx = entered_tx.clone();
+                let (release_tx, release_rx) = mpsc::channel();
+                releases.push(release_tx);
+                thread::spawn(move || {
+                    coordinator.run(format!("first-{i}").into(), ThumbnailSize::Large, |_| {
+                        entered_tx.send(()).unwrap();
+                        release_rx.recv().unwrap();
+                        Ok((format!("first-{i}").into(), false))
+                    })
+                })
+            })
+            .collect();
+        for _ in 0..LARGE_THUMBNAIL_CONCURRENCY {
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let released_at = Arc::new(Mutex::new(None));
+        let second = {
+            let coordinator = Arc::clone(&coordinator);
+            let released_at = Arc::clone(&released_at);
+            thread::spawn(move || {
+                coordinator.run("second".into(), ThumbnailSize::Large, |deadline| {
+                    let release = released_at.lock().unwrap().unwrap();
+                    assert!(deadline.expires_at.unwrap() >= release + LARGE_THUMBNAIL_TIMEOUT);
+                    Ok(("second".into(), false))
+                })
+            })
+        };
+        wait_until(|| coordinator.flights.lock().unwrap().len() == LARGE_THUMBNAIL_CONCURRENCY + 1);
+        thread::sleep(Duration::from_millis(100));
+        *released_at.lock().unwrap() = Some(Instant::now());
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        second.join().unwrap().unwrap();
+    }
+
+    #[test]
+    fn producer_panic_releases_lane_and_flight() {
+        let coordinator = GenerationCoordinator::default();
+        let panic = std::panic::catch_unwind(|| {
+            coordinator.run("panic".into(), ThumbnailSize::Large, |_| panic!("producer"))
+        });
+        assert!(panic.is_err());
+        assert!(coordinator.flights.lock().unwrap().is_empty());
+        assert_eq!(*coordinator.active_large.lock().unwrap(), 0);
+        assert!(coordinator
+            .run("panic".into(), ThumbnailSize::Large, |_| Ok((
+                "recovered".into(),
+                false
+            )))
+            .is_ok());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn large_deadline_terminates_a_running_helper_and_does_not_restart_the_budget() {
+        let deadline = ThumbnailDeadline {
+            expires_at: Some(Instant::now() + Duration::from_millis(120)),
+        };
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 10"]);
+        let started = Instant::now();
+        assert!(!deadline.command_succeeded(&mut command, "large deadline test"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(deadline.command_timeout().is_zero());
+        assert!(!deadline.command_succeeded(&mut Command::new("true"), "second helper"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn clip_helpers_use_one_deadline_and_stop_after_timeout() {
+        let deadline = ThumbnailDeadline {
+            expires_at: Some(Instant::now() + Duration::from_millis(120)),
+        };
+        let mut helper = Command::new("sh");
+        helper.args(["-c", "sleep 10"]);
+        let started = Instant::now();
+        assert_eq!(
+            deadline.command_output(&mut helper),
+            Err(crate::DeadlineCommandError::TimedOut)
+        );
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(
+            deadline.command_output(&mut Command::new("should-never-spawn")),
+            Err(crate::DeadlineCommandError::TimedOut)
+        );
+    }
+
+    #[test]
+    fn clip_still_deadline_bounds_large_lane_wait_and_releases_its_flight() {
+        let coordinator = Arc::new(GenerationCoordinator::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let mut releases = Vec::new();
+        let workers: Vec<_> = (0..LARGE_THUMBNAIL_CONCURRENCY)
+            .map(|i| {
+                let coordinator = Arc::clone(&coordinator);
+                let entered_tx = entered_tx.clone();
+                let (tx, rx) = mpsc::channel();
+                releases.push(tx);
+                thread::spawn(move || {
+                    coordinator.run(format!("busy-{i}").into(), ThumbnailSize::Large, |_| {
+                        entered_tx.send(()).unwrap();
+                        rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                        Ok(("still.webp".into(), false))
+                    })
+                })
+            })
+            .collect();
+        for _ in 0..LARGE_THUMBNAIL_CONCURRENCY {
+            entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        }
+        let started = Instant::now();
+        let parent = ThumbnailDeadline {
+            expires_at: Some(started + Duration::from_millis(80)),
+        };
+        let result = coordinator.run_thumbnail_before(
+            "clip-still".into(),
+            ThumbnailSize::Large,
+            parent,
+            |_| panic!("expired still wait started generation"),
+        );
+        let flight_removed = !coordinator
+            .flights
+            .lock()
+            .unwrap()
+            .contains_key(&PathBuf::from("clip-still"));
+        for release in releases {
+            release.send(()).unwrap();
+        }
+        for worker in workers {
+            worker.join().unwrap().unwrap();
+        }
+        assert_eq!(result, Err(ThumbnailFailure::TimedOut));
+        assert!(flight_removed);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(*coordinator.active_large.lock().unwrap(), 0);
+    }
+
+    #[test]
+    fn clip_still_deadline_bounds_shared_flight_wait_without_cancelling_the_producer() {
+        let coordinator = Arc::new(GenerationCoordinator::default());
+        let (entered_tx, entered_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let worker = {
+            let coordinator = Arc::clone(&coordinator);
+            thread::spawn(move || {
+                coordinator.run("still".into(), ThumbnailSize::Large, |_| {
+                    entered_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(("still.webp".into(), false))
+                })
+            })
+        };
+        entered_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        let parent = ThumbnailDeadline {
+            expires_at: Some(Instant::now() + Duration::from_millis(80)),
+        };
+        let result =
+            coordinator.run_thumbnail_before("still".into(), ThumbnailSize::Large, parent, |_| {
+                panic!("shared flight generated a second still")
+            });
+        let producer_remains = coordinator
+            .flights
+            .lock()
+            .unwrap()
+            .contains_key(&PathBuf::from("still"));
+        release_tx.send(()).unwrap();
+        let produced = worker.join().unwrap();
+        assert_eq!(result, Err(ThumbnailFailure::TimedOut));
+        assert!(producer_remains);
+        assert_eq!(produced, Ok(("still.webp".into(), false)));
+    }
+
+    #[test]
+    fn clip_still_generation_inherits_the_original_deadline_and_large_budget() {
+        let coordinator = GenerationCoordinator::default();
+        let clip = ThumbnailDeadline::clip();
+        let large = ThumbnailDeadline::new(ThumbnailSize::Large).bounded_by(clip);
+        assert!(large.expires_at < clip.expires_at);
+        let short = ThumbnailDeadline {
+            expires_at: Some(Instant::now() + Duration::from_millis(120)),
+        };
+        thread::sleep(Duration::from_millis(20));
+        coordinator
+            .run_thumbnail_before("still".into(), ThumbnailSize::Large, short, |deadline| {
+                assert_eq!(deadline, short);
+                assert!(deadline.command_timeout() < Duration::from_millis(110));
+                Ok(("still.webp".into(), false))
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn large_ignores_old_failure_markers_while_standard_still_honors_them() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let source = media.path().join("image.png");
+        image::RgbImage::from_pixel(20, 20, image::Rgb([20, 120, 200]))
+            .save(&source)
+            .unwrap();
+        let path = source.to_str().unwrap();
+        let meta = std::fs::metadata(path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        for tier in [ThumbnailSize::Standard, ThumbnailSize::Large] {
+            let key = crate::gui_thumb_cache_key(path, mtime, meta.len(), tier);
+            let marker = crate::failure_marker_path(cache.path(), &key);
+            crate::write_failure_marker(
+                &marker,
+                ThumbnailFailure::ProbeFailed,
+                crate::current_epoch_secs() + 900,
+            )
+            .unwrap();
+            let result = crate::thumbnail_for_sized(cache.path(), path, 900, tier);
+            if tier == ThumbnailSize::Large {
+                assert!(result.thumbnail.is_some());
+                assert!(!marker.exists());
+            } else {
+                assert_eq!(result.failure_reason, Some(ThumbnailFailure::ProbeFailed));
+                assert!(marker.exists());
+            }
+        }
+    }
+
+    #[test]
+    fn large_failures_do_not_persist_markers() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let source = media.path().join("invalid.unsupported");
+        std::fs::write(&source, b"invalid").unwrap();
+        let result = crate::thumbnail_for_sized(
+            cache.path(),
+            source.to_str().unwrap(),
+            900,
+            ThumbnailSize::Large,
+        );
+        assert_eq!(result.failure_reason, Some(ThumbnailFailure::Unsupported));
+        assert_eq!(crate::thumbnail_cache_info(cache.path()).failure_entries, 0);
+    }
+}
