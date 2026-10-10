@@ -3,6 +3,7 @@ import { useReducedMotion } from '../../hooks/useReducedMotion.ts';
 import { useThumbnailStore } from '../../state/ThumbnailStoreContext.tsx';
 import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type LibraryViewModel } from '../libraryViewModel.ts';
 import { safeFileSrc } from '../safeFileSrc.ts';
+import { bookStaticSource } from '../wallpaperBookModel.ts';
 import { largePreviewKey, staticPreviewAssetPath } from '../wallpaperPreviewMedia.ts';
 import type { LibraryBrowserItemDTO } from '../../api/types.ts';
 import type { ApplyGesture, LibraryViewMode } from '../../shell/shellPreferences.ts';
@@ -11,8 +12,8 @@ import type { BookWheelSample } from '../wallpaperBookModel.ts';
 import { KNOT_CURVES, modulo } from './knotCurves.ts';
 import { loadKnotRenderer, type KnotRenderer } from './knotRenderer.ts';
 import {
-  AUTO_PICTURES_PER_SECOND, CAMERA_SECONDS, DRAG_DEAD_ZONE, SETTLE_IDLE_MS,
-  accumulateKnotWheel, exponentialStep, knotPointerInteraction, nearestLoopTarget, selectedIndex,
+  AUTO_PICTURES_PER_SECOND, CAMERA_REST_PICTURES, CAMERA_REST_SPEED, DRAG_DEAD_ZONE, SETTLE_IDLE_MS,
+  accumulateKnotWheel, knotPointerInteraction, springStep, nearestLoopTarget, selectedIndex,
   settleTarget, textureWindow, wheelSensitivity,
 } from './knotModel.ts';
 
@@ -55,7 +56,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
     const initial = resolveLibraryFlowStartupAnchor(latest.current.props.model.entries, latest.current.props.initialAnchorWallpaperId, latest.current.props.model.currentPath)?.index ?? 0;
     let count = latest.current.props.model.entries.length;
-    let targetT = initial / Math.max(1, count), cameraT = targetT;
+    let targetT = initial / Math.max(1, count), cameraT = targetT, cameraV = 0;
     let curveIndex = 0, auto = false, inputPending = false;
     let lastFrame = performance.now();
     let wheelSample: BookWheelSample | undefined;
@@ -94,6 +95,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       }
     };
     const clearIdle = () => { if (idleTimer !== null) clearTimeout(idleTimer); idleTimer = null; };
+    const pictureSource = (entry: LibraryBrowserItemDTO) => bookStaticSource(entry, Boolean(store.getFailure(entry.path))).thumbnailPath;
     const clearPreview = () => {
       previewUnsubscribe?.(); previewUnsubscribe = null;
       previewObservation = null;
@@ -122,7 +124,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
         void model.onRequestMoreIfNeeded();
       }
     };
-    const observePictures = (settled: boolean, focusedKey: string | null) => {
+    const observePictures = (previewIndex: number | null) => {
       if (!renderer || !canRun()) return;
       const { model } = latest.current.props;
       const indices = textureWindow(cameraT, count);
@@ -137,17 +139,24 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
         for (const index of indices) {
           const entry = model.entries[index], key = String(entry.wallpaperId);
           if (subscriptions.has(key)) continue;
-          const path = staticPreviewAssetPath(entry);
+          // One source for both sizes (see pictureSource): the video's own frame, with the bundled
+          // preview only as a fallback if that frame cannot be made.
+          const path = pictureSource(entry), fallback = staticPreviewAssetPath(entry);
           const update = () => {
-            const thumbnail = store.get(path);
+            const thumbnail = store.get(path) ?? (store.getFailure(path) ? store.get(fallback) : undefined);
             renderer?.setPicture(key, thumbnail ? safeFileSrc(thumbnail) : null);
           };
-          subscriptions.set(key, store.subscribe(path, update));
+          const unsubscribePath = store.subscribe(path, update);
+          const unsubscribeFallback = fallback === path ? null : store.subscribe(fallback, update);
+          subscriptions.set(key, () => { unsubscribePath(); unsubscribeFallback?.(); });
           update();
         }
       }
-      const entry = settled && focusedKey ? model.entries.find((item) => String(item.wallpaperId) === focusedKey) : null;
-      const key = entry ? largePreviewKey(entry.path) : null;
+      const entry = previewIndex === null ? null : model.entries[previewIndex] ?? null;
+      // The large preview must be the same picture as the small one, only sharper. Asking for the
+      // large size of a different file (the video, when the small one came from its bundled square
+      // preview) made the assembled picture change content and shape a moment after landing.
+      const key = entry ? largePreviewKey(pictureSource(entry)) : null;
       if (previewObservation !== key) {
         clearPreview();
         previewObservation = key;
@@ -163,7 +172,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       }
       // Replacing pending work keeps a long scroll from creating a stale request backlog.
       // Only refresh the queue when the window or large-preview request changes.
-      const paths = indices.map((index) => staticPreviewAssetPath(model.entries[index]));
+      const paths = indices.map((index) => pictureSource(model.entries[index]));
       const queueKey = `${signature}:${key ?? ''}`;
       if (queueKey !== queuedObservation) {
         queuedObservation = queueKey;
@@ -193,7 +202,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       clearIdle();
       if (!settleImmediately) armSettle();
       // Reduced motion changes the camera before reporting, never starts a travel tween.
-      if (latest.current.reducedMotion) cameraT = targetT;
+      if (latest.current.reducedMotion) { cameraT = targetT; cameraV = 0; }
       report(false);
       invalidate();
     };
@@ -205,14 +214,19 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       const reduced = latest.current.reducedMotion;
       if (reduced) stopAuto();
       if (auto) targetT += AUTO_PICTURES_PER_SECOND * dt / Math.max(1, count);
-      cameraT = reduced ? targetT : exponentialStep(cameraT, targetT, dt, CAMERA_SECONDS);
-      const cameraMoving = Math.abs(cameraT - targetT) * count > CAMERA_SETTLE_PICTURES;
-      if (!cameraMoving) cameraT = targetT;
-      const result = renderer.render(cameraT, now, dt, reduced);
-      // Selection/status follow the camera; the large preview waits for complete assembly.
-      const settled = !auto && !drag && !inputPending && !cameraMoving;
-      report(settled);
-      observePictures(settled, result.focusedKey);
+      if (reduced) { cameraT = targetT; cameraV = 0; }
+      else ({ position: cameraT, velocity: cameraV } = springStep(cameraT, cameraV, targetT, dt));
+      const away = Math.abs(cameraT - targetT) * count, speed = Math.abs(cameraV) * count;
+      // Rest is declared only when the remaining move is far below a pixel, so ending it is not a jump.
+      const cameraMoving = away > CAMERA_REST_PICTURES || speed > CAMERA_REST_SPEED;
+      if (!cameraMoving) { cameraT = targetT; cameraV = 0; }
+      const result = renderer.render(cameraT, now, dt, reduced, speed);
+      // Selection/status follow the camera as soon as it has visibly arrived.
+      const resting = !auto && !drag && !inputPending;
+      report(resting && away <= CAMERA_SETTLE_PICTURES);
+      // The sharp picture waits for the camera to stop: decoding and uploading it costs two long
+      // frames, which are invisible at rest and a stutter in the middle of a move.
+      observePictures(resting && !cameraMoving ? selectedIndex(targetT, count) : null);
       requestMore();
       if ((auto || cameraMoving || result.moving) && frame === null) frame = requestAnimationFrame(tick);
     }
@@ -379,19 +393,20 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
           reset = next.model.replaceCount;
           const nextCount = next.model.entries.length;
           if (replacing) {
-            targetT = cameraT = 0; stopAuto(); inputPending = false; clearIdle();
+            targetT = cameraT = cameraV = 0; stopAuto(); inputPending = false; clearIdle();
             reportedId = undefined; reportedSettled = undefined; appendClaim = '';
           } else if (count && nextCount) {
             // Appending retains picture-space progress, including the current loop turn.
             targetT = Math.floor(targetT) + modulo(targetT) * count / nextCount;
             cameraT = Math.floor(cameraT) + modulo(cameraT) * count / nextCount;
+            cameraV *= count / nextCount;
           }
           entries = next.model.entries; count = nextCount;
           for (const [key, unsubscribe] of subscriptions) { unsubscribe(); renderer?.setPicture(key, null); }
           subscriptions.clear(); clearPreview(); observationKey = queuedObservation = '';
           renderer?.setLayout(entries.map((entry) => ({ key: String(entry.wallpaperId), id: entry.wallpaperId })), KNOT_CURVES[curveIndex], performance.now(), latest.current.reducedMotion);
         }
-        if (latest.current.reducedMotion) { stopAuto(); cameraT = targetT; }
+        if (latest.current.reducedMotion) { stopAuto(); cameraT = targetT; cameraV = 0; }
         if (focusToken !== next.focusToken || returnFocusToken !== next.returnFocusToken) {
           focusToken = next.focusToken; returnFocusToken = next.returnFocusToken;
           if (next.model.active) focus();

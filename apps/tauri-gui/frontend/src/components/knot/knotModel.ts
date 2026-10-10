@@ -11,9 +11,19 @@ export const FOG_NEAR = 9;
 export const FOG_FAR = 34;
 export const LIFT = 2.6;
 export const ASSEMBLE_RADIUS = 0.62;
-export const ASSEMBLE_SECONDS = 0.16;
-export const ASSEMBLE_EPSILON = 0.0001;
-export const CAMERA_SECONDS = 0.25;
+// Assembly follows the camera's distance directly, so a picture is whole exactly when the camera
+// arrives. The slew limit only softens jumps; the speed gate keeps a fast pass from strobing
+// every picture it flies over.
+export const ASSEMBLE_SLEW_PER_SECOND = 12;
+export const ASSEMBLE_FREE_SPEED = 3.5;
+export const ASSEMBLE_BLOCKED_SPEED = 9;
+export const ASSEMBLED_AMOUNT = 0.99;
+// Fraction of the assembly spent on the stagger between the first and the last tile.
+export const TILE_STAGGER = 0.5;
+// Critically damped spring: no velocity jump when a step starts, no creeping tail when it ends.
+export const CAMERA_OMEGA = 12;
+export const CAMERA_REST_PICTURES = 0.002;
+export const CAMERA_REST_SPEED = 0.02;
 export const SETTLE_IDLE_MS = 140;
 export const REDISTRIBUTE_SECONDS = 0.9;
 export const REDISTRIBUTE_STAGGER_SECONDS = 0.12;
@@ -45,7 +55,12 @@ export const settleTarget = (target: number, count: number) => count > 0 ? Math.
 export const selectedIndex = (t: number, count: number) => count > 0 ? modulo(Math.round(t * count), count) : 0;
 export const pathLengthForCount = (count: number) => Math.max(count, MIN_DENSITY_COUNT) * PATH_UNITS_PER_PICTURE;
 export const wheelSensitivity = (height: number, count: number) => 1 / (Math.max(1, height) * 4) * WHEEL_REFERENCE_COUNT / Math.max(count, WHEEL_REFERENCE_COUNT);
-export const exponentialStep = (current: number, target: number, dt: number, seconds: number) => target + (current - target) * Math.exp(-Math.max(0, dt) / seconds);
+/** Exact step of a critically damped spring, so the motion is the same at any frame rate. */
+export function springStep(position: number, velocity: number, target: number, dt: number, omega = CAMERA_OMEGA) {
+  const time = Math.max(0, dt), offset = position - target, decay = Math.exp(-omega * time);
+  const drive = velocity + omega * offset;
+  return { position: target + (offset + drive * time) * decay, velocity: (drive - omega * (offset + drive * time)) * decay };
+}
 export function accumulateKnotWheel(target: number, input: BookWheelInput, height: number, count: number, at: number, previous?: BookWheelSample) {
   const intent = classifyBookWheel(input, at, previous);
   // Classification preserves accelerated trackpad streams. Pixel deltas remain exact;
@@ -81,11 +96,27 @@ export const smoothstep = (value: number) => {
 export const pictureAspect = (aspect: number) => Math.max(0.6, Math.min(2.4, Number.isFinite(aspect) && aspect > 0 ? aspect : DEFAULT_ASPECT));
 export const cameraFov = (viewAspect: number) => viewAspect < NARROW_VIEW_ASPECT ? NARROW_CAMERA_FOV : CAMERA_FOV;
 export const pictureLoopDistance = (a: number, b: number, count: number) => loopDistance(a, b) * count;
-export const assembleWant = (distancePictures: number) => smoothstep(1 - Math.max(0, distancePictures) / ASSEMBLE_RADIUS);
+/** Speed is the camera's, in pictures per second. */
+export const assembleWant = (distancePictures: number, speedPictures = 0) =>
+  smoothstep(1 - Math.max(0, distancePictures) / ASSEMBLE_RADIUS)
+  * (1 - smoothstep((Math.abs(speedPictures) - ASSEMBLE_FREE_SPEED) / (ASSEMBLE_BLOCKED_SPEED - ASSEMBLE_FREE_SPEED)));
 export function stepAssemble(amount: number, want: number, dt: number, reduced = false) {
-  const next = reduced ? want : exponentialStep(amount, want, dt, ASSEMBLE_SECONDS);
-  return Math.abs(next - want) < ASSEMBLE_EPSILON ? want : next;
+  if (reduced) return want;
+  const limit = ASSEMBLE_SLEW_PER_SECOND * Math.max(0, dt);
+  return amount + Math.max(-limit, Math.min(limit, want - amount));
 }
+const tileCentreDistance = (tile: number) => Math.hypot(
+  (tile % TILE_COLUMNS + 0.5) / TILE_COLUMNS - 0.5, (Math.floor(tile / TILE_COLUMNS) + 0.5) / TILE_ROWS - 0.5);
+const TILE_DISTANCES = Array.from({ length: TILE_COUNT }, (_, tile) => tileCentreDistance(tile));
+const TILE_NEAREST = Math.min(...TILE_DISTANCES), TILE_FARTHEST = Math.max(...TILE_DISTANCES);
+/** 0 for the tiles next to the picture's centre, 1 for its corners. */
+export const tileRank = (tile: number) => (TILE_DISTANCES[tile] - TILE_NEAREST) / (TILE_FARTHEST - TILE_NEAREST);
+/**
+ * A picture forms from its centre outwards and comes apart from its corners inwards. Moving all
+ * twelve tiles in step left a long moment where every tile was nearly, but not quite, in place.
+ */
+export const tileAmount = (amount: number, tile: number) =>
+  Math.max(0, Math.min(1, amount * (1 + TILE_STAGGER) - TILE_STAGGER * tileRank(tile)));
 /** Dirty geometry includes one-time texture aspect/viewport changes; idle scatter never writes. */
 export function needsVertexUpdate(previous: number, next: number, redistributing: boolean, dirty = false) {
   return dirty || redistributing || previous !== next;

@@ -4,9 +4,9 @@ import { curvePoint, lerp, type KnotCurve, type Vec3 } from './knotCurves.ts';
 import {
   CAM_Z, CAMERA_FOV, DEFAULT_ASPECT, FOG_FAR, FOG_NEAR, TILE_COUNT,
   REDISTRIBUTE_SECONDS, REDISTRIBUTE_STAGGER_SECONDS,
-  assembleWant, assembledCell, assembledCellBounds, assembledSize, cameraFov, needsVertexUpdate, pictureAspect,
+  ASSEMBLED_AMOUNT, assembleWant, assembledCell, assembledCellBounds, assembledSize, cameraFov, needsVertexUpdate, pictureAspect,
   pictureLoopDistance, redistributionProgress, scaledKnotPath, scatteredTileCentre,
-  scatteredTileSize, selectedIndex, stepAssemble, tilePose, tileUVCell,
+  scatteredTileSize, selectedIndex, stepAssemble, tileAmount, tilePose, tileUVCell,
 } from './knotModel.ts';
 
 let three: typeof Three;
@@ -43,6 +43,7 @@ export class KnotRenderer {
   private readonly pictures = new Map<string, string>();
   private readonly requestedPictures = new Map<string, string>();
   private previewKey: string | null = null;
+  private readonly previewKeys = new Set<string>();
   private path: readonly Vec3[] = [];
   private fromPath: readonly Vec3[] = [];
   private layoutAt = 0;
@@ -156,10 +157,29 @@ export class KnotRenderer {
     this.releaseUnusedTextures();
     this.onInvalidate?.();
   }
+  /**
+   * Names the picture that should be sharp. A picture that stops being that one keeps its large
+   * preview until its tiles have scattered: dropping it at once showed the picture going soft for
+   * the whole of its exit.
+   */
   setPreview(key: string | null, url: string | null) {
-    if (this.previewKey && this.previewKey !== key) this.setPicture(`large:${this.previewKey}`, null);
     this.previewKey = key;
-    if (key) this.setPicture(`large:${key}`, url);
+    if (!key) return;
+    this.previewKeys.add(key);
+    if (url !== null) this.setPicture(`large:${key}`, url);
+  }
+  private releasePreviews() {
+    let released = false;
+    for (const key of this.previewKeys) {
+      if (key === this.previewKey) continue;
+      const card = this.cards.find((candidate) => candidate.entry.key === key);
+      if (card && card.amount > 0) continue;
+      this.previewKeys.delete(key);
+      this.requestedPictures.delete(`large:${key}`);
+      this.pictures.delete(`large:${key}`);
+      released = true;
+    }
+    if (released) this.releaseUnusedTextures();
   }
   private loadTexture(url: string) {
     const existing = this.textures.get(url);
@@ -208,9 +228,11 @@ export class KnotRenderer {
   }
 
   /** Only changing assembly/layout (or a new aspect/viewport) uploads vertices. */
-  render(cameraT: number, now: number, dt: number, reduced: boolean): { moving: boolean; focusedKey: string | null } {
+  render(cameraT: number, now: number, dt: number, reduced: boolean, speedPictures = 0): { moving: boolean; focusedKey: string | null } {
     if (!this.available || document.hidden || this.path.length === 0) return { moving: false, focusedKey: null };
     this.reduced = reduced;
+    // Before choosing textures, so a released picture draws its thumbnail in this same frame.
+    if (this.previewKeys.size > (this.previewKey ? 1 : 0)) this.releasePreviews();
     const elapsed = (now - this.layoutAt) / 1000;
     const redistributing = this.transitioning;
     const pathProgress = redistributing ? redistributionProgress(elapsed, 0, 1, reduced) : 1;
@@ -223,12 +245,12 @@ export class KnotRenderer {
     let focusedKey: string | null = null;
     for (let index = 0; index < this.cards.length; index++) {
       const card = this.cards[index];
-      const want = assembleWant(pictureLoopDistance(index / this.cards.length, cameraT, this.cards.length));
+      const want = assembleWant(pictureLoopDistance(index / this.cards.length, cameraT, this.cards.length), speedPictures);
       const previous = card.amount;
       card.amount = stepAssemble(previous, want, dt, reduced);
       if (card.amount !== want) moving = true;
       if (index === selected && card.amount === 1 && !layoutMoving) focusedKey = card.entry.key;
-      const cached = (card.entry.key === this.previewKey ? this.texture(`large:${card.entry.key}`) : null) ?? this.texture(card.entry.key);
+      const cached = (this.previewKeys.has(card.entry.key) ? this.texture(`large:${card.entry.key}`) : null) ?? this.texture(card.entry.key);
       const material = card.mesh.material, texture = cached?.texture ?? null;
       if (material.map !== texture) {
         material.map = texture; material.needsUpdate = true;
@@ -246,7 +268,7 @@ export class KnotRenderer {
         const positions = card.mesh.geometry.attributes.position;
         for (let tile = 0; tile < TILE_COUNT; tile++) {
           const pose = tilePose(card.scattered[tile], scatteredTileSize(card.aspect, card.entry.id, tile),
-            assembledCell(card.position, size, tile), card.amount);
+            assembledCell(card.position, size, tile), tileAmount(card.amount, tile));
           const [x, y, z] = pose.centre, w = pose.width / 2, h = pose.height / 2;
           if (card.amount === 1) {
             // Shared cell edges use identical arithmetic before Float32 quantisation.
@@ -272,7 +294,8 @@ export class KnotRenderer {
     this.renderer.render(this.scene, this.camera);
     return { moving, focusedKey };
   }
-  isAssembled(index: number) { return this.cards[index]?.amount === 1 && !this.transitioning; }
+  /** Whole enough to act on: the last hundredth is a sub-pixel move, not worth refusing a click for. */
+  isAssembled(index: number) { return (this.cards[index]?.amount ?? 0) >= ASSEMBLED_AMOUNT && !this.transitioning; }
   pick(x: number, y: number): number | null {
     if (!this.available) return null;
     const rect = this.canvas.getBoundingClientRect();
@@ -291,7 +314,7 @@ export class KnotRenderer {
     this.canvas.removeEventListener('webglcontextlost', this.onLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onRestored);
     for (const card of this.cards) { card.mesh.geometry.dispose(); card.mesh.material.dispose(); }
-    this.pictures.clear(); this.requestedPictures.clear();
+    this.pictures.clear(); this.requestedPictures.clear(); this.previewKeys.clear();
     this.releaseUnusedTextures();
     this.cards = [];
     this.scene.clear();
