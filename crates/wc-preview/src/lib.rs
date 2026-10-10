@@ -20,10 +20,14 @@ use wc_core::config::ConfigDir;
 
 mod generation;
 use generation::{GenerationCoordinator, ThumbnailDeadline};
+mod clip;
+pub use clip::{preview_clip_cache_key, preview_clip_for, MAX_PREVIEW_CLIP_BYTES};
 
 const THUMBNAIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
 const LARGE_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
 pub const LARGE_THUMBNAIL_CONCURRENCY: usize = 3;
+const PREVIEW_CLIP_TIMEOUT: Duration = Duration::from_secs(45);
+pub const PREVIEW_CLIP_CONCURRENCY: usize = 1;
 const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_DRAIN_GRACE: Duration = Duration::from_millis(200);
@@ -760,6 +764,9 @@ pub enum ThumbnailFailure {
     ImageTooLarge,
     CacheWriteFailed,
     MissingFile,
+    EmptyClip,
+    ClipTooLarge,
+    TimedOut,
 }
 
 impl ThumbnailFailure {
@@ -770,6 +777,9 @@ impl ThumbnailFailure {
             ThumbnailFailure::ImageTooLarge => "image_too_large",
             ThumbnailFailure::CacheWriteFailed => "cache_write_failed",
             ThumbnailFailure::MissingFile => "missing_file",
+            ThumbnailFailure::EmptyClip => "empty_output",
+            ThumbnailFailure::ClipTooLarge => "output_too_large",
+            ThumbnailFailure::TimedOut => "timed_out",
         }
     }
 
@@ -780,6 +790,9 @@ impl ThumbnailFailure {
             "image_too_large" => Some(ThumbnailFailure::ImageTooLarge),
             "cache_write_failed" => Some(ThumbnailFailure::CacheWriteFailed),
             "missing_file" => Some(ThumbnailFailure::MissingFile),
+            "empty_output" => Some(ThumbnailFailure::EmptyClip),
+            "output_too_large" => Some(ThumbnailFailure::ClipTooLarge),
+            "timed_out" => Some(ThumbnailFailure::TimedOut),
             _ => None,
         }
     }
@@ -1090,12 +1103,20 @@ fn write_failure_marker(
 // ── Internal generators ────────────────────────────────────────────────────
 
 fn reserve_unique_thumbnail_temp(cache_dir: &Path, key: &str) -> Result<PathBuf, ThumbnailFailure> {
+    reserve_unique_preview_temp(cache_dir, key, "webp")
+}
+
+fn reserve_unique_preview_temp(
+    cache_dir: &Path,
+    key: &str,
+    extension: &str,
+) -> Result<PathBuf, ThumbnailFailure> {
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     for _ in 0..128 {
         let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let path = cache_dir.join(format!(
-            ".{key}.{}.{}.tmp.webp",
+            ".{key}.{}.{}.tmp.{extension}",
             std::process::id(),
             sequence
         ));
@@ -1146,7 +1167,7 @@ pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.starts_with('.') || !name.ends_with(".tmp.webp") {
+        if !name.starts_with('.') || !(name.ends_with(".tmp.webp") || name.ends_with(".tmp.mp4")) {
             continue;
         }
         let Ok(meta) = entry.metadata() else {

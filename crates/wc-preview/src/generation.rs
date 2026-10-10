@@ -1,4 +1,4 @@
-//! Separate Large capacity and share one physical generation per cache key.
+//! Separate Large/clip capacity and share one physical generation per cache key.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -8,10 +8,17 @@ use std::time::{Duration, Instant};
 
 use crate::{
     ThumbnailFailure, ThumbnailSize, LARGE_THUMBNAIL_CONCURRENCY, LARGE_THUMBNAIL_TIMEOUT,
-    METADATA_COMMAND_TIMEOUT, THUMBNAIL_COMMAND_TIMEOUT,
+    METADATA_COMMAND_TIMEOUT, PREVIEW_CLIP_CONCURRENCY, PREVIEW_CLIP_TIMEOUT,
+    THUMBNAIL_COMMAND_TIMEOUT,
 };
 
 type GenerationResult = Result<(PathBuf, bool), ThumbnailFailure>;
+
+#[derive(Clone, Copy)]
+enum GenerationKind {
+    Thumbnail(ThumbnailSize),
+    Clip,
+}
 
 #[derive(Default)]
 struct Flight {
@@ -24,6 +31,8 @@ pub(super) struct GenerationCoordinator {
     flights: Mutex<HashMap<PathBuf, Arc<Flight>>>,
     active_large: Mutex<usize>,
     lane_available: Condvar,
+    active_clip: Mutex<usize>,
+    clip_available: Condvar,
 }
 
 impl GenerationCoordinator {
@@ -31,6 +40,23 @@ impl GenerationCoordinator {
         &self,
         key: PathBuf,
         tier: ThumbnailSize,
+        generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
+    ) -> GenerationResult {
+        self.run_with_budget(key, GenerationKind::Thumbnail(tier), generate)
+    }
+
+    pub(super) fn run_clip(
+        &self,
+        key: PathBuf,
+        generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
+    ) -> GenerationResult {
+        self.run_with_budget(key, GenerationKind::Clip, generate)
+    }
+
+    fn run_with_budget(
+        &self,
+        key: PathBuf,
+        kind: GenerationKind,
         generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
     ) -> GenerationResult {
         let (flight, leader) = {
@@ -61,20 +87,24 @@ impl GenerationCoordinator {
             key,
             flight,
         };
-        let _lane = if tier == ThumbnailSize::Large {
-            let mut active = self.active_large.lock().unwrap_or_else(|e| e.into_inner());
-            while *active >= LARGE_THUMBNAIL_CONCURRENCY {
-                active = self
-                    .lane_available
-                    .wait(active)
-                    .unwrap_or_else(|e| e.into_inner());
-            }
-            *active += 1;
-            Some(LargePermit(self))
-        } else {
-            None
+        let _lane = match kind {
+            GenerationKind::Thumbnail(ThumbnailSize::Large) => Some(GenerationPermit::acquire(
+                &self.active_large,
+                &self.lane_available,
+                LARGE_THUMBNAIL_CONCURRENCY,
+            )),
+            GenerationKind::Clip => Some(GenerationPermit::acquire(
+                &self.active_clip,
+                &self.clip_available,
+                PREVIEW_CLIP_CONCURRENCY,
+            )),
+            GenerationKind::Thumbnail(ThumbnailSize::Standard) => None,
         };
-        let result = generate(ThumbnailDeadline::new(tier));
+        let deadline = match kind {
+            GenerationKind::Thumbnail(tier) => ThumbnailDeadline::new(tier),
+            GenerationKind::Clip => ThumbnailDeadline::clip(),
+        };
+        let result = generate(deadline);
         *completion
             .flight
             .result
@@ -84,17 +114,27 @@ impl GenerationCoordinator {
     }
 }
 
-struct LargePermit<'a>(&'a GenerationCoordinator);
+struct GenerationPermit<'a> {
+    active: &'a Mutex<usize>,
+    available: &'a Condvar,
+}
 
-impl Drop for LargePermit<'_> {
+impl<'a> GenerationPermit<'a> {
+    fn acquire(active: &'a Mutex<usize>, available: &'a Condvar, width: usize) -> Self {
+        let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
+        while *count >= width {
+            count = available.wait(count).unwrap_or_else(|e| e.into_inner());
+        }
+        *count += 1;
+        Self { active, available }
+    }
+}
+
+impl Drop for GenerationPermit<'_> {
     fn drop(&mut self) {
-        let mut active = self
-            .0
-            .active_large
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let mut active = self.active.lock().unwrap_or_else(|e| e.into_inner());
         *active -= 1;
-        self.0.lane_available.notify_one();
+        self.available.notify_one();
     }
 }
 
@@ -118,7 +158,7 @@ impl Drop for FlightCompletion<'_> {
     }
 }
 
-/// Large helpers share a generation budget, created only after lane admission.
+/// Large/clip helpers share a generation budget, created only after lane admission.
 /// Standard retains its original per-command timeouts. Native image decoding
 /// is allocation-bounded but cannot be interrupted by an external-process deadline.
 #[derive(Clone, Copy)]
@@ -127,6 +167,12 @@ pub(super) struct ThumbnailDeadline {
 }
 
 impl ThumbnailDeadline {
+    pub(super) fn clip() -> Self {
+        Self {
+            expires_at: Some(Instant::now() + PREVIEW_CLIP_TIMEOUT),
+        }
+    }
+
     pub(super) fn new(tier: ThumbnailSize) -> Self {
         Self {
             expires_at: (tier == ThumbnailSize::Large)
@@ -152,6 +198,17 @@ impl ThumbnailDeadline {
     pub(super) fn command_succeeded(self, command: &mut Command, label: &str) -> bool {
         let timeout = self.command_timeout();
         !timeout.is_zero() && crate::command_succeeded(command, timeout, label)
+    }
+
+    pub(super) fn command_output(
+        self,
+        command: &mut Command,
+    ) -> Result<crate::DeadlineCommandOutput, crate::DeadlineCommandError> {
+        let timeout = self.command_timeout();
+        if timeout.is_zero() {
+            return Err(crate::DeadlineCommandError::TimedOut);
+        }
+        crate::run_command_with_deadline(command, timeout)
     }
 }
 

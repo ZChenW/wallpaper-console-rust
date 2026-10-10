@@ -216,6 +216,7 @@ pub fn run() {
             commands::sqlite_restore,
             commands::sqlite_export_flat,
             commands::thumbnail_for,
+            commands::preview_clip,
             commands::preview_asset_authorize,
             commands::thumbnail_cache_status,
             commands::thumbnail_cache_clear,

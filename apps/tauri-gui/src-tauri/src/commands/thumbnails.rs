@@ -4,6 +4,7 @@ use super::common::{
 use super::path_guard;
 use rusqlite::params;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::Manager;
@@ -150,6 +151,56 @@ pub async fn preview_asset_authorize(
     })
     .await
     .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn preview_clip(path: String) -> Result<tauri::ipc::Response, String> {
+    let requested = path.clone();
+    let flight_key = tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        let canonical = path_guard::ensure_command_wallpaper_path(&requested, s)?;
+        let meta = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let cache_dir = s.cd.gui_thumbnail_cache_dir();
+        let cache_dir = cache_dir.canonicalize().unwrap_or(cache_dir);
+        Ok::<_, String>(cache_dir.join(wc_preview::preview_clip_cache_key(
+            &canonical.to_string_lossy(),
+            mtime,
+            meta.len(),
+        )))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let bytes = thumbnail_lane::run_clip(flight_key, move || {
+        let s = storage()?;
+        let canonical = path_guard::ensure_command_wallpaper_path(&path, s)?;
+        let (clip, _) = wc_preview::preview_clip_for(
+            &s.cd.gui_thumbnail_cache_dir(),
+            &canonical.to_string_lossy(),
+        )
+        .map_err(|failure| failure.as_str().to_string())?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&clip)
+            .and_then(|file| {
+                file.take(wc_preview::MAX_PREVIEW_CLIP_BYTES + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|error| error.to_string())?;
+        if bytes.is_empty() {
+            return Err("empty_output".into());
+        }
+        if bytes.len() as u64 > wc_preview::MAX_PREVIEW_CLIP_BYTES {
+            return Err("output_too_large".into());
+        }
+        Ok(bytes)
+    })
+    .await??;
+    Ok(tauri::ipc::Response::new(bytes))
 }
 
 #[tauri::command]
