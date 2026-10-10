@@ -15,15 +15,16 @@ pub const MAX_PREVIEW_CLIP_BYTES: u64 = 12 * 1024 * 1024;
 // and WebKitGTK on the NVIDIA driver then drew every frame flat green; the same clip with the tags
 // filled in plays correctly (both verified on that desktop). HDR sources are tagged BT.709 too and
 // look washed out rather than green.
-const CLIP_FILTER: &str = "scale=-2:'trunc(min(720,ih)/2)*2':out_color_matrix=bt709:out_range=tv,\
+const CLIP_FILTER: &str = "scale=-2:'trunc(min(576,ih)/2)*2':out_color_matrix=bt709:out_range=tv,\
 setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,setsar=1";
 const CLIP_X264_COLOUR: &str = "colorprim=bt709:transfer=bt709:colormatrix=bt709";
-// Playing a clip costs about as much as presenting its frames: measured in the app on the real desktop,
-// 720p at 30 fps took 14% of a core, at 24 fps 11.5%, at 15 fps 7.8% (and 540p at 30 fps 11.3%).
-// 24 is the lowest rate that still reads as video.
+// Playing a clip costs about as much as presenting its frames. Measured in the app on the real desktop
+// with the software video sink the app uses: 720p at 24 fps took 16.5% of a core, 576p at 24 fps 13.6%,
+// 540p at 20 fps 11.8%. 24 is the lowest rate that still reads as video, and 576 is the height of the
+// assembled picture in a 2560x1440 window, so nothing visible is lost there.
 const CLIP_FPS: &str = "24";
-// Bumped from v1 when the colour tags were added, so clips made without them are not reused.
-const CLIP_KEY_PREFIX: &str = "v2-clip";
+// Bumped whenever the encoding changes (colour tags, then size and rate), so older clips are not reused.
+const CLIP_KEY_PREFIX: &str = "v3-clip";
 
 /// Same canonical-path/mtime-seconds/size identity as GUI thumbnails, in its own namespace.
 pub fn preview_clip_cache_key(path: &str, mtime: u64, size: u64) -> String {
