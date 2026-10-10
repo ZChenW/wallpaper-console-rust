@@ -673,24 +673,24 @@ select:focus, input:focus { border-color: var(--primary); }
   grid-area: status;
 }
 
-/* Chrome leaves layout only in the synchronous, fully hidden switch. */
-.single-page-shell[data-book-immersive] {
+/* Shared immersive layout: Book commits during its dip; Knot commits before its fade. */
+.single-page-shell[data-library-immersive] {
   grid-template-areas: "library";
   grid-template-rows: minmax(0, 1fr);
 }
-.single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+.single-page-shell[data-library-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
   display: none;
 }
-.single-page-shell[data-book-immersive] > .single-page-library {
+.single-page-shell[data-library-immersive] > .single-page-library {
   position: relative;
   padding: 0;
 }
-.single-page-shell[data-book-immersive] .single-page-library > :is(.single-page-discovery-error, .library-repair-prompt, .single-page-stale-results) {
+.single-page-shell[data-library-immersive] .single-page-library > :is(.single-page-discovery-error, .library-repair-prompt, .single-page-stale-results) {
   position: relative;
   z-index: 6;
   margin: 0;
 }
-.single-page-shell[data-book-immersive] .single-page-load-more {
+.single-page-shell[data-library-immersive] .single-page-load-more {
   position: absolute;
   z-index: 6;
   bottom: 4.5rem;
@@ -2273,7 +2273,7 @@ select:focus, input:focus { border-color: var(--primary); }
   container-type: inline-size;
 }
 
-.single-page-shell[data-book-immersive] .library-viewport {
+.single-page-shell[data-library-immersive] .library-viewport {
   position: absolute;
   inset: 0;
 }
@@ -2547,48 +2547,16 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
 .wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
-/* Knot gallery: the canvas fog resolves to this same page background. */
+/* Knot uses the whole window; controls stay quiet above the fragments. */
 .wallpaper-knot {
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  position: relative;
   width: 100%;
   height: 100%;
   min-height: 0;
   color: var(--text);
   background: var(--bg);
 }
-.wallpaper-knot__heading {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0.8rem;
-  padding: 1rem 1.4rem 0;
-}
-.wallpaper-knot__heading h3 { margin: 0; font-size: 0.95rem; font-weight: 500; }
-.wallpaper-knot__heading p { margin: 0; color: var(--text-muted); font-size: 0.78rem; }
-.wallpaper-knot__heading button { margin-inline-start: auto; }
-.wallpaper-knot__controls {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 0.25rem 0.65rem;
-  padding: 0.6rem 1.4rem;
-}
-.wallpaper-knot__controls button {
-  padding: 0.35rem 0.5rem;
-  border: 0;
-  border-radius: 0.3rem;
-  background: transparent;
-  color: var(--text-muted);
-  font: inherit;
-  font-size: 0.75rem;
-  cursor: pointer;
-}
-.wallpaper-knot__controls button:hover:not(:disabled) { background: var(--surface-muted); color: var(--text); }
-.wallpaper-knot__controls button[aria-pressed="true"] { color: var(--primary-foreground); background: var(--primary-bg); }
-.wallpaper-knot__controls button:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.wallpaper-knot__controls button:disabled { opacity: 0.55; cursor: default; }
-.wallpaper-knot__controls button:last-child { margin-inline-start: auto; }
+.wallpaper-knot--recovery { display: grid; place-items: center; }
 .wallpaper-knot__stage {
   position: relative;
   display: grid;
@@ -2602,30 +2570,76 @@ select:focus, input:focus { border-color: var(--primary); }
   background: var(--bg);
   /* Resolve the muted theme token for WebGL without a visible border. */
   border: 0 solid var(--surface-muted);
+  outline: none;
 }
 .wallpaper-knot__stage:active { cursor: grabbing; }
-.wallpaper-knot__stage:focus-visible { outline: 1px solid var(--primary); outline-offset: -2px; }
+.wallpaper-knot__stage:focus-visible .wallpaper-knot__caption { outline: 1px solid var(--primary); outline-offset: 4px; }
 .wallpaper-knot__canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
 .wallpaper-knot__stage:not([data-ready]) .wallpaper-knot__canvas { visibility: hidden; }
 .wallpaper-knot__message { position: relative; max-width: 28rem; padding: 1.5rem; color: var(--text-muted); text-align: center; }
+.wallpaper-knot__view-switch { position: absolute; z-index: 2; top: 0.75rem; right: 0.75rem; }
+.wallpaper-knot__view-switch .library-view-switch__button { padding: 0.35rem 0.55rem; font-size: 0.72rem; }
 .wallpaper-knot__caption {
   position: absolute;
-  bottom: 1.25rem;
+  bottom: 1rem;
   left: 50%;
   transform: translateX(-50%);
-  margin: 0;
-  max-width: 80%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 0.85rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: calc(100% - 14rem);
+  border-radius: 2rem;
+  padding: 0.15rem 0.35rem 0.15rem 0.65rem;
+  font-size: 0.8rem;
   color: var(--text-muted);
   background: var(--bg);
-  padding: 0.2rem 0.5rem;
+  cursor: default;
+}
+.wallpaper-knot__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallpaper-knot__badge { flex: none; font-size: 0.65rem; }
+.wallpaper-knot__actions { flex: none; padding: 0; gap: 0.35rem; }
+.wallpaper-book__actions.wallpaper-knot__actions button { position: relative; width: 2rem; height: 2rem; }
+.wallpaper-knot__actions .apply-indicator { position: static; }
+.wallpaper-knot__knots { position: absolute; bottom: 1rem; right: 0.75rem; display: flex; gap: 0.1rem; }
+.wallpaper-knot__knots button {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 2rem;
+  border: 0;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.wallpaper-knot__knots button::after { content: ''; width: 0.35rem; height: 0.35rem; border-radius: 50%; background: currentColor; opacity: 0.5; }
+.wallpaper-knot__knots button[aria-pressed="true"]::after { opacity: 1; }
+.wallpaper-knot__knots button:hover:not(:disabled) { color: var(--text); }
+.wallpaper-knot__knots button:focus-visible { outline: 1px solid var(--primary); outline-offset: 1px; border-radius: 50%; }
+.wallpaper-knot__knots button:disabled { opacity: 0.45; cursor: default; }
+.wallpaper-knot__hint {
+  position: absolute;
+  bottom: 4rem;
+  inset-inline: 0.75rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 300ms ease-out;
   pointer-events: none;
 }
-.wallpaper-knot__hint { margin: 0; padding: 0.75rem 1.4rem 1rem; color: var(--text-muted); font-size: 0.72rem; text-align: center; }
+.wallpaper-knot__hint[data-visible] { opacity: 1; }
+.wallpaper-knot[data-reduced-motion] .wallpaper-knot__hint { transition: none; }
 .wallpaper-knot__announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@container library-viewport (max-width: 480px) {
+  .wallpaper-knot__caption { max-width: calc(100% - 1.5rem); }
+  .wallpaper-knot__knots { bottom: 4rem; }
+}
+@media (forced-colors: active) {
+  .wallpaper-knot__stage:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }
+  .wallpaper-knot__knots button[aria-pressed="true"] { outline: 1px solid Highlight; }
+}
 
 /* Escape Library's container stacking context, above the window zoom. */
 .wallpaper-book__menu-layer {

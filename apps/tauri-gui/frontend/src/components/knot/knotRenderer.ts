@@ -2,10 +2,11 @@
 import type * as Three from 'three';
 import { curvePoint, lerp, type KnotCurve, type Vec3 } from './knotCurves.ts';
 import {
-  CAM_Z, CAMERA_FOV, DEFAULT_ASPECT, FOCUS_LIFT, FOG_FAR, FOG_NEAR, MAX_SCALE,
-  REDISTRIBUTE_SECONDS, REDISTRIBUTE_STAGGER_SECONDS, SCALE_SECONDS,
-  exponentialStep, focusScale, loopDistance, pathLengthForCount, planePosition,
-  redistributionProgress, scaledKnotPath, seededOffsets, ROPE_OPACITY, ROPE_POINTS,
+  CAM_Z, CAMERA_FOV, DEFAULT_ASPECT, FOG_FAR, FOG_NEAR, TILE_COUNT,
+  REDISTRIBUTE_SECONDS, REDISTRIBUTE_STAGGER_SECONDS,
+  assembleWant, assembledCell, assembledCellBounds, assembledSize, cameraFov, needsVertexUpdate, pictureAspect,
+  pictureLoopDistance, redistributionProgress, scaledKnotPath, scatteredTileCentre,
+  scatteredTileSize, selectedIndex, stepAssemble, tilePose, tileUVCell,
 } from './knotModel.ts';
 
 let three: typeof Three;
@@ -16,17 +17,18 @@ export async function loadKnotRenderer() {
 export interface KnotRenderEntry { readonly key: string; readonly id: number }
 interface Picture {
   readonly entry: KnotRenderEntry;
-  readonly mesh: Three.Mesh<Three.PlaneGeometry, Three.MeshBasicMaterial>;
-  readonly size: number;
+  readonly mesh: Three.Mesh<Three.BufferGeometry, Three.MeshBasicMaterial>;
   from: Vec3;
   to: Vec3;
   position: Vec3;
-  scale: number;
-  lift: number;
+  fromTiles: readonly Vec3[];
+  toTiles: readonly Vec3[];
+  scattered: readonly Vec3[];
+  amount: number;
+  aspect: number;
+  dirty: boolean;
 }
 interface CachedTexture { readonly texture: Three.Texture; readonly image: HTMLImageElement; ready: boolean }
-const SCALE_EPSILON = 0.001;
-const POSITION_EPSILON = 0.0001;
 
 export class KnotRenderer {
   onInvalidate: (() => void) | null = null;
@@ -34,7 +36,6 @@ export class KnotRenderer {
   private readonly scene = new three.Scene();
   private readonly camera = new three.PerspectiveCamera(CAMERA_FOV, 1, 0.1, 20000);
   private readonly raycaster = new three.Raycaster();
-  private readonly geometry = new three.PlaneGeometry(1, 1);
   private readonly tint = new three.Color();
   private readonly colorCanvas = document.createElement('canvas');
   private cards: Picture[] = [];
@@ -43,9 +44,6 @@ export class KnotRenderer {
   private readonly requestedPictures = new Map<string, string>();
   private previewKey: string | null = null;
   private path: readonly Vec3[] = [];
-  /** A hairline along the knot: with few pictures it is what makes the path read as a knot. */
-  private rope: Three.LineLoop<Three.BufferGeometry, Three.LineBasicMaterial> | null = null;
-  private ropeDirty = true;
   private fromPath: readonly Vec3[] = [];
   private layoutAt = 0;
   private transitioning = false;
@@ -64,12 +62,6 @@ export class KnotRenderer {
     this.renderer = new three.WebGLRenderer({ canvas, alpha: true, antialias: true, powerPreference: 'low-power' });
     this.renderer.setClearColor(0, 0);
     this.scene.fog = new three.Fog(0, FOG_NEAR, FOG_FAR);
-    const ropeGeometry = new three.BufferGeometry();
-    ropeGeometry.setAttribute('position', new three.BufferAttribute(new Float32Array(ROPE_POINTS * 3), 3));
-    this.rope = new three.LineLoop(ropeGeometry, new three.LineBasicMaterial({ transparent: true, opacity: ROPE_OPACITY, depthWrite: false }));
-    this.rope.frustumCulled = false;
-    this.rope.renderOrder = -1;
-    this.scene.add(this.rope);
     // Default quaternion is identity: the camera always looks down -Z.
     canvas.addEventListener('webglcontextlost', this.onLost);
     canvas.addEventListener('webglcontextrestored', this.onRestored);
@@ -78,13 +70,13 @@ export class KnotRenderer {
     this.renderer.setPixelRatio(Math.min(2, Math.max(1, dpr)));
     this.renderer.setSize(Math.max(1, width), Math.max(1, height), false);
     this.camera.aspect = Math.max(1, width) / Math.max(1, height);
+    this.camera.fov = cameraFov(this.camera.aspect);
     this.camera.updateProjectionMatrix();
+    for (const card of this.cards) card.dirty = true;
   }
   setTheme(background: string, muted: string) {
     (this.scene.fog as Three.Fog).color.copy(this.cssColor(background));
     this.tint.copy(this.cssColor(muted));
-    // The line takes the stage's text colour, so it follows the theme; fog fades its far side.
-    this.rope?.material.color.copy(this.cssColor(getComputedStyle(this.canvas).color));
     for (const card of this.cards) if (!card.mesh.material.map) card.mesh.material.color.copy(this.tint);
   }
   private cssColor(css: string) {
@@ -107,26 +99,43 @@ export class KnotRenderer {
     const nextPath = scaledKnotPath(curve, entries.length);
     const existing = new Map(this.cards.map((card) => [card.entry.key, card]));
     this.cards = entries.map((entry, index) => {
-      const to = planePosition(nextPath, index, entries.length, entry.id);
+      const to = curvePoint(nextPath, index / Math.max(1, entries.length));
+      const toTiles = Array.from({ length: TILE_COUNT }, (_, tile) => scatteredTileCentre(nextPath, index, entries.length, entry.id, tile));
       const retained = existing.get(entry.key);
       if (retained) {
         existing.delete(entry.key);
-        // Capture the current interpolated position, even on an interrupted switch.
+        // Capture the sampled scatter and centre on interrupted redistribution.
         retained.from = retained.position;
+        retained.fromTiles = retained.scattered;
         retained.to = to;
+        retained.toTiles = toTiles;
+        retained.dirty = true;
         return retained;
       }
-      const mesh = new three.Mesh(this.geometry, new three.MeshBasicMaterial({ side: three.DoubleSide, color: this.tint }));
+      const geometry = new three.BufferGeometry();
+      geometry.setAttribute('position', new three.BufferAttribute(new Float32Array(TILE_COUNT * 4 * 3), 3).setUsage(three.DynamicDrawUsage));
+      const uvs: number[] = [], indices: number[] = [];
+      for (let tile = 0; tile < TILE_COUNT; tile++) {
+        const { u0, u1, v0, v1 } = tileUVCell(tile), base = tile * 4;
+        uvs.push(u0, v0, u1, v0, u1, v1, u0, v1);
+        indices.push(base, base + 1, base + 2, base, base + 2, base + 3);
+      }
+      geometry.setAttribute('uv', new three.Float32BufferAttribute(uvs, 2));
+      geometry.setIndex(indices);
+      const mesh = new three.Mesh(geometry, new three.MeshBasicMaterial({ side: three.DoubleSide, color: this.tint }));
+      mesh.userData.index = index;
       this.scene.add(mesh);
-      return { entry, mesh, size: seededOffsets(entry.id).size, from: to, to, position: to, scale: 1, lift: 0 };
+      return { entry, mesh, from: to, to, position: to, fromTiles: toTiles, toTiles, scattered: toTiles,
+        amount: 0, aspect: DEFAULT_ASPECT, dirty: true };
     });
-    for (const card of existing.values()) { this.scene.remove(card.mesh); card.mesh.material.dispose(); this.setPicture(card.entry.key, null); }
+    for (const card of existing.values()) {
+      this.scene.remove(card.mesh); card.mesh.geometry.dispose(); card.mesh.material.dispose(); this.setPicture(card.entry.key, null);
+    }
     this.fromPath = oldPath.length ? oldPath : nextPath;
     this.path = nextPath;
     this.layoutAt = now;
     this.reduced = reduced;
     this.transitioning = oldPath.length > 0 && !reduced;
-    this.ropeDirty = true;
     this.onInvalidate?.();
   }
   /** Freeze redistribution time while the controller is hidden/inactive. */
@@ -198,64 +207,72 @@ export class KnotRenderer {
     return cached?.ready ? cached : null;
   }
 
-  /** Returns whether focus or redistribution still needs another frame. */
+  /** Only changing assembly/layout (or a new aspect/viewport) uploads vertices. */
   render(cameraT: number, now: number, dt: number, reduced: boolean): { moving: boolean; focusedKey: string | null } {
     if (!this.available || document.hidden || this.path.length === 0) return { moving: false, focusedKey: null };
     this.reduced = reduced;
     const elapsed = (now - this.layoutAt) / 1000;
-    const pathProgress = this.transitioning ? redistributionProgress(elapsed, 0, 1, reduced) : 1;
+    const redistributing = this.transitioning;
+    const pathProgress = redistributing ? redistributionProgress(elapsed, 0, 1, reduced) : 1;
     const point = lerp(curvePoint(this.fromPath, cameraT), curvePoint(this.path, cameraT), pathProgress);
     this.camera.position.set(point[0], point[1], point[2] + CAM_Z);
-    if (this.rope && (this.ropeDirty || this.transitioning)) {
-      const positions = this.rope.geometry.attributes.position.array as Float32Array;
-      for (let i = 0; i < ROPE_POINTS; i++) {
-        const source = Math.floor(i / ROPE_POINTS * this.path.length);
-        const p = lerp(this.fromPath[source] ?? this.path[source], this.path[source], pathProgress);
-        positions[i * 3] = p[0]; positions[i * 3 + 1] = p[1]; positions[i * 3 + 2] = p[2];
-      }
-      this.rope.geometry.attributes.position.needsUpdate = true;
-      this.ropeDirty = this.transitioning;
-    }
     this.camera.updateMatrixWorld();
-    let moving = this.transitioning && !reduced && elapsed < REDISTRIBUTE_SECONDS + REDISTRIBUTE_STAGGER_SECONDS;
-    const targets: number[] = [];
-    let focused = -1, best = 1;
+    const layoutMoving = redistributing && !reduced && elapsed < REDISTRIBUTE_SECONDS + REDISTRIBUTE_STAGGER_SECONDS;
+    let moving = layoutMoving;
+    const selected = selectedIndex(cameraT, this.cards.length);
+    let focusedKey: string | null = null;
     for (let index = 0; index < this.cards.length; index++) {
       const card = this.cards[index];
-      const progress = this.transitioning ? redistributionProgress(elapsed, index, this.cards.length, reduced) : 1;
-      card.position = lerp(card.from, card.to, progress);
-      const [x, y, z] = card.position;
-      const target = focusScale(Math.hypot(x - point[0], y - point[1]), Math.abs(z - this.camera.position.z),
-        loopDistance(index / this.cards.length, cameraT) * pathLengthForCount(this.cards.length));
-      targets.push(target);
-      if (target > best) { best = target; focused = index; }
-    }
-    for (let index = 0; index < this.cards.length; index++) {
-      const card = this.cards[index], target = targets[index];
-      const lift = index === focused ? FOCUS_LIFT * (target - 1) / (MAX_SCALE - 1) : 0;
-      card.scale = reduced ? target : exponentialStep(card.scale, target, dt, SCALE_SECONDS);
-      card.lift = reduced ? lift : exponentialStep(card.lift, lift, dt, SCALE_SECONDS);
-      if (Math.abs(card.scale - target) < SCALE_EPSILON) card.scale = target;
-      else moving = true;
-      if (Math.abs(card.lift - lift) < POSITION_EPSILON) card.lift = lift;
-      else moving = true;
-      card.mesh.position.set(card.position[0], card.position[1], card.position[2] + card.lift);
+      const want = assembleWant(pictureLoopDistance(index / this.cards.length, cameraT, this.cards.length));
+      const previous = card.amount;
+      card.amount = stepAssemble(previous, want, dt, reduced);
+      if (card.amount !== want) moving = true;
+      if (index === selected && card.amount === 1 && !layoutMoving) focusedKey = card.entry.key;
       const cached = (card.entry.key === this.previewKey ? this.texture(`large:${card.entry.key}`) : null) ?? this.texture(card.entry.key);
-      const texture = cached?.texture ?? null;
-      const material = card.mesh.material;
-      if (material.map !== texture) { material.map = texture; material.needsUpdate = true; }
-      if (texture) material.color.set(0xffffff);
-      else material.color.copy(this.tint);
+      const material = card.mesh.material, texture = cached?.texture ?? null;
+      if (material.map !== texture) {
+        material.map = texture; material.needsUpdate = true;
+        if (texture) material.color.set(0xffffff);
+        else material.color.copy(this.tint);
+      }
       const image = cached?.image;
-      const aspect = image?.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : DEFAULT_ASPECT;
-      const size = card.size * card.scale;
-      card.mesh.scale.set(aspect >= 1 ? size : size * aspect, aspect >= 1 ? size / aspect : size, 1);
+      const aspect = pictureAspect(image?.naturalWidth && image.naturalHeight ? image.naturalWidth / image.naturalHeight : DEFAULT_ASPECT);
+      if (aspect !== card.aspect) { card.aspect = aspect; card.dirty = true; }
+      if (needsVertexUpdate(previous, card.amount, redistributing, card.dirty)) {
+        const progress = redistributing ? redistributionProgress(elapsed, index, this.cards.length, reduced) : 1;
+        card.position = lerp(card.from, card.to, progress);
+        card.scattered = card.toTiles.map((p, tile) => lerp(card.fromTiles[tile], p, progress));
+        const size = assembledSize(card.aspect, this.camera.aspect);
+        const positions = card.mesh.geometry.attributes.position;
+        for (let tile = 0; tile < TILE_COUNT; tile++) {
+          const pose = tilePose(card.scattered[tile], scatteredTileSize(card.aspect, card.entry.id, tile),
+            assembledCell(card.position, size, tile), card.amount);
+          const [x, y, z] = pose.centre, w = pose.width / 2, h = pose.height / 2;
+          if (card.amount === 1) {
+            // Shared cell edges use identical arithmetic before Float32 quantisation.
+            const { left, right, top, bottom, z: depth } = assembledCellBounds(card.position, size, tile);
+            positions.setXYZ(tile * 4, left, bottom, depth);
+            positions.setXYZ(tile * 4 + 1, right, bottom, depth);
+            positions.setXYZ(tile * 4 + 2, right, top, depth);
+            positions.setXYZ(tile * 4 + 3, left, top, depth);
+            continue;
+          }
+          positions.setXYZ(tile * 4, x - w, y - h, z);
+          positions.setXYZ(tile * 4 + 1, x + w, y - h, z);
+          positions.setXYZ(tile * 4 + 2, x + w, y + h, z);
+          positions.setXYZ(tile * 4 + 3, x - w, y + h, z);
+        }
+        positions.needsUpdate = true;
+        card.mesh.geometry.computeBoundingSphere();
+        card.dirty = false;
+      }
       card.mesh.userData.index = index;
     }
-    if (!moving || reduced || elapsed >= REDISTRIBUTE_SECONDS + REDISTRIBUTE_STAGGER_SECONDS) this.transitioning = false;
+    if (reduced || elapsed >= REDISTRIBUTE_SECONDS + REDISTRIBUTE_STAGGER_SECONDS) this.transitioning = false;
     this.renderer.render(this.scene, this.camera);
-    return { moving, focusedKey: focused >= 0 ? this.cards[focused].entry.key : null };
+    return { moving, focusedKey };
   }
+  isAssembled(index: number) { return this.cards[index]?.amount === 1 && !this.transitioning; }
   pick(x: number, y: number): number | null {
     if (!this.available) return null;
     const rect = this.canvas.getBoundingClientRect();
@@ -273,9 +290,7 @@ export class KnotRenderer {
     this.onInvalidate = null;
     this.canvas.removeEventListener('webglcontextlost', this.onLost);
     this.canvas.removeEventListener('webglcontextrestored', this.onRestored);
-    for (const card of this.cards) card.mesh.material.dispose();
-    this.geometry.dispose();
-    this.rope?.geometry.dispose(); this.rope?.material.dispose(); this.rope = null;
+    for (const card of this.cards) { card.mesh.geometry.dispose(); card.mesh.material.dispose(); }
     this.pictures.clear(); this.requestedPictures.clear();
     this.releaseUnusedTextures();
     this.cards = [];

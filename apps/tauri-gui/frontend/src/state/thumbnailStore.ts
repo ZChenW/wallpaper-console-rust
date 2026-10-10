@@ -1,6 +1,7 @@
 import type { ThumbnailDTO } from '../api/bridge.ts';
 import { ThumbnailRequestQueue, type EnqueueOptions } from '../hooks/thumbnailQueueCore.ts';
 import { recordMetric } from '../perf/metrics.ts';
+import { LARGE_PREVIEW_PREFIX } from '../components/wallpaperPreviewMedia.ts';
 
 export const MAX_REVEAL_PER_FRAME = 12;
 export const DEFAULT_THUMBNAIL_CACHE_LIMIT = 256;
@@ -78,8 +79,15 @@ export class ThumbnailSession {
     return this.failures.get(path);
   }
 
+  /**
+   * Failures the user should hear about. A large preview is an upgrade over the grid-size one
+   * that is already showing, so when it fails (typically a first-time generation timing out
+   * while several run at once) the view just keeps the smaller picture; it is not a warning.
+   */
   failureCount(): number {
-    return this.failures.size;
+    let count = 0;
+    for (const key of this.failures.keys()) if (!key.startsWith(LARGE_PREVIEW_PREFIX)) count += 1;
+    return count;
   }
 
   listenerPathCount(): number {

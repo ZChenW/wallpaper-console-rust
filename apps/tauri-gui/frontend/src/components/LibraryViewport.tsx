@@ -23,6 +23,8 @@ export interface LibraryViewportProps {
   // Unlike focusToken it must not re-anchor or scroll the view.
   readonly returnFocusToken: number;
   readonly onAnchorChange: (wallpaperId: number, settled?: boolean) => void;
+  readonly viewMode?: LibraryViewMode;
+  readonly onViewModeChange?: (mode: LibraryViewMode) => void;
   readonly immersive?: boolean;
   readonly onImmersiveChange?: (immersive: boolean) => void;
 }
@@ -36,13 +38,15 @@ function LibraryViewportImpl({
   focusToken,
   returnFocusToken,
   onAnchorChange,
+  viewMode,
+  onViewModeChange,
   immersive,
   onImmersiveChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
     knot: () => (
       <Suspense fallback={<div className="wallpaper-knot__stage" role="status">Preparing Knot…</div>}>
-        <WallpaperKnot model={model} initialAnchorWallpaperId={initialAnchorWallpaperId}
+        <WallpaperKnot model={model} applyGesture={applyGesture} viewMode={viewMode ?? mode} onViewModeChange={onViewModeChange} initialAnchorWallpaperId={initialAnchorWallpaperId}
           focusToken={focusToken} returnFocusToken={returnFocusToken} onAnchorChange={onAnchorChange} />
       </Suspense>
     ),

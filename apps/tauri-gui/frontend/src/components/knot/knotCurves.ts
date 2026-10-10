@@ -25,13 +25,7 @@ const torus = (p: number, q: number) => (t: number): Vec3 => {
 };
 export const CINQUEFOIL: KnotCurve = { id: 'cinquefoil', label: 'Cinquefoil', components: [torus(2, 5)] };
 export const TORUS_3_4: KnotCurve = { id: 'torus-3-4', label: 'Torus (3,4)', components: [torus(3, 4)] };
-export const LISSAJOUS: KnotCurve = {
-  id: 'lissajous', label: 'Lissajous', components: [(t) => {
-    const a = t * TAU;
-    return [Math.cos(2 * a + 0.3), Math.cos(3 * a + 1.2), Math.cos(5 * a + 0.7)];
-  }],
-};
-export const KNOT_CURVES = [TREFOIL, FIGURE_EIGHT, CINQUEFOIL, TORUS_3_4, LISSAJOUS] as const;
+export const KNOT_CURVES = [TREFOIL, FIGURE_EIGHT, CINQUEFOIL, TORUS_3_4] as const;
 export const modulo = (n: number, length = 1) => ((n % length) + length) % length;
 export const lerp = (a: Vec3, b: Vec3, t: number): Vec3 => [
   a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t,

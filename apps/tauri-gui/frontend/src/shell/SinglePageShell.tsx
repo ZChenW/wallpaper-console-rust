@@ -20,7 +20,7 @@ import LibraryFilterControls, { sourceFilterValue } from './LibraryFilterControl
 import { useLibrarySelection } from './useLibrarySelection.ts';
 import { useLibraryViewModel } from './useLibraryViewModel.ts';
 import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
-import { createBookImmersiveTransition } from './bookImmersiveLayout.ts';
+import { createBookImmersiveTransition, fadeLibraryModeStage, libraryChromeHidden } from './bookImmersiveLayout.ts';
 import { flushSync } from 'react-dom';
 import { shouldEndBookImmersive } from '../components/wallpaperBookModel.ts';
 import { useReducedMotion } from '../hooks/useReducedMotion.ts';
@@ -607,6 +607,11 @@ export default function SinglePageShell() {
   const outgoingLibraryMode = preferences.libraryViewMode;
   const changeLibraryViewMode = useCallback((mode: typeof outgoingLibraryMode) => {
     if (mode === outgoingLibraryMode) return;
+    if (mode === 'knot' || outgoingLibraryMode === 'knot') {
+      // Cancel any departing Book dip before committing the new mode/layout.
+      bookTransitionRef.current?.request(false, true);
+      setFiltersOpen(false);
+    }
     const anchor = resolveLibraryModeSwitchAnchor(
       browser.entries,
       selectedEntry?.wallpaperId,
@@ -649,6 +654,14 @@ export default function SinglePageShell() {
   const changeBookImmersive = useCallback((immersive: boolean) => {
     bookTransitionRef.current?.request(immersive, reducedMotion);
   }, [reducedMotion]);
+  const previousViewModeRef = useRef(preferences.libraryViewMode);
+  useLayoutEffect(() => {
+    const previous = previousViewModeRef.current;
+    previousViewModeRef.current = preferences.libraryViewMode;
+    if (previous === preferences.libraryViewMode || (previous !== 'knot' && preferences.libraryViewMode !== 'knot')) return;
+    const stage = shellRef.current?.querySelector<HTMLElement>('.library-viewport');
+    if (stage) return fadeLibraryModeStage(stage, reducedMotion);
+  }, [preferences.libraryViewMode, reducedMotion]);
   const immersiveQueryRef = useRef({ resetKey, replaceCount: browser.replaceCount });
   useEffect(() => {
     const previous = immersiveQueryRef.current;
@@ -665,6 +678,8 @@ export default function SinglePageShell() {
     [browser.entries, libraryViewportAnchorId],
   );
 
+  const chromeHidden = libraryChromeHidden(preferences.libraryViewMode, bookImmersive);
+
   const scanActivityVisible = scan.presentation.kind !== 'hidden';
   const feedbackVisible = feedbackState.notices.length > 0;
   const shellNotificationsVisible = scanActivityVisible || feedbackVisible;
@@ -673,6 +688,7 @@ export default function SinglePageShell() {
     <div
       ref={shellRef}
       data-book-immersive={bookImmersive || undefined}
+      data-library-immersive={chromeHidden || undefined}
       className={`single-page-shell library-view-${preferences.libraryViewMode}${
         settingsOpen ? ' settings-open' : ''
       }${shellNotificationsVisible ? ' has-notifications' : ''}${
@@ -692,7 +708,7 @@ export default function SinglePageShell() {
         event.preventDefault();
       }}
     >
-      <header className="single-page-topbar" data-tauri-drag-region="deep" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
+      <header className="single-page-topbar" data-tauri-drag-region="deep" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <h1 className="single-page-brand">Wallpaper Console</h1>
         <label className="single-page-search">
           <Search size={16} aria-hidden="true" />
@@ -759,7 +775,7 @@ export default function SinglePageShell() {
         </button>
       </header>
 
-      <div className="single-page-library-controls" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
+      <div className="single-page-library-controls" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <OverflowStrip className="single-page-filters" role="toolbar" aria-label="Library filters">
           <span aria-hidden="true" className="single-page-filters__label">01 / FILTER</span>
           <LibraryFilterControls
@@ -862,13 +878,15 @@ export default function SinglePageShell() {
             model: libraryViewModel,
             onAnchorChange: rememberLibraryAnchor,
             returnFocusToken: libraryReturnFocusToken,
+            viewMode: preferences.libraryViewMode,
+            onViewModeChange: changeLibraryViewMode,
             immersive: bookImmersive,
             onImmersiveChange: changeBookImmersive,
           }}
         />
       </main>
 
-      <footer className="single-page-statusbar" inert={bookImmersive} aria-hidden={bookImmersive || undefined}>
+      <footer className="single-page-statusbar" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <span className="single-page-statusbar__selection">
           {preferences.libraryViewMode !== 'grid'
             ? flowAnchorEntry

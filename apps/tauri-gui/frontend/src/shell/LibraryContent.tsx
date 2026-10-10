@@ -1,6 +1,7 @@
 import type { ComponentProps } from 'react';
 import { ClockAlert, FolderPlus, LoaderCircle, ScanSearch, SearchCheck, SearchX, TriangleAlert } from 'lucide-react';
 import LibraryState from '../components/LibraryState.tsx';
+import LibraryViewSwitch from '../components/LibraryViewSwitch.tsx';
 import LibraryViewport from '../components/LibraryViewport.tsx';
 import FirstRunSuggestions from './FirstRunSuggestions.tsx';
 import type { useLibraryBrowser } from './useLibraryBrowser.ts';
@@ -19,7 +20,7 @@ interface Props {
 }
 
 /** Library loading and recovery stay independent of settings and display probes. */
-export default function LibraryContent({
+function LibraryContentState({
   browser, libraryLifecycle, firstRunEligible, scanRunning, viewport,
   addFirstRunDirectory, scanWallpaperEngine, onOpenSources, onClearFilters,
 }: Props) {
@@ -192,3 +193,20 @@ export default function LibraryContent({
       />
     );
   }
+
+
+/** Recovery/empty results must keep an exit from Knot's hidden shell chrome. */
+export default function LibraryContent(props: Props) {
+  const { browser, viewport, firstRunEligible } = props;
+  if (viewport.mode !== 'knot') return <LibraryContentState {...props} />;
+  if (!browser.initialLoading && !firstRunEligible && browser.emptyConfirmed && !browser.loadError && !props.scanRunning && browser.entries.length === 0) {
+    return <LibraryViewport {...viewport} />;
+  }
+  if (browser.entries.length > 0 && !browser.initialLoading && !firstRunEligible) return <LibraryContentState {...props} />;
+  return <section className="wallpaper-knot wallpaper-knot--recovery" aria-label="Knot wallpaper browser">
+    {viewport.onViewModeChange ? <div className="wallpaper-knot__view-switch">
+      <LibraryViewSwitch value={viewport.viewMode ?? 'knot'} onChange={viewport.onViewModeChange} />
+    </div> : null}
+    <LibraryContentState {...props} />
+  </section>;
+}

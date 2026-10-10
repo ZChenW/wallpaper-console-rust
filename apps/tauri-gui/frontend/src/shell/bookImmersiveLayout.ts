@@ -1,4 +1,18 @@
+import type { LibraryViewMode } from './shellPreferences.ts';
 import { driveAnimations } from '../components/drivenAnimation.ts';
+
+// Book owns its session state and transition; Knot only borrows the layout.
+export const libraryChromeHidden = (mode: LibraryViewMode, bookImmersive: boolean) =>
+  mode === 'knot' || (mode === 'book' && bookImmersive);
+
+/** A mode/layout commit precedes this fade. Never play on WebKit's compositor. */
+export function fadeLibraryModeStage(stage: HTMLElement, reducedMotion: boolean) {
+  if (reducedMotion) return () => undefined;
+  const animation = stage.animate([{ opacity: 0 }, { opacity: 1 }], { duration: 150, easing: 'ease-out', fill: 'both' });
+  animation.onfinish = () => animation.cancel();
+  driveAnimations([animation]);
+  return () => { animation.onfinish = null; animation.cancel(); };
+}
 
 export type BookImmersivePhase = 'out' | 'in' | 'return';
 

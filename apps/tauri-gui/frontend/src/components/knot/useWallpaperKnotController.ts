@@ -1,29 +1,35 @@
 import { useEffect, useRef, useState } from 'react';
 import { useReducedMotion } from '../../hooks/useReducedMotion.ts';
 import { useThumbnailStore } from '../../state/ThumbnailStoreContext.tsx';
-import { resolveLibraryFlowStartupAnchor, type LibraryViewModel } from '../libraryViewModel.ts';
+import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type LibraryViewModel } from '../libraryViewModel.ts';
 import { safeFileSrc } from '../safeFileSrc.ts';
 import { largePreviewKey, staticPreviewAssetPath } from '../wallpaperPreviewMedia.ts';
+import type { LibraryBrowserItemDTO } from '../../api/types.ts';
+import type { ApplyGesture, LibraryViewMode } from '../../shell/shellPreferences.ts';
+import { isContextMenuKey } from '../../shell/keyboardInteraction.ts';
 import type { BookWheelSample } from '../wallpaperBookModel.ts';
 import { KNOT_CURVES, modulo } from './knotCurves.ts';
 import { loadKnotRenderer, type KnotRenderer } from './knotRenderer.ts';
 import {
   AUTO_PICTURES_PER_SECOND, CAMERA_SECONDS, DRAG_DEAD_ZONE, SETTLE_IDLE_MS,
-  accumulateKnotWheel, exponentialStep, nearestLoopTarget, selectedIndex,
+  accumulateKnotWheel, exponentialStep, knotPointerInteraction, nearestLoopTarget, selectedIndex,
   settleTarget, textureWindow, wheelSensitivity,
 } from './knotModel.ts';
 
 export interface WallpaperKnotProps {
   readonly model: LibraryViewModel;
+  readonly applyGesture: ApplyGesture;
+  readonly viewMode?: LibraryViewMode;
+  readonly onViewModeChange?: (mode: LibraryViewMode) => void;
   readonly initialAnchorWallpaperId?: number | null;
   readonly focusToken?: number;
   readonly returnFocusToken?: number;
   readonly onAnchorChange?: (wallpaperId: number, settled?: boolean) => void;
 }
-interface KnotEngine { sync: () => void; switchKnot: (index: number) => void; toggleAuto: () => void }
+interface KnotEngine { sync: () => void; switchKnot: (index: number) => void; applySelected: () => void }
 const APPEND_DISTANCE = 10;
 const CAMERA_SETTLE_PICTURES = 0.03;
-const INPUT_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', 'a', 'A', '1', '2', '3', '4', '5']);
+const INPUT_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', 'a', 'A', '1', '2', '3', '4', 'Enter', 'Escape', 'ContextMenu', 'F10']);
 
 /** RAF, store subscriptions and input stay imperative; React only sees semantic changes. */
 export function useWallpaperKnotController(props: WallpaperKnotProps) {
@@ -40,7 +46,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
   }));
   const [status, setStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [knotIndex, setKnotIndex] = useState(0);
-  const [autoTravel, setAutoTravel] = useState(false);
+  const [contextMenu, setContextMenu] = useState<{ entry: LibraryBrowserItemDTO; x: number; y: number } | null>(null);
 
   useEffect(() => {
     const stage = stageRef.current, canvas = canvasRef.current;
@@ -61,11 +67,24 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     let entries = latest.current.props.model.entries;
     let reset = latest.current.props.model.replaceCount;
     let focusToken = latest.current.props.focusToken, returnFocusToken = latest.current.props.returnFocusToken;
+    let cameraSettled = true;
+    let pendingMenu: { id: number; x: number; y: number } | null = null;
+    let suppressClick = false;
     let pausedAt: number | null = null;
     let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean; index: number | null } | null = null;
     const canRun = () => !disposed && !document.hidden && latest.current.props.model.active;
     const interactive = () => renderer?.available && canRun() && !latest.current.props.model.queryReplacementPending;
     const focus = () => stage.focus({ preventScroll: true });
+    const fromControl = (event: Event) => event.target instanceof Element && Boolean(event.target.closest('button, [role="menu"], .library-view-switch, .wallpaper-knot__caption'));
+    const cancelMenu = () => { pendingMenu = null; setContextMenu(null); };
+    const applySelected = () => {
+      const { model } = latest.current.props;
+      const entry = model.entries[selectedIndex(cameraT, count)];
+      if (interactive() && cameraSettled && entry && libraryEntryApplyAvailable(model.canApplyToDisplay, model.isEntryApplicable, entry)) {
+        model.onSelect(entry); model.onApply(entry);
+      }
+      focus();
+    };
     const cancelFrame = () => { if (frame !== null) cancelAnimationFrame(frame); frame = null; };
     const invalidate = () => {
       if (canRun() && renderer?.available && frame === null) {
@@ -83,6 +102,11 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     const report = (settled: boolean) => {
       const { model, onAnchorChange } = latest.current.props;
       const index = selectedIndex(cameraT, count), entry = model.entries[index];
+      cameraSettled = settled;
+      if (settled && pendingMenu && entry?.wallpaperId === pendingMenu.id) {
+        const menu = pendingMenu; pendingMenu = null;
+        setContextMenu({ entry, x: menu.x, y: menu.y });
+      }
       if (!entry || (reportedId === entry.wallpaperId && reportedSettled === settled)) return;
       reportedId = entry.wallpaperId; reportedSettled = settled;
       setSelection((previous) => previous.index === index && previous.settled === settled ? previous : { index, settled });
@@ -158,9 +182,10 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
         invalidate();
       }, SETTLE_IDLE_MS);
     };
-    const stopAuto = () => { if (auto) { auto = false; setAutoTravel(false); } };
+    const stopAuto = () => { auto = false; };
     const moveTo = (t: number, settleImmediately = false) => {
       if (!interactive()) return;
+      cancelMenu();
       stopAuto();
       targetT = t;
       inputPending = !settleImmediately;
@@ -184,8 +209,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       const cameraMoving = Math.abs(cameraT - targetT) * count > CAMERA_SETTLE_PICTURES;
       if (!cameraMoving) cameraT = targetT;
       const result = renderer.render(cameraT, now, dt, reduced);
-      // The camera coming to rest is what selects a picture. Waiting for the scale easing's long
-      // tail as well delayed the status bar and the sharp preview by several seconds.
+      // Selection/status follow the camera; the large preview waits for complete assembly.
       const settled = !auto && !drag && !inputPending && !cameraMoving;
       report(settled);
       observePictures(settled, result.focusedKey);
@@ -194,6 +218,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     }
     const switchKnot = (index: number) => {
       if (!interactive() || index === curveIndex || !KNOT_CURVES[index]) return;
+      cancelMenu();
       curveIndex = index; setKnotIndex(index);
       clearPreview(); report(false);
       renderer?.setLayout(entries.map((entry) => ({ key: String(entry.wallpaperId), id: entry.wallpaperId })), KNOT_CURVES[index], performance.now(), latest.current.reducedMotion);
@@ -201,15 +226,25 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     };
     const toggleAuto = () => {
       if (!interactive() || latest.current.reducedMotion) return;
-      auto = !auto; setAutoTravel(auto);
+      cancelMenu();
+      auto = !auto;
       clearIdle(); inputPending = false;
       if (!auto) targetT = settleTarget(targetT, count);
       clearPreview(); report(false); invalidate();
     };
     const keydown = (event: KeyboardEvent) => {
-      if (event.target !== stage || !interactive() || event.altKey || event.ctrlKey || event.metaKey || !INPUT_KEYS.has(event.key)) return;
+      if (event.target !== stage || !interactive()) return;
+      // Tab/other keys also abandon a queued menu instead of stealing focus on arrival.
+      if (pendingMenu) cancelMenu();
+      if (event.key === 'Escape') { event.preventDefault(); cancelMenu(); return; }
+      if (event.altKey || event.ctrlKey || event.metaKey || !INPUT_KEYS.has(event.key)) return;
+      if (event.key === 'F10' && !event.shiftKey) return;
       event.preventDefault();
-      if (/^[1-5]$/.test(event.key)) switchKnot(Number(event.key) - 1);
+      if (event.key === 'Enter') { if (!event.repeat) applySelected(); }
+      else if (isContextMenuKey(event.key, event.shiftKey)) {
+        const rect = stage.getBoundingClientRect();
+        openMenu(selectedIndex(cameraT, count), rect.left + rect.width / 2, rect.top + rect.height / 2);
+      } else if (/^[1-4]$/.test(event.key)) switchKnot(Number(event.key) - 1);
       else if (event.key.toLowerCase() === 'a') { if (!event.repeat) toggleAuto(); }
       else if (event.key === 'Home') moveTo(nearestLoopTarget(cameraT, 0), true);
       else if (event.key === 'End') {
@@ -218,7 +253,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       } else moveTo((Math.round(targetT * count) + (event.key === 'ArrowRight' || event.key === 'PageDown' ? 1 : -1)) / count, true);
     };
     const wheel = (event: WheelEvent) => {
-      if (!interactive() || event.ctrlKey) return;
+      if (!interactive() || event.ctrlKey || fromControl(event)) return;
       event.preventDefault();
       const next = accumulateKnotWheel(targetT, event, stage.clientHeight, count, performance.now(), wheelSample);
       wheelSample = next.sample;
@@ -228,7 +263,8 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       const rect = canvas.getBoundingClientRect(); return renderer?.pick(x - rect.left, y - rect.top) ?? null;
     };
     const pointerdown = (event: PointerEvent) => {
-      if (!interactive() || event.button !== 0 || drag) return;
+      if (!interactive() || event.button !== 0 || drag || fromControl(event)) return;
+      cancelMenu(); suppressClick = false;
       focus(); stopAuto(); clearIdle();
       stage.setPointerCapture(event.pointerId);
       drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false, index: hit(event.clientX, event.clientY) };
@@ -246,19 +282,52 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       if (!drag || event.pointerId !== drag.id) return;
       const completed = drag; drag = null;
       if (stage.hasPointerCapture(completed.id)) stage.releasePointerCapture(completed.id);
-      if (event.type === 'pointerup' && !completed.moved && completed.index !== null) moveTo(nearestLoopTarget(cameraT, completed.index / count), true);
-      else { inputPending = true; armSettle(); invalidate(); }
+      suppressClick = completed.moved || event.type !== 'pointerup';
+      if (suppressClick || completed.index === null) { inputPending = true; armSettle(); invalidate(); }
+    };
+    const click = (event: MouseEvent) => {
+      if (!interactive() || fromControl(event) || suppressClick) return;
+      const index = hit(event.clientX, event.clientY);
+      if (index === null) return;
+      const { model, applyGesture } = latest.current.props;
+      const entry = model.entries[index];
+      const intent = knotPointerInteraction({ gesture: applyGesture, clickCount: event.detail,
+        canApply: libraryEntryApplyAvailable(model.canApplyToDisplay, model.isEntryApplicable, entry), fromControl: false },
+      cameraSettled && index === selectedIndex(cameraT, count) && Boolean(renderer?.isAssembled(index)));
+      if (intent.travel) moveTo(nearestLoopTarget(cameraT, index / count), true);
+      if (intent.select) model.onSelect(entry);
+      if (intent.apply) model.onApply(entry);
+    };
+    const openMenu = (index: number, x: number, y: number) => {
+      if (!interactive() || !entries[index]) return;
+      focus();
+      const entry = entries[index];
+      if (cameraSettled && index === selectedIndex(cameraT, count)) {
+        stopAuto(); latest.current.props.model.onSelect(entry);
+        setContextMenu({ entry, x, y });
+      } else {
+        moveTo(nearestLoopTarget(cameraT, index / count), true);
+        pendingMenu = { id: entry.wallpaperId, x, y };
+        invalidate();
+      }
+    };
+    const contextmenu = (event: MouseEvent) => {
+      if (fromControl(event)) return;
+      event.preventDefault();
+      const index = hit(event.clientX, event.clientY);
+      if (index !== null) openMenu(index, event.clientX, event.clientY);
     };
     const adopt = (event: KeyboardEvent) => {
       if (event.defaultPrevented || event.target !== document.body || !interactive() || !INPUT_KEYS.has(event.key) || event.altKey || event.ctrlKey || event.metaKey) return;
+      if (event.key === 'F10' && !event.shiftKey) return;
       focus();
-      stage.dispatchEvent(new KeyboardEvent('keydown', { key: event.key, repeat: event.repeat, bubbles: true, cancelable: true }));
+      stage.dispatchEvent(new KeyboardEvent('keydown', { key: event.key, repeat: event.repeat, shiftKey: event.shiftKey, bubbles: true, cancelable: true }));
       event.preventDefault();
     };
     const syncPause = () => {
       if (!canRun()) {
         if (pausedAt === null) pausedAt = performance.now();
-        cancelFrame(); clearIdle();
+        cancelFrame(); clearIdle(); cancelMenu();
         const captured = drag; drag = null;
         if (captured && stage.hasPointerCapture(captured.id)) stage.releasePointerCapture(captured.id);
         store.setInteracting(false);
@@ -285,6 +354,8 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     themeObserver.observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme', 'style', 'class', 'data-color-scheme'] });
     const colorScheme = window.matchMedia('(prefers-color-scheme: dark)');
     colorScheme.addEventListener('change', theme);
+    stage.addEventListener('click', click);
+    stage.addEventListener('contextmenu', contextmenu);
     stage.addEventListener('keydown', keydown);
     stage.addEventListener('wheel', wheel, { passive: false });
     stage.addEventListener('pointerdown', pointerdown);
@@ -297,12 +368,13 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     window.addEventListener('resize', resize);
     store.setScrolling(false); syncPause();
     engineRef.current = {
-      switchKnot, toggleAuto,
+      switchKnot, applySelected,
       sync: () => {
         const next = latest.current.props;
         syncPause();
         if (next.model.queryReplacementPending) { clearPreview(); return; }
         if (reset !== next.model.replaceCount || entries !== next.model.entries) {
+          cancelMenu();
           const replacing = reset !== next.model.replaceCount;
           reset = next.model.replaceCount;
           const nextCount = next.model.entries.length;
@@ -347,6 +419,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       previewUnsubscribe?.();
       store.setInteracting(false);
       resizeObserver.disconnect(); themeObserver.disconnect(); colorScheme.removeEventListener('change', theme);
+      stage.removeEventListener('click', click); stage.removeEventListener('contextmenu', contextmenu);
       stage.removeEventListener('keydown', keydown); stage.removeEventListener('wheel', wheel);
       stage.removeEventListener('pointerdown', pointerdown); stage.removeEventListener('pointermove', pointermove);
       stage.removeEventListener('pointerup', finishPointer); stage.removeEventListener('pointercancel', finishPointer);
@@ -358,7 +431,10 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
   }, [store]);
   useEffect(() => { engineRef.current?.sync(); }, [props.model.entries, props.model.active, props.model.replaceCount, props.model.queryReplacementPending, props.model.loadingMore, props.model.canAutoAppend, props.focusToken, props.returnFocusToken, reducedMotion]);
   return { stageRef, canvasRef, selection, selectedEntry: props.model.entries[selection.index], status,
-    knotIndex, autoTravel, reducedMotion,
+    knotIndex, reducedMotion, contextMenu,
+    closeContextMenu: () => setContextMenu(null),
+    focusStage: () => stageRef.current?.focus({ preventScroll: true }),
+    applySelected: () => engineRef.current?.applySelected(),
     switchKnot: (index: number) => engineRef.current?.switchKnot(index),
-    toggleAuto: () => engineRef.current?.toggleAuto() };
+  };
 }

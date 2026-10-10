@@ -72,10 +72,10 @@
 }
 
 /* Win over editorial gutters and chrome display rules at every breakpoint. */
-:root[data-theme="editorial"] .single-page-shell[data-book-immersive] > .single-page-library {
+:root[data-theme="editorial"] .single-page-shell[data-library-immersive] > .single-page-library {
   padding: 0;
 }
-:root[data-theme="editorial"] .single-page-shell[data-book-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+:root[data-theme="editorial"] .single-page-shell[data-library-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
   display: none;
 }
 
