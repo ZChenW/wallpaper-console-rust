@@ -108,7 +108,10 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     const syncClip = (quiet: boolean) => {
       if (!clip) return;
       const index = selectedIndex(targetT, count);
-      const entry = quiet && !document.hidden ? latest.current.props.model.entries[index] : undefined;
+      // A window in the background keeps the clip it is showing, frozen, and starts no new one.
+      const used = document.hasFocus();
+      clip.setRunning(used);
+      const entry = quiet && !document.hidden && (used || clip.playingKey !== null) ? latest.current.props.model.entries[index] : undefined;
       clip.want(entry && entry.type === 'video' && renderer?.isAssembled(index)
         ? { key: String(entry.wallpaperId), path: entry.path, place: () => renderer?.pictureRect(index) ?? null } : null);
     };
@@ -443,6 +446,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     stage.addEventListener('lostpointercapture', finishPointer);
     document.addEventListener('keydown', adopt);
     document.addEventListener('visibilitychange', syncPause);
+    window.addEventListener('blur', invalidate); window.addEventListener('focus', invalidate);
     window.addEventListener('resize', resize);
     store.setScrolling(false); syncPause();
     engineRef.current = {
@@ -526,6 +530,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       stage.removeEventListener('pointerup', finishPointer); stage.removeEventListener('pointercancel', finishPointer);
       stage.removeEventListener('lostpointercapture', finishPointer);
       document.removeEventListener('keydown', adopt); document.removeEventListener('visibilitychange', syncPause);
+      window.removeEventListener('blur', invalidate); window.removeEventListener('focus', invalidate);
       window.removeEventListener('resize', resize);
       renderer?.dispose();
     };

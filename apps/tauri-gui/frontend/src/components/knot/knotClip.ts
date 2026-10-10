@@ -51,6 +51,7 @@ export class KnotClipPlayer {
   /** The picture a fading-out clip is still following. */
   private leaving: ClipTarget | null = null;
   private opacity = 0;
+  private running = true;
   private ramp = 0;
   private request = 0;
   private dwell: unknown = null;
@@ -93,6 +94,18 @@ export class KnotClipPlayer {
   reposition(): void {
     const target = this.shown ? this.wanted : this.leaving;
     if (target) this.place(target);
+  }
+
+  /**
+   * Freeze the clip where it is, or let it run again. For a window that is not being used: a frozen
+   * frame looks like the still it replaced and costs nothing, where a playing clip costs a tenth of a
+   * core for as long as the view is open.
+   */
+  setRunning(running: boolean): void {
+    if (this.disposed || this.running === running) return;
+    this.running = running;
+    if (!this.shown) return;
+    if (running) void this.video.play().catch(() => undefined); else this.video.pause();
   }
 
   /** Stop at once: for a pause or a teardown, not for a picture about to move. */
@@ -143,7 +156,10 @@ export class KnotClipPlayer {
     for (let attempt = 0; attempt <= CLIP_RECOVERIES; attempt++) {
       try { await this.video.play(); } catch { return; }
       if (!current()) { this.video.pause(); return; }
-      if (await this.advancing(current)) { if (current()) this.reveal(request); return; }
+      if (await this.advancing(current)) {
+        if (current()) { this.reveal(request); if (!this.running) this.video.pause(); }
+        return;
+      }
       if (!current()) return;
       if (attempt === CLIP_RECOVERIES) break;
       this.video.load();

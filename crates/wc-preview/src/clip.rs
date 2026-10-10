@@ -10,15 +10,28 @@ use crate::generation::{GenerationCoordinator, ThumbnailDeadline};
 use crate::{DeadlineCommandError, DeadlineCommandOutput, ThumbnailFailure};
 
 pub const MAX_PREVIEW_CLIP_BYTES: u64 = 12 * 1024 * 1024;
-const CLIP_SCALE: &str = "scale=-2:'trunc(min(720,ih)/2)*2'";
+// The clip is always written as complete BT.709, square pixels. A source that names its colour
+// matrix but not its primaries or transfer (common in Wallpaper Engine uploads) passed that gap on,
+// and WebKitGTK on the NVIDIA driver then drew every frame flat green; the same clip with the tags
+// filled in plays correctly (both verified on that desktop). HDR sources are tagged BT.709 too and
+// look washed out rather than green.
+const CLIP_FILTER: &str = "scale=-2:'trunc(min(720,ih)/2)*2':out_color_matrix=bt709:out_range=tv,\
+setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,setsar=1";
+const CLIP_X264_COLOUR: &str = "colorprim=bt709:transfer=bt709:colormatrix=bt709";
+// Playing a clip costs about as much as presenting its frames: measured in the app on the real desktop,
+// 720p at 30 fps took 14% of a core, at 24 fps 11.5%, at 15 fps 7.8% (and 540p at 30 fps 11.3%).
+// 24 is the lowest rate that still reads as video.
+const CLIP_FPS: &str = "24";
+// Bumped from v1 when the colour tags were added, so clips made without them are not reused.
+const CLIP_KEY_PREFIX: &str = "v2-clip";
 
 /// Same canonical-path/mtime-seconds/size identity as GUI thumbnails, in its own namespace.
 pub fn preview_clip_cache_key(path: &str, mtime: u64, size: u64) -> String {
     let real = fs::canonicalize(path)
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_else(|_| path.to_string());
-    let hash = crate::stable_hash_hex(&format!("v1-clip-{real}:{mtime}:{size}"));
-    format!("v1-clip-{hash}.mp4")
+    let hash = crate::stable_hash_hex(&format!("{CLIP_KEY_PREFIX}-{real}:{mtime}:{size}"));
+    format!("{CLIP_KEY_PREFIX}-{hash}.mp4")
 }
 
 /// Return a bounded cached MP4 (path, cache hit). Failures never persist markers.
@@ -120,13 +133,15 @@ fn clip_command(src: &str, dst: &Path) -> Command {
             "-sn",
             "-dn",
             "-vf",
-            CLIP_SCALE,
+            CLIP_FILTER,
             "-r",
-            "30",
+            CLIP_FPS,
             "-c:v",
             "libx264",
             "-pix_fmt",
             "yuv420p",
+            "-x264-params",
+            CLIP_X264_COLOUR,
             "-preset",
             "veryfast",
             "-crf",
