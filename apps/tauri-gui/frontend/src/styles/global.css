@@ -204,6 +204,10 @@ select:focus, input:focus { border-color: var(--primary); }
   inset: 0;
   background: var(--panel-alt);
   pointer-events: none;
+  /* A lazy image far off screen stays pending, so its placeholder would pulse for ever where nobody
+     can see it, and an endless animation keeps the whole window compositing at 60 fps (measured:
+     Flow idle at 14% CPU instead of 1.5%). Skipped content does not animate. */
+  content-visibility: auto;
 }
 .wallpaper-thumb-placeholder--loading .wallpaper-type-icon {
   animation: wallpaper-placeholder-pulse 1.2s ease-in-out infinite;
@@ -2597,7 +2601,9 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 .wallpaper-knot__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wallpaper-knot__badge { flex: none; font-size: 0.65rem; }
-.wallpaper-knot__actions { flex: none; padding: 0; gap: 0.35rem; }
+/* Two classes: Book's own padding for this row is declared later and would otherwise win,
+   pushing the buttons above the caption's centre line and the caption up into the hint. */
+.wallpaper-book__actions.wallpaper-knot__actions { flex: none; padding: 0; gap: 0.35rem; }
 .wallpaper-book__actions.wallpaper-knot__actions button { position: relative; width: 2rem; height: 2rem; }
 .wallpaper-knot__actions .apply-indicator { position: static; }
 .wallpaper-knot__knots { position: absolute; bottom: 1rem; right: 0.75rem; display: flex; gap: 0.1rem; }
@@ -2619,7 +2625,8 @@ select:focus, input:focus { border-color: var(--primary); }
 .wallpaper-knot__knots button:disabled { opacity: 0.45; cursor: default; }
 .wallpaper-knot__hint {
   position: absolute;
-  bottom: 4rem;
+  /* Clear of the caption and of the focus ring drawn around it. */
+  bottom: 4.25rem;
   inset-inline: 0.75rem;
   margin: 0;
   color: var(--text-muted);
@@ -3273,6 +3280,16 @@ select:focus, input:focus { border-color: var(--primary); }
   .wallpaper-thumb-placeholder--loading
   .wallpaper-type-icon {
   animation-play-state: paused;
+  will-change: auto;
+}
+
+/* Flow marks every picture away from the centre as lazy, and a lazy picture well below the fold
+   never starts loading, so its placeholder would tick for as long as the view is open. Nobody is
+   waiting on those; only pictures being fetched now show the pulse. */
+.wallpaper-flow
+  .wallpaper-thumb-placeholder--loading:has(~ img[loading="lazy"])
+  .wallpaper-type-icon {
+  animation: none;
   will-change: auto;
 }
 
