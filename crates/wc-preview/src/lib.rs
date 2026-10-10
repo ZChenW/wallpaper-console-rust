@@ -18,7 +18,12 @@ use std::time::{Duration, Instant};
 
 use wc_core::config::ConfigDir;
 
+mod generation;
+use generation::{GenerationCoordinator, ThumbnailDeadline};
+
 const THUMBNAIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const LARGE_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const LARGE_THUMBNAIL_CONCURRENCY: usize = 3;
 const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_DRAIN_GRACE: Duration = Duration::from_millis(200);
@@ -675,6 +680,28 @@ pub fn generate_gui_thumbnail_sized(
         return Ok((dst, true));
     }
 
+    static COORDINATOR: OnceLock<GenerationCoordinator> = OnceLock::new();
+    let coordinator = COORDINATOR.get_or_init(GenerationCoordinator::default);
+    let flight_key = std::fs::canonicalize(cache_dir)
+        .unwrap_or_else(|_| cache_dir.to_path_buf())
+        .join(&key);
+    coordinator.run(flight_key, tier, |deadline| {
+        // Another producer may have published while this request waited for its lane.
+        if dst.exists() {
+            return Ok((dst, true));
+        }
+        generate_gui_thumbnail_uncached(cache_dir, path, &key, dst, max_side, deadline)
+    })
+}
+
+fn generate_gui_thumbnail_uncached(
+    cache_dir: &Path,
+    path: &str,
+    key: &str,
+    dst: PathBuf,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
     let ext = wc_core::formats::get_extension(path)
         .unwrap_or_default()
         .to_lowercase();
@@ -684,14 +711,14 @@ pub fn generate_gui_thumbnail_sized(
 
     // Each producer owns a unique temporary file. This avoids same-key calls
     // deleting or partially overwriting one another before atomic publication.
-    let tmp = reserve_unique_thumbnail_temp(cache_dir, &key)?;
+    let tmp = reserve_unique_thumbnail_temp(cache_dir, key)?;
 
     let generated = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv") {
-        generate_video_thumbnail_v2(path, &tmp, max_side)
+        generate_video_thumbnail_v2(path, &tmp, max_side, deadline)
             .then_some(())
             .ok_or(ThumbnailFailure::ProbeFailed)
     } else {
-        generate_image_thumbnail(path, &tmp, max_side)
+        generate_image_thumbnail(path, &tmp, max_side, deadline)
     };
 
     if let Err(failure) = generated {
@@ -959,7 +986,15 @@ pub fn thumbnail_for_sized(
     let _ = maybe_cleanup_stale_tmp_thumbnails(cache_dir, current_epoch_secs());
     let key = gui_thumb_cache_key(path, mtime, size, tier);
     let marker = failure_marker_path(cache_dir, &key);
-    if let Some(failure) = read_failure_marker(&marker) {
+    // Large upgrades use bounded frontend retries. Old 15-minute markers must
+    // not suppress those retries; Standard's persisted failure policy is unchanged.
+    if tier == ThumbnailSize::Large {
+        let _ = std::fs::remove_file(&marker);
+    }
+    if let Some(failure) = (tier == ThumbnailSize::Standard)
+        .then(|| read_failure_marker(&marker))
+        .flatten()
+    {
         return ThumbnailResult {
             path: path.to_string(),
             thumbnail: None,
@@ -981,8 +1016,10 @@ pub fn thumbnail_for_sized(
             failure_reason: None,
         },
         Err(failure) => {
-            let expires_at = current_epoch_secs().saturating_add(failure_ttl_secs);
-            let _ = write_failure_marker(&marker, failure, expires_at);
+            if tier == ThumbnailSize::Standard {
+                let expires_at = current_epoch_secs().saturating_add(failure_ttl_secs);
+                let _ = write_failure_marker(&marker, failure, expires_at);
+            }
             ThumbnailResult {
                 path: path.to_string(),
                 thumbnail: None,
@@ -1214,7 +1251,12 @@ fn imagemagick_first_frame_source(src: &str) -> String {
     format!("{src}[0]")
 }
 
-fn generate_image_thumbnail(src: &str, dst: &Path, max_side: u32) -> Result<(), ThumbnailFailure> {
+fn generate_image_thumbnail(
+    src: &str,
+    dst: &Path,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> Result<(), ThumbnailFailure> {
     if generate_image_thumbnail_rust(src, dst, max_side)? {
         return Ok(());
     }
@@ -1234,11 +1276,7 @@ fn generate_image_thumbnail(src: &str, dst: &Path, max_side: u32) -> Result<(), 
                 "-auto-orient",
             ])
             .arg(dst);
-        if command_succeeded(
-            &mut command,
-            THUMBNAIL_COMMAND_TIMEOUT,
-            "ImageMagick thumbnail",
-        ) {
+        if deadline.command_succeeded(&mut command, "ImageMagick thumbnail") {
             return Ok(());
         }
     }
@@ -1246,14 +1284,37 @@ fn generate_image_thumbnail(src: &str, dst: &Path, max_side: u32) -> Result<(), 
 }
 
 /// Generate a video thumbnail using multi-point frame selection.
-fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
+// FFmpeg's installed manuals document codec threads as input/output options,
+// filter_threads as global (default: all CPUs), and frames:v as an output limit.
+// Large's two codec threads and one filter thread go together with the three-job
+// lane width to bound aggregate CPU use; keep these limits and the width in sync.
+// Keep accurate input seeking, frame choice, Lanczos scaling and quality intact.
+fn configure_large_ffmpeg(command: &mut Command, deadline: ThumbnailDeadline) {
+    if deadline.is_large() {
+        command.args(["-threads", "2", "-filter_threads", "1"]);
+    }
+}
+
+fn configure_large_ffmpeg_output(command: &mut Command, deadline: ThumbnailDeadline) {
+    if deadline.is_large() {
+        command.args(["-threads", "2"]);
+    }
+}
+
+fn generate_video_thumbnail_v2(
+    src: &str,
+    dst: &Path,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> bool {
     if !command_exists("ffmpeg") {
         return false;
     }
     let scale_filter = ffmpeg_thumbnail_scale_filter(max_side);
 
     // Get duration.
-    let duration = get_video_duration(src).unwrap_or(0.0);
+    let duration =
+        get_video_duration_with_deadline(src, deadline.metadata_timeout()).unwrap_or(0.0);
     if duration <= 0.0 {
         return false;
     }
@@ -1275,15 +1336,13 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
                 "-q",
                 "8",
             ]);
-            let ok = command_succeeded(
-                &mut thumbnailer,
-                THUMBNAIL_COMMAND_TIMEOUT,
-                "ffmpegthumbnailer GUI thumbnail",
-            );
+            let ok =
+                deadline.command_succeeded(&mut thumbnailer, "ffmpegthumbnailer GUI thumbnail");
             if ok && tmp.exists() {
-                // Convert to 400px webp.
+                // Convert the selected still to the requested WebP size.
                 let _ = std::fs::remove_file(dst);
                 let mut ffmpeg = Command::new("ffmpeg");
+                configure_large_ffmpeg(&mut ffmpeg, deadline);
                 ffmpeg.args([
                     "-hide_banner",
                     "-loglevel",
@@ -1292,17 +1351,19 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
                     "-y",
                     "-i",
                     tmp.to_str().unwrap_or(""),
+                ]);
+                configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+                if deadline.is_large() {
+                    ffmpeg.args(["-frames:v", "1"]);
+                }
+                ffmpeg.args([
                     "-vf",
                     &scale_filter,
                     "-quality",
                     "80",
                     dst.to_str().unwrap_or(""),
                 ]);
-                let ok = command_succeeded(
-                    &mut ffmpeg,
-                    THUMBNAIL_COMMAND_TIMEOUT,
-                    "ffmpeg GUI thumbnail conversion",
-                );
+                let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI thumbnail conversion");
                 let _ = std::fs::remove_file(&tmp);
                 if ok && dst.exists() && frame_has_content(dst) {
                     return true;
@@ -1317,6 +1378,7 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
     for &ts in &candidates {
         let _ = std::fs::remove_file(dst);
         let mut ffmpeg = Command::new("ffmpeg");
+        configure_large_ffmpeg(&mut ffmpeg, deadline);
         ffmpeg.args([
             "-hide_banner",
             "-loglevel",
@@ -1327,6 +1389,9 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
             &format!("{:.1}", ts),
             "-i",
             src,
+        ]);
+        configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+        ffmpeg.args([
             "-frames:v",
             "1",
             "-vf",
@@ -1335,11 +1400,7 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
             "80",
             dst.to_str().unwrap_or(""),
         ]);
-        let ok = command_succeeded(
-            &mut ffmpeg,
-            THUMBNAIL_COMMAND_TIMEOUT,
-            "ffmpeg GUI thumbnail",
-        );
+        let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI thumbnail");
         if ok && dst.exists() && frame_has_content(dst) {
             return true;
         }
@@ -1350,6 +1411,7 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
     let ts = duration * 0.5;
     let _ = std::fs::remove_file(dst);
     let mut ffmpeg = Command::new("ffmpeg");
+    configure_large_ffmpeg(&mut ffmpeg, deadline);
     ffmpeg.args([
         "-hide_banner",
         "-loglevel",
@@ -1360,6 +1422,9 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
         &format!("{:.1}", ts),
         "-i",
         src,
+    ]);
+    configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+    ffmpeg.args([
         "-frames:v",
         "1",
         "-vf",
@@ -1368,15 +1433,14 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path, max_side: u32) -> bool {
         "80",
         dst.to_str().unwrap_or(""),
     ]);
-    let ok = command_succeeded(
-        &mut ffmpeg,
-        THUMBNAIL_COMMAND_TIMEOUT,
-        "ffmpeg GUI fallback thumbnail",
-    );
+    let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI fallback thumbnail");
     ok && dst.exists()
 }
 
-fn get_video_duration(path: &str) -> Option<f64> {
+fn get_video_duration_with_deadline(path: &str, timeout: Duration) -> Option<f64> {
+    if timeout.is_zero() {
+        return None;
+    }
     let mut ffprobe = Command::new("ffprobe");
     ffprobe
         .args([
@@ -1389,7 +1453,7 @@ fn get_video_duration(path: &str) -> Option<f64> {
         ])
         .arg("--")
         .arg(path);
-    let out = command_output(&mut ffprobe, METADATA_COMMAND_TIMEOUT, "ffprobe duration")?;
+    let out = command_output(&mut ffprobe, timeout, "ffprobe duration")?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     s.parse().ok()
 }

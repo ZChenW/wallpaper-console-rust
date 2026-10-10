@@ -9,6 +9,9 @@ use std::sync::{Mutex, OnceLock};
 use tauri::Manager;
 use wc_storage::StorageApi;
 
+#[path = "thumbnail_lane.rs"]
+mod thumbnail_lane;
+
 fn preview_asset_scope_cache() -> &'static Mutex<HashSet<PathBuf>> {
     static CACHE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
     CACHE.get_or_init(|| Mutex::new(HashSet::new()))
@@ -160,7 +163,35 @@ pub async fn thumbnail_for(
         Some("large") => wc_preview::ThumbnailSize::Large,
         _ => wc_preview::ThumbnailSize::Standard,
     };
-    tauri::async_runtime::spawn_blocking(move || {
+    // Resolve Large identity in a short preflight before lane admission. This
+    // lets concurrent callers share failures as well as successful disk entries.
+    let flight_key = if tier == wc_preview::ThumbnailSize::Large {
+        let requested = path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let s = storage()?;
+            let canonical = path_guard::ensure_command_wallpaper_path(&requested, s)?;
+            let meta = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let cache_dir = s.cd.gui_thumbnail_cache_dir();
+            let cache_dir = cache_dir.canonicalize().unwrap_or(cache_dir);
+            Ok::<_, String>(cache_dir.join(wc_preview::gui_thumb_cache_key(
+                &canonical.to_string_lossy(),
+                mtime,
+                meta.len(),
+                tier,
+            )))
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    } else {
+        PathBuf::new()
+    };
+    thumbnail_lane::run(flight_key, tier, move || {
         let s = storage()?;
         let canonical = path_guard::ensure_command_wallpaper_path(&path, s)?;
         let canonical = canonical.to_string_lossy().into_owned();
@@ -190,8 +221,7 @@ pub async fn thumbnail_for(
             failure_reason: result.failure_reason.map(|r| r.as_str().to_string()),
         })
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?
 }
 
 #[cfg(test)]
