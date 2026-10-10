@@ -2595,6 +2595,32 @@ select:focus, input:focus { border-color: var(--primary); }
   background: transparent;
 }
 .wallpaper-knot__message { position: relative; max-width: 28rem; padding: 1.5rem; color: var(--text-muted); text-align: center; }
+/* Above the stage, below the view switch: the top edge moves the window, as the hidden top bar would. */
+.wallpaper-knot__window-handle {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2.25rem;
+  cursor: grab;
+  -webkit-app-region: drag;
+}
+.wallpaper-knot__window-handle:active { cursor: grabbing; }
+.wallpaper-knot__window-handle::after {
+  content: '';
+  position: absolute;
+  top: 0.45rem;
+  left: 50%;
+  width: 2.5rem;
+  height: 0.2rem;
+  border-radius: 0.2rem;
+  transform: translateX(-50%);
+  background: var(--text-muted);
+  opacity: 0.18;
+  pointer-events: none;
+}
+.wallpaper-knot__window-handle:hover::after { opacity: 0.5; }
 .wallpaper-knot__view-switch { position: absolute; z-index: 2; top: 0.75rem; right: 0.75rem; }
 .wallpaper-knot__view-switch .library-view-switch__button { padding: 0.35rem 0.55rem; font-size: 0.72rem; }
 .wallpaper-knot__caption {
