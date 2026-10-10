@@ -673,6 +673,17 @@ pub fn generate_gui_thumbnail_sized(
     size: u64,
     tier: ThumbnailSize,
 ) -> Result<(PathBuf, bool), ThumbnailFailure> {
+    generate_gui_thumbnail_sized_before(cache_dir, path, mtime, size, tier, None)
+}
+
+fn generate_gui_thumbnail_sized_before(
+    cache_dir: &Path,
+    path: &str,
+    mtime: u64,
+    size: u64,
+    tier: ThumbnailSize,
+    parent: Option<ThumbnailDeadline>,
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
     std::fs::create_dir_all(cache_dir).map_err(|_| ThumbnailFailure::CacheWriteFailed)?;
 
     let max_side = tier.max_side();
@@ -689,13 +700,17 @@ pub fn generate_gui_thumbnail_sized(
     let flight_key = std::fs::canonicalize(cache_dir)
         .unwrap_or_else(|_| cache_dir.to_path_buf())
         .join(&key);
-    coordinator.run(flight_key, tier, |deadline| {
+    let generate = |deadline| {
         // Another producer may have published while this request waited for its lane.
         if dst.exists() {
             return Ok((dst, true));
         }
         generate_gui_thumbnail_uncached(cache_dir, path, &key, dst, max_side, deadline)
-    })
+    };
+    match parent {
+        Some(deadline) => coordinator.run_thumbnail_before(flight_key, tier, deadline, generate),
+        None => coordinator.run(flight_key, tier, generate),
+    }
 }
 
 fn generate_gui_thumbnail_uncached(

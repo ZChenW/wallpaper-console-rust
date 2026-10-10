@@ -53,10 +53,35 @@ impl GenerationCoordinator {
         self.run_with_budget(key, GenerationKind::Clip, generate)
     }
 
+    pub(super) fn run_thumbnail_before(
+        &self,
+        key: PathBuf,
+        tier: ThumbnailSize,
+        deadline: ThumbnailDeadline,
+        generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
+    ) -> GenerationResult {
+        self.run_before(
+            key,
+            GenerationKind::Thumbnail(tier),
+            Some(deadline),
+            generate,
+        )
+    }
+
     fn run_with_budget(
         &self,
         key: PathBuf,
         kind: GenerationKind,
+        generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
+    ) -> GenerationResult {
+        self.run_before(key, kind, None, generate)
+    }
+
+    fn run_before(
+        &self,
+        key: PathBuf,
+        kind: GenerationKind,
+        parent: Option<ThumbnailDeadline>,
         generate: impl FnOnce(ThumbnailDeadline) -> GenerationResult,
     ) -> GenerationResult {
         let (flight, leader) = {
@@ -73,10 +98,22 @@ impl GenerationCoordinator {
         if !leader {
             let mut result = flight.result.lock().unwrap_or_else(|e| e.into_inner());
             while result.is_none() {
-                result = flight
-                    .finished
-                    .wait(result)
-                    .unwrap_or_else(|e| e.into_inner());
+                result = if let Some(deadline) = parent {
+                    let remaining = deadline.command_timeout();
+                    if remaining.is_zero() {
+                        return Err(ThumbnailFailure::TimedOut);
+                    }
+                    flight
+                        .finished
+                        .wait_timeout(result, remaining)
+                        .unwrap_or_else(|e| e.into_inner())
+                        .0
+                } else {
+                    flight
+                        .finished
+                        .wait(result)
+                        .unwrap_or_else(|e| e.into_inner())
+                };
             }
             return result.as_ref().unwrap().clone();
         }
@@ -87,24 +124,31 @@ impl GenerationCoordinator {
             key,
             flight,
         };
-        let _lane = match kind {
-            GenerationKind::Thumbnail(ThumbnailSize::Large) => Some(GenerationPermit::acquire(
-                &self.active_large,
-                &self.lane_available,
-                LARGE_THUMBNAIL_CONCURRENCY,
-            )),
-            GenerationKind::Clip => Some(GenerationPermit::acquire(
-                &self.active_clip,
-                &self.clip_available,
-                PREVIEW_CLIP_CONCURRENCY,
-            )),
-            GenerationKind::Thumbnail(ThumbnailSize::Standard) => None,
-        };
-        let deadline = match kind {
-            GenerationKind::Thumbnail(tier) => ThumbnailDeadline::new(tier),
-            GenerationKind::Clip => ThumbnailDeadline::clip(),
-        };
-        let result = generate(deadline);
+        let result = (|| {
+            let _lane = match kind {
+                GenerationKind::Thumbnail(ThumbnailSize::Large) => {
+                    Some(GenerationPermit::acquire_before(
+                        &self.active_large,
+                        &self.lane_available,
+                        LARGE_THUMBNAIL_CONCURRENCY,
+                        parent,
+                    )?)
+                }
+                GenerationKind::Clip => Some(GenerationPermit::acquire_before(
+                    &self.active_clip,
+                    &self.clip_available,
+                    PREVIEW_CLIP_CONCURRENCY,
+                    parent,
+                )?),
+                GenerationKind::Thumbnail(ThumbnailSize::Standard) => None,
+            };
+            let deadline = match kind {
+                GenerationKind::Thumbnail(tier) => ThumbnailDeadline::new(tier),
+                GenerationKind::Clip => ThumbnailDeadline::clip(),
+            };
+            let deadline = parent.map_or(deadline, |parent| deadline.bounded_by(parent));
+            generate(deadline)
+        })();
         *completion
             .flight
             .result
@@ -120,13 +164,32 @@ struct GenerationPermit<'a> {
 }
 
 impl<'a> GenerationPermit<'a> {
-    fn acquire(active: &'a Mutex<usize>, available: &'a Condvar, width: usize) -> Self {
+    fn acquire_before(
+        active: &'a Mutex<usize>,
+        available: &'a Condvar,
+        width: usize,
+        deadline: Option<ThumbnailDeadline>,
+    ) -> Result<Self, ThumbnailFailure> {
         let mut count = active.lock().unwrap_or_else(|e| e.into_inner());
         while *count >= width {
-            count = available.wait(count).unwrap_or_else(|e| e.into_inner());
+            count = if let Some(deadline) = deadline {
+                let remaining = deadline.command_timeout();
+                if remaining.is_zero() {
+                    return Err(ThumbnailFailure::TimedOut);
+                }
+                available
+                    .wait_timeout(count, remaining)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0
+            } else {
+                available.wait(count).unwrap_or_else(|e| e.into_inner())
+            };
+        }
+        if deadline.is_some_and(|deadline| deadline.command_timeout().is_zero()) {
+            return Err(ThumbnailFailure::TimedOut);
         }
         *count += 1;
-        Self { active, available }
+        Ok(Self { active, available })
     }
 }
 
@@ -161,12 +224,21 @@ impl Drop for FlightCompletion<'_> {
 /// Large/clip helpers share a generation budget, created only after lane admission.
 /// Standard retains its original per-command timeouts. Native image decoding
 /// is allocation-bounded but cannot be interrupted by an external-process deadline.
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct ThumbnailDeadline {
     expires_at: Option<Instant>,
 }
 
 impl ThumbnailDeadline {
+    pub(super) fn bounded_by(self, other: Self) -> Self {
+        Self {
+            expires_at: match (self.expires_at, other.expires_at) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            },
+        }
+    }
+
     pub(super) fn clip() -> Self {
         Self {
             expires_at: Some(Instant::now() + PREVIEW_CLIP_TIMEOUT),
