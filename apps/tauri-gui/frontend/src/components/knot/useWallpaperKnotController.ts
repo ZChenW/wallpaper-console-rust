@@ -13,7 +13,7 @@ import { KNOT_CURVES, modulo } from './knotCurves.ts';
 import { loadKnotRenderer, type KnotRenderer } from './knotRenderer.ts';
 import {
   AUTO_PICTURES_PER_SECOND, CAMERA_REST_PICTURES, CAMERA_REST_SPEED, DRAG_DEAD_ZONE, SETTLE_IDLE_MS,
-  accumulateKnotWheel, knotPointerInteraction, springStep, nearestLoopTarget, selectedIndex,
+  accumulateKnotWheel, knotPointerInteraction, replacementIndex, springStep, nearestLoopTarget, selectedIndex,
   settleTarget, textureWindow, wheelSensitivity,
 } from './knotModel.ts';
 
@@ -30,6 +30,17 @@ export interface WallpaperKnotProps {
 interface KnotEngine { sync: () => void; switchKnot: (index: number) => void; applySelected: () => void }
 const APPEND_DISTANCE = 10;
 const CAMERA_SETTLE_PICTURES = 0.03;
+// The knot last used is kept across launches. It is a taste, not a setting worth a preferences entry.
+const KNOT_STORAGE_KEY = 'wc.knot.curve';
+function storedKnotIndex() {
+  try {
+    const index = KNOT_CURVES.findIndex((curve) => curve.id === localStorage.getItem(KNOT_STORAGE_KEY));
+    return index >= 0 ? index : 0;
+  } catch { return 0; }
+}
+function storeKnotIndex(index: number) {
+  try { localStorage.setItem(KNOT_STORAGE_KEY, KNOT_CURVES[index].id); } catch { /* Restricted storage: the session still remembers. */ }
+}
 const INPUT_KEYS = new Set(['ArrowLeft', 'ArrowRight', 'PageDown', 'PageUp', 'Home', 'End', 'a', 'A', '1', '2', '3', '4', 'Enter', 'Escape', 'ContextMenu', 'F10']);
 
 /** RAF, store subscriptions and input stay imperative; React only sees semantic changes. */
@@ -46,7 +57,8 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     settled: true,
   }));
   const [status, setStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
-  const [knotIndex, setKnotIndex] = useState(0);
+  const [knotIndex, setKnotIndex] = useState(storedKnotIndex);
+  const initialKnot = useRef(knotIndex);
   const [contextMenu, setContextMenu] = useState<{ entry: LibraryBrowserItemDTO; x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -54,10 +66,20 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     if (!stage || !canvas) return;
     let disposed = false, renderer: KnotRenderer | null = null, frame: number | null = null;
     let idleTimer: ReturnType<typeof setTimeout> | null = null;
-    const initial = resolveLibraryFlowStartupAnchor(latest.current.props.model.entries, latest.current.props.initialAnchorWallpaperId, latest.current.props.model.currentPath)?.index ?? 0;
+    const startup = () => {
+      const { model, initialAnchorWallpaperId } = latest.current.props;
+      const anchor = resolveLibraryFlowStartupAnchor(model.entries, initialAnchorWallpaperId, model.currentPath);
+      const entry = anchor ? model.entries[anchor.index] : undefined;
+      // "Found" means the session anchor or the current wallpaper, not the first-result fallback.
+      return { index: anchor?.index ?? 0, found: Boolean(entry && (entry.wallpaperId === initialAnchorWallpaperId || entry.path === model.currentPath)) };
+    };
+    const first = startup(), initial = first.index;
+    // Until the user travels, a current wallpaper that becomes known late still claims the camera.
+    let startupPending = !first.found, userMoved = false;
+    let queryKey = latest.current.props.model.resetKey;
     let count = latest.current.props.model.entries.length;
     let targetT = initial / Math.max(1, count), cameraT = targetT, cameraV = 0;
-    let curveIndex = 0, auto = false, inputPending = false;
+    let curveIndex = initialKnot.current, auto = false, inputPending = false;
     let lastFrame = performance.now();
     let wheelSample: BookWheelSample | undefined;
     let reportedId: number | undefined, reportedSettled: boolean | undefined;
@@ -196,6 +218,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       if (!interactive()) return;
       cancelMenu();
       stopAuto();
+      userMoved = true;
       targetT = t;
       inputPending = !settleImmediately;
       clearPreview();
@@ -233,7 +256,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     const switchKnot = (index: number) => {
       if (!interactive() || index === curveIndex || !KNOT_CURVES[index]) return;
       cancelMenu();
-      curveIndex = index; setKnotIndex(index);
+      curveIndex = index; setKnotIndex(index); storeKnotIndex(index);
       clearPreview(); report(false);
       renderer?.setLayout(entries.map((entry) => ({ key: String(entry.wallpaperId), id: entry.wallpaperId })), KNOT_CURVES[index], performance.now(), latest.current.reducedMotion);
       invalidate();
@@ -241,7 +264,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     const toggleAuto = () => {
       if (!interactive() || latest.current.reducedMotion) return;
       cancelMenu();
-      auto = !auto;
+      auto = !auto; userMoved = true;
       clearIdle(); inputPending = false;
       if (!auto) targetT = settleTarget(targetT, count);
       clearPreview(); report(false); invalidate();
@@ -393,7 +416,17 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
           reset = next.model.replaceCount;
           const nextCount = next.model.entries.length;
           if (replacing) {
-            targetT = cameraT = cameraV = 0; stopAuto(); inputPending = false; clearIdle();
+            // A refresh of the same result must not throw the camera back to the first picture.
+            const queryChanged = queryKey !== next.model.resetKey;
+            queryKey = next.model.resetKey;
+            const fallback = startup();
+            // Nothing has been chosen yet, by the user or by startup: let startup choose now.
+            const undecided = startupPending && !userMoved;
+            const index = replacementIndex(next.model.entries.map((entry) => entry.wallpaperId),
+              undecided ? undefined : entries[selectedIndex(targetT, count)]?.wallpaperId, queryChanged, fallback.index);
+            if (queryChanged) { startupPending = false; userMoved = false; } else if (fallback.found) startupPending = false;
+            targetT = cameraT = index / Math.max(1, nextCount); cameraV = 0;
+            stopAuto(); inputPending = false; clearIdle();
             reportedId = undefined; reportedSettled = undefined; appendClaim = '';
           } else if (count && nextCount) {
             // Appending retains picture-space progress, including the current loop turn.
@@ -405,6 +438,15 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
           for (const [key, unsubscribe] of subscriptions) { unsubscribe(); renderer?.setPicture(key, null); }
           subscriptions.clear(); clearPreview(); observationKey = queuedObservation = '';
           renderer?.setLayout(entries.map((entry) => ({ key: String(entry.wallpaperId), id: entry.wallpaperId })), KNOT_CURVES[curveIndex], performance.now(), latest.current.reducedMotion);
+        }
+        if (startupPending && !userMoved && count > 0) {
+          const late = startup();
+          if (late.found) {
+            startupPending = false;
+            targetT = cameraT = late.index / count; cameraV = 0;
+            reportedId = undefined; reportedSettled = undefined;
+            clearPreview(); invalidate();
+          }
         }
         if (latest.current.reducedMotion) { stopAuto(); cameraT = targetT; cameraV = 0; }
         if (focusToken !== next.focusToken || returnFocusToken !== next.returnFocusToken) {
@@ -444,7 +486,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       renderer?.dispose();
     };
   }, [store]);
-  useEffect(() => { engineRef.current?.sync(); }, [props.model.entries, props.model.active, props.model.replaceCount, props.model.queryReplacementPending, props.model.loadingMore, props.model.canAutoAppend, props.focusToken, props.returnFocusToken, reducedMotion]);
+  useEffect(() => { engineRef.current?.sync(); }, [props.model.entries, props.model.active, props.model.replaceCount, props.model.currentPath, props.model.resetKey, props.model.queryReplacementPending, props.model.loadingMore, props.model.canAutoAppend, props.focusToken, props.returnFocusToken, reducedMotion]);
   return { stageRef, canvasRef, selection, selectedEntry: props.model.entries[selection.index], status,
     knotIndex, reducedMotion, contextMenu,
     closeContextMenu: () => setContextMenu(null),

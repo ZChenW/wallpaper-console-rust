@@ -49,6 +49,16 @@ export const SCATTER_GAP = 0.04;
 export const PICTURE_VIEW_HEIGHT = 0.46;
 export const PICTURE_VIEW_WIDTH = 0.40;
 
+/**
+ * Where the camera belongs when the library result is replaced underneath it. A refresh of the
+ * same query (a rescan finishing, a favourite changing) keeps the wallpaper being looked at; only
+ * a different query starts again from its first result.
+ */
+export function replacementIndex(ids: readonly number[], keepId: number | undefined, queryChanged: boolean, fallback: number) {
+  if (queryChanged) return 0;
+  const kept = keepId === undefined ? -1 : ids.indexOf(keepId);
+  return kept >= 0 ? kept : Math.max(0, Math.min(ids.length - 1, fallback));
+}
 export const loopDistance = (a: number, b: number) => Math.abs(modulo(a - b + 0.5) - 0.5);
 export const nearestLoopTarget = (current: number, t: number) => current + modulo(t - current + 0.5) - 0.5;
 export const settleTarget = (target: number, count: number) => count > 0 ? Math.round(target * count) / count : 0;
