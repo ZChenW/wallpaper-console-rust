@@ -5,12 +5,15 @@ import { libraryEntryApplyAvailable, resolveLibraryFlowStartupAnchor, type Libra
 import { safeFileSrc } from '../safeFileSrc.ts';
 import { bookStaticSource } from '../wallpaperBookModel.ts';
 import { largePreviewKey, staticPreviewAssetPath } from '../wallpaperPreviewMedia.ts';
+import { api } from '../../api/bridge.ts';
 import type { LibraryBrowserItemDTO } from '../../api/types.ts';
 import type { ApplyGesture, LibraryViewMode } from '../../shell/shellPreferences.ts';
 import { isContextMenuKey } from '../../shell/keyboardInteraction.ts';
 import type { BookWheelSample } from '../wallpaperBookModel.ts';
 import { KNOT_CURVES, modulo } from './knotCurves.ts';
 import { loadKnotRenderer, type KnotRenderer } from './knotRenderer.ts';
+import { KnotClipPlayer } from './knotClip.ts';
+import { createRope, grabRope, pullRope, releaseRope, settleRope, stepRope } from './knotRope.ts';
 import {
   AUTO_PICTURES_PER_SECOND, CAMERA_REST_PICTURES, CAMERA_REST_SPEED, DRAG_DEAD_ZONE, SETTLE_IDLE_MS,
   accumulateKnotWheel, knotPointerInteraction, replacementIndex, springStep, nearestLoopTarget, selectedIndex,
@@ -49,6 +52,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
   const store = useThumbnailStore();
   const stageRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const engineRef = useRef<KnotEngine | null>(null);
   const latest = useRef({ props, reducedMotion });
   latest.current = { props, reducedMotion };
@@ -94,7 +98,20 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     let pendingMenu: { id: number; x: number; y: number } | null = null;
     let suppressClick = false;
     let pausedAt: number | null = null;
-    let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean; index: number | null } | null = null;
+    // A drag that starts on a piece pulls the rope there; one that starts on empty space travels.
+    let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean; index: number | null;
+      pull: { perPixel: number; x: number; y: number; z: number } | null } | null = null;
+    let rope = createRope(count);
+    const video = videoRef.current;
+    const clip = video ? new KnotClipPlayer(video, { load: (path) => api.previewClip(path) }) : null;
+    /** The clip plays on a video wallpaper the camera rests on; it rides along when the rope is pulled. */
+    const syncClip = (quiet: boolean) => {
+      if (!clip) return;
+      const index = selectedIndex(targetT, count);
+      const entry = quiet && !document.hidden ? latest.current.props.model.entries[index] : undefined;
+      clip.want(entry && entry.type === 'video' && renderer?.isAssembled(index)
+        ? { key: String(entry.wallpaperId), path: entry.path, place: () => renderer?.pictureRect(index) ?? null } : null);
+    };
     const canRun = () => !disposed && !document.hidden && latest.current.props.model.active;
     const interactive = () => renderer?.available && canRun() && !latest.current.props.model.queryReplacementPending;
     const focus = () => stage.focus({ preventScroll: true });
@@ -243,7 +260,12 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       // Rest is declared only when the remaining move is far below a pixel, so ending it is not a jump.
       const cameraMoving = away > CAMERA_REST_PICTURES || speed > CAMERA_REST_SPEED;
       if (!cameraMoving) { cameraT = targetT; cameraV = 0; }
+      const swinging = reduced ? (settleRope(rope), false) : stepRope(rope, dt);
+      renderer.setOffsets(swinging ? rope.offsets : null);
+      syncClip(!auto && !inputPending && !cameraMoving && !reduced);
       const result = renderer.render(cameraT, now, dt, reduced, speed);
+      // After drawing, so the clip sits on where the picture has just been put.
+      clip?.reposition();
       // Selection/status follow the camera as soon as it has visibly arrived.
       const resting = !auto && !drag && !inputPending;
       report(resting && away <= CAMERA_SETTLE_PICTURES);
@@ -251,7 +273,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       // frames, which are invisible at rest and a stutter in the middle of a move.
       observePictures(resting && !cameraMoving ? selectedIndex(targetT, count) : null);
       requestMore();
-      if ((auto || cameraMoving || result.moving) && frame === null) frame = requestAnimationFrame(tick);
+      if ((auto || cameraMoving || result.moving || swinging) && frame === null) frame = requestAnimationFrame(tick);
     }
     const switchKnot = (index: number) => {
       if (!interactive() || index === curveIndex || !KNOT_CURVES[index]) return;
@@ -296,20 +318,37 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       wheelSample = next.sample;
       if (next.target !== targetT) moveTo(next.target);
     };
-    const hit = (x: number, y: number) => {
-      const rect = canvas.getBoundingClientRect(); return renderer?.pick(x - rect.left, y - rect.top) ?? null;
+    const hitDetail = (x: number, y: number) => {
+      const rect = canvas.getBoundingClientRect(); return renderer?.pickDetail(x - rect.left, y - rect.top) ?? null;
     };
+    const hit = (x: number, y: number) => hitDetail(x, y)?.index ?? null;
     const pointerdown = (event: PointerEvent) => {
       if (!interactive() || event.button !== 0 || drag || fromControl(event)) return;
       cancelMenu(); suppressClick = false;
       focus(); stopAuto(); clearIdle();
       stage.setPointerCapture(event.pointerId);
-      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false, index: hit(event.clientX, event.clientY) };
+      const detail = hitDetail(event.clientX, event.clientY);
+      const perPixel = detail && !latest.current.reducedMotion ? renderer?.unitsPerPixel(detail.depth) ?? 0 : 0;
+      drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false,
+        index: detail?.index ?? null, pull: perPixel > 0 ? { perPixel, x: 0, y: 0, z: 0 } : null };
     };
     const pointermove = (event: PointerEvent) => {
       if (!drag || drag.id !== event.pointerId) return;
       const moved = Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) > DRAG_DEAD_ZONE;
       if (!drag.moved && !moved) return;
+      if (drag.pull && drag.index !== null) {
+        if (!drag.moved) {
+          drag.moved = true; cancelMenu(); clearPreview();
+          grabRope(rope, drag.index);
+          [drag.pull.x, drag.pull.y, drag.pull.z] = rope.hold;
+          report(false);
+        }
+        // Screen y grows downwards, the scene's upwards.
+        pullRope(rope, drag.pull.x + (event.clientX - drag.startX) * drag.pull.perPixel,
+          drag.pull.y - (event.clientY - drag.startY) * drag.pull.perPixel, drag.pull.z);
+        invalidate();
+        return;
+      }
       const dx = event.clientX - (drag.moved ? drag.x : drag.startX);
       const dy = event.clientY - (drag.moved ? drag.y : drag.startY);
       drag.moved = true; drag.x = event.clientX; drag.y = event.clientY;
@@ -320,6 +359,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       const completed = drag; drag = null;
       if (stage.hasPointerCapture(completed.id)) stage.releasePointerCapture(completed.id);
       suppressClick = completed.moved || event.type !== 'pointerup';
+      if (completed.pull && completed.moved) { releaseRope(rope); invalidate(); return; }
       if (suppressClick || completed.index === null) { inputPending = true; armSettle(); invalidate(); }
     };
     const click = (event: MouseEvent) => {
@@ -364,9 +404,10 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     const syncPause = () => {
       if (!canRun()) {
         if (pausedAt === null) pausedAt = performance.now();
-        cancelFrame(); clearIdle(); cancelMenu();
+        cancelFrame(); clearIdle(); cancelMenu(); clip?.halt();
         const captured = drag; drag = null;
         if (captured && stage.hasPointerCapture(captured.id)) stage.releasePointerCapture(captured.id);
+        releaseRope(rope);
         store.setInteracting(false);
       } else {
         store.setInteracting(true);
@@ -379,7 +420,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       }
     };
     const resize = () => {
-      const rect = stage.getBoundingClientRect(); renderer?.setSize(rect.width, rect.height, window.devicePixelRatio); invalidate();
+      const rect = stage.getBoundingClientRect(); renderer?.setSize(rect.width, rect.height, window.devicePixelRatio); clip?.reposition(); invalidate();
     };
     const theme = () => {
       const style = getComputedStyle(stage);
@@ -435,6 +476,9 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
             cameraV *= count / nextCount;
           }
           entries = next.model.entries; count = nextCount;
+          // Nodes are per wallpaper: a different list is a different rope.
+          if (drag?.pull) drag.pull = null;
+          rope = createRope(count);
           for (const [key, unsubscribe] of subscriptions) { unsubscribe(); renderer?.setPicture(key, null); }
           subscriptions.clear(); clearPreview(); observationKey = queuedObservation = '';
           renderer?.setLayout(entries.map((entry) => ({ key: String(entry.wallpaperId), id: entry.wallpaperId })), KNOT_CURVES[curveIndex], performance.now(), latest.current.reducedMotion);
@@ -468,7 +512,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       } catch { renderer?.dispose(); renderer = null; setStatus('failed'); }
     }, () => { if (!disposed) setStatus('failed'); });
     return () => {
-      disposed = true; cancelFrame(); clearIdle();
+      disposed = true; cancelFrame(); clearIdle(); clip?.dispose();
       const captured = drag; drag = null;
       if (captured && stage.hasPointerCapture(captured.id)) stage.releasePointerCapture(captured.id);
       engineRef.current = null;
@@ -487,7 +531,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     };
   }, [store]);
   useEffect(() => { engineRef.current?.sync(); }, [props.model.entries, props.model.active, props.model.replaceCount, props.model.currentPath, props.model.resetKey, props.model.queryReplacementPending, props.model.loadingMore, props.model.canAutoAppend, props.focusToken, props.returnFocusToken, reducedMotion]);
-  return { stageRef, canvasRef, selection, selectedEntry: props.model.entries[selection.index], status,
+  return { stageRef, canvasRef, videoRef, selection, selectedEntry: props.model.entries[selection.index], status,
     knotIndex, reducedMotion, contextMenu,
     closeContextMenu: () => setContextMenu(null),
     focusStage: () => stageRef.current?.focus({ preventScroll: true }),

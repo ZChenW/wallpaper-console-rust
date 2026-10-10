@@ -43,6 +43,7 @@ export class KnotRenderer {
   private readonly pictures = new Map<string, string>();
   private readonly requestedPictures = new Map<string, string>();
   private previewKey: string | null = null;
+  private offsets: Float32Array | null = null;
   private readonly previewKeys = new Set<string>();
   private path: readonly Vec3[] = [];
   private fromPath: readonly Vec3[] = [];
@@ -289,6 +290,10 @@ export class KnotRenderer {
         card.dirty = false;
       }
       card.mesh.userData.index = index;
+      // The rope's give is a rigid shift of the whole wallpaper, on top of where the knot puts it.
+      const at = index * 3, offsets = this.offsets;
+      if (offsets && at + 2 < offsets.length) card.mesh.position.set(offsets[at], offsets[at + 1], offsets[at + 2]);
+      else card.mesh.position.set(0, 0, 0);
     }
     if (reduced || elapsed >= REDISTRIBUTE_SECONDS + REDISTRIBUTE_STAGGER_SECONDS) this.transitioning = false;
     this.renderer.render(this.scene, this.camera);
@@ -296,7 +301,29 @@ export class KnotRenderer {
   }
   /** Whole enough to act on: the last hundredth is a sub-pixel move, not worth refusing a click for. */
   isAssembled(index: number) { return (this.cards[index]?.amount ?? 0) >= ASSEMBLED_AMOUNT && !this.transitioning; }
-  pick(x: number, y: number): number | null {
+  /** How far each wallpaper's rope node is from its place: x, y, z per card, or null for a rope at rest. */
+  setOffsets(offsets: Float32Array | null) { this.offsets = offsets; }
+  /** Scene units per CSS pixel at a distance from the camera: what a pointer movement is worth there. */
+  unitsPerPixel(depth: number) {
+    const height = this.canvas.getBoundingClientRect().height;
+    return height ? 2 * depth * Math.tan(this.camera.fov * Math.PI / 360) / height : 0;
+  }
+  /** The assembled picture's rectangle in CSS pixels relative to the canvas, for content laid over it. */
+  pictureRect(index: number): { left: number; top: number; width: number; height: number } | null {
+    const card = this.cards[index], rect = this.canvas.getBoundingClientRect();
+    if (!card || !rect.width || !rect.height) return null;
+    const size = assembledSize(card.aspect, this.camera.aspect);
+    const first = assembledCellBounds(card.position, size, 0), last = assembledCellBounds(card.position, size, TILE_COUNT - 1);
+    const shift = card.mesh.position, depth = this.camera.position.z - (first.z + shift.z);
+    if (depth <= 0) return null;
+    const halfHeight = depth * Math.tan(this.camera.fov * Math.PI / 360), halfWidth = halfHeight * this.camera.aspect;
+    const x = (world: number) => ((world + shift.x - this.camera.position.x) / halfWidth + 1) / 2 * rect.width;
+    const y = (world: number) => (1 - (world + shift.y - this.camera.position.y) / halfHeight) / 2 * rect.height;
+    return { left: x(first.left), top: y(first.top), width: x(last.right) - x(first.left), height: y(last.bottom) - y(first.top) };
+  }
+  pick(x: number, y: number): number | null { return this.pickDetail(x, y)?.index ?? null; }
+  /** The wallpaper under a point and how far from the camera it was hit. */
+  pickDetail(x: number, y: number): { index: number; depth: number } | null {
     if (!this.available) return null;
     const rect = this.canvas.getBoundingClientRect();
     if (!rect.width || !rect.height) return null;
@@ -305,7 +332,7 @@ export class KnotRenderer {
     const hits = this.raycaster.intersectObjects(this.cards.map((card) => card.mesh), false);
     // Fog-hidden surfaces should not intercept clicks on the empty stage.
     const hit = hits.find((candidate) => this.camera.position.z - candidate.point.z < FOG_FAR);
-    return hit ? hit.object.userData.index as number : null;
+    return hit ? { index: hit.object.userData.index as number, depth: this.camera.position.z - hit.point.z } : null;
   }
   dispose() {
     if (this.disposed) return;
