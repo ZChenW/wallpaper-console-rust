@@ -10,6 +10,7 @@ import LibraryState from './LibraryState.tsx';
 import WallpaperPreviewMedia from './WallpaperPreviewMedia.tsx';
 import { useThumbnail } from '../state/ThumbnailStoreContext.tsx';
 import BookZoomPicture from './BookZoomPicture.tsx';
+import WindowHandle from './WindowHandle.tsx';
 import { libraryEntryApplyAvailable, libraryEntryApplyDisabledReason } from './libraryViewModel.ts';
 import { bookLeafTransform, bookStaticSource, bookWallpaperIndex, type BookFace } from './wallpaperBookModel.ts';
 import { flowStateLabels } from './wallpaperFlowModel.ts';
@@ -276,6 +277,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
       onKeyDown={handleEscape}
       onWheelCapture={cancelPendingMenu}
     >
+      {props.immersive ? <WindowHandle className="wallpaper-book__window-handle" /> : null}
       <header className="wallpaper-book__heading" inert={zoomed} aria-hidden={zoomed || undefined}>
         <h3>Library</h3>
         <p>{model.totalKnown && model.total !== null ? model.total : model.entries.length} wallpapers</p>

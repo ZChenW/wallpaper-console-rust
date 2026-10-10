@@ -2595,10 +2595,10 @@ select:focus, input:focus { border-color: var(--primary); }
   background: transparent;
 }
 .wallpaper-knot__message { position: relative; max-width: 28rem; padding: 1.5rem; color: var(--text-muted); text-align: center; }
-/* Above the stage, below the view switch: the top edge moves the window, as the hidden top bar would. */
-.wallpaper-knot__window-handle {
+/* A view that fills the window hides the top bar, the window's usual handle; this strip along its
+   top edge moves the window instead. Each view places it above its stage and below its own controls. */
+.window-handle {
   position: absolute;
-  z-index: 1;
   top: 0;
   left: 0;
   right: 0;
@@ -2606,8 +2606,8 @@ select:focus, input:focus { border-color: var(--primary); }
   cursor: grab;
   -webkit-app-region: drag;
 }
-.wallpaper-knot__window-handle:active { cursor: grabbing; }
-.wallpaper-knot__window-handle::after {
+.window-handle:active { cursor: grabbing; }
+.window-handle::after {
   content: '';
   position: absolute;
   top: 0.45rem;
@@ -2620,7 +2620,8 @@ select:focus, input:focus { border-color: var(--primary); }
   opacity: 0.18;
   pointer-events: none;
 }
-.wallpaper-knot__window-handle:hover::after { opacity: 0.5; }
+.window-handle:hover::after { opacity: 0.5; }
+.wallpaper-knot__window-handle { z-index: 1; }
 .wallpaper-knot__view-switch { position: absolute; z-index: 2; top: 0.75rem; right: 0.75rem; }
 .wallpaper-knot__view-switch .library-view-switch__button { padding: 0.35rem 0.55rem; font-size: 0.72rem; }
 .wallpaper-knot__caption {
@@ -2782,6 +2783,13 @@ select:focus, input:focus { border-color: var(--primary); }
   padding: 0;
   color: var(--text-muted);
 }
+/* The heading floats over the top edge in immersive mode. Its text lets presses through to the
+   window handle beneath it; anything in it that can be clicked still can. */
+.wallpaper-book__window-handle { z-index: 4; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading { pointer-events: none; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading :is(button, a) { pointer-events: auto; }
+/* The pill would sit on the heading's text: move the text down a line instead of hiding either. */
+.single-page-shell[data-book-immersive] .wallpaper-book__heading { top: 1rem; }
 .single-page-shell[data-book-immersive] .wallpaper-book__heading h3 {
   margin: 0;
   font-size: 0.75rem;

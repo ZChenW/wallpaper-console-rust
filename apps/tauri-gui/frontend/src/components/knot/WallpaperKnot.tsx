@@ -4,6 +4,7 @@ import { createPortal } from 'react-dom';
 import { Check, Heart, SearchX } from 'lucide-react';
 import LibraryState from '../LibraryState.tsx';
 import LibraryViewSwitch from '../LibraryViewSwitch.tsx';
+import WindowHandle from '../WindowHandle.tsx';
 import ContextMenu from '../ContextMenu.tsx';
 import { ApplyIndicator } from '../ApplyIndicator.tsx';
 import { libraryEntryApplyAvailable, libraryEntryApplyDisabledReason } from '../libraryViewModel.ts';
@@ -31,13 +32,6 @@ function useSessionHint() {
   }, []);
   return visible;
 }
-/**
- * The Knot fills the window and the shell's top bar, the window's usual handle, is hidden. This strip
- * along the top takes its place: pressing it moves the window instead of travelling or pulling.
- */
-function WindowHandle() {
-  return <div className="wallpaper-knot__window-handle" data-tauri-drag-region="deep" title="Drag to move the window" />;
-}
 function ViewSwitch(props: WallpaperKnotProps) {
   return props.onViewModeChange ? <div className="wallpaper-knot__view-switch">
     <LibraryViewSwitch value={props.viewMode ?? 'knot'} onChange={props.onViewModeChange} />
@@ -60,7 +54,7 @@ function WallpaperKnotReady(props: WallpaperKnotProps) {
   const pending = Boolean(selectedEntry && model.pendingPath === selectedEntry.path);
   return (
     <section className="wallpaper-knot" aria-label="Knot wallpaper browser" data-reduced-motion={reducedMotion || undefined}>
-      <WindowHandle />
+      <WindowHandle className="wallpaper-knot__window-handle" />
       <ViewSwitch {...props} />
       <div className="wallpaper-knot__stage" ref={stageRef} tabIndex={0}
         aria-label="Wallpaper Knot. Scroll or drag to travel. Left and Right arrows or Page Up and Page Down step pictures. Home and End jump. Keys 1 to 4 change knots. A toggles automatic travel. Enter applies. Right-click for actions."
@@ -111,7 +105,7 @@ function WallpaperKnotReady(props: WallpaperKnotProps) {
 function WallpaperKnot(props: WallpaperKnotProps) {
   if (props.model.entries.length === 0 || (props.initialAnchorWallpaperId == null && !props.model.currentObservationReady)) return (
     <section className="wallpaper-knot" aria-label="Knot wallpaper browser">
-      <WindowHandle />
+      <WindowHandle className="wallpaper-knot__window-handle" />
       <ViewSwitch {...props} />
       <div aria-label="Wallpaper Knot" className="wallpaper-knot__stage" tabIndex={0}>
         {props.model.entries.length === 0 ? <LibraryState description="Try clearing the active filters or changing your search."
