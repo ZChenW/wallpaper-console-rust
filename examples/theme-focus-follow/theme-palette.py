@@ -266,16 +266,27 @@ def processes():
 # for as long as the consumer stayed away. Retries back off instead; a fresh change always goes out
 # at once, and one-shot commands are new processes, so they always try.
 PENDING_RETRY_MAX = 60
-pending_retry = {'at': 0.0, 'delay': 1.0}
+# After this many failures in a row the reload is dropped: the consumer is not there (Clavis not
+# running, say), its files are already written, and it reads them itself when it starts. Without
+# this the follower logged the same failure once a minute for the rest of the session.
+PENDING_GIVE_UP = 6
+pending_retry = {'at': 0.0, 'delay': 1.0, 'failures': 0}
 
 
 def pending_retry_due(now):
     return now >= pending_retry['at']
 
 
-def note_pending_retry(now, failed):
+def note_pending_retry(now, failed, fresh=False):
+    """Returns whether the pending reloads should be kept for another try."""
     pending_retry['delay'] = min(PENDING_RETRY_MAX, pending_retry['delay'] * 2) if failed else 1.0
     pending_retry['at'] = now + pending_retry['delay'] if failed else 0.0
+    # A reload for something that has just changed starts the count again.
+    pending_retry['failures'] = (1 if fresh else pending_retry['failures'] + 1) if failed else 0
+    if pending_retry['failures'] < PENDING_GIVE_UP:
+        return True
+    pending_retry.update(at=0.0, delay=1.0, failures=0)
+    return False
 
 
 def reload_consumers(changed):
@@ -372,7 +383,10 @@ def activate(output, timeout=30, full=False, _follower=None):
         now = time.monotonic()
         if changed or (pending and pending_retry_due(now)):
             remaining = reload_consumers(sorted(set(changed + pending)))
-            note_pending_retry(now, bool(remaining))
+            if not note_pending_retry(now, bool(remaining), fresh=bool(changed)):
+                print(f'theme-palette: giving up on {len(remaining)} pending reload(s); '
+                      'the files are written and will be picked up when the consumer starts', file=sys.stderr)
+                remaining = []
         else:
             remaining = pending
         if remaining != pending:
