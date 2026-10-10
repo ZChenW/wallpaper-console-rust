@@ -70,29 +70,32 @@ def clavis_compatibility():
     )))
 
 
-def read_json(path, default=None):
+def read_json(path, default=None, _fingerprints=None):
+    record_fingerprint(path, _fingerprints)
     try:
         return json.loads(Path(path).read_text())
     except FileNotFoundError:
         return default
 
 
-def atomic_bytes(path, data):
-    path = Path(path).resolve()  # retain user symlinks instead of replacing them
+def atomic_bytes(path, data, _fingerprints=None):
+    consumer_path = Path(path)
+    path = consumer_path.resolve()  # retain user symlinks instead of replacing them
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(prefix='.' + path.name + '.', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
             stream.write(data)
         os.chmod(tmp, path.stat().st_mode & 0o777 if path.exists() else 0o644)
+        record_fingerprint(consumer_path, _fingerprints, tmp)
         os.replace(tmp, path)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
 
 
-def atomic_json(path, data):
-    atomic_bytes(path, json.dumps(data, ensure_ascii=False, sort_keys=True).encode())
+def atomic_json(path, data, _fingerprints=None):
+    atomic_bytes(path, json.dumps(data, ensure_ascii=False, sort_keys=True).encode(), _fingerprints)
 
 
 @contextlib.contextmanager
@@ -218,17 +221,17 @@ def generate():
         print(f'theme-palette: cached {len(outputs)} outputs', flush=True)
 
 
-def palette_for(output):
-    revision = (read_json(CACHE / 'outputs.json', {}) or {}).get('outputs', {}).get(output)
+def palette_for(output, _fingerprints=None):
+    revision = (read_json(CACHE / 'outputs.json', {}, _fingerprints) or {}).get('outputs', {}).get(output)
     if not revision or len(revision) != 64 or any(c not in '0123456789abcdef' for c in revision):
         raise ValueError(f'no complete palette for {output}')
-    return read_palette(revision)
+    return read_palette(revision, _fingerprints)
 
 
-def read_palette(revision):
+def read_palette(revision, _fingerprints=None):
     """Validate the same complete payload before reuse or live activation."""
     directory = CACHE / 'revisions' / revision
-    palette = read_json(directory / 'palette.json')
+    palette = read_json(directory / 'palette.json', _fingerprints=_fingerprints)
     if not isinstance(palette, dict) or palette.get('revision') != revision:
         raise ValueError(f'incomplete palette revision: {revision}')
     files = palette.get('files')
@@ -241,6 +244,7 @@ def read_palette(revision):
                        for key in ('name', 'file', 'destination', 'sha256'))
                 or item['file'] != f'file-{index}'):
             raise ValueError(f'invalid palette file entry: {revision}')
+        record_fingerprint(directory / item['file'], _fingerprints)
         content = (directory / item['file']).read_bytes()
         if not content or hashlib.sha256(content).hexdigest() != item['sha256']:
             raise ValueError(f'damaged palette: {item["name"]}')
@@ -257,8 +261,8 @@ def processes():
             pass
 
 
-# A consumer that cannot be reloaded (Clavis not running, say) stays pending. The follower activates
-# once a second, so retrying on every activation started a process and logged an error every second
+# A consumer that cannot be reloaded (Clavis not running, say) stays pending. The follower used to
+# activate once a second, so retrying on every activation started a process and logged an error every second
 # for as long as the consumer stayed away. Retries back off instead; a fresh change always goes out
 # at once, and one-shot commands are new processes, so they always try.
 PENDING_RETRY_MAX = 60
@@ -317,10 +321,13 @@ def reload_consumers(changed):
     return sorted(set(pending))
 
 
-def activate(output, timeout=30, full=False):
+def activate(output, timeout=30, full=False, _follower=None):
     started = time.monotonic()
+    fingerprints = {} if _follower is not None else None
     with live_locked(timeout):
-        revision, complete = palette_for(output)
+        revision, complete = palette_for(output, fingerprints)
+        for item, _ in complete:
+            record_fingerprint(item['destination'], fingerprints)
         skipped = set() if full else focus_skipped_templates()
         payload = [entry for entry in complete if entry[0]['name'] not in skipped]
         changed = []
@@ -340,6 +347,9 @@ def activate(output, timeout=30, full=False):
                 with os.fdopen(fd, 'wb') as stream:
                     stream.write(content)
                 os.chmod(temporary, dest.stat().st_mode & 0o777 if original is not None else 0o644)
+                # The installed inode's stamp must be captured before publishing:
+                # an external writer can change the destination immediately after replace.
+                record_fingerprint(consumer_path, fingerprints, temporary)
             for dest, temporary, original, consumer_path in staged:
                 os.replace(temporary, dest)
                 committed.append((dest, original))
@@ -358,7 +368,7 @@ def activate(output, timeout=30, full=False):
             for _, temporary, _, _ in staged:
                 Path(temporary).unlink(missing_ok=True)
         pending_path = CACHE / 'pending-reloads.json'
-        pending = read_json(pending_path, [])
+        pending = read_json(pending_path, [], fingerprints)
         now = time.monotonic()
         if changed or (pending and pending_retry_due(now)):
             remaining = reload_consumers(sorted(set(changed + pending)))
@@ -366,16 +376,76 @@ def activate(output, timeout=30, full=False):
         else:
             remaining = pending
         if remaining != pending:
-            atomic_json(pending_path, remaining)
+            atomic_json(pending_path, remaining, fingerprints)
         # Record the complete revision so a partial activation still describes
         # the palette the outputs belong to.
         state = {'output': output, 'revision': revision, 'files': [dict(destination=item['destination'], sha256=item['sha256']) for item, _ in complete]}
-        if changed or read_json(CACHE / 'active.json') != state:
-            atomic_json(CACHE / 'active.json', state)
+        if changed or read_json(CACHE / 'active.json', _fingerprints=fingerprints) != state:
+            atomic_json(CACHE / 'active.json', state, fingerprints)
+        if _follower is not None:
+            _follower.remember(output, revision, complete, remaining, fingerprints)
     elapsed = (time.monotonic() - started) * 1000
     if changed:
         print(f'theme-palette: activated {output} revision={revision[:12]} files={len(changed)} {elapsed:.1f}ms', flush=True)
     return revision
+
+
+def file_fingerprint(paths):
+    stamps = []
+    for path in paths:
+        try:
+            stat = os.stat(path)  # Follow destination symlinks, as activation does.
+            stamps.append((stat.st_mtime_ns, stat.st_size, stat.st_ino))
+        except (FileNotFoundError, NotADirectoryError):
+            stamps.append(None)
+    return tuple(stamps)
+
+
+def record_fingerprint(path, fingerprints, source=None):
+    if fingerprints is not None:
+        fingerprints[Path(path)] = file_fingerprint((path if source is None else source,))[0]
+
+
+class FollowerActivation:
+    """Only followers may skip an unchanged, previously successful activation."""
+    def __init__(self):
+        self.output = None
+        self.paths = ()
+        self.fingerprint = None
+        self.last_full = 0
+        self.pending = False
+
+    def remember(self, output, revision, complete, pending, fingerprints):
+        directory = CACHE / 'revisions' / revision
+        paths = [CACHE / 'outputs.json', directory / 'palette.json',
+                 CACHE / 'pending-reloads.json', CACHE / 'active.json']
+        for item, _ in complete:
+            paths.extend((directory / item['file'], Path(item['destination'])))
+        self.output = output
+        self.paths = paths
+        # Stamps describe validated reads or our staged writes, not a later
+        # snapshot that could silently absorb an external writer's changes.
+        self.fingerprint = tuple(fingerprints[path] for path in paths)
+        self.last_full = time.monotonic()
+        self.pending = bool(pending)
+
+    def deadline(self):
+        if self.output is None:
+            return float('inf')
+        safety = self.last_full + 30
+        return min(safety, pending_retry['at']) if self.pending else safety
+
+    def activate(self, output, now, force=False):
+        # The one-second metadata check catches ordinary edits, creates, deletes,
+        # atomic replacements and symlink retargets of the manifest, revision,
+        # destinations and reload/active state. Same-size writes that preserve
+        # mtime and inode need the 30-second full content
+        # comparison/checksum validation. No file contents or locks are touched
+        # on an unchanged idle tick. Focus events always force the full path.
+        if (force or output != self.output or now >= self.deadline()
+                or file_fingerprint(self.paths) != self.fingerprint):
+            self.output = None  # A failed activation must never leave a usable memo.
+            activate(output, .02, _follower=self)
 
 
 def focus_provider():
@@ -442,27 +512,46 @@ def post_apply():
         raise RuntimeError('neither cached palette nor original post-apply hook is available')
 
 
+renderer_pids = {}
+
+
 def renderer_active():
     # Linux comm truncates names to 15 bytes, including linux-wallpaperengine.
-    return os.environ.get('WCR_FOCUS_REQUIRE_RENDERER', '1') == '0' or any(
-        name in ('mpvpaper', 'awww-daemon', 'swaybg', 'linux-wallpaper') for _, name in processes())
+    if os.environ.get('WCR_FOCUS_REQUIRE_RENDERER', '1') == '0':
+        return True
+    for path, name in list(renderer_pids.items()):
+        try:
+            if path.stat().st_uid == os.getuid() and (path / 'comm').read_text().strip() == name:
+                return True
+        except OSError:
+            pass
+        del renderer_pids[path]
+    renderer_pids.update((path, name) for path, name in processes()
+                         if name in ('mpvpaper', 'awww-daemon', 'swaybg', 'linux-wallpaper'))
+    return bool(renderer_pids)
 
 
 def follow_polled(provider):
     current = None; next_check = 0; renderers = False
+    due = None; activation = FollowerActivation()
     while True:
         output = focused_output(provider)
         now = time.monotonic()
-        if now >= next_check:
+        if output != current:
+            current = output
+            due = now if output else None
+        tick = now >= next_check
+        if tick:
             renderers = renderer_active()
-        if output and renderers and (output != current or now >= next_check):
+            next_check = time.monotonic() + 1
+        if output and renderers and (
+                (due is not None and now >= due)
+                or (due is None and (tick or now >= activation.deadline()))):
             try:
-                activate(output, .02)
-                current = output
+                activation.activate(output, now, force=due is not None)
+                due = None
             except (OSError, ValueError, TimeoutError):
-                current = None
-        if now >= next_check:
-            next_check = now + 1
+                due = time.monotonic() + .25
         time.sleep(.15)
 
 
@@ -475,11 +564,17 @@ def follow():
             return follow_polled(provider)
         stream = subprocess.Popen(['niri', 'msg', '-j', 'event-stream'], stdout=subprocess.PIPE)
         selector = selectors.DefaultSelector(); selector.register(stream.stdout, selectors.EVENT_READ)
-        workspaces = {}; current = None; buffer = b''; due = 0; next_check = 0; renderers = False
+        workspaces = {}; current = None; buffer = b''; due = None; next_check = 0; renderers = False
+        activation = FollowerActivation()
         try:
-            while stream.poll() is None:
+            while True:
                 now = time.monotonic()
-                for key, _ in selector.select(.05):
+                deadlines = [next_check]
+                if current and renderers:
+                    deadlines.append(due if due is not None else activation.deadline())
+                # EOF on the pipe notices stream exit; polling the child at 20 Hz
+                # is unnecessary. Focus events wake select even during idle waits.
+                for key, _ in selector.select(max(0, min(deadlines) - now)):
                     chunk = os.read(key.fd, 65536)
                     if not chunk: return
                     buffer += chunk
@@ -489,22 +584,25 @@ def follow():
                         if 'WorkspacesChanged' in event:
                             workspaces = {w['id']: w for w in event['WorkspacesChanged']['workspaces']}
                             current = next((w['output'] for w in workspaces.values() if w['is_focused']), None)
-                            due = now + .04
+                            due = time.monotonic() + .04 if current else None
                         elif 'WorkspaceActivated' in event and event['WorkspaceActivated']['focused']:
                             current = workspaces.get(event['WorkspaceActivated']['id'], {}).get('output')
-                            due = now + .04
-                if now >= next_check:
+                            due = time.monotonic() + .04 if current else None
+                now = time.monotonic()
+                tick = now >= next_check
+                if tick:
                     renderers = renderer_active()
-                    next_check = now + 1
-                    if not due: due = now
-                if current and renderers and due and now >= due:
+                    next_check = time.monotonic() + 1
+                if current and renderers and (
+                        (due is not None and now >= due)
+                        or (due is None and (tick or now >= activation.deadline()))):
                     try:
                         # Content comparison also repairs changed palette revisions and external writes
-                        # while focus remains on the same output. Busy Clavis gets the next retry.
-                        activate(current, .02)
-                        due = 0
+                        # while focus remains unchanged; metadata decides when it is needed.
+                        activation.activate(current, now, force=due is not None)
+                        due = None
                     except (OSError, ValueError, TimeoutError):
-                        due = now + .25
+                        due = time.monotonic() + .25
         finally:
             selector.close()
             stream.terminate()
