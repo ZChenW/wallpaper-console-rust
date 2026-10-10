@@ -6,7 +6,7 @@ import {
   REDISTRIBUTE_SECONDS, REDISTRIBUTE_STAGGER_SECONDS,
   ASSEMBLED_AMOUNT, assembleWant, assembledCell, assembledCellBounds, assembledSize, cameraFov, needsVertexUpdate, pictureAspect,
   pictureLoopDistance, redistributionProgress, scaledKnotPath, scatteredTileCentre,
-  scatteredTileSize, selectedIndex, stepAssemble, tileAmount, tilePose, tileUVCell,
+  scatteredTileSize, selectedIndex, stepAssemble, textureUrl, tileAmount, tilePose, tileUVCell,
 } from './knotModel.ts';
 
 let three: typeof import('./knotThree.ts');
@@ -201,7 +201,7 @@ export class KnotRenderer {
         this.onInvalidate?.();
       }, () => { /* Keep the thumbnail/tint if decoding the replacement fails. */ });
     };
-    image.src = url;
+    image.src = textureUrl(url);
   }
   private releaseUnusedTextures() {
     const used = new Set([...this.pictures.values(), ...this.requestedPictures.values()]);

@@ -59,6 +59,14 @@ export function replacementIndex(ids: readonly number[], keepId: number | undefi
   const kept = keepId === undefined ? -1 : ids.indexOf(keepId);
   return kept >= 0 ? kept : Math.max(0, Math.min(ids.length - 1, fallback));
 }
+/**
+ * A texture has to be fetched in CORS mode, and WebKit keeps one cached resource per URL: when the
+ * same thumbnail URL is fetched by an <img> (no CORS) and by the Knot (CORS), each change of mode
+ * replaces the cached resource, decodes every picture again and leaves the old copies behind.
+ * Measured in the app: about 45 MB more after every visit to the Knot, never returned. A marker in
+ * the query gives the Knot its own cache entries; the asset protocol ignores the query.
+ */
+export const textureUrl = (url: string) => `${url}${url.includes('?') ? '&' : '?'}gl`;
 export const loopDistance = (a: number, b: number) => Math.abs(modulo(a - b + 0.5) - 0.5);
 export const nearestLoopTarget = (current: number, t: number) => current + modulo(t - current + 0.5) - 0.5;
 export const settleTarget = (target: number, count: number) => count > 0 ? Math.round(target * count) / count : 0;
