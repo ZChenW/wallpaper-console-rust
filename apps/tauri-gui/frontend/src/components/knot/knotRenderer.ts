@@ -9,9 +9,9 @@ import {
   scatteredTileSize, selectedIndex, stepAssemble, tileAmount, tilePose, tileUVCell,
 } from './knotModel.ts';
 
-let three: typeof Three;
+let three: typeof import('./knotThree.ts');
 export async function loadKnotRenderer() {
-  three = await import('three');
+  three = await import('./knotThree.ts');
   return KnotRenderer;
 }
 export interface KnotRenderEntry { readonly key: string; readonly id: number }
