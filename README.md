@@ -12,8 +12,15 @@ display.
 
 ## Features
 
-- Grid and Flow browsing
+- Four ways to browse the library:
+  - **Grid**: every wallpaper at a glance
+  - **Flow**: one wallpaper at a time, with its details beside it
+  - **Book**: a notebook whose pages turn in 3D; zoom into a page, or let the
+    book fill the window
+  - **Knot**: the library laid out along a mathematical knot in 3D. Each
+    wallpaper is scattered into pieces that fly together as you reach it
 - Images, GIFs, videos, and compatible Wallpaper Engine scenes
+- Video wallpapers play a short silent preview in Flow, Book and Knot
 - Multiple folders, favorites, and explicit display subsets
 - Optional wallpaper restore after login
 - Optional post-apply command for tools such as matugen
@@ -196,6 +203,15 @@ If the GUI opens as a blank window because of WebKitGTK rendering issues, try:
 WCR_WEBKIT_DISABLE_DMABUF_RENDERER=1 ./wallpaper-console_0.1.6_x86_64.AppImage
 ```
 
+Knot needs WebGL. If it is unavailable the view says so and the other three
+views keep working.
+
+Video previews are short clips made with `ffmpeg` (H.264) the first time a
+wallpaper is shown, which can take a few seconds, and cached afterwards. The
+app starts WebKitGTK with `WEBKIT_GST_DISABLE_GL_SINK=1` because its GL video
+sink draws video as a solid green rectangle on the NVIDIA proprietary driver;
+set the variable yourself to override that.
+
 There is no automatic updater. Download and verify newer release assets before
 replacing existing files.
 
@@ -220,4 +236,30 @@ the upgrade.
 
 ### Library keyboard controls
 
-In Grid, Enter or Space selects and applies the focused wallpaper. In Flow, Enter or Space selects the FlowAnchor first; pressing again applies it. Ctrl/Meta+Enter applies directly in Flow. Moving through Flow does not change Selected. Both views support the Context Menu key and Shift+F10 for wallpaper actions.
+In Grid, Enter or Space selects and applies the focused wallpaper. In Flow, Enter or Space selects the FlowAnchor first; pressing again applies it. Ctrl/Meta+Enter applies directly in Flow. Moving through Flow does not change Selected. Every view supports the Context Menu key and Shift+F10 for wallpaper actions.
+
+Book:
+
+| Key | Action |
+| --- | --- |
+| Left / Right, Page Up / Page Down | Turn the page |
+| Home / End | First / last page |
+| Up / Down | Select the left / right open page |
+| Enter | Apply the selected wallpaper |
+| Space or Z | Zoom into the selected page; Escape closes |
+| F | Immersive mode: the book fills the window |
+
+Knot:
+
+| Key or gesture | Action |
+| --- | --- |
+| Scroll, or drag | Travel along the knot |
+| Left / Right, Page Up / Page Down | Previous / next wallpaper |
+| Home / End | First / last wallpaper |
+| 1 to 4 | Trefoil, figure-eight, cinquefoil, torus (3,4) knot |
+| A | Travel by itself |
+| Shift + drag a piece | Pull the rope; it swings back when released |
+| Enter | Apply the wallpaper the camera rests on |
+
+Book in immersive mode and Knot fill the window and hide the top bar. Drag the
+strip along the top edge (marked by a small pill) to move the window.
