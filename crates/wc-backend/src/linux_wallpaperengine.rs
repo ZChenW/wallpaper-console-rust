@@ -628,6 +628,7 @@ mod tests {
     #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn handoff_kills_old_pid_when_new_process_survives() {
         use std::os::unix::fs::PermissionsExt;
+        let _session = crate::runtime_observation::AssumeSessionWithoutDisplay::enable();
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("config"),
@@ -689,6 +690,7 @@ mod tests {
     #[ignore = "signals a real process group; run only in an isolated local environment"]
     fn cross_backend_switch_cleans_non_lwe_after_success() {
         use std::os::unix::fs::PermissionsExt;
+        let _session = crate::runtime_observation::AssumeSessionWithoutDisplay::enable();
         let tmp = tempfile::tempdir().unwrap();
         let cd = ConfigDir {
             path: tmp.path().join("config"),

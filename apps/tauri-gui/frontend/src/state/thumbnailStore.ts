@@ -1,9 +1,15 @@
 import type { ThumbnailDTO } from '../api/bridge.ts';
 import { ThumbnailRequestQueue, type EnqueueOptions } from '../hooks/thumbnailQueueCore.ts';
 import { recordMetric } from '../perf/metrics.ts';
+import { LARGE_PREVIEW_PREFIX } from '../components/wallpaperPreviewMedia.ts';
 
 export const MAX_REVEAL_PER_FRAME = 12;
 export const DEFAULT_THUMBNAIL_CACHE_LIMIT = 256;
+export const LARGE_PREVIEW_CONCURRENCY = 3;
+export const LARGE_PREVIEW_RETRY_LIMIT = 2;
+export const LARGE_PREVIEW_RETRY_DELAY_MS = 5_000;
+
+type LargeRetry = { retries: number; nextAttemptAt: number; timer?: ReturnType<typeof setTimeout> };
 
 /**
  * ThumbnailSession — single deep module for load + URL cache + reveal batching.
@@ -18,6 +24,9 @@ export class ThumbnailSession {
   private failureNotifyPending = false;
   private failureNotifyScheduled = false;
   private queue: ThumbnailRequestQueue;
+  private largeQueue: ThumbnailRequestQueue;
+  private largeRetries = new Map<string, LargeRetry>();
+  private visiblePaths = new Set<string>();
   private enqueueScheduled = false;
   private pendingPaths: string[] = [];
   private pendingOptions?: EnqueueOptions;
@@ -36,22 +45,30 @@ export class ThumbnailSession {
     this.cacheLimit = Number.isFinite(cacheLimit) && cacheLimit > 0
       ? Math.max(1, Math.floor(cacheLimit))
       : DEFAULT_THUMBNAIL_CACHE_LIMIT;
-    this.queue = new ThumbnailRequestQueue({
-      concurrency,
-      load,
-      isCached: (path) => this.cache.has(path),
-      onThumbnail: (path, thumbnail) => {
+    const callbacks = {
+      load: (path: string) => {
+        const retry = this.largeRetries.get(path);
+        if (retry) {
+          if (retry.timer !== undefined) clearTimeout(retry.timer);
+          retry.timer = undefined;
+          retry.retries += 1;
+        }
+        return load(path);
+      },
+      isCached: (path: string) => this.cache.has(path),
+      onThumbnail: (path: string, thumbnail: string) => {
         const previousFailureCount = this.failures.size;
         // Refresh insertion order so reads and replacements implement a small
         // LRU instead of retaining base64/file URLs for the entire session.
         this.cache.delete(path);
         this.cache.set(path, thumbnail);
         this.failures.delete(path);
+        this.clearLargeRetry(path);
         this.evictUnusedCacheEntries();
         this.scheduleNotify(path);
         if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
       },
-      onFailure: (path, reason) => {
+      onFailure: (path: string, reason?: string) => {
         const previousFailureCount = this.failures.size;
         // A completed refresh failure is authoritative. Keeping the previous
         // media here would make a changed or deleted project look healthy
@@ -59,11 +76,20 @@ export class ThumbnailSession {
         this.cache.delete(path);
         this.failures.delete(path);
         this.failures.set(path, reason ?? 'thumbnail_failed');
+        if (path.startsWith(LARGE_PREVIEW_PREFIX)) {
+          const retry = this.largeRetries.get(path) ?? { retries: 0, nextAttemptAt: 0 };
+          retry.nextAttemptAt = Date.now() + LARGE_PREVIEW_RETRY_DELAY_MS;
+          this.largeRetries.set(path, retry);
+          this.scheduleLargeRetry(path);
+        }
         this.evictUnusedFailures();
         this.scheduleNotify(path);
         if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
       },
-    });
+    };
+    this.queue = new ThumbnailRequestQueue({ ...callbacks, concurrency });
+    // A waiting Large command must not consume the Grid's four frontend slots.
+    this.largeQueue = new ThumbnailRequestQueue({ ...callbacks, concurrency: LARGE_PREVIEW_CONCURRENCY });
   }
 
   get(path: string): string | undefined {
@@ -78,8 +104,14 @@ export class ThumbnailSession {
     return this.failures.get(path);
   }
 
+  /**
+   * Failures the user should hear about. A large preview is an upgrade over the grid-size one
+   * that is already showing, so a bounded retry can end quietly with the smaller picture.
+   */
   failureCount(): number {
-    return this.failures.size;
+    let count = 0;
+    for (const key of this.failures.keys()) if (!key.startsWith(LARGE_PREVIEW_PREFIX)) count += 1;
+    return count;
   }
 
   listenerPathCount(): number {
@@ -98,10 +130,16 @@ export class ThumbnailSession {
       this.listeners.set(path, listeners);
     }
     listeners.add(cb);
+    this.scheduleLargeRetry(path);
     return () => {
       listeners.delete(cb);
       if (listeners.size === 0 && this.listeners.get(path) === listeners) {
         this.listeners.delete(path);
+        const retry = this.largeRetries.get(path);
+        if (retry?.timer !== undefined && !this.isLargeRequested(path)) {
+          clearTimeout(retry.timer);
+          retry.timer = undefined;
+        }
         this.evictUnusedCacheEntries();
         if (this.evictUnusedFailures()) this.scheduleFailureNotify();
       }
@@ -120,7 +158,18 @@ export class ThumbnailSession {
       const opts = this.pendingOptions;
       this.pendingPaths = [];
       this.pendingOptions = undefined;
-      this.queue.replacePending(unique, opts);
+      this.visiblePaths = new Set(unique);
+      for (const [path, retry] of this.largeRetries) {
+        if (!this.isLargeRequested(path) && retry.timer !== undefined) {
+          clearTimeout(retry.timer);
+          retry.timer = undefined;
+        }
+      }
+      this.queue.replacePending(unique.filter((path) => !path.startsWith(LARGE_PREVIEW_PREFIX)), opts);
+      this.largeQueue.replacePending(unique.filter((path) => (
+        path.startsWith(LARGE_PREVIEW_PREFIX) && this.canLoadLarge(path)
+      )), opts);
+      for (const path of unique) this.scheduleLargeRetry(path);
     };
     if (typeof requestAnimationFrame === 'function') requestAnimationFrame(flush);
     else Promise.resolve().then(flush);
@@ -133,6 +182,9 @@ export class ThumbnailSession {
     this.syncRevealPaused();
   }
 
+  /** Whether the viewport is moving right now; pictures arriving meanwhile skip their fade-in. */
+  isScrolling(): boolean { return this.scrolling; }
+
   /** Viewport / card interaction is active (Grid active, Flow interacting). */
   setInteracting(interacting: boolean): void {
     if (this.interacting === interacting) return;
@@ -143,9 +195,11 @@ export class ThumbnailSession {
   forget(paths: string[]): void {
     const previousFailureCount = this.failures.size;
     this.queue.forget(paths);
+    this.largeQueue.forget(paths);
     for (const path of paths) {
       this.cache.delete(path);
       this.failures.delete(path);
+      this.clearLargeRetry(path);
       this.scheduleNotify(path);
     }
     if (this.failures.size !== previousFailureCount) this.scheduleFailureNotify();
@@ -155,6 +209,9 @@ export class ThumbnailSession {
     const listenerPaths = Array.from(this.listeners.keys());
     const previousFailureCount = this.failures.size;
     this.queue.reset();
+    this.largeQueue.reset();
+    this.clearLargeRetries();
+    this.visiblePaths.clear();
     this.cache.clear();
     this.failures.clear();
     this.pendingNotifyPaths.clear();
@@ -170,13 +227,15 @@ export class ThumbnailSession {
     const listenerPaths = Array.from(this.listeners.keys());
     const previousFailureCount = this.failures.size;
     this.queue.reset();
+    this.largeQueue.reset();
+    this.clearLargeRetries();
     for (const path of this.cache.keys()) {
       if (!this.listeners.has(path)) this.cache.delete(path);
     }
     this.failures.clear();
     if (previousFailureCount > 0) this.scheduleFailureNotify();
     if (listenerPaths.length > 0) {
-      this.queue.enqueue(listenerPaths, { priority: 'front', force: true });
+      this.enqueue(listenerPaths, { priority: 'front', force: true });
     }
   }
 
@@ -184,18 +243,60 @@ export class ThumbnailSession {
     const paths = Array.from(this.failures.keys());
     if (paths.length === 0) return;
     this.failures.clear();
+    this.clearLargeRetries();
     this.scheduleFailureNotify();
-    this.queue.enqueue(paths, { priority: 'front', force: true });
+    this.enqueue(paths, { priority: 'front', force: true });
   }
 
   snapshot() {
     const base = this.queue.snapshot();
-    return { ...base, cached: this.cache.size };
+    const large = this.largeQueue.snapshot();
+    return {
+      pending: [...base.pending, ...large.pending],
+      active: base.active + large.active,
+      versioned: base.versioned + large.versioned,
+      cached: this.cache.size,
+    };
   }
 
   stats(): { pending: number; active: number; cached: number; failures: number } {
     const base = this.queue.stats();
-    return { ...base, cached: this.cache.size, failures: this.failures.size };
+    const large = this.largeQueue.stats();
+    return { pending: base.pending + large.pending, active: base.active + large.active, cached: this.cache.size, failures: this.failures.size };
+  }
+
+  private enqueue(paths: string[], options?: EnqueueOptions): void {
+    this.queue.enqueue(paths.filter((path) => !path.startsWith(LARGE_PREVIEW_PREFIX)), options);
+    this.largeQueue.enqueue(paths.filter((path) => path.startsWith(LARGE_PREVIEW_PREFIX) && this.canLoadLarge(path)), options);
+  }
+
+  private canLoadLarge(path: string): boolean {
+    const retry = this.largeRetries.get(path);
+    return !retry || (retry.retries < LARGE_PREVIEW_RETRY_LIMIT && Date.now() >= retry.nextAttemptAt);
+  }
+
+  private isLargeRequested(path: string): boolean {
+    return this.visiblePaths.has(path) || this.listeners.has(path);
+  }
+
+  private scheduleLargeRetry(path: string): void {
+    const retry = this.largeRetries.get(path);
+    if (!retry || retry.timer !== undefined || retry.retries >= LARGE_PREVIEW_RETRY_LIMIT || !this.isLargeRequested(path)) return;
+    retry.timer = setTimeout(() => {
+      retry.timer = undefined;
+      if (this.largeRetries.get(path) !== retry || !this.isLargeRequested(path) || !this.canLoadLarge(path)) return;
+      this.largeQueue.enqueue([path]);
+    }, Math.max(0, retry.nextAttemptAt - Date.now()));
+  }
+
+  private clearLargeRetry(path: string): void {
+    const retry = this.largeRetries.get(path);
+    if (retry?.timer !== undefined) clearTimeout(retry.timer);
+    this.largeRetries.delete(path);
+  }
+
+  private clearLargeRetries(): void {
+    for (const path of this.largeRetries.keys()) this.clearLargeRetry(path);
   }
 
   private syncRevealPaused(): void {
@@ -233,6 +334,7 @@ export class ThumbnailSession {
       if (candidate === null) return;
       this.cache.delete(candidate);
       this.queue.forget([candidate]);
+      this.largeQueue.forget([candidate]);
       this.scheduleNotify(candidate);
     }
   }
@@ -243,6 +345,7 @@ export class ThumbnailSession {
       const candidate = this.firstUnsubscribedPath(this.failures.keys());
       if (candidate === null) return changed;
       this.failures.delete(candidate);
+      this.clearLargeRetry(candidate);
       changed = true;
     }
     return changed;

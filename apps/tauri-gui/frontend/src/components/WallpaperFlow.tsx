@@ -139,6 +139,7 @@ function WallpaperFlowReady(props: WallpaperFlowProps) {
                 <div className="flow-preview-item__media">
                   <WallpaperPreviewMedia
                     alt=""
+                    clipActive={model.active && !contextMenu && !indexOpen}
                     eligibility={{
                       active: interactionActive && !contextMenu,
                       centered,

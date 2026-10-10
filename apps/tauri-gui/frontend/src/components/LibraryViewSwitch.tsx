@@ -32,6 +32,8 @@ export function LibraryViewSwitchView({
     <div aria-label="Library view" className="library-view-switch" role="group">
       {button('grid', 'Grid')}
       {button('flow', 'Flow')}
+      {button('book', 'Book')}
+      {button('knot', 'Knot')}
     </div>
   );
 }

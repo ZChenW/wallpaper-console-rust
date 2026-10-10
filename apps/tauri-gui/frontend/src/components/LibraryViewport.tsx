@@ -1,13 +1,16 @@
-import { memo } from 'react';
+import { lazy, memo, Suspense } from 'react';
 
 import type { ApplyGesture, LibraryViewMode } from '../shell/shellPreferences.ts';
 import type { WallpaperCardSize } from '../utils/layout.ts';
 import WallpaperFlow from './WallpaperFlow.tsx';
+import WallpaperBook from './WallpaperBook.tsx';
 import WallpaperGrid from './WallpaperGrid.tsx';
 import {
   instantiateActiveLibraryAdapter,
   type LibraryViewModel,
 } from './libraryViewModel.ts';
+
+const WallpaperKnot = lazy(() => import('./knot/WallpaperKnot.tsx'));
 
 export interface LibraryViewportProps {
   readonly mode: LibraryViewMode;
@@ -20,6 +23,10 @@ export interface LibraryViewportProps {
   // Unlike focusToken it must not re-anchor or scroll the view.
   readonly returnFocusToken: number;
   readonly onAnchorChange: (wallpaperId: number, settled?: boolean) => void;
+  readonly viewMode?: LibraryViewMode;
+  readonly onViewModeChange?: (mode: LibraryViewMode) => void;
+  readonly immersive?: boolean;
+  readonly onImmersiveChange?: (immersive: boolean) => void;
 }
 
 function LibraryViewportImpl({
@@ -31,8 +38,30 @@ function LibraryViewportImpl({
   focusToken,
   returnFocusToken,
   onAnchorChange,
+  viewMode,
+  onViewModeChange,
+  immersive,
+  onImmersiveChange,
 }: LibraryViewportProps) {
   const adapter = instantiateActiveLibraryAdapter(mode, {
+    knot: () => (
+      <Suspense fallback={<div className="wallpaper-knot__stage" role="status">Preparing Knot…</div>}>
+        <WallpaperKnot model={model} applyGesture={applyGesture} viewMode={viewMode ?? mode} onViewModeChange={onViewModeChange} initialAnchorWallpaperId={initialAnchorWallpaperId}
+          focusToken={focusToken} returnFocusToken={returnFocusToken} onAnchorChange={onAnchorChange} />
+      </Suspense>
+    ),
+    book: () => (
+      <WallpaperBook
+        applyGesture={applyGesture}
+        focusToken={focusToken}
+        initialAnchorWallpaperId={initialAnchorWallpaperId}
+        model={model}
+        onAnchorChange={onAnchorChange}
+        returnFocusToken={returnFocusToken}
+        immersive={immersive}
+        onImmersiveChange={onImmersiveChange}
+      />
+    ),
     flow: () => (
       <WallpaperFlow
         applyGesture={applyGesture}

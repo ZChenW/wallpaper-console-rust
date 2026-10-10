@@ -14,7 +14,7 @@ use wc_core::error::WcError;
 const OUTPUT_CAP: usize = 32 * 1024;
 const POLL_INTERVAL: Duration = Duration::from_millis(10);
 
-pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output, WcError> {
+pub fn output(command: &mut Command, timeout: Duration) -> Result<Output, WcError> {
     prepare_process_group(command);
     command
         .stdin(Stdio::null())
@@ -47,7 +47,7 @@ pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output,
     }
 }
 
-pub(crate) fn status(command: &mut Command, timeout: Duration) -> Result<ExitStatus, WcError> {
+pub fn status(command: &mut Command, timeout: Duration) -> Result<ExitStatus, WcError> {
     prepare_process_group(command);
     // Status-only callers do not consume output. Null streams prevent inherited
     // or high-volume renderer output from blocking the launcher.

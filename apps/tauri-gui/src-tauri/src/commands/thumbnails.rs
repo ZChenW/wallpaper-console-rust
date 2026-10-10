@@ -4,10 +4,14 @@ use super::common::{
 use super::path_guard;
 use rusqlite::params;
 use std::collections::HashSet;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::Manager;
 use wc_storage::StorageApi;
+
+#[path = "thumbnail_lane.rs"]
+mod thumbnail_lane;
 
 fn preview_asset_scope_cache() -> &'static Mutex<HashSet<PathBuf>> {
     static CACHE: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
@@ -150,8 +154,95 @@ pub async fn preview_asset_authorize(
 }
 
 #[tauri::command]
-pub async fn thumbnail_for(app: tauri::AppHandle, path: String) -> Result<ThumbnailDto, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+pub async fn preview_clip(path: String) -> Result<tauri::ipc::Response, String> {
+    let requested = path.clone();
+    let flight_key = tauri::async_runtime::spawn_blocking(move || {
+        let s = storage()?;
+        let canonical = path_guard::ensure_command_wallpaper_path(&requested, s)?;
+        let meta = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_secs())
+            .unwrap_or(0);
+        let cache_dir = s.cd.gui_thumbnail_cache_dir();
+        let cache_dir = cache_dir.canonicalize().unwrap_or(cache_dir);
+        Ok::<_, String>(cache_dir.join(wc_preview::preview_clip_cache_key(
+            &canonical.to_string_lossy(),
+            mtime,
+            meta.len(),
+        )))
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    let bytes = thumbnail_lane::run_clip(flight_key, move || {
+        let s = storage()?;
+        let canonical = path_guard::ensure_command_wallpaper_path(&path, s)?;
+        let (clip, _) = wc_preview::preview_clip_for(
+            &s.cd.gui_thumbnail_cache_dir(),
+            &canonical.to_string_lossy(),
+        )
+        .map_err(|failure| failure.as_str().to_string())?;
+        let mut bytes = Vec::new();
+        std::fs::File::open(&clip)
+            .and_then(|file| {
+                file.take(wc_preview::MAX_PREVIEW_CLIP_BYTES + 1)
+                    .read_to_end(&mut bytes)
+            })
+            .map_err(|error| error.to_string())?;
+        if bytes.is_empty() {
+            return Err("empty_output".into());
+        }
+        if bytes.len() as u64 > wc_preview::MAX_PREVIEW_CLIP_BYTES {
+            return Err("output_too_large".into());
+        }
+        Ok(bytes)
+    })
+    .await??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+#[tauri::command]
+pub async fn thumbnail_for(
+    app: tauri::AppHandle,
+    path: String,
+    size: Option<String>,
+) -> Result<ThumbnailDto, String> {
+    // "large" is the preview for views that show one picture big; anything else is the grid size.
+    let tier = match size.as_deref() {
+        Some("large") => wc_preview::ThumbnailSize::Large,
+        _ => wc_preview::ThumbnailSize::Standard,
+    };
+    // Resolve Large identity in a short preflight before lane admission. This
+    // lets concurrent callers share failures as well as successful disk entries.
+    let flight_key = if tier == wc_preview::ThumbnailSize::Large {
+        let requested = path.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            let s = storage()?;
+            let canonical = path_guard::ensure_command_wallpaper_path(&requested, s)?;
+            let meta = std::fs::metadata(&canonical).map_err(|error| error.to_string())?;
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|duration| duration.as_secs())
+                .unwrap_or(0);
+            let cache_dir = s.cd.gui_thumbnail_cache_dir();
+            let cache_dir = cache_dir.canonicalize().unwrap_or(cache_dir);
+            Ok::<_, String>(cache_dir.join(wc_preview::gui_thumb_cache_key(
+                &canonical.to_string_lossy(),
+                mtime,
+                meta.len(),
+                tier,
+            )))
+        })
+        .await
+        .map_err(|error| error.to_string())??
+    } else {
+        PathBuf::new()
+    };
+    thumbnail_lane::run(flight_key, tier, move || {
         let s = storage()?;
         let canonical = path_guard::ensure_command_wallpaper_path(&path, s)?;
         let canonical = canonical.to_string_lossy().into_owned();
@@ -169,7 +260,7 @@ pub async fn thumbnail_for(app: tauri::AppHandle, path: String) -> Result<Thumbn
             .parse()
             .unwrap_or(900);
         let cache_dir = s.cd.gui_thumbnail_cache_dir();
-        let result = wc_preview::thumbnail_for_with_failure_ttl(&cache_dir, &canonical, ttl);
+        let result = wc_preview::thumbnail_for_sized(&cache_dir, &canonical, ttl, tier);
         let thumbnail =
             authorize_thumbnail_asset_with(result.thumbnail.as_deref(), &cache_dir, |thumbnail| {
                 allow_preview_asset(&app, thumbnail)
@@ -181,8 +272,7 @@ pub async fn thumbnail_for(app: tauri::AppHandle, path: String) -> Result<Thumbn
             failure_reason: result.failure_reason.map(|r| r.as_str().to_string()),
         })
     })
-    .await
-    .map_err(|e| e.to_string())?
+    .await?
 }
 
 #[cfg(test)]

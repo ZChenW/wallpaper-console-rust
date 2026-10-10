@@ -1,6 +1,12 @@
 use super::common::{fail, ok, storage, CommandResult};
 use super::path_guard;
 
+fn reap_child(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+}
+
 /// Resolve a path for opening: directories are opened directly, files reveal their parent,
 /// except WE project directories (containing project.json) which open directly.
 pub(crate) fn open_location_target(path: &str) -> Result<std::path::PathBuf, String> {
@@ -145,13 +151,14 @@ fn open_with_file_manager(
     if file_mgr == "custom" {
         let parts = custom_command_parts(custom_cmd, &target_str)?;
         let prog = parts[0].clone();
-        let _status = std::process::Command::new(&prog)
+        let child = std::process::Command::new(&prog)
             .args(&parts[1..])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .map_err(|e| format!("Failed to launch {}: {}", prog, e))?;
+        reap_child(child);
         return Ok(format!("Opened with custom: {}", target_str));
     }
 
@@ -170,7 +177,10 @@ fn open_with_file_manager(
             .stderr(std::process::Stdio::null())
             .spawn();
         match status {
-            Ok(_) => return Ok(format!("Opened with {}: {}", c, target_str)),
+            Ok(child) => {
+                reap_child(child);
+                return Ok(format!("Opened with {}: {}", c, target_str));
+            }
             Err(_) => continue,
         }
     }
@@ -241,6 +251,7 @@ fn open_terminal_file_manager(
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .spawn()
+                .map(reap_child)
                 .is_ok()
         },
     )
@@ -308,7 +319,10 @@ pub async fn open_path(path: String) -> CommandResult {
             .arg(target.to_string_lossy().as_ref())
             .spawn()
         {
-            Ok(_) => ok("Opened path."),
+            Ok(child) => {
+                reap_child(child);
+                ok("Opened path.")
+            }
             Err(e) => fail(e.to_string()),
         }
     })

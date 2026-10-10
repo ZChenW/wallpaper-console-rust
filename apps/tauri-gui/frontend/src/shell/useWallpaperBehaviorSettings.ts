@@ -135,6 +135,10 @@ export class WallpaperBehaviorWriter {
     this.snapshot = snapshot;
   }
 
+  current(): BehaviorSettingsSnapshotDTO | null {
+    return this.snapshot;
+  }
+
   persist(patch: BehaviorSettingsPatchDTO): Promise<BehaviorSettingsSnapshotDTO> {
     if (patchIsEmpty(patch)) {
       return this.snapshot === null
@@ -149,6 +153,7 @@ export class WallpaperBehaviorWriter {
       } catch (error) {
         if (!isRevisionConflict(error)) throw error;
         current = await this.client.behaviorSettingsGet();
+        this.snapshot = current;
         current = await this.client.behaviorSettingsUpdate(current.revision, patch);
       }
       this.snapshot = current;
@@ -216,9 +221,21 @@ export function useWallpaperBehaviorSettings(
     settingsRef.current = next;
     setSettings(next);
     setSaveError(null);
-    void writer.persist(patch).catch((failure: unknown) => {
-      setSaveError(errorFromUnknown(failure, 'Failed to save wallpaper behavior settings.'));
-    });
+    void writer.persist(patch).then(
+      (snapshot) => {
+        if (settingsRef.current !== next) return;
+        settingsRef.current = snapshot.settings;
+        setSettings(snapshot.settings);
+        setSaveError(null);
+      },
+      (failure: unknown) => {
+        if (settingsRef.current !== next) return;
+        const confirmed = writer.current()?.settings ?? null;
+        settingsRef.current = confirmed;
+        setSettings(confirmed);
+        setSaveError(errorFromUnknown(failure, 'Failed to save wallpaper behavior settings.'));
+      },
+    );
   }, [writer]);
 
   const saveMpvpaperOptions = useCallback(async (mpvpaperOptions: string) => {
@@ -231,9 +248,15 @@ export function useWallpaperBehaviorSettings(
     try {
       // Always persist this explicit intent, even if a preceding blur optimistically
       // changed the UI. The writer queues it after earlier saves and retries failures.
-      await writer.persist({ mpvpaperOptions });
-      setSaveError(null);
+      const snapshot = await writer.persist({ mpvpaperOptions });
+      if (settingsRef.current === next) {
+        settingsRef.current = snapshot.settings;
+        setSettings(snapshot.settings);
+        setSaveError(null);
+      }
     } catch (failure) {
+      // Unlike a control edit, this is an explicit Apply of a typed draft: keep it in place so
+      // the same arguments can be retried after a failed save.
       setSaveError(errorFromUnknown(failure, 'Failed to save mpv arguments.'));
       throw failure;
     }

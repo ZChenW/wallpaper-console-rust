@@ -11,32 +11,48 @@ pub(crate) fn stop_awww_daemon_with_wait(
     pc: &dyn crate::process_control::ProcessControl,
     sleep: Duration,
 ) {
-    const AWWW_DAEMON_PATTERN: &str = r"(^|/)awww-daemon\b";
+    const NAME: &str = "awww-daemon";
     const TERM_CHECKS: usize = 20;
     const KILL_CHECKS: usize = 5;
 
-    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
-        pc.term_process(pid);
+    // Signal only the daemons discovered up front. A later PID is a different process.
+    let targets = pc.find_named_processes(NAME);
+    for pid in &targets {
+        pc.term_process(*pid);
+    }
+    if targets.is_empty() {
+        return;
     }
 
     for _ in 0..TERM_CHECKS {
-        let running = pc.find_processes(AWWW_DAEMON_PATTERN);
-        if running.is_empty() {
+        if named_pids_exited(pc, NAME, &targets) {
             return;
         }
         std::thread::sleep(sleep);
     }
 
-    for pid in pc.find_processes(AWWW_DAEMON_PATTERN) {
-        pc.kill_process(pid);
+    let running = pc.find_named_processes(NAME);
+    for pid in &targets {
+        if running.contains(pid) {
+            pc.kill_process(*pid);
+        }
     }
 
     for _ in 0..KILL_CHECKS {
-        if pc.find_processes(AWWW_DAEMON_PATTERN).is_empty() {
+        if named_pids_exited(pc, NAME, &targets) {
             return;
         }
         std::thread::sleep(sleep);
     }
+}
+
+fn named_pids_exited(
+    pc: &dyn crate::process_control::ProcessControl,
+    name: &str,
+    targets: &[u32],
+) -> bool {
+    let running = pc.find_named_processes(name);
+    targets.iter().all(|pid| !running.contains(pid))
 }
 
 fn clear_awww_cache() {
@@ -128,13 +144,6 @@ pub(crate) fn build_awww_img_command(
         .arg(duration)
         .arg("--transition-fps")
         .arg(fps);
-    cmd
-}
-
-#[cfg(test)]
-fn build_pkill_exact_command(user: &str, process_name: &str) -> Command {
-    let mut cmd = Command::new("pkill");
-    cmd.args(["-u", user, "-x", process_name]);
     cmd
 }
 
@@ -270,14 +279,20 @@ mod tests {
     }
 
     #[test]
-    fn stop_awww_uses_exact_daemon_process_name() {
-        let cmd = build_pkill_exact_command("alice", "awww-daemon");
+    fn stop_awww_discovers_daemon_by_exact_process_name() {
+        let cmd = crate::process_control::exact_name_pgrep_command(
+            &crate::ProcessUserScope::Name("alice".to_string()),
+            "awww-daemon",
+        );
+        assert_eq!(cmd.get_program().to_string_lossy(), "pgrep");
         let args: Vec<String> = cmd
             .get_args()
             .map(|s| s.to_string_lossy().to_string())
             .collect();
         assert_eq!(args, ["-u", "alice", "-x", "awww-daemon"]);
-        assert!(!args.contains(&r"(^|/)awww\b".to_string()));
+        assert!(!args
+            .iter()
+            .any(|arg| arg == "-f" || arg.contains("awww-daemon\\b")));
     }
 
     #[test]
@@ -289,6 +304,8 @@ mod tests {
         assert_eq!(pc.termed(), vec![42]);
         assert!(pc.killed().is_empty());
         assert_eq!(pc.find_calls(), 3);
+        assert!(pc.pattern_queries().is_empty());
+        assert!(pc.named_queries().iter().all(|name| name == "awww-daemon"));
     }
 
     #[test]
@@ -299,6 +316,33 @@ mod tests {
 
         assert_eq!(pc.termed(), vec![42]);
         assert_eq!(pc.killed(), vec![42]);
+        // Initial discovery, 20 term polls, the pre-kill snapshot, then 5 kill polls.
+        assert_eq!(pc.find_calls(), 27);
+        assert!(pc.pattern_queries().is_empty());
+    }
+
+    #[test]
+    fn stop_awww_does_not_signal_a_different_pid_that_appears_later() {
+        let pc = SequenceProcessControl::new(vec![vec![42], vec![99]]);
+
+        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
+
+        assert_eq!(pc.termed(), vec![42]);
+        assert!(pc.killed().is_empty());
+        assert!(!pc.termed().contains(&99));
+        assert_eq!(pc.find_calls(), 2);
+    }
+
+    #[test]
+    fn stop_awww_returns_without_signals_when_no_daemon_is_running() {
+        let pc = SequenceProcessControl::new(vec![vec![]]);
+
+        stop_awww_daemon_with_wait(&pc, std::time::Duration::ZERO);
+
+        assert!(pc.termed().is_empty());
+        assert!(pc.killed().is_empty());
+        assert_eq!(pc.find_calls(), 1);
+        assert_eq!(pc.named_queries(), vec!["awww-daemon".to_string()]);
     }
 
     struct SequenceProcessControl {
@@ -307,6 +351,8 @@ mod tests {
         find_calls: std::cell::Cell<usize>,
         termed: std::cell::RefCell<Vec<u32>>,
         killed: std::cell::RefCell<Vec<u32>>,
+        named_queries: std::cell::RefCell<Vec<String>>,
+        pattern_queries: std::cell::RefCell<Vec<String>>,
     }
 
     impl SequenceProcessControl {
@@ -317,7 +363,20 @@ mod tests {
                 find_calls: std::cell::Cell::new(0),
                 termed: std::cell::RefCell::new(Vec::new()),
                 killed: std::cell::RefCell::new(Vec::new()),
+                named_queries: std::cell::RefCell::new(Vec::new()),
+                pattern_queries: std::cell::RefCell::new(Vec::new()),
             }
+        }
+
+        fn next_pids(&self) -> Vec<u32> {
+            self.find_calls.set(self.find_calls.get() + 1);
+            let next = if self.results.borrow().is_empty() {
+                self.last.borrow().clone()
+            } else {
+                self.results.borrow_mut().remove(0)
+            };
+            *self.last.borrow_mut() = next.clone();
+            next
         }
 
         fn find_calls(&self) -> usize {
@@ -331,18 +390,25 @@ mod tests {
         fn killed(&self) -> Vec<u32> {
             self.killed.borrow().clone()
         }
+
+        fn named_queries(&self) -> Vec<String> {
+            self.named_queries.borrow().clone()
+        }
+
+        fn pattern_queries(&self) -> Vec<String> {
+            self.pattern_queries.borrow().clone()
+        }
     }
 
     impl crate::process_control::ProcessControl for SequenceProcessControl {
-        fn find_processes(&self, _pattern: &str) -> Vec<u32> {
-            self.find_calls.set(self.find_calls.get() + 1);
-            let next = if self.results.borrow().is_empty() {
-                self.last.borrow().clone()
-            } else {
-                self.results.borrow_mut().remove(0)
-            };
-            *self.last.borrow_mut() = next.clone();
-            next
+        fn find_processes(&self, pattern: &str) -> Vec<u32> {
+            self.pattern_queries.borrow_mut().push(pattern.to_string());
+            self.next_pids()
+        }
+
+        fn find_named_processes(&self, name: &str) -> Vec<u32> {
+            self.named_queries.borrow_mut().push(name.to_string());
+            self.next_pids()
         }
 
         fn find_lwe_processes(&self) -> Vec<u32> {

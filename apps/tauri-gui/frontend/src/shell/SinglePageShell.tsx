@@ -9,6 +9,7 @@ import { Popover } from 'radix-ui';
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -19,6 +20,10 @@ import LibraryFilterControls, { sourceFilterValue } from './LibraryFilterControl
 import { useLibrarySelection } from './useLibrarySelection.ts';
 import { useLibraryViewModel } from './useLibraryViewModel.ts';
 import { useMpvpaperReapply } from './useMpvpaperReapply.ts';
+import { createBookImmersiveTransition, fadeLibraryModeStage, libraryChromeHidden } from './bookImmersiveLayout.ts';
+import { flushSync } from 'react-dom';
+import { shouldEndBookImmersive } from '../components/wallpaperBookModel.ts';
+import { useReducedMotion } from '../hooks/useReducedMotion.ts';
 
 import { api } from '../api/bridge.ts';
 import { commandErrorFeedback, commandResultMessage } from '../api/feedback.ts';
@@ -90,6 +95,11 @@ function selectedDescription(entry: LibraryBrowserItemDTO | null): string {
 export default function SinglePageShell() {
   if (libraryMetricsEnabled()) recordMetric('library.shell.render', 1);
   const [search, setSearch] = useState('');
+  const [bookImmersive, setBookImmersive] = useState(false);
+  const shellRef = useRef<HTMLDivElement>(null);
+  const bookTransitionRef = useRef<ReturnType<typeof createBookImmersiveTransition> | null>(null);
+  const bookActiveRef = useRef(false);
+  const reducedMotion = useReducedMotion();
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [sourcesOpen, setSourcesOpen] = useState(false);
@@ -594,17 +604,24 @@ export default function SinglePageShell() {
     libraryViewportAnchorRef.current = wallpaperId;
     if (settled) setLibraryViewportAnchorId((current) => current === wallpaperId ? current : wallpaperId);
   }, []);
-  const changeLibraryViewMode = useCallback((mode: typeof preferences.libraryViewMode) => {
-    if (mode === preferences.libraryViewMode) return;
+  const outgoingLibraryMode = preferences.libraryViewMode;
+  const changeLibraryViewMode = useCallback((mode: typeof outgoingLibraryMode) => {
+    if (mode === outgoingLibraryMode) return;
+    if (mode === 'knot' || outgoingLibraryMode === 'knot') {
+      // Cancel any departing Book dip before committing the new mode/layout.
+      bookTransitionRef.current?.request(false, true);
+      setFiltersOpen(false);
+    }
     const anchor = resolveLibraryModeSwitchAnchor(
       browser.entries,
       selectedEntry?.wallpaperId,
       libraryViewportAnchorRef.current,
+      outgoingLibraryMode,
     );
     setLibraryModeAnchorId(anchor?.wallpaperId ?? null);
     setLibraryViewFocusToken((token) => token + 1);
     updatePreferences((current) => ({ ...current, libraryViewMode: mode }));
-  }, [browser.entries, preferences.libraryViewMode, selectedEntry, updatePreferences]);
+  }, [browser.entries, outgoingLibraryMode, selectedEntry, updatePreferences]);
 
   const libraryViewModel = useLibraryViewModel({
     browser, runtimeWallpaper, favoritePendingPaths, scanRunning, resetKey,
@@ -617,10 +634,51 @@ export default function SinglePageShell() {
       onDetails: openLibraryDetails, buildContextActions,
     },
   });
+  bookActiveRef.current = libraryViewModel.active;
+  useLayoutEffect(() => {
+    const shell = shellRef.current;
+    if (!shell) return;
+    const transition = createBookImmersiveTransition(shell, (value, synchronous = true) => {
+      const update = () => {
+        if (value) setFiltersOpen(false);
+        setBookImmersive(value);
+      };
+      if (synchronous) flushSync(update);
+      else update();
+    }, () => {
+      if (bookActiveRef.current) shell.querySelector<HTMLElement>('.wallpaper-book__stage')?.focus({ preventScroll: true });
+    });
+    bookTransitionRef.current = transition;
+    return () => { transition.dispose(); bookTransitionRef.current = null; };
+  }, []);
+  const changeBookImmersive = useCallback((immersive: boolean) => {
+    bookTransitionRef.current?.request(immersive, reducedMotion);
+  }, [reducedMotion]);
+  const previousViewModeRef = useRef(preferences.libraryViewMode);
+  useLayoutEffect(() => {
+    const previous = previousViewModeRef.current;
+    previousViewModeRef.current = preferences.libraryViewMode;
+    if (previous === preferences.libraryViewMode || (previous !== 'knot' && preferences.libraryViewMode !== 'knot')) return;
+    const stage = shellRef.current?.querySelector<HTMLElement>('.library-viewport');
+    if (stage) return fadeLibraryModeStage(stage, reducedMotion);
+  }, [preferences.libraryViewMode, reducedMotion]);
+  const immersiveQueryRef = useRef({ resetKey, replaceCount: browser.replaceCount });
+  useEffect(() => {
+    const previous = immersiveQueryRef.current;
+    immersiveQueryRef.current = { resetKey, replaceCount: browser.replaceCount };
+    const queryReset = previous.resetKey !== resetKey || previous.replaceCount !== browser.replaceCount;
+    const active = libraryViewModel.active && browser.entries.length > 0 && !browser.initialLoading && !firstRunEligible;
+    if (shouldEndBookImmersive(preferences.libraryViewMode, active, queryReset)) {
+      changeBookImmersive(false);
+    }
+  }, [bookImmersive, browser.entries.length, browser.initialLoading, browser.replaceCount,
+    changeBookImmersive, firstRunEligible, libraryViewModel.active, preferences.libraryViewMode, resetKey]);
   const flowAnchorEntry = useMemo(
     () => browser.entries.find((entry) => entry.wallpaperId === libraryViewportAnchorId) ?? null,
     [browser.entries, libraryViewportAnchorId],
   );
+
+  const chromeHidden = libraryChromeHidden(preferences.libraryViewMode, bookImmersive);
 
   const scanActivityVisible = scan.presentation.kind !== 'hidden';
   const feedbackVisible = feedbackState.notices.length > 0;
@@ -628,6 +686,9 @@ export default function SinglePageShell() {
 
   return (
     <div
+      ref={shellRef}
+      data-book-immersive={bookImmersive || undefined}
+      data-library-immersive={chromeHidden || undefined}
       className={`single-page-shell library-view-${preferences.libraryViewMode}${
         settingsOpen ? ' settings-open' : ''
       }${shellNotificationsVisible ? ' has-notifications' : ''}${
@@ -647,7 +708,7 @@ export default function SinglePageShell() {
         event.preventDefault();
       }}
     >
-      <header className="single-page-topbar" data-tauri-drag-region="deep">
+      <header className="single-page-topbar" data-tauri-drag-region="deep" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <h1 className="single-page-brand">Wallpaper Console</h1>
         <label className="single-page-search">
           <Search size={16} aria-hidden="true" />
@@ -714,7 +775,7 @@ export default function SinglePageShell() {
         </button>
       </header>
 
-      <div className="single-page-library-controls">
+      <div className="single-page-library-controls" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <OverflowStrip className="single-page-filters" role="toolbar" aria-label="Library filters">
           <span aria-hidden="true" className="single-page-filters__label">01 / FILTER</span>
           <LibraryFilterControls
@@ -817,16 +878,20 @@ export default function SinglePageShell() {
             model: libraryViewModel,
             onAnchorChange: rememberLibraryAnchor,
             returnFocusToken: libraryReturnFocusToken,
+            viewMode: preferences.libraryViewMode,
+            onViewModeChange: changeLibraryViewMode,
+            immersive: bookImmersive,
+            onImmersiveChange: changeBookImmersive,
           }}
         />
       </main>
 
-      <footer className="single-page-statusbar">
+      <footer className="single-page-statusbar" inert={chromeHidden} aria-hidden={chromeHidden || undefined}>
         <span className="single-page-statusbar__selection">
-          {preferences.libraryViewMode === 'flow'
+          {preferences.libraryViewMode !== 'grid'
             ? flowAnchorEntry
               ? `Viewing: ${displayName(flowAnchorEntry)}`
-              : 'Flow is positioning the current wallpaper…'
+              : `${preferences.libraryViewMode === 'book' ? 'Book' : preferences.libraryViewMode === 'knot' ? 'Knot' : 'Flow'} is positioning the current wallpaper…`
             : selectedDescription(selectedEntry)}
         </span>
         <span className="single-page-statusbar__current">{currentWallpaperLabel(currentWallpaper)}</span>

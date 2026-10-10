@@ -26,8 +26,9 @@ export function previewImagePath({
   thumbnail,
   thumbnailLoadFailed,
 }: PreviewImagePathInput): string | null | undefined {
-  if (candidateKind === 'video' && authorizedCandidatePath) return null;
-  return authorizedCandidatePath
+  // A preview clip overlays the still for its entire lifetime; a video's original path is
+  // never an image source (nor a playable asset-protocol video source on WebKitGTK).
+  return (candidateKind === 'video' ? null : authorizedCandidatePath)
     ?? (staticFallbackLoadFailed ? null : authorizedStaticFallbackPath)
     ?? (thumbnailLoadFailed ? undefined : thumbnail);
 }
@@ -60,6 +61,22 @@ export function previewFallbackState(
 export interface AttachableVideo extends ReleasableVideo {
   getAttribute(name: string): string | null;
   setAttribute(name: string, value: string): void;
+}
+
+/**
+ * Thumbnail-store key for the large preview (up to 1600 px a side) of a path. The plain path is
+ * the grid-size preview (400 px). The two are separate entries in the store and on disk.
+ */
+export const LARGE_PREVIEW_PREFIX = 'large::';
+
+export function largePreviewKey(path: string): string {
+  return `${LARGE_PREVIEW_PREFIX}${path}`;
+}
+
+export function splitPreviewKey(key: string): { path: string; size?: 'large' } {
+  return key.startsWith(LARGE_PREVIEW_PREFIX)
+    ? { path: key.slice(LARGE_PREVIEW_PREFIX.length), size: 'large' }
+    : { path: key };
 }
 
 export function staticPreviewAssetPath(entry: WallpaperDTO): string {

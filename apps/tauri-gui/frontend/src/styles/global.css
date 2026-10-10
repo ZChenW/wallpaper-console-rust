@@ -4,6 +4,7 @@ html, body, #root { height: 100%; }
 
 /* Overlay stacking order, lowest to highest. */
 :root {
+  --z-book-zoom: 80;
   --z-context-menu: 100;
   --z-index-dialog: 180;
   --z-details-overlay: 850;
@@ -203,6 +204,10 @@ select:focus, input:focus { border-color: var(--primary); }
   inset: 0;
   background: var(--panel-alt);
   pointer-events: none;
+  /* A lazy image far off screen stays pending, so its placeholder would pulse for ever where nobody
+     can see it, and an endless animation keeps the whole window compositing at 60 fps (measured:
+     Flow idle at 14% CPU instead of 1.5%). Skipped content does not animate. */
+  content-visibility: auto;
 }
 .wallpaper-thumb-placeholder--loading .wallpaper-type-icon {
   animation: wallpaper-placeholder-pulse 1.2s ease-in-out infinite;
@@ -343,6 +348,31 @@ select:focus, input:focus { border-color: var(--primary); }
   place-items: center;
   padding: clamp(0.75rem, 3vw, 2rem);
   background: rgb(0 0 0 / 58%);
+  animation: wallpaper-details-overlay-enter 140ms ease-out;
+}
+.wallpaper-details__overlay .wallpaper-details {
+  animation: wallpaper-details-panel-enter 140ms ease-out;
+}
+.wallpaper-details__overlay[data-presentation-phase="exiting"] {
+  pointer-events: none;
+  animation: wallpaper-details-overlay-exit 100ms ease-out forwards;
+}
+.wallpaper-details__overlay[data-presentation-phase="exiting"] .wallpaper-details {
+  animation: wallpaper-details-panel-exit 100ms ease-out forwards;
+}
+@keyframes wallpaper-details-overlay-enter { from { opacity: 0; } to { opacity: 1; } }
+@keyframes wallpaper-details-overlay-exit { from { opacity: 1; } to { opacity: 0; } }
+@keyframes wallpaper-details-panel-enter {
+  from { opacity: 0; transform: translateY(6px) scale(0.985); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes wallpaper-details-panel-exit {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(6px) scale(0.985); }
+}
+.wallpaper-details__overlay[data-reduced-motion],
+.wallpaper-details__overlay[data-reduced-motion] .wallpaper-details {
+  animation: none;
 }
 
 .wallpaper-details__header {
@@ -571,6 +601,8 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .wallpaper-details__overlay,
+  .wallpaper-details__overlay .wallpaper-details { animation: none; }
   *,
   *::before,
   *::after {
@@ -645,6 +677,29 @@ select:focus, input:focus { border-color: var(--primary); }
   grid-area: status;
 }
 
+/* Shared immersive layout: Book commits during its dip; Knot commits before its fade. */
+.single-page-shell[data-library-immersive] {
+  grid-template-areas: "library";
+  grid-template-rows: minmax(0, 1fr);
+}
+.single-page-shell[data-library-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+  display: none;
+}
+.single-page-shell[data-library-immersive] > .single-page-library {
+  position: relative;
+  padding: 0;
+}
+.single-page-shell[data-library-immersive] .single-page-library > :is(.single-page-discovery-error, .library-repair-prompt, .single-page-stale-results) {
+  position: relative;
+  z-index: 6;
+  margin: 0;
+}
+.single-page-shell[data-library-immersive] .single-page-load-more {
+  position: absolute;
+  z-index: 6;
+  bottom: 4.5rem;
+  inset-inline: 0;
+}
 .shell-notifications {
   position: fixed;
   z-index: var(--z-notifications);
@@ -2159,10 +2214,10 @@ select:focus, input:focus { border-color: var(--primary); }
   padding-bottom: 1rem;
 }
 
-/* ── Library view mode & Flow browser ───────────────────────────── */
+/* ── Library view modes ────────────────────────────────────────── */
 .library-view-switch {
   display: inline-grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   flex: 0 0 auto;
   height: 1.85rem;
   overflow: hidden;
@@ -2222,6 +2277,11 @@ select:focus, input:focus { border-color: var(--primary); }
   container-type: inline-size;
 }
 
+.single-page-shell[data-library-immersive] .library-viewport {
+  position: absolute;
+  inset: 0;
+}
+
 .library-viewport__updating {
   position: absolute;
   z-index: 4;
@@ -2242,6 +2302,653 @@ select:focus, input:focus { border-color: var(--primary); }
   min-width: 0;
   min-height: 0;
   flex: 1 1 auto;
+}
+
+/* Book shares Library media/state tokens with Flow. */
+.wallpaper-book {
+  --book-stage-bg: color-mix(in srgb, var(--surface) 78%, var(--panel));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+  color: var(--text);
+  background: var(--book-stage-bg);
+  border: 1px solid var(--border-subtle);
+}
+
+.wallpaper-book__heading {
+  min-height: 4.8rem;
+  padding: 1rem 1rem 0;
+  text-align: center;
+}
+
+.wallpaper-book__heading h3 {
+  margin: 0 0 0.25rem;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.wallpaper-book__heading p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.wallpaper-book__heading .wallpaper-book__loading {
+  margin-top: 0.3rem;
+  font-size: 0.7rem;
+}
+
+.wallpaper-book__load-more {
+  margin-top: 0.35rem;
+  padding: 0.2rem 0.65rem;
+  font-size: 0.75rem;
+}
+
+.wallpaper-book__stage {
+  --book-perspective: 1400px;
+  /* Reserve the scaled fans horizontally and the lift/shadow vertically. */
+  --book-spread-width: max(1px, min(70cqw, calc(100cqw - 256px), 220cqh, 84rem));
+  --book-paper-margin: clamp(1px, calc(var(--book-spread-width) * 0.008), 18px);
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  perspective: var(--book-perspective);
+  perspective-origin: 50% 50%;
+  touch-action: pan-y;
+  user-select: none;
+  cursor: grab;
+  container-type: size;
+}
+
+.wallpaper-book__stage[data-dragging],
+.wallpaper-book__stage[data-dragging] .book-leaf__face { cursor: grabbing; }
+.wallpaper-book__scene {
+  position: absolute;
+  inset: 0;
+  perspective: var(--book-perspective);
+  perspective-origin: 50% 50%;
+}
+.wallpaper-book__stage[data-zoomed] .wallpaper-book__scene {
+  opacity: 0;
+  pointer-events: none;
+}
+.wallpaper-book.is-refreshing { cursor: progress; }
+.wallpaper-book__stage:focus-visible {
+  outline: none;
+}
+.wallpaper-book__stage:focus-visible:not([data-selectable]) {
+  outline: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  outline-offset: -2px;
+}
+
+.wallpaper-book__spread {
+  position: absolute;
+  width: var(--book-spread-width);
+  aspect-ratio: 32 / 10;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%) rotateX(7deg);
+  transform-style: preserve-3d;
+}
+
+.book-leaf {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  width: 50%;
+  height: 100%;
+  transform-origin: left center;
+  transform-style: preserve-3d;
+}
+
+.book-leaf__face {
+  position: absolute;
+  inset: 0;
+  padding: calc(var(--book-paper-margin) * 0.625) var(--book-paper-margin);
+  border-radius: 1px 0.6rem 0.6rem 1px;
+  background: var(--panel);
+  backface-visibility: hidden;
+  -webkit-backface-visibility: hidden;
+  cursor: grab;
+  outline: 1px solid color-mix(in srgb, var(--border-subtle) 60%, transparent);
+}
+
+.book-leaf__face[data-open] { cursor: pointer; }
+.book-leaf__face--front { transform: translateZ(0.3px); }
+.book-leaf__face--back {
+  transform: rotateY(180deg) translateZ(0.3px);
+  border-radius: 0.6rem 1px 1px 0.6rem;
+}
+
+.book-leaf__print {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  border-radius: 0.25rem;
+  background: var(--surface-muted);
+}
+
+.book-leaf__print > :is(img, video, .wallpaper-thumb-placeholder),
+.wallpaper-book__zoom-print > :is(img, video, .wallpaper-thumb-placeholder),
+.wallpaper-book__zoom-media > :is(img, video, .wallpaper-thumb-placeholder) {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.book-leaf__spine-shadow,
+.book-leaf__shade,
+.book-leaf__highlight {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.book-leaf__spine-shadow {
+  background: linear-gradient(to right, color-mix(in srgb, var(--text) 11%, transparent), transparent 9%);
+}
+.book-leaf__face--back .book-leaf__spine-shadow {
+  background: linear-gradient(to left, color-mix(in srgb, var(--text) 11%, transparent), transparent 9%);
+}
+.book-leaf__shade { opacity: 0; background: var(--text); }
+.book-leaf__highlight {
+  opacity: 0;
+  background: linear-gradient(to right, transparent 25%, var(--panel) 60%, transparent);
+}
+
+.wallpaper-book__contact-shadow {
+  position: absolute;
+  width: calc(var(--book-spread-width) * 1.25);
+  height: calc(var(--book-spread-width) * 0.15);
+  top: calc(50% + var(--book-spread-width) * 0.055);
+  left: calc(50% - var(--book-spread-width) * 0.625);
+  border-radius: 50%;
+  background: radial-gradient(ellipse, color-mix(in srgb, var(--text) 16%, transparent), transparent 70%);
+  transform: translateZ(0);
+  transition: transform 220ms ease-out;
+  pointer-events: none;
+}
+/* On the first and last spread only one page lies open: keep the shadow under that half. */
+.wallpaper-book__contact-shadow[data-side="right"] { transform: translateZ(0) scaleX(0.5); transform-origin: right center; }
+.wallpaper-book__contact-shadow[data-side="left"] { transform: translateZ(0) scaleX(0.5); transform-origin: left center; }
+.wallpaper-book[data-reduced-motion] .wallpaper-book__contact-shadow { transition: none; }
+
+.book-leaf__states {
+  position: absolute;
+  z-index: 4;
+  bottom: 0.65rem;
+  inset-inline-start: 0.75rem;
+  max-width: calc(100% - 1.5rem);
+  padding: 0.15rem 0.4rem;
+  border-radius: 0.2rem;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.65rem;
+  line-height: 1.3;
+  pointer-events: none;
+}
+.book-leaf__states:empty { display: none; }
+/* Persistent selection layers cross-fade without covering the picture. */
+.book-leaf__face::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  /* No lift shadow: a dark patch under the picture read as a blob appearing. The bar marks selection. */
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
+  pointer-events: none;
+}
+.book-leaf__face::after {
+  content: '';
+  position: absolute;
+  width: 22%;
+  height: clamp(1.5px, calc(var(--book-paper-margin) * 0.39), 6px);
+  bottom: max(1px, calc(var(--book-paper-margin) * 0.3125 - 1.5px));
+  left: 39%;
+  z-index: 5;
+  border-radius: 2px;
+  background: var(--primary);
+  opacity: 0;
+  transform: translateY(2px);
+  transition: opacity 160ms ease-out, transform 160ms ease-out;
+  pointer-events: none;
+}
+.book-leaf__face[data-open][data-selected]::before,
+.book-leaf__face[data-open][data-selected]::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+/* Keep the sheet in place while its picture, lift and bookmark travel in zoom. */
+.book-leaf__face[data-zoom-source] {
+  visibility: hidden;
+}
+.wallpaper-book__stage:focus-visible .book-leaf__face[data-open][data-selected] .book-leaf__print {
+  outline: 1.5px solid color-mix(in srgb, var(--primary) 55%, transparent);
+  outline-offset: -1.5px;
+}
+.wallpaper-book__stage[data-moving] .book-leaf__face::before,
+.wallpaper-book__stage[data-moving] .book-leaf__face::after {
+  opacity: 0;
+  transform: translateY(2px);
+  transition-duration: 100ms;
+  transition-delay: 0ms;
+}
+.wallpaper-book__stage[data-settling] .book-leaf__face::before,
+.wallpaper-book__stage[data-settling] .book-leaf__face::after {
+  transition-duration: 320ms;
+  transition-timing-function: ease-out;
+  transition-delay: 80ms;
+}
+.wallpaper-book__stage[data-moving] .book-leaf__states { visibility: hidden; }
+.wallpaper-book__stage[data-moving] .book-leaf__print { outline: none; }
+/* Knot uses the whole window; controls stay quiet above the fragments. */
+.wallpaper-knot {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  color: var(--text);
+  background: var(--bg);
+}
+.wallpaper-knot--recovery { display: grid; place-items: center; }
+.wallpaper-knot__stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  overflow: hidden;
+  touch-action: none;
+  cursor: grab;
+  background: var(--bg);
+  /* Resolve the muted theme token for WebGL without a visible border. */
+  border: 0 solid var(--surface-muted);
+  outline: none;
+}
+.wallpaper-knot__stage:active { cursor: grabbing; }
+.wallpaper-knot__stage:focus-visible .wallpaper-knot__caption { outline: 1px solid var(--primary); outline-offset: 4px; }
+.wallpaper-knot__canvas { position: absolute; inset: 0; display: block; width: 100%; height: 100%; }
+.wallpaper-knot__stage:not([data-ready]) .wallpaper-knot__canvas { visibility: hidden; }
+/* The preview clip sits exactly on the assembled picture; the player sets its box and its opacity. */
+.wallpaper-knot__video {
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 0;
+  height: 0;
+  object-fit: cover;
+  /* Transparent, never hidden: WebKit does not advance a video it considers out of sight, and the
+     player only fades the clip in once it is really running. */
+  opacity: 0;
+  pointer-events: none;
+  background: transparent;
+}
+.wallpaper-knot__message { position: relative; max-width: 28rem; padding: 1.5rem; color: var(--text-muted); text-align: center; }
+/* A view that fills the window hides the top bar, the window's usual handle; this strip along its
+   top edge moves the window instead. Each view places it above its stage and below its own controls. */
+.window-handle {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 2.25rem;
+  cursor: grab;
+  -webkit-app-region: drag;
+}
+.window-handle:active { cursor: grabbing; }
+.window-handle::after {
+  content: '';
+  position: absolute;
+  top: 0.45rem;
+  left: 50%;
+  width: 2.5rem;
+  height: 0.2rem;
+  border-radius: 0.2rem;
+  transform: translateX(-50%);
+  background: var(--text-muted);
+  opacity: 0.18;
+  pointer-events: none;
+}
+.window-handle:hover::after { opacity: 0.5; }
+.wallpaper-knot__window-handle { z-index: 1; }
+.wallpaper-knot__view-switch { position: absolute; z-index: 2; top: 0.75rem; right: 0.75rem; }
+.wallpaper-knot__view-switch .library-view-switch__button { padding: 0.35rem 0.55rem; font-size: 0.72rem; }
+.wallpaper-knot__caption {
+  position: absolute;
+  bottom: 1rem;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  max-width: calc(100% - 14rem);
+  border-radius: 2rem;
+  padding: 0.15rem 0.35rem 0.15rem 0.65rem;
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  background: var(--bg);
+  cursor: default;
+}
+/* A video's preview clip can take seconds to make the first time. Shown only if the wait is noticeable. */
+.wallpaper-knot__clip-loading {
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+  animation: wallpaper-knot-clip-loading 0.9s ease-in-out 350ms infinite alternate;
+}
+@keyframes wallpaper-knot-clip-loading {
+  from { opacity: 0.25; }
+  to { opacity: 0.9; }
+}
+.wallpaper-knot[data-reduced-motion] .wallpaper-knot__clip-loading { animation: none; opacity: 0.6; }
+.wallpaper-knot__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wallpaper-knot__badge { flex: none; font-size: 0.65rem; }
+/* Two classes: Book's own padding for this row is declared later and would otherwise win,
+   pushing the buttons above the caption's centre line and the caption up into the hint. */
+.wallpaper-book__actions.wallpaper-knot__actions { flex: none; padding: 0; gap: 0.35rem; }
+.wallpaper-book__actions.wallpaper-knot__actions button { position: relative; width: 2rem; height: 2rem; }
+.wallpaper-knot__actions .apply-indicator { position: static; }
+.wallpaper-knot__knots { position: absolute; bottom: 1rem; right: 0.75rem; display: flex; gap: 0.1rem; }
+.wallpaper-knot__knots button {
+  display: grid;
+  place-items: center;
+  width: 1.5rem;
+  height: 2rem;
+  border: 0;
+  padding: 0;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+}
+.wallpaper-knot__knots button::after { content: ''; width: 0.35rem; height: 0.35rem; border-radius: 50%; background: currentColor; opacity: 0.5; }
+.wallpaper-knot__knots button[aria-pressed="true"]::after { opacity: 1; }
+.wallpaper-knot__knots button:hover:not(:disabled) { color: var(--text); }
+.wallpaper-knot__knots button:focus-visible { outline: 1px solid var(--primary); outline-offset: 1px; border-radius: 50%; }
+.wallpaper-knot__knots button:disabled { opacity: 0.45; cursor: default; }
+.wallpaper-knot__hint {
+  position: absolute;
+  /* Clear of the caption and of the focus ring drawn around it. */
+  bottom: 4.25rem;
+  inset-inline: 0.75rem;
+  margin: 0;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  text-align: center;
+  opacity: 0;
+  transition: opacity 300ms ease-out;
+  pointer-events: none;
+}
+.wallpaper-knot__hint[data-visible] { opacity: 1; }
+.wallpaper-knot[data-reduced-motion] .wallpaper-knot__hint { transition: none; }
+.wallpaper-knot__announcement { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+@container library-viewport (max-width: 480px) {
+  .wallpaper-knot__caption { max-width: calc(100% - 1.5rem); }
+  .wallpaper-knot__knots { bottom: 4rem; }
+}
+@media (forced-colors: active) {
+  .wallpaper-knot__stage:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }
+  .wallpaper-knot__knots button[aria-pressed="true"] { outline: 1px solid Highlight; }
+}
+
+/* Escape Library's container stacking context, above the window zoom. */
+.wallpaper-book__menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-context-menu);
+  pointer-events: none;
+}
+.wallpaper-book__menu-layer .context-menu {
+  pointer-events: auto;
+  transform-origin: var(--context-pointer-x, 0px) var(--context-pointer-y, 0px);
+  animation: book-menu-enter 120ms ease-out;
+}
+@keyframes book-menu-enter {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.wallpaper-book__menu-layer[data-reduced-motion] .context-menu { animation: none; }
+/* The shared preview error badge otherwise peeks out under the state label. */
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-thumb-error { display: none; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-preview-image { animation: none; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) :is(.book-leaf__print, .wallpaper-book__zoom-print) img {
+  image-rendering: auto;
+}
+:is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-thumb-placeholder { background: var(--panel-alt); }
+.book-leaf__face:not([data-open]) .wallpaper-type-icon { display: none; }
+/* Clip opacity is driven from rAF after its clock advances, never by the compositor. */
+.wallpaper-preview-clip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  z-index: 2;
+  opacity: 0;
+  pointer-events: none;
+}
+.flow-preview-item__media > video.wallpaper-preview-clip {
+  transition: filter 160ms ease-out;
+}
+.book-leaf__indicator {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+}
+.book-leaf__indicator > .apply-indicator {
+  position: relative;
+}
+
+.wallpaper-book__actions {
+  display: flex;
+  justify-content: center;
+  gap: 0.65rem;
+  padding: 0.6rem 1rem 1rem;
+}
+/* Portaling controls must not resize the real stage or its landing page. */
+.wallpaper-book__actions-reserve { height: 4.1rem; pointer-events: none; }
+.wallpaper-book__reason-reserve { opacity: 0; }
+.wallpaper-book__actions button {
+  display: grid;
+  place-items: center;
+  width: 2.5rem;
+  height: 2.5rem;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--panel);
+  border: 1px solid var(--border-subtle);
+  color: var(--text);
+}
+.wallpaper-book__actions button:hover:not(:disabled) { background: var(--panel-hover); }
+.wallpaper-book__actions button[aria-pressed="true"] { background: var(--primary-bg); color: var(--primary-foreground); }
+.wallpaper-book__actions button:disabled { opacity: 0.45; cursor: default; }
+.wallpaper-book__actions button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
+.wallpaper-book__disabled-reason { margin: -0.4rem 1rem 0.6rem; color: var(--text-muted); text-align: center; font-size: 0.75rem; }
+.wallpaper-book--preparing { place-content: center; text-align: center; color: var(--text-muted); }
+
+.single-page-shell[data-book-immersive] .wallpaper-book {
+  position: relative;
+  display: block;
+  border: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__stage {
+  --book-spread-width: max(1px, min(70cqw, calc(100cqw - 256px), 220cqh));
+  position: absolute;
+  inset: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__heading {
+  position: absolute;
+  z-index: 5;
+  top: 0.75rem;
+  inset-inline: 0.75rem;
+  display: flex;
+  align-items: baseline;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.35rem;
+  min-height: 0;
+  padding: 0;
+  color: var(--text-muted);
+}
+/* The heading floats over the top edge in immersive mode. Its text lets presses through to the
+   window handle beneath it; anything in it that can be clicked still can. */
+.wallpaper-book__window-handle { z-index: 4; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading { pointer-events: none; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading :is(button, a) { pointer-events: auto; }
+/* The pill would sit on the heading's text: move the text down a line instead of hiding either. */
+.single-page-shell[data-book-immersive] .wallpaper-book__heading { top: 1rem; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading h3 {
+  margin: 0;
+  font-size: 0.75rem;
+  font-weight: 400;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__heading h3::after { content: ' ·'; }
+.single-page-shell[data-book-immersive] .wallpaper-book__heading :is(.wallpaper-book__loading, .wallpaper-book__load-more) { margin: 0; }
+.single-page-shell[data-book-immersive] .wallpaper-book__actions {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 0;
+  bottom: 0;
+}
+.single-page-shell[data-book-immersive] .wallpaper-book__disabled-reason {
+  position: absolute;
+  z-index: 5;
+  inset-inline: 0.5rem;
+  bottom: 4.2rem;
+  margin: 0;
+  pointer-events: none;
+}
+
+.wallpaper-book[data-zoomed] .wallpaper-book__heading { opacity: 0; }
+.wallpaper-book__zoom-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-book-zoom);
+  color: var(--text);
+}
+.wallpaper-book__zoom-content { position: absolute; inset: 0; pointer-events: none; }
+.wallpaper-book__zoom-content .wallpaper-book__actions { pointer-events: auto; }
+/* The camera matrix is calibrated from the real projected quad. Keep it out of
+   the page animation so interpolation is a rigid rotation and uniform scale. */
+.wallpaper-book__zoom-projection {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding-bottom: 4rem;
+  transform-style: preserve-3d;
+  pointer-events: none;
+}
+.wallpaper-book__zoom-layer .wallpaper-book__actions {
+  position: absolute;
+  inset-inline: 0;
+  bottom: 0;
+}
+.wallpaper-book__zoom-layer .wallpaper-book__disabled-reason {
+  position: absolute;
+  inset-inline: 0.5rem;
+  bottom: 4.2rem;
+  margin: 0;
+  pointer-events: none;
+}
+.wallpaper-book__zoom-backdrop {
+  position: absolute;
+  inset: 0;
+  background: color-mix(in srgb, var(--surface) 92%, transparent);
+  cursor: zoom-out;
+}
+.wallpaper-book__zoom-page {
+  position: relative;
+  width: max(1px, min(92vw, calc((100vh - 7rem) * 1.6)));
+  aspect-ratio: 16 / 10;
+  transform-origin: center;
+  background: var(--panel);
+  border-radius: 0.5rem;
+  overflow: visible;
+  cursor: default;
+  pointer-events: auto;
+}
+.wallpaper-book__zoom-print {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  overflow: hidden;
+  background: var(--surface-muted);
+}
+
+.wallpaper-book__zoom-media {
+  position: absolute;
+  inset: 0;
+  opacity: 1;
+}
+.wallpaper-book__zoom-picture,
+.wallpaper-book__zoom-outgoing {
+  position: absolute;
+  inset: 0;
+}
+.wallpaper-book__zoom-picture > :is(img, video, .wallpaper-thumb-placeholder),
+.wallpaper-book__zoom-outgoing > :is(img, video, .wallpaper-thumb-placeholder) {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.wallpaper-book__zoom-outgoing { pointer-events: none; z-index: 2; }
+.wallpaper-book__zoom-still { z-index: 1; }
+.wallpaper-book__zoom-decoration {
+  position: absolute;
+  inset: auto;
+  top: 0;
+  left: 0;
+  transform-origin: top left;
+  background: transparent;
+  pointer-events: none;
+  z-index: 2;
+}
+.wallpaper-book__zoom-decoration .book-leaf__print { background: transparent; }
+:is(.wallpaper-book, .wallpaper-book__zoom-layer)[data-reduced-motion] :is(.book-leaf__face::before, .book-leaf__face::after) { transition: none; }
+
+.wallpaper-book[data-reduced-motion] .wallpaper-book__spread { transform: translate(-50%, -50%); }
+.wallpaper-book__outgoing-spread { pointer-events: none; }
+.wallpaper-book[data-reduced-motion] .book-leaf { transform-style: flat; }
+.wallpaper-book[data-reduced-motion] .book-leaf__face { display: none; transform: none; }
+.wallpaper-book[data-reduced-motion] .book-leaf__face[data-open] { display: block; animation: book-spread-fade 140ms ease-out; }
+.wallpaper-book__zoom-layer[data-reduced-motion] .wallpaper-book__zoom-decoration { animation: none; }
+.wallpaper-book[data-reduced-motion] :is(.book-leaf__shade, .book-leaf__highlight) { display: none; }
+@keyframes book-spread-fade { from { opacity: 0; } to { opacity: 1; } }
+@media (prefers-reduced-motion: reduce) {
+  .wallpaper-book .book-leaf__face[data-open] { animation-duration: 140ms !important; }
+  /* Escape Library's container stacking context, above the window zoom. */
+.wallpaper-book__menu-layer {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-context-menu);
+  pointer-events: none;
+}
+.wallpaper-book__menu-layer .context-menu {
+  pointer-events: auto; animation: none; }
+}
+@media (forced-colors: active) {
+  .wallpaper-book__stage:focus-visible { outline: 1px solid Highlight; outline-offset: -2px; }
+  .wallpaper-book__stage:focus-visible:not([data-selectable]) { outline-color: Highlight; }
+  .book-leaf__face { outline-color: CanvasText; }
+  .wallpaper-book__stage:not([data-moving]) .book-leaf__face[data-open][data-selected] { outline: 1.5px solid Highlight; outline-offset: -2px; }
 }
 
 .wallpaper-flow {
@@ -2643,6 +3350,16 @@ select:focus, input:focus { border-color: var(--primary); }
   .wallpaper-thumb-placeholder--loading
   .wallpaper-type-icon {
   animation-play-state: paused;
+  will-change: auto;
+}
+
+/* Flow marks every picture away from the centre as lazy, and a lazy picture well below the fold
+   never starts loading, so its placeholder would tick for as long as the view is open. Nobody is
+   waiting on those; only pictures being fetched now show the pulse. */
+.wallpaper-flow
+  .wallpaper-thumb-placeholder--loading:has(~ img[loading="lazy"])
+  .wallpaper-type-icon {
+  animation: none;
   will-change: auto;
 }
 

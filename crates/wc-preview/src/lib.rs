@@ -18,7 +18,16 @@ use std::time::{Duration, Instant};
 
 use wc_core::config::ConfigDir;
 
+mod generation;
+use generation::{GenerationCoordinator, ThumbnailDeadline};
+mod clip;
+pub use clip::{preview_clip_cache_key, preview_clip_for, MAX_PREVIEW_CLIP_BYTES};
+
 const THUMBNAIL_COMMAND_TIMEOUT: Duration = Duration::from_secs(8);
+const LARGE_THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(30);
+pub const LARGE_THUMBNAIL_CONCURRENCY: usize = 3;
+const PREVIEW_CLIP_TIMEOUT: Duration = Duration::from_secs(45);
+pub const PREVIEW_CLIP_CONCURRENCY: usize = 1;
 const METADATA_COMMAND_TIMEOUT: Duration = Duration::from_secs(2);
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const COMMAND_DRAIN_GRACE: Duration = Duration::from_millis(200);
@@ -27,10 +36,41 @@ const MAX_IMAGE_DIMENSION: u32 = 32_768;
 const MAX_IMAGE_PIXELS: u64 = 64 * 1024 * 1024;
 const MAX_IMAGE_DECODE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_THUMBNAIL_WIDTH: u32 = 400;
+#[cfg(test)]
 const MAX_THUMBNAIL_HEIGHT: u32 = 400;
-const MAX_THUMBNAIL_PIXELS: u64 = MAX_THUMBNAIL_WIDTH as u64 * MAX_THUMBNAIL_HEIGHT as u64;
-const FFMPEG_THUMBNAIL_SCALE_FILTER: &str =
-    "scale='min(400,iw)':'min(400,ih)':force_original_aspect_ratio=decrease:flags=lanczos";
+/// Longest side of the large GUI preview, for views that show one picture big (Book pages).
+pub const MAX_LARGE_THUMBNAIL_SIDE: u32 = 1600;
+
+/// Which of the two cached GUI preview sizes to produce. They are separate cache entries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThumbnailSize {
+    /// At most 400 px a side: grids, strips, piles.
+    Standard,
+    /// At most 1600 px a side: a picture shown large.
+    Large,
+}
+
+impl ThumbnailSize {
+    fn max_side(self) -> u32 {
+        match self {
+            ThumbnailSize::Standard => MAX_THUMBNAIL_WIDTH,
+            ThumbnailSize::Large => MAX_LARGE_THUMBNAIL_SIDE,
+        }
+    }
+
+    fn key_prefix(self) -> &'static str {
+        match self {
+            ThumbnailSize::Standard => "v3",
+            ThumbnailSize::Large => "v3-large",
+        }
+    }
+}
+
+fn ffmpeg_thumbnail_scale_filter(max_side: u32) -> String {
+    format!(
+        "scale='min({max_side},iw)':'min({max_side},ih)':force_original_aspect_ratio=decrease:flags=lanczos"
+    )
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct DeadlineCommandOutput {
@@ -603,10 +643,15 @@ const FAILURE_CACHE_DIR_NAME: &str = ".failures";
 
 /// Cache key for a GUI thumbnail (v3 — incompatible with animated v2 entries).
 pub fn gui_thumb_cache_key_v3(path: &str, mtime: u64, size: u64) -> String {
+    gui_thumb_cache_key(path, mtime, size, ThumbnailSize::Standard)
+}
+
+/// Cache key for a GUI thumbnail of the given size. Standard keys are unchanged from v3.
+pub fn gui_thumb_cache_key(path: &str, mtime: u64, size: u64, tier: ThumbnailSize) -> String {
     let real = std::fs::canonicalize(path)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| path.to_string());
-    let raw = format!("v3-{}:{}:{}", real, mtime, size);
+    let raw = format!("{}-{}:{}:{}", tier.key_prefix(), real, mtime, size);
     format!("{}.webp", stable_hash_hex(&raw))
 }
 
@@ -617,9 +662,32 @@ pub fn generate_gui_thumbnail(
     mtime: u64,
     size: u64,
 ) -> Result<(PathBuf, bool), ThumbnailFailure> {
+    generate_gui_thumbnail_sized(cache_dir, path, mtime, size, ThumbnailSize::Standard)
+}
+
+/// Generate a GUI thumbnail of the given size. Returns (path, was_cached) or failure reason.
+pub fn generate_gui_thumbnail_sized(
+    cache_dir: &Path,
+    path: &str,
+    mtime: u64,
+    size: u64,
+    tier: ThumbnailSize,
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
+    generate_gui_thumbnail_sized_before(cache_dir, path, mtime, size, tier, None)
+}
+
+fn generate_gui_thumbnail_sized_before(
+    cache_dir: &Path,
+    path: &str,
+    mtime: u64,
+    size: u64,
+    tier: ThumbnailSize,
+    parent: Option<ThumbnailDeadline>,
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
     std::fs::create_dir_all(cache_dir).map_err(|_| ThumbnailFailure::CacheWriteFailed)?;
 
-    let key = gui_thumb_cache_key_v3(path, mtime, size);
+    let max_side = tier.max_side();
+    let key = gui_thumb_cache_key(path, mtime, size, tier);
     let dst = cache_dir.join(&key);
 
     // Already cached — return immediately.
@@ -627,6 +695,32 @@ pub fn generate_gui_thumbnail(
         return Ok((dst, true));
     }
 
+    static COORDINATOR: OnceLock<GenerationCoordinator> = OnceLock::new();
+    let coordinator = COORDINATOR.get_or_init(GenerationCoordinator::default);
+    let flight_key = std::fs::canonicalize(cache_dir)
+        .unwrap_or_else(|_| cache_dir.to_path_buf())
+        .join(&key);
+    let generate = |deadline| {
+        // Another producer may have published while this request waited for its lane.
+        if dst.exists() {
+            return Ok((dst, true));
+        }
+        generate_gui_thumbnail_uncached(cache_dir, path, &key, dst, max_side, deadline)
+    };
+    match parent {
+        Some(deadline) => coordinator.run_thumbnail_before(flight_key, tier, deadline, generate),
+        None => coordinator.run(flight_key, tier, generate),
+    }
+}
+
+fn generate_gui_thumbnail_uncached(
+    cache_dir: &Path,
+    path: &str,
+    key: &str,
+    dst: PathBuf,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> Result<(PathBuf, bool), ThumbnailFailure> {
     let ext = wc_core::formats::get_extension(path)
         .unwrap_or_default()
         .to_lowercase();
@@ -636,28 +730,28 @@ pub fn generate_gui_thumbnail(
 
     // Each producer owns a unique temporary file. This avoids same-key calls
     // deleting or partially overwriting one another before atomic publication.
-    let tmp = reserve_unique_thumbnail_temp(cache_dir, &key)?;
+    let tmp = reserve_unique_thumbnail_temp(cache_dir, key)?;
 
     let generated = if matches!(ext.as_str(), "mp4" | "webm" | "mkv" | "mov" | "avi" | "flv") {
-        generate_video_thumbnail_v2(path, &tmp)
+        generate_video_thumbnail_v2(path, &tmp, max_side, deadline)
             .then_some(())
             .ok_or(ThumbnailFailure::ProbeFailed)
     } else {
-        generate_image_thumbnail(path, &tmp)
+        generate_image_thumbnail(path, &tmp, max_side, deadline)
     };
 
     if let Err(failure) = generated {
         let _ = std::fs::remove_file(&tmp);
         return Err(failure);
     }
-    if validate_generated_thumbnail(&tmp).is_err() {
+    if validate_generated_thumbnail_within(&tmp, max_side).is_err() {
         let _ = std::fs::remove_file(&tmp);
         return Err(ThumbnailFailure::ProbeFailed);
     }
 
     match std::fs::rename(&tmp, &dst) {
         Ok(()) => Ok((dst, false)),
-        Err(_) if dst.exists() && validate_generated_thumbnail(&dst).is_ok() => {
+        Err(_) if dst.exists() && validate_generated_thumbnail_within(&dst, max_side).is_ok() => {
             let _ = std::fs::remove_file(&tmp);
             Ok((dst, true))
         }
@@ -685,6 +779,9 @@ pub enum ThumbnailFailure {
     ImageTooLarge,
     CacheWriteFailed,
     MissingFile,
+    EmptyClip,
+    ClipTooLarge,
+    TimedOut,
 }
 
 impl ThumbnailFailure {
@@ -695,6 +792,9 @@ impl ThumbnailFailure {
             ThumbnailFailure::ImageTooLarge => "image_too_large",
             ThumbnailFailure::CacheWriteFailed => "cache_write_failed",
             ThumbnailFailure::MissingFile => "missing_file",
+            ThumbnailFailure::EmptyClip => "empty_output",
+            ThumbnailFailure::ClipTooLarge => "output_too_large",
+            ThumbnailFailure::TimedOut => "timed_out",
         }
     }
 
@@ -705,6 +805,9 @@ impl ThumbnailFailure {
             "image_too_large" => Some(ThumbnailFailure::ImageTooLarge),
             "cache_write_failed" => Some(ThumbnailFailure::CacheWriteFailed),
             "missing_file" => Some(ThumbnailFailure::MissingFile),
+            "empty_output" => Some(ThumbnailFailure::EmptyClip),
+            "output_too_large" => Some(ThumbnailFailure::ClipTooLarge),
+            "timed_out" => Some(ThumbnailFailure::TimedOut),
             _ => None,
         }
     }
@@ -879,6 +982,16 @@ pub fn thumbnail_for_with_failure_ttl(
     path: &str,
     failure_ttl_secs: u64,
 ) -> ThumbnailResult {
+    thumbnail_for_sized(cache_dir, path, failure_ttl_secs, ThumbnailSize::Standard)
+}
+
+/// As `thumbnail_for_with_failure_ttl`, for either preview size.
+pub fn thumbnail_for_sized(
+    cache_dir: &Path,
+    path: &str,
+    failure_ttl_secs: u64,
+    tier: ThumbnailSize,
+) -> ThumbnailResult {
     let meta = match std::fs::metadata(path) {
         Ok(m) => m,
         Err(e) => {
@@ -899,9 +1012,17 @@ pub fn thumbnail_for_with_failure_ttl(
         .map(|d| d.as_secs())
         .unwrap_or(0);
     let _ = maybe_cleanup_stale_tmp_thumbnails(cache_dir, current_epoch_secs());
-    let key = gui_thumb_cache_key_v3(path, mtime, size);
+    let key = gui_thumb_cache_key(path, mtime, size, tier);
     let marker = failure_marker_path(cache_dir, &key);
-    if let Some(failure) = read_failure_marker(&marker) {
+    // Large upgrades use bounded frontend retries. Old 15-minute markers must
+    // not suppress those retries; Standard's persisted failure policy is unchanged.
+    if tier == ThumbnailSize::Large {
+        let _ = std::fs::remove_file(&marker);
+    }
+    if let Some(failure) = (tier == ThumbnailSize::Standard)
+        .then(|| read_failure_marker(&marker))
+        .flatten()
+    {
         return ThumbnailResult {
             path: path.to_string(),
             thumbnail: None,
@@ -914,7 +1035,7 @@ pub fn thumbnail_for_with_failure_ttl(
         };
     }
 
-    match generate_gui_thumbnail(cache_dir, path, mtime, size) {
+    match generate_gui_thumbnail_sized(cache_dir, path, mtime, size, tier) {
         Ok((thumb, cached)) => ThumbnailResult {
             path: path.to_string(),
             thumbnail: Some(thumb.to_string_lossy().to_string()),
@@ -923,8 +1044,10 @@ pub fn thumbnail_for_with_failure_ttl(
             failure_reason: None,
         },
         Err(failure) => {
-            let expires_at = current_epoch_secs().saturating_add(failure_ttl_secs);
-            let _ = write_failure_marker(&marker, failure, expires_at);
+            if tier == ThumbnailSize::Standard {
+                let expires_at = current_epoch_secs().saturating_add(failure_ttl_secs);
+                let _ = write_failure_marker(&marker, failure, expires_at);
+            }
             ThumbnailResult {
                 path: path.to_string(),
                 thumbnail: None,
@@ -995,12 +1118,20 @@ fn write_failure_marker(
 // ── Internal generators ────────────────────────────────────────────────────
 
 fn reserve_unique_thumbnail_temp(cache_dir: &Path, key: &str) -> Result<PathBuf, ThumbnailFailure> {
+    reserve_unique_preview_temp(cache_dir, key, "webp")
+}
+
+fn reserve_unique_preview_temp(
+    cache_dir: &Path,
+    key: &str,
+    extension: &str,
+) -> Result<PathBuf, ThumbnailFailure> {
     static NEXT_TEMP_ID: AtomicU64 = AtomicU64::new(0);
 
     for _ in 0..128 {
         let sequence = NEXT_TEMP_ID.fetch_add(1, Ordering::Relaxed);
         let path = cache_dir.join(format!(
-            ".{key}.{}.{}.tmp.webp",
+            ".{key}.{}.{}.tmp.{extension}",
             std::process::id(),
             sequence
         ));
@@ -1014,7 +1145,12 @@ fn reserve_unique_thumbnail_temp(cache_dir: &Path, key: &str) -> Result<PathBuf,
     Err(ThumbnailFailure::CacheWriteFailed)
 }
 
+#[cfg(test)]
 fn validate_generated_thumbnail(path: &Path) -> Result<(), ThumbnailFailure> {
+    validate_generated_thumbnail_within(path, MAX_THUMBNAIL_WIDTH)
+}
+
+fn validate_generated_thumbnail_within(path: &Path, max_side: u32) -> Result<(), ThumbnailFailure> {
     let reader = image::ImageReader::open(path).map_err(|_| ThumbnailFailure::ProbeFailed)?;
     let mut reader = reader
         .with_guessed_format()
@@ -1023,12 +1159,16 @@ fn validate_generated_thumbnail(path: &Path) -> Result<(), ThumbnailFailure> {
         return Err(ThumbnailFailure::ProbeFailed);
     }
     let mut limits = image::Limits::default();
-    limits.max_image_width = Some(MAX_THUMBNAIL_WIDTH);
-    limits.max_image_height = Some(MAX_THUMBNAIL_HEIGHT);
-    limits.max_alloc = Some(MAX_THUMBNAIL_PIXELS.saturating_mul(4));
+    limits.max_image_width = Some(max_side);
+    limits.max_image_height = Some(max_side);
+    limits.max_alloc = Some(
+        u64::from(max_side)
+            .saturating_mul(u64::from(max_side))
+            .saturating_mul(4),
+    );
     reader.limits(limits);
     let image = reader.decode().map_err(|_| ThumbnailFailure::ProbeFailed)?;
-    validate_thumbnail_dimensions(image.width(), image.height())
+    validate_thumbnail_dimensions(image.width(), image.height(), max_side)
 }
 
 pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 {
@@ -1042,7 +1182,7 @@ pub fn cleanup_stale_tmp_thumbnails(cache_dir: &Path, max_age_secs: u64) -> u64 
         let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
             continue;
         };
-        if !name.starts_with('.') || !name.ends_with(".tmp.webp") {
+        if !name.starts_with('.') || !(name.ends_with(".tmp.webp") || name.ends_with(".tmp.mp4")) {
             continue;
         }
         let Ok(meta) = entry.metadata() else {
@@ -1077,27 +1217,31 @@ fn validate_image_dimensions(width: u32, height: u32) -> Result<(), ThumbnailFai
     Ok(())
 }
 
-fn validate_thumbnail_dimensions(width: u32, height: u32) -> Result<(), ThumbnailFailure> {
-    let pixels = u64::from(width).saturating_mul(u64::from(height));
-    if width == 0
-        || height == 0
-        || width > MAX_THUMBNAIL_WIDTH
-        || height > MAX_THUMBNAIL_HEIGHT
-        || pixels > MAX_THUMBNAIL_PIXELS
-    {
+fn validate_thumbnail_dimensions(
+    width: u32,
+    height: u32,
+    max_side: u32,
+) -> Result<(), ThumbnailFailure> {
+    if width == 0 || height == 0 || width > max_side || height > max_side {
         return Err(ThumbnailFailure::ProbeFailed);
     }
     Ok(())
 }
 
+#[cfg(test)]
 fn thumbnail_resize_bounds(width: u32, height: u32) -> (u32, u32) {
-    (
-        width.min(MAX_THUMBNAIL_WIDTH),
-        height.min(MAX_THUMBNAIL_HEIGHT),
-    )
+    thumbnail_resize_bounds_within(width, height, MAX_THUMBNAIL_WIDTH)
 }
 
-fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> Result<bool, ThumbnailFailure> {
+fn thumbnail_resize_bounds_within(width: u32, height: u32, max_side: u32) -> (u32, u32) {
+    (width.min(max_side), height.min(max_side))
+}
+
+fn generate_image_thumbnail_rust(
+    src: &str,
+    dst: &Path,
+    max_side: u32,
+) -> Result<bool, ThumbnailFailure> {
     let Ok(reader) = image::ImageReader::open(src) else {
         return Ok(false);
     };
@@ -1126,13 +1270,13 @@ fn generate_image_thumbnail_rust(src: &str, dst: &Path) -> Result<bool, Thumbnai
     let width = img.width();
     let height = img.height();
     validate_image_dimensions(width, height)?;
-    let (target_width, target_height) = thumbnail_resize_bounds(width, height);
+    let (target_width, target_height) = thumbnail_resize_bounds_within(width, height, max_side);
     let resized = img.resize(
         target_width,
         target_height,
         image::imageops::FilterType::Lanczos3,
     );
-    validate_thumbnail_dimensions(resized.width(), resized.height())?;
+    validate_thumbnail_dimensions(resized.width(), resized.height(), max_side)?;
     Ok(resized
         .save_with_format(dst, image::ImageFormat::WebP)
         .is_ok()
@@ -1143,8 +1287,13 @@ fn imagemagick_first_frame_source(src: &str) -> String {
     format!("{src}[0]")
 }
 
-fn generate_image_thumbnail(src: &str, dst: &Path) -> Result<(), ThumbnailFailure> {
-    if generate_image_thumbnail_rust(src, dst)? {
+fn generate_image_thumbnail(
+    src: &str,
+    dst: &Path,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> Result<(), ThumbnailFailure> {
+    if generate_image_thumbnail_rust(src, dst, max_side)? {
         return Ok(());
     }
     let first_frame_source = imagemagick_first_frame_source(src);
@@ -1155,13 +1304,15 @@ fn generate_image_thumbnail(src: &str, dst: &Path) -> Result<(), ThumbnailFailur
         let mut command = Command::new(program);
         command
             .arg(&first_frame_source)
-            .args(["-resize", "400x400>", "-quality", "80", "-auto-orient"])
+            .args([
+                "-resize",
+                &format!("{max_side}x{max_side}>"),
+                "-quality",
+                "80",
+                "-auto-orient",
+            ])
             .arg(dst);
-        if command_succeeded(
-            &mut command,
-            THUMBNAIL_COMMAND_TIMEOUT,
-            "ImageMagick thumbnail",
-        ) {
+        if deadline.command_succeeded(&mut command, "ImageMagick thumbnail") {
             return Ok(());
         }
     }
@@ -1169,13 +1320,37 @@ fn generate_image_thumbnail(src: &str, dst: &Path) -> Result<(), ThumbnailFailur
 }
 
 /// Generate a video thumbnail using multi-point frame selection.
-fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
+// FFmpeg's installed manuals document codec threads as input/output options,
+// filter_threads as global (default: all CPUs), and frames:v as an output limit.
+// Large's two codec threads and one filter thread go together with the three-job
+// lane width to bound aggregate CPU use; keep these limits and the width in sync.
+// Keep accurate input seeking, frame choice, Lanczos scaling and quality intact.
+fn configure_large_ffmpeg(command: &mut Command, deadline: ThumbnailDeadline) {
+    if deadline.is_large() {
+        command.args(["-threads", "2", "-filter_threads", "1"]);
+    }
+}
+
+fn configure_large_ffmpeg_output(command: &mut Command, deadline: ThumbnailDeadline) {
+    if deadline.is_large() {
+        command.args(["-threads", "2"]);
+    }
+}
+
+fn generate_video_thumbnail_v2(
+    src: &str,
+    dst: &Path,
+    max_side: u32,
+    deadline: ThumbnailDeadline,
+) -> bool {
     if !command_exists("ffmpeg") {
         return false;
     }
+    let scale_filter = ffmpeg_thumbnail_scale_filter(max_side);
 
     // Get duration.
-    let duration = get_video_duration(src).unwrap_or(0.0);
+    let duration =
+        get_video_duration_with_deadline(src, deadline.metadata_timeout()).unwrap_or(0.0);
     if duration <= 0.0 {
         return false;
     }
@@ -1197,15 +1372,13 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                 "-q",
                 "8",
             ]);
-            let ok = command_succeeded(
-                &mut thumbnailer,
-                THUMBNAIL_COMMAND_TIMEOUT,
-                "ffmpegthumbnailer GUI thumbnail",
-            );
+            let ok =
+                deadline.command_succeeded(&mut thumbnailer, "ffmpegthumbnailer GUI thumbnail");
             if ok && tmp.exists() {
-                // Convert to 400px webp.
+                // Convert the selected still to the requested WebP size.
                 let _ = std::fs::remove_file(dst);
                 let mut ffmpeg = Command::new("ffmpeg");
+                configure_large_ffmpeg(&mut ffmpeg, deadline);
                 ffmpeg.args([
                     "-hide_banner",
                     "-loglevel",
@@ -1214,17 +1387,19 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
                     "-y",
                     "-i",
                     tmp.to_str().unwrap_or(""),
+                ]);
+                configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+                if deadline.is_large() {
+                    ffmpeg.args(["-frames:v", "1"]);
+                }
+                ffmpeg.args([
                     "-vf",
-                    FFMPEG_THUMBNAIL_SCALE_FILTER,
+                    &scale_filter,
                     "-quality",
                     "80",
                     dst.to_str().unwrap_or(""),
                 ]);
-                let ok = command_succeeded(
-                    &mut ffmpeg,
-                    THUMBNAIL_COMMAND_TIMEOUT,
-                    "ffmpeg GUI thumbnail conversion",
-                );
+                let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI thumbnail conversion");
                 let _ = std::fs::remove_file(&tmp);
                 if ok && dst.exists() && frame_has_content(dst) {
                     return true;
@@ -1239,6 +1414,7 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
     for &ts in &candidates {
         let _ = std::fs::remove_file(dst);
         let mut ffmpeg = Command::new("ffmpeg");
+        configure_large_ffmpeg(&mut ffmpeg, deadline);
         ffmpeg.args([
             "-hide_banner",
             "-loglevel",
@@ -1249,19 +1425,18 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
             &format!("{:.1}", ts),
             "-i",
             src,
+        ]);
+        configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+        ffmpeg.args([
             "-frames:v",
             "1",
             "-vf",
-            FFMPEG_THUMBNAIL_SCALE_FILTER,
+            &scale_filter,
             "-quality",
             "80",
             dst.to_str().unwrap_or(""),
         ]);
-        let ok = command_succeeded(
-            &mut ffmpeg,
-            THUMBNAIL_COMMAND_TIMEOUT,
-            "ffmpeg GUI thumbnail",
-        );
+        let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI thumbnail");
         if ok && dst.exists() && frame_has_content(dst) {
             return true;
         }
@@ -1272,6 +1447,7 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
     let ts = duration * 0.5;
     let _ = std::fs::remove_file(dst);
     let mut ffmpeg = Command::new("ffmpeg");
+    configure_large_ffmpeg(&mut ffmpeg, deadline);
     ffmpeg.args([
         "-hide_banner",
         "-loglevel",
@@ -1282,23 +1458,25 @@ fn generate_video_thumbnail_v2(src: &str, dst: &Path) -> bool {
         &format!("{:.1}", ts),
         "-i",
         src,
+    ]);
+    configure_large_ffmpeg_output(&mut ffmpeg, deadline);
+    ffmpeg.args([
         "-frames:v",
         "1",
         "-vf",
-        FFMPEG_THUMBNAIL_SCALE_FILTER,
+        &scale_filter,
         "-quality",
         "80",
         dst.to_str().unwrap_or(""),
     ]);
-    let ok = command_succeeded(
-        &mut ffmpeg,
-        THUMBNAIL_COMMAND_TIMEOUT,
-        "ffmpeg GUI fallback thumbnail",
-    );
+    let ok = deadline.command_succeeded(&mut ffmpeg, "ffmpeg GUI fallback thumbnail");
     ok && dst.exists()
 }
 
-fn get_video_duration(path: &str) -> Option<f64> {
+fn get_video_duration_with_deadline(path: &str, timeout: Duration) -> Option<f64> {
+    if timeout.is_zero() {
+        return None;
+    }
     let mut ffprobe = Command::new("ffprobe");
     ffprobe
         .args([
@@ -1311,7 +1489,7 @@ fn get_video_duration(path: &str) -> Option<f64> {
         ])
         .arg("--")
         .arg(path);
-    let out = command_output(&mut ffprobe, METADATA_COMMAND_TIMEOUT, "ffprobe duration")?;
+    let out = command_output(&mut ffprobe, timeout, "ffprobe duration")?;
     let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
     s.parse().ok()
 }
@@ -1726,6 +1904,57 @@ mod tests {
 
         assert!(poisoned.is_err());
         assert!(schedule.should_run(Path::new("/cache"), 1_000, 3_600));
+    }
+
+    #[test]
+    fn large_preview_is_a_separate_bounded_cache_entry() {
+        let cache = tempfile::tempdir().unwrap();
+        let media = tempfile::tempdir().unwrap();
+        let image_path = media.path().join("wide.png");
+        let img = image::RgbImage::from_pixel(3200, 1800, image::Rgb([20, 120, 200]));
+        img.save(&image_path).unwrap();
+        let path = image_path.to_str().unwrap();
+
+        let standard = thumbnail_for(cache.path(), path);
+        let large = thumbnail_for_sized(
+            cache.path(),
+            path,
+            DEFAULT_FAILURE_TTL_SECS,
+            ThumbnailSize::Large,
+        );
+        let standard_file = standard.thumbnail.expect("standard thumbnail");
+        let large_file = large.thumbnail.expect("large thumbnail");
+        assert_ne!(
+            standard_file, large_file,
+            "the two sizes must not share a cache entry"
+        );
+        assert!(!large.cache_hit);
+
+        let small = image::open(&standard_file).unwrap();
+        assert_eq!((small.width(), small.height()), (400, 225));
+        let big = image::open(&large_file).unwrap();
+        assert_eq!((big.width(), big.height()), (1600, 900));
+
+        let again = thumbnail_for_sized(
+            cache.path(),
+            path,
+            DEFAULT_FAILURE_TTL_SECS,
+            ThumbnailSize::Large,
+        );
+        assert!(again.cache_hit);
+        assert_eq!(again.thumbnail.as_deref(), Some(large_file.as_str()));
+        // The standard key is exactly what it was before sizes existed.
+        let meta = std::fs::metadata(path).unwrap();
+        let mtime = meta
+            .modified()
+            .unwrap()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert_eq!(
+            gui_thumb_cache_key(path, mtime, meta.len(), ThumbnailSize::Standard),
+            gui_thumb_cache_key_v3(path, mtime, meta.len())
+        );
     }
 
     #[test]

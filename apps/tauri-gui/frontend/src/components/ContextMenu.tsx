@@ -145,6 +145,8 @@ export default function ContextMenu({ x, y, path, actions, onClose }: Props) {
       });
       menu.style.left = `${left}px`;
       menu.style.top = `${top}px`;
+      menu.style.setProperty('--context-pointer-x', `${x - left}px`);
+      menu.style.setProperty('--context-pointer-y', `${y - top}px`);
     };
 
     // Clamp before paint, then focus. autoFocus alone is unreliable when the

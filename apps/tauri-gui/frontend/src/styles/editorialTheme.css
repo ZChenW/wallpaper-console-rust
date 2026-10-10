@@ -71,6 +71,14 @@
   background: var(--bg);
 }
 
+/* Win over editorial gutters and chrome display rules at every breakpoint. */
+:root[data-theme="editorial"] .single-page-shell[data-library-immersive] > .single-page-library {
+  padding: 0;
+}
+:root[data-theme="editorial"] .single-page-shell[data-library-immersive] > :is(.single-page-topbar, .single-page-library-controls, .single-page-statusbar) {
+  display: none;
+}
+
 :root[data-theme="editorial"] .single-page-topbar {
   display: grid;
   grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -548,8 +556,8 @@
   gap: 1rem;
   padding: 0.45rem var(--editorial-gutter);
   border-top: var(--editorial-rule);
-  background: var(--text);
-  color: var(--bg);
+  background: var(--bg);
+  color: var(--text);
   font-size: 0.72rem;
   font-weight: 650;
   letter-spacing: 0.07em;
@@ -557,7 +565,7 @@
 }
 
 :root[data-theme="editorial"] .single-page-statusbar__running {
-  color: var(--bg);
+  color: var(--text);
   font-weight: 780;
 }
 
@@ -1325,6 +1333,15 @@
   box-shadow: 0 0 0 2px var(--bg);
 }
 
+:root[data-theme="editorial"] .wallpaper-book__stage[tabindex]:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+:root[data-theme="editorial"] .wallpaper-book__stage[tabindex]:focus-visible:not([data-selectable]) {
+  outline: 1px solid color-mix(in srgb, var(--primary) 35%, transparent);
+  outline-offset: -2px;
+}
+
 :root[data-theme="editorial"] .wallpaper-card .wallpaper-card__primary:focus-visible {
   outline: none;
   box-shadow: none;
@@ -1729,6 +1746,13 @@
   }
 
   :root[data-theme="editorial"] :is(button, input, select, [role="button"], [role="menuitem"], [tabindex]:not([tabindex="-1"])):focus-visible {
+    outline-color: Highlight;
+  }
+  :root[data-theme="editorial"] .wallpaper-book__stage[tabindex]:focus-visible {
+    outline: 1px solid Highlight;
+    outline-offset: -2px;
+  }
+  :root[data-theme="editorial"] .wallpaper-book__stage[tabindex]:focus-visible:not([data-selectable]) {
     outline-color: Highlight;
   }
 }

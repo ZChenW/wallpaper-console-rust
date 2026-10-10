@@ -630,16 +630,70 @@ fn decode_proc_cmdline(raw: &[u8]) -> Result<Vec<String>, String> {
     Ok(arguments)
 }
 
-#[cfg(unix)]
-pub(crate) fn process_in_current_session(pid: u32) -> bool {
-    let keys = if std::env::var_os("WAYLAND_DISPLAY").is_some() {
-        &["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"][..]
-    } else if std::env::var_os("DISPLAY").is_some() {
-        &["DISPLAY"][..]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DisplayClass {
+    Wayland,
+    X11,
+    Absent,
+}
+
+fn display_class(wayland: bool, x11: bool) -> DisplayClass {
+    if wayland {
+        DisplayClass::Wayland
+    } else if x11 {
+        DisplayClass::X11
     } else {
-        // Isolated non-desktop tests have no compositor to accidentally control.
-        return true;
-    };
+        DisplayClass::Absent
+    }
+}
+
+/// A missing display variable is not a session. `absent_override` is test-only.
+fn session_membership(class: DisplayClass, environ_matches: bool, absent_override: bool) -> bool {
+    match class {
+        DisplayClass::Absent => absent_override,
+        DisplayClass::Wayland | DisplayClass::X11 => environ_matches,
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    static MISSING_DISPLAY_COUNTS_AS_SESSION: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+fn absent_display_counts_as_session() -> bool {
+    MISSING_DISPLAY_COUNTS_AS_SESSION.with(|cell| cell.get())
+}
+
+#[cfg(not(test))]
+fn absent_display_counts_as_session() -> bool {
+    false
+}
+
+/// Opt-in for isolated tests that scan processes with no display variable set.
+#[cfg(test)]
+pub(crate) struct AssumeSessionWithoutDisplay {
+    previous: bool,
+}
+
+#[cfg(test)]
+impl AssumeSessionWithoutDisplay {
+    pub(crate) fn enable() -> Self {
+        let previous = MISSING_DISPLAY_COUNTS_AS_SESSION.with(|cell| cell.replace(true));
+        Self { previous }
+    }
+}
+
+#[cfg(test)]
+impl Drop for AssumeSessionWithoutDisplay {
+    fn drop(&mut self) {
+        MISSING_DISPLAY_COUNTS_AS_SESSION.with(|cell| cell.set(self.previous));
+    }
+}
+
+#[cfg(unix)]
+fn environ_matches(pid: u32, keys: &[&str]) -> bool {
     let Ok(raw) = std::fs::read(format!("/proc/{pid}/environ")) else {
         return false;
     };
@@ -653,6 +707,20 @@ pub(crate) fn process_in_current_session(pid: u32) -> bool {
         expected.extend_from_slice(value.as_bytes());
         raw.split(|byte| *byte == 0).any(|entry| entry == expected)
     })
+}
+
+#[cfg(unix)]
+pub(crate) fn process_in_current_session(pid: u32) -> bool {
+    let class = display_class(
+        std::env::var_os("WAYLAND_DISPLAY").is_some(),
+        std::env::var_os("DISPLAY").is_some(),
+    );
+    let matches = match class {
+        DisplayClass::Wayland => environ_matches(pid, &["WAYLAND_DISPLAY", "XDG_RUNTIME_DIR"]),
+        DisplayClass::X11 => environ_matches(pid, &["DISPLAY"]),
+        DisplayClass::Absent => false,
+    };
+    session_membership(class, matches, absent_display_counts_as_session())
 }
 
 #[cfg(unix)]
@@ -1199,6 +1267,48 @@ mod tests {
     use super::{
         awww_query_arguments, decode_proc_cmdline, output_with_timeout, parse_swaybg_command_line,
     };
+
+    #[test]
+    fn missing_display_is_outside_the_session_unless_a_test_opts_in() {
+        use super::{display_class, session_membership, DisplayClass};
+
+        assert_eq!(display_class(true, true), DisplayClass::Wayland);
+        assert_eq!(display_class(false, true), DisplayClass::X11);
+        assert_eq!(display_class(false, false), DisplayClass::Absent);
+        assert!(!session_membership(DisplayClass::Absent, true, false));
+        assert!(session_membership(DisplayClass::Absent, false, true));
+        assert!(session_membership(DisplayClass::Wayland, true, false));
+        assert!(!session_membership(DisplayClass::Wayland, false, true));
+        assert!(session_membership(DisplayClass::X11, true, false));
+        assert!(!session_membership(DisplayClass::X11, false, true));
+    }
+
+    #[test]
+    fn session_override_lasts_only_while_the_guard_is_alive() {
+        assert!(!super::absent_display_counts_as_session());
+        {
+            let _session = super::AssumeSessionWithoutDisplay::enable();
+            assert!(super::absent_display_counts_as_session());
+        }
+        assert!(!super::absent_display_counts_as_session());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn current_process_is_in_session_only_when_a_display_variable_is_set() {
+        let pid = std::process::id();
+        if std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some() {
+            assert!(super::process_in_current_session(pid));
+            assert!(!super::process_in_current_session(u32::MAX));
+            let _session = super::AssumeSessionWithoutDisplay::enable();
+            assert!(super::process_in_current_session(pid));
+            assert!(!super::process_in_current_session(u32::MAX));
+        } else {
+            assert!(!super::process_in_current_session(pid));
+            let _session = super::AssumeSessionWithoutDisplay::enable();
+            assert!(super::process_in_current_session(pid));
+        }
+    }
 
     #[test]
     fn awww_query_covers_every_running_namespace() {

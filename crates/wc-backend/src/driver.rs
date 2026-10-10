@@ -398,6 +398,31 @@ pub(crate) fn apply_awww_instant(
     Ok(())
 }
 
+fn setsid_spawn_not_found(error: &WcError) -> bool {
+    match error {
+        WcError::Io(io) => io.kind() == std::io::ErrorKind::NotFound,
+        WcError::Other(message) => {
+            let Some(detail) = message.strip_prefix("setsid failed to start: ") else {
+                return false;
+            };
+            detail.contains("os error 2") || detail.contains("No such file or directory")
+        }
+        _ => false,
+    }
+}
+
+fn awww_daemon_launch_error(error: WcError) -> WcError {
+    if setsid_spawn_not_found(&error) {
+        WcError::Other(
+            "setsid not available — cannot launch awww-daemon. \
+             setsid is part of util-linux; install it with your package manager."
+                .into(),
+        )
+    } else {
+        error
+    }
+}
+
 /// Ensure awww-daemon is running (ProcessIo: socket probe + optional spawn).
 pub(crate) fn ensure_awww_daemon_running(runtime: &mut dyn ProcessIo) -> Result<(), WcError> {
     if matches!(runtime.awww_socket_ready(), AwwwReadiness::Ready) {
@@ -407,13 +432,10 @@ pub(crate) fn ensure_awww_daemon_running(runtime: &mut dyn ProcessIo) -> Result<
     let was_running = runtime.awww_process_running();
     if !was_running {
         let mut cmd = build_awww_daemon_command();
-        let status = runtime.command_status(&mut cmd).map_err(|_| {
-            WcError::Other(
-                "setsid not available — cannot launch awww-daemon. \
-                 setsid is part of util-linux; install it with your package manager."
-                    .into(),
-            )
-        })?;
+        let status = match runtime.command_status(&mut cmd) {
+            Ok(status) => status,
+            Err(error) => return Err(awww_daemon_launch_error(error)),
+        };
         if !status.success() {
             return Err(WcError::Other(
                 "awww-daemon not found. Install awww (pip install awww or AUR).".into(),
@@ -1361,6 +1383,52 @@ impl BackendDriver for LweDriver {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn awww_daemon_launch_keeps_the_real_error_unless_setsid_is_missing() {
+        let timeout = WcError::Other(
+            "setsid timed out after 10000 ms; the command process group was terminated".into(),
+        );
+        assert_eq!(
+            awww_daemon_launch_error(timeout).to_string(),
+            "setsid timed out after 10000 ms; the command process group was terminated"
+        );
+
+        let denied =
+            WcError::Other("setsid failed to start: Permission denied (os error 13)".into());
+        assert_eq!(
+            awww_daemon_launch_error(denied).to_string(),
+            "setsid failed to start: Permission denied (os error 13)"
+        );
+
+        let other_program = WcError::Other(
+            "awww-daemon failed to start: No such file or directory (os error 2)".into(),
+        );
+        assert_eq!(
+            awww_daemon_launch_error(other_program).to_string(),
+            "awww-daemon failed to start: No such file or directory (os error 2)"
+        );
+
+        let fake = WcError::Other("fake command failed: broken pipe".into());
+        assert_eq!(
+            awww_daemon_launch_error(fake).to_string(),
+            "fake command failed: broken pipe"
+        );
+    }
+
+    #[test]
+    fn awww_daemon_launch_mentions_setsid_only_when_that_program_is_missing() {
+        let missing =
+            WcError::Other("setsid failed to start: No such file or directory (os error 2)".into());
+        let mapped = awww_daemon_launch_error(missing).to_string();
+        assert!(mapped.contains("setsid not available"), "{mapped}");
+        assert!(mapped.contains("util-linux"), "{mapped}");
+
+        let io_missing = WcError::Io(std::io::Error::from_raw_os_error(2));
+        let mapped = awww_daemon_launch_error(io_missing).to_string();
+        assert!(mapped.contains("setsid not available"), "{mapped}");
+        assert!(!mapped.contains("os error 2"), "{mapped}");
+    }
 
     #[test]
     fn prepared_video_and_scene_reject_changed_material() {
