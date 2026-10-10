@@ -5,7 +5,8 @@ import { useAuthorizedPreviewAsset } from './useAuthorizedPreviewAsset.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
 import { attachVideoDecoder } from './wallpaperPreviewMedia.ts';
 import { bookStaticSource } from './wallpaperBookModel.ts';
-import { decodeBookStill, watchBookVideoReady } from './wallpaperBookZoomMedia.ts';
+import { decodeBookStill } from './wallpaperBookZoomMedia.ts';
+import { usePreviewClip } from './usePreviewClip.ts';
 
 export function bookZoomLiveAsset(entry: LibraryBrowserItemDTO) {
   if (entry.type === 'video') return { kind: 'video' as const, path: entry.path };
@@ -14,24 +15,22 @@ export function bookZoomLiveAsset(entry: LibraryBrowserItemDTO) {
   return null;
 }
 
-function BookZoomLive({ entry, onReady }: { entry: LibraryBrowserItemDTO; onReady: () => void }) {
+function BookZoomLive({ entry, reducedMotion, onReady, onFailure }: {
+  entry: LibraryBrowserItemDTO; reducedMotion: boolean; onReady: () => void; onFailure: () => void;
+}) {
   const candidate = bookZoomLiveAsset(entry);
-  const authorized = useAuthorizedPreviewAsset(candidate?.path ?? null, entry.path);
+  const authorized = useAuthorizedPreviewAsset(candidate?.kind === 'image' ? candidate.path : null, entry.path);
   const source = authorized.path ? safeFileSrc(authorized.path) : null;
   const videoRef = useRef<HTMLVideoElement>(null);
   const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
-    videoRef.current = attachVideoDecoder(videoRef.current, video, source);
-  }, [source]);
-  useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !source) return;
-    const stopWatching = watchBookVideoReady(video, onReady);
-    void video.play().catch(() => { /* Keep the still when playback is unavailable. */ });
-    return stopWatching;
-  }, [onReady, source]);
+    videoRef.current = attachVideoDecoder(videoRef.current, video, null);
+  }, []);
+  usePreviewClip(entry.path, videoRef, candidate?.kind === 'video' && !reducedMotion,
+    candidate?.kind === 'video' && !reducedMotion ? candidate.path : null,
+    onReady, onFailure, 0); // The existing 90 ms Book still reveal remains in charge of the zoom handoff.
+  if (candidate?.kind === 'video') return <video ref={setVideoRef} muted loop playsInline
+    preload="auto" data-enhanced-preview="video" data-preview-clip="true" style={{ opacity: 0 }} />;
   if (!source) return null;
-  if (candidate?.kind === 'video') return <video ref={setVideoRef} src={source} autoPlay muted loop playsInline
-    preload="auto" data-enhanced-preview="video" />;
   return <img src={source} alt="" draggable={false} data-enhanced-preview="image" onLoad={(event) => {
     const image = event.currentTarget;
     void image.decode().then(() => { if (image.isConnected && image.src === source) onReady(); }, () => {});
@@ -47,6 +46,17 @@ export default function BookZoomPicture({ entry, active, reducedMotion, moving, 
 }) {
   const [liveEntry, setLiveEntry] = useState<string | null>(null);
   const live = useMemo(() => bookZoomLiveAsset(entry), [entry]);
+  const restoreClipStill = useCallback(() => {
+    const still = stillRef.current;
+    if (!still || !mayUpdateStill()) return;
+    // A failed clip (or a reduced-motion switch) returns to the SAME decoded picture. A
+    // completed, filled live-reveal animation must relinquish its opacity for that fallback.
+    for (const animation of still.getAnimations?.() ?? []) animation.cancel();
+    still.style.opacity = '1';
+  }, [mayUpdateStill, stillRef]);
+  useEffect(() => {
+    if (live?.kind === 'video' && reducedMotion && !moving) restoreClipStill();
+  }, [live?.kind, moving, reducedMotion, restoreClipStill]);
   useEffect(() => {
     // Once mounted, loss of focus or a close cannot remove/re-hide a live frame.
     if (!moving && mayUpdateStill() && active && !reducedMotion && live) setLiveEntry(entry.path);
@@ -71,7 +81,8 @@ export default function BookZoomPicture({ entry, active, reducedMotion, moving, 
   }, [staticSource, entry.path, mayUpdateStill, moving, stillRef]);
   return <>
     {live && liveEntry === entry.path ? <div className="wallpaper-book__zoom-media" ref={mediaRef}>
-      <BookZoomLive key={entry.path} entry={entry} onReady={onLiveReady} />
+      <BookZoomLive key={entry.path} entry={entry} reducedMotion={reducedMotion}
+        onReady={onLiveReady} onFailure={restoreClipStill} />
     </div> : null}
     <img alt="" className="wallpaper-book__zoom-still" src={stillSrc ?? undefined}
       ref={stillRef} draggable={false} loading="eager" />

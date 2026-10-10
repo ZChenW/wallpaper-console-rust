@@ -4,15 +4,6 @@ export type EnhancedMediaKind = 'image' | 'video';
 
 export const ENHANCED_MEDIA_ACTIVATION_DELAY_MS = 180;
 
-/** Keep the same decoder until the replacement still has decoded and its fade completes. */
-export function previewVideoHandoff(activeSource: string | null, retainedSource: string | null,
-  imageReady: boolean, enabled: boolean) {
-  return {
-    source: activeSource ?? (enabled ? retainedSource : null),
-    fading: enabled && activeSource === null && retainedSource !== null && imageReady,
-  };
-}
-
 export interface EnhancedMediaCandidate {
   readonly kind: EnhancedMediaKind;
   readonly path: string;
@@ -35,8 +26,9 @@ export function previewImagePath({
   thumbnail,
   thumbnailLoadFailed,
 }: PreviewImagePathInput): string | null | undefined {
-  if (candidateKind === 'video' && authorizedCandidatePath) return null;
-  return authorizedCandidatePath
+  // A preview clip overlays the still for its entire lifetime; a video's original path is
+  // never an image source (nor a playable asset-protocol video source on WebKitGTK).
+  return (candidateKind === 'video' ? null : authorizedCandidatePath)
     ?? (staticFallbackLoadFailed ? null : authorizedStaticFallbackPath)
     ?? (thumbnailLoadFailed ? undefined : thumbnail);
 }

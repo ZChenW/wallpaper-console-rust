@@ -20,8 +20,8 @@ import { useWallpaperBookController, type WallpaperBookProps } from './useWallpa
 export type { WallpaperBookProps } from './useWallpaperBookController.ts';
 
 /** Stable media props: motion/window renders cannot restart decode or eligibility. */
-const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, active, reducedMotion }: {
-  entry: LibraryBrowserItemDTO; open: boolean; selected: boolean; active: boolean; reducedMotion: boolean; moving: boolean;
+const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, active, clipActive, reducedMotion }: {
+  entry: LibraryBrowserItemDTO; open: boolean; selected: boolean; active: boolean; clipActive: boolean; reducedMotion: boolean; moving: boolean;
 }) {
   const { failure } = useThumbnail(bookStaticSource(entry).thumbnailPath);
   const base = bookStaticSource(entry, Boolean(failure));
@@ -35,10 +35,10 @@ const BookPageMedia = memo(function BookPageMedia({ entry, open, selected, activ
     active, centered: open && selected, selected: open && selected, settled: true, reducedMotion,
   }), [active, open, selected, reducedMotion]);
   return <WallpaperPreviewMedia entry={entry} alt="" eligibility={eligibility}
-    loading="eager" staticFallback={open} staticSource={source} stabilizeEntranceDuringMotion captureFrame />;
+    clipActive={clipActive} loading="eager" staticFallback={open} staticSource={source} stabilizeEntranceDuringMotion />;
 }, (previous, next) => previous.entry === next.entry && (next.moving || (
   previous.open === next.open && previous.selected === next.selected
-  && previous.active === next.active && previous.reducedMotion === next.reducedMotion
+  && previous.active === next.active && previous.clipActive === next.clipActive && previous.reducedMotion === next.reducedMotion
   && previous.moving === next.moving
 )));
 
@@ -113,6 +113,7 @@ function WallpaperBookReady(props: WallpaperBookProps) {
           {entry ? (
             <BookPageMedia
               key={entry.path} entry={entry} open={open} selected={selected}
+              clipActive={model.active && !contextMenu && !zoomed}
               active={interactionActive} reducedMotion={reducedMotion} moving={!settled} />
           ) : null}
         </div>

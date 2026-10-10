@@ -26,7 +26,7 @@ import {
 } from './wallpaperBookZoom.ts';
 import { largePreviewKey } from './wallpaperPreviewMedia.ts';
 import { driveAnimations } from './drivenAnimation.ts';
-import { captureBookVideoStill, decodeBookStill } from './wallpaperBookZoomMedia.ts';
+import { captureBookVideoStill, decodeBookStill, prepareBookClipStillHandoff } from './wallpaperBookZoomMedia.ts';
 
 export interface WallpaperBookProps {
   readonly model: LibraryViewModel;
@@ -572,7 +572,8 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
       focusStage();
     };
     const video = option?.querySelector<HTMLVideoElement>('video[data-enhanced-preview="video"]');
-    const frame = video && typeof video.pause === 'function' ? captureBookVideoStill(video) : null;
+    const frame = video && !video.dataset?.previewClip && !video.src?.startsWith('blob:')
+      && typeof video.pause === 'function' ? captureBookVideoStill(video) : null;
     if (frame) {
       zoomResumePageVideoRef.current = frame.resume;
       const request = ++zoomNavigationRef.current;
@@ -1017,7 +1018,7 @@ export function useWallpaperBookController(props: WallpaperBookProps) {
           if (oldStill && clonedStill) clonedStill.style.opacity = getComputedStyle(oldStill).opacity;
           const video = picture.querySelector<HTMLVideoElement>('video');
           const clonedVideo = outgoing.querySelector<HTMLVideoElement>('video');
-          if (video && clonedVideo) {
+          if (!prepareBookClipStillHandoff(picture, outgoing) && video && clonedVideo) {
             const frame = captureBookVideoStill(video);
             clonedVideo.removeAttribute('autoplay');
             clonedVideo.removeAttribute('src');

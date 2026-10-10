@@ -15,13 +15,14 @@ import {
   enhancedMediaActivationPlan,
   enhancedMediaCandidates,
   previewImagePath,
-  previewVideoHandoff,
   staticFallbackAssetPath,
   staticPreviewAssetPath,
   type EnhancedMediaEligibility,
 } from './wallpaperPreviewMedia.ts';
 import { useAuthorizedPreviewAsset } from './useAuthorizedPreviewAsset.ts';
 import { safeFileSrc } from './safeFileSrc.ts';
+import { PREVIEW_CLIP_FADE_OUT_MS } from './previewClip.ts';
+import { usePreviewClip } from './usePreviewClip.ts';
 
 export { safeFileSrc } from './safeFileSrc.ts';
 
@@ -50,8 +51,8 @@ export interface WallpaperPreviewMediaProps {
     readonly largeThumbnailPath?: string | null;
   };
   readonly stabilizeEntranceDuringMotion?: boolean;
-  /** Book zoom captures the displayed frame through a canvas. */
-  readonly captureFrame?: boolean;
+  /** Video eligibility without the window-focus gate; blur freezes an already shown clip. */
+  readonly clipActive?: boolean;
   readonly onReady?: (ready: boolean) => void;
   readonly onEnhancedError?: (message: string) => void;
 }
@@ -68,7 +69,7 @@ export default function WallpaperPreviewMedia({
   stabilizeEntranceDuringMotion = false,
   onEnhancedError,
   onReady,
-  captureFrame = false,
+  clipActive,
 }: WallpaperPreviewMediaProps) {
   const assetPath = staticSource?.thumbnailPath ?? staticPreviewAssetPath(entry);
   const { thumbnail: standardThumbnail, failure: thumbnailFailure } = useThumbnail(assetPath);
@@ -85,10 +86,13 @@ export default function WallpaperPreviewMedia({
     entry.path,
   );
   const [enhancedActivatedPath, setEnhancedActivatedPath] = useState<string | null>(null);
+  const mediaEligibility = useMemo(() => entry.type === 'video' && clipActive !== undefined
+    ? { ...eligibility, active: clipActive }
+    : eligibility, [clipActive, eligibility, entry.type]);
   const activationPlan = enhancedMediaActivationPlan(
     entry,
     enhancedActivatedPath === entry.path,
-    eligibility,
+    mediaEligibility,
   );
   useEffect(() => {
     if (activationPlan.retain) return undefined;
@@ -106,12 +110,12 @@ export default function WallpaperPreviewMedia({
   const candidates = useMemo(() => {
     if (transientImagePath) return [{ kind: 'image' as const, path: transientImagePath }];
     const media = enhancedMediaCandidates(entry, {
-      ...eligibility,
+      ...mediaEligibility,
       settled: activationPlan.retain,
     });
     // A playback error must not replace a healthy video-frame still with preview.gif.
     return bookVideo ? media.filter((candidate) => candidate.kind === 'video') : media;
-  }, [activationPlan.retain, bookVideo, eligibility, entry, transientImagePath]);
+  }, [activationPlan.retain, bookVideo, mediaEligibility, entry, transientImagePath]);
   const candidateKey = candidates.map((candidate) => `${candidate.kind}:${candidate.path}`).join('\0');
   const [candidateIndex, setCandidateIndex] = useState(0);
   const [enhancedError, setEnhancedError] = useState<string | null>(null);
@@ -150,14 +154,9 @@ export default function WallpaperPreviewMedia({
 
   const activeCandidate = candidates[candidateIndex] ?? null;
   const authorizedCandidate = useAuthorizedPreviewAsset(
-    activeCandidate?.path ?? null,
+    activeCandidate?.kind === 'image' ? activeCandidate.path : null,
     entry.path,
   );
-  const [readyVideoSource, setReadyVideoSource] = useState<string | null>(null);
-  const [retainedVideo, setRetainedVideo] = useState<{ entryPath: string; source: string } | null>(null);
-  const activeVideoSource = activeCandidate?.kind === 'video' && authorizedCandidate.path
-    ? safeFileSrc(authorizedCandidate.path)
-    : null;
   const handleEnhancedError = useCallback(() => {
     const nextIndex = candidateIndex + 1;
     const message = `Enhanced preview unavailable for ${entry.title || entry.path}`;
@@ -176,47 +175,48 @@ export default function WallpaperPreviewMedia({
   }, [authorizedCandidate.error, handleEnhancedError]);
 
   const imagePath = previewImagePath({
-    // Decode the Book still under its live video using the existing image handoff.
-    candidateKind: staticSource && activeCandidate?.kind === 'video' ? null : activeCandidate?.kind ?? null,
-    authorizedCandidatePath: activeCandidate?.kind === 'video' && staticSource ? null : authorizedCandidate.path,
+    candidateKind: activeCandidate?.kind ?? null,
+    authorizedCandidatePath: authorizedCandidate.path,
     authorizedStaticFallbackPath: authorizedStaticFallback.path,
     staticFallbackLoadFailed,
     thumbnail,
     thumbnailLoadFailed,
   });
-  const videoPosterPath = (staticFallbackLoadFailed ? null : authorizedStaticFallback.path)
-    ?? (thumbnailLoadFailed ? undefined : thumbnail);
   const displayedImage = loadedImage?.entryPath === entry.path ? loadedImage : null;
   const imageLoaded = imagePath !== null
     && imagePath !== undefined
     && displayedImage?.path === imagePath;
-  const handoff = previewVideoHandoff(
-    activeVideoSource,
-    retainedVideo?.entryPath === entry.path ? retainedVideo.source : null,
-    imageLoaded,
-    staticSource !== undefined,
-  );
-  const retainVideoForStill = staticSource !== undefined;
   const setVideoRef = useCallback((video: HTMLVideoElement | null) => {
-    videoRef.current = attachVideoDecoder(videoRef.current, video, handoff.source);
-  }, [handoff.source]);
+    videoRef.current = attachVideoDecoder(videoRef.current, video, null);
+  }, []);
+  const [runningVideoPath, setRunningVideoPath] = useState<string | null>(null);
+  const clipPath = activeCandidate?.kind === 'video' ? activeCandidate.path : null;
+  useLayoutEffect(() => { if (!clipPath) setRunningVideoPath(null); }, [clipPath]);
+  const hasStill = Boolean(displayedImage || imagePath);
+  // A <video> exists only for the one item that may play, and for the moment its clip fades out.
+  // Every <video> element makes the engine set up a media player that holds several connections to
+  // the user's session bus; one per video card (49 in a Grid of this library) exhausted the bus's
+  // file descriptors within a few view switches and took the whole desktop session down.
+  const [clipMounted, setClipMounted] = useState(false);
   useLayoutEffect(() => {
-    if (retainVideoForStill && activeVideoSource) setRetainedVideo({ entryPath: entry.path, source: activeVideoSource });
-  }, [activeVideoSource, entry.path, retainVideoForStill]);
-  useEffect(() => {
-    if (!handoff.source || activeVideoSource) return undefined;
-    // Freeze the last sharp frame while the still is decoding, then fade it away.
-    videoRef.current?.pause();
-    if (!handoff.fading) return undefined;
-    const timer = window.setTimeout(() => setRetainedVideo(null), eligibility.reducedMotion ? 0 : 160);
+    if (clipPath) { setClipMounted(true); return undefined; }
+    if (!clipMounted) return undefined;
+    const timer = window.setTimeout(() => setClipMounted(false), eligibility.reducedMotion ? 0 : PREVIEW_CLIP_FADE_OUT_MS + 60);
     return () => window.clearTimeout(timer);
-  }, [activeVideoSource, eligibility.reducedMotion, handoff.fading, handoff.source]);
-  useEffect(() => {
-    if (retainVideoForStill && activeVideoSource) void videoRef.current?.play().catch(() => {});
-  }, [activeVideoSource, retainVideoForStill]);
+  }, [clipMounted, clipPath, eligibility.reducedMotion]);
+  usePreviewClip(entry.path, videoRef, entry.type === 'video' && clipMounted && !eligibility.reducedMotion, clipPath,
+    () => setRunningVideoPath(entry.path),
+    () => {
+      // A missing/broken clip ends on the existing still, rather than trying an animated preview.
+      setRunningVideoPath(null);
+      setCandidateIndex(candidates.length);
+      const message = `Enhanced preview unavailable for ${entry.title || entry.path}`;
+      setEnhancedError(message);
+      if (!hasStill) onEnhancedError?.(message);
+    });
   useLayoutEffect(() => {
-    onReady?.(activeVideoSource !== null ? readyVideoSource === activeVideoSource : imageLoaded);
-  }, [activeVideoSource, imageLoaded, onReady, readyVideoSource]);
+    onReady?.(imageLoaded || (clipPath !== null && runningVideoPath === entry.path));
+  }, [clipPath, entry.path, imageLoaded, onReady, runningVideoPath]);
   const pendingImagePath = imagePath && !imageLoaded ? imagePath : null;
 
   const handleImageError = (failedPath: string) => {
@@ -262,42 +262,28 @@ export default function WallpaperPreviewMedia({
     });
   };
 
-  const video = handoff.source ? (
+  // Keep the decoder laid out at its real size while it is transparent. WebKit will not
+  // advance hidden/zero-sized video. The player alone assigns a small previewClip blob URL.
+  const video = entry.type === 'video' && clipMounted ? (
     <video
       aria-hidden="true"
-      autoPlay
-      crossOrigin={captureFrame ? 'anonymous' : undefined}
-      className={[className, staticSource ? 'wallpaper-preview-video--handoff' : ''].filter(Boolean).join(' ')}
+      className={[className, 'wallpaper-preview-clip'].filter(Boolean).join(' ')}
       data-enhanced-preview="video"
-      data-preview-fading={handoff.fading || undefined}
+      data-preview-clip="true"
       key={`video:${entry.path}`}
       loop
       muted
-      onLoadedData={() => setReadyVideoSource(handoff.source)}
-      onError={activeVideoSource ? handleEnhancedError : undefined}
       playsInline
-      poster={videoPosterPath ? safeFileSrc(videoPosterPath) : undefined}
-      preload="metadata"
+      preload="auto"
       ref={setVideoRef}
-      src={handoff.source}
+      style={{ opacity: 0 }}
     />
   ) : null;
-  if (video && !staticSource) {
-    return (
-      <>
-        {video}
-        {enhancedError && !thumbnail ? (
-          <span aria-label="Preview unavailable" className="wallpaper-thumb-error" title="Preview unavailable">!</span>
-        ) : null}
-      </>
-    );
-  }
 
-  if (imagePath || (staticSource && (displayedImage || video))) {
+  if (imagePath || (staticSource && displayedImage) || video) {
     const imageClassName = ['wallpaper-preview-image', className].filter(Boolean).join(' ');
     return (
       <>
-        {video}
         {!displayedImage ? (
           <span
             aria-hidden="true"
@@ -351,7 +337,8 @@ export default function WallpaperPreviewMedia({
             src={safeFileSrc(pendingImagePath)}
           />
         ) : null}
-        {enhancedError && !thumbnail ? (
+        {video}
+        {enhancedError && (entry.type === 'video' ? !hasStill : !thumbnail) ? (
           <span aria-label="Preview unavailable" className="wallpaper-thumb-error" title="Preview unavailable">!</span>
         ) : null}
       </>

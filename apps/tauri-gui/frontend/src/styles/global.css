@@ -2729,12 +2729,19 @@ select:focus, input:focus { border-color: var(--primary); }
 }
 :is(.wallpaper-book, .wallpaper-book__zoom-layer) .wallpaper-thumb-placeholder { background: var(--panel-alt); }
 .book-leaf__face:not([data-open]) .wallpaper-type-icon { display: none; }
-.wallpaper-preview-video--handoff {
+/* Clip opacity is driven from rAF after its clock advances, never by the compositor. */
+.wallpaper-preview-clip {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
   z-index: 2;
-  transition: opacity 160ms ease-out;
+  opacity: 0;
+  pointer-events: none;
 }
-.wallpaper-preview-video--handoff[data-preview-fading] { opacity: 0; }
-.wallpaper-book[data-reduced-motion] .wallpaper-preview-video--handoff { transition: none; }
+.flow-preview-item__media > video.wallpaper-preview-clip {
+  transition: filter 160ms ease-out;
+}
 .book-leaf__indicator {
   position: absolute;
   inset: 0;

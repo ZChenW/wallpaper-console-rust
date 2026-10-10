@@ -50,6 +50,9 @@ export function captureBookVideoStill(
   video: HTMLVideoElement,
   createCanvas: () => HTMLCanvasElement = () => document.createElement('canvas'),
 ): { source: string; resume: () => void } | null {
+  // WebKitGTK clip frames read back as black. The page's already decoded large still is
+  // the zoom/turn handoff, and its clip player owns pause/resume independently of this capture.
+  if (video.dataset?.previewClip || video.src?.startsWith('blob:')) return null;
   if (video.readyState < 2 || video.videoWidth <= 0 || video.videoHeight <= 0) return null;
   const wasPlaying = !video.paused;
   video.pause();
@@ -68,4 +71,13 @@ export function captureBookVideoStill(
     resume();
     return null;
   }
+}
+
+/** Detached outgoing zoom copies carry the existing still, never a cloned clip decoder/frame. */
+export function prepareBookClipStillHandoff(picture: HTMLElement, outgoing: HTMLElement): boolean {
+  if (!picture.querySelector('video[data-preview-clip]')) return false;
+  outgoing.querySelector('.wallpaper-book__zoom-media')?.remove();
+  const still = outgoing.querySelector<HTMLElement>('.wallpaper-book__zoom-still');
+  if (still) still.style.opacity = '1';
+  return true;
 }
