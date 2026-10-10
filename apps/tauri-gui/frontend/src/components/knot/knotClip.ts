@@ -34,8 +34,11 @@ export interface ClipTarget {
   /** Where its assembled picture is right now, in CSS pixels relative to the video's offset parent. */
   readonly place: () => ClipRect | null;
 }
+export type ClipState = 'idle' | 'loading' | 'playing';
 export interface ClipHost {
   readonly load: (path: string) => Promise<ArrayBuffer | null>;
+  /** Told when a clip starts being fetched (its first generation can take seconds), plays, or stops. */
+  readonly onState?: (state: ClipState) => void;
   readonly createUrl?: (bytes: ArrayBuffer) => string;
   readonly revokeUrl?: (url: string) => void;
   readonly schedule?: (callback: () => void, ms: number) => unknown;
@@ -52,6 +55,7 @@ export class KnotClipPlayer {
   private leaving: ClipTarget | null = null;
   private opacity = 0;
   private running = true;
+  private state: ClipState = 'idle';
   private ramp = 0;
   private request = 0;
   private dwell: unknown = null;
@@ -70,6 +74,12 @@ export class KnotClipPlayer {
     this.frame = host.frame ?? ((callback) => { requestAnimationFrame(callback); });
   }
 
+  private setState(state: ClipState): void {
+    if (this.state === state) return;
+    this.state = state;
+    this.host.onState?.(state);
+  }
+
   get playingKey() { return this.shown ? this.wanted?.key ?? null : null; }
 
   /** The wallpaper whose clip should be playing, or null. Calling it again with the same key is free. */
@@ -79,6 +89,7 @@ export class KnotClipPlayer {
     if (target && this.leaving?.key === target.key && !this.video.paused) {
       this.request += 1; this.leaving = null; this.wanted = target; this.shown = true;
       this.video.dataset.visible = 'true';
+      this.setState('playing');
       this.fade(1, CLIP_FADE_MS);
       return;
     }
@@ -130,10 +141,17 @@ export class KnotClipPlayer {
 
   private async start(target: ClipTarget, request: number): Promise<void> {
     const current = () => !this.disposed && request === this.request && this.wanted?.key === target.key;
+    this.setState('loading');
+    const done = await this.begin(target, request, current);
+    if (!done && current()) this.setState('idle');
+  }
+
+  /** Resolves true once the clip is showing. */
+  private async begin(target: ClipTarget, request: number, current: () => boolean): Promise<boolean> {
     let url = this.urls.get(target.path);
     if (url) { this.urls.delete(target.path); this.urls.set(target.path, url); } else {
       const bytes = await this.host.load(target.path).catch(() => null);
-      if (!bytes || this.disposed) return;
+      if (!bytes || this.disposed) return false;
       // Keep it even if the camera has moved on: coming back should not generate or read it again.
       url = this.createUrl(bytes);
       this.urls.set(target.path, url);
@@ -143,30 +161,33 @@ export class KnotClipPlayer {
         this.urls.delete(path); this.revokeUrl(old);
       }
     }
-    if (!current()) return;
+    if (!current()) return false;
     // The same clip is still loaded when the camera returns to a picture it just left: it resumes on
     // the very frame the pieces are showing.
     // A new clip must not replace one that is still fading out on another picture.
     if (this.leaving) this.finishLeaving();
-    if (!this.place(target)) return;
+    if (!this.place(target)) return false;
     if (this.loaded?.key !== target.key || this.loaded.url !== url) {
       this.video.src = url; this.loaded = { key: target.key, url };
-      if (!await this.ready() || !current()) return;
+      if (!await this.ready() || !current()) return false;
     }
     for (let attempt = 0; attempt <= CLIP_RECOVERIES; attempt++) {
-      try { await this.video.play(); } catch { return; }
-      if (!current()) { this.video.pause(); return; }
+      try { await this.video.play(); } catch { return false; }
+      if (!current()) { this.video.pause(); return false; }
       if (await this.advancing(current)) {
-        if (current()) { this.reveal(request); if (!this.running) this.video.pause(); }
-        return;
+        if (!current()) return false;
+        this.reveal(request);
+        if (!this.running) this.video.pause();
+        return true;
       }
-      if (!current()) return;
+      if (!current()) return false;
       if (attempt === CLIP_RECOVERIES) break;
       this.video.load();
-      if (!await this.ready() || !current()) return;
+      if (!await this.ready() || !current()) return false;
     }
     // It never got going: leave the still, and stop decoding.
     this.video.pause();
+    return false;
   }
 
   /** Whether playback really moves within CLIP_WATCH_MS (a stuck clip reports playing and stays at one time). */
@@ -221,6 +242,7 @@ export class KnotClipPlayer {
     this.place(this.wanted!);
     this.video.dataset.visible = 'true';
     this.opacity = 0; this.video.style.opacity = '0';
+    this.setState('playing');
     this.fade(1, CLIP_FADE_MS);
   }
 
@@ -233,6 +255,7 @@ export class KnotClipPlayer {
 
   private stop(fadeOut: boolean): void {
     this.request += 1;
+    this.setState('idle');
     if (this.dwell !== null) { this.cancel(this.dwell); this.dwell = null; }
     if (this.shown && fadeOut && this.wanted) {
       // Keeps playing and following its picture while it fades into the still underneath.

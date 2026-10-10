@@ -39,7 +39,7 @@ function ViewSwitch(props: WallpaperKnotProps) {
 }
 function WallpaperKnotReady(props: WallpaperKnotProps) {
   const { model } = props;
-  const { stageRef, canvasRef, videoRef, selection, selectedEntry, status, knotIndex, reducedMotion,
+  const { stageRef, canvasRef, videoRef, clipLoading, selection, selectedEntry, status, knotIndex, reducedMotion,
     switchKnot, applySelected, focusStage, contextMenu, closeContextMenu } = useWallpaperKnotController(props);
   const hintVisible = useSessionHint();
   const name = selectedEntry ? displayName(selectedEntry) : '';
@@ -57,13 +57,14 @@ function WallpaperKnotReady(props: WallpaperKnotProps) {
       <WindowHandle className="wallpaper-knot__window-handle" />
       <ViewSwitch {...props} />
       <div className="wallpaper-knot__stage" ref={stageRef} tabIndex={0}
-        aria-label="Wallpaper Knot. Scroll or drag to travel. Left and Right arrows or Page Up and Page Down step pictures. Home and End jump. Keys 1 to 4 change knots. A toggles automatic travel. Enter applies. Right-click for actions."
+        aria-label="Wallpaper Knot. Scroll or drag to travel. Hold Shift and drag a piece to pull the rope. Left and Right arrows or Page Up and Page Down step pictures. Home and End jump. Keys 1 to 4 change knots. A toggles automatic travel. Enter applies. Right-click for actions."
         data-settled={selection.settled || undefined} data-ready={status === 'ready' || undefined}>
         <canvas className="wallpaper-knot__canvas" ref={canvasRef} aria-hidden="true" />
         <video className="wallpaper-knot__video" ref={videoRef} aria-hidden="true" loop muted playsInline tabIndex={-1} />
         {status === 'loading' ? <p className="wallpaper-knot__message" role="status">Preparing Knot…</p> : null}
         {status === 'failed' ? <p className="wallpaper-knot__message" role="status">Knot needs WebGL. Choose Grid, Flow or Book to browse this Library.</p> : null}
         {selectedEntry ? <div className="wallpaper-knot__caption">
+          {clipLoading ? <span className="wallpaper-knot__clip-loading" role="status" aria-label="Loading video preview" title="Loading video preview" /> : null}
           <span className="wallpaper-knot__name" title={name}>{name}</span>
           {model.currentPath === selectedEntry.path ? <span className="wallpaper-knot__badge">Current</span> : null}
           {selectedEntry.favorite ? <Heart className="wallpaper-knot__badge" aria-label="Favourite wallpaper" size={12} fill="currentColor" /> : null}
@@ -88,7 +89,7 @@ function WallpaperKnotReady(props: WallpaperKnotProps) {
           aria-pressed={knotIndex === index} disabled={status !== 'ready' || !model.active || model.queryReplacementPending}
           title={curve.label} onClick={() => { switchKnot(index); focusStage(); }} />)}
       </div>
-      <p className="wallpaper-knot__hint" aria-hidden={!hintVisible} data-visible={hintVisible || undefined}>Scroll or drag · drag a piece to pull · ← → step · 1–4 knot · A travel · Enter apply</p>
+      <p className="wallpaper-knot__hint" aria-hidden={!hintVisible} data-visible={hintVisible || undefined}>Scroll or drag · Shift-drag a piece to pull · ← → step · 1–4 knot · A travel · Enter apply</p>
       <p className="wallpaper-knot__announcement" aria-live="polite" aria-atomic="true">
         {selection.settled && selectedEntry ? `${name}, ${selection.index + 1} of ${total}` : ''}
         {model.loadingMore ? ' Loading more…' : ''}

@@ -2640,6 +2640,21 @@ select:focus, input:focus { border-color: var(--primary); }
   background: var(--bg);
   cursor: default;
 }
+/* A video's preview clip can take seconds to make the first time. Shown only if the wait is noticeable. */
+.wallpaper-knot__clip-loading {
+  flex: none;
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0;
+  animation: wallpaper-knot-clip-loading 0.9s ease-in-out 350ms infinite alternate;
+}
+@keyframes wallpaper-knot-clip-loading {
+  from { opacity: 0.25; }
+  to { opacity: 0.9; }
+}
+.wallpaper-knot[data-reduced-motion] .wallpaper-knot__clip-loading { animation: none; opacity: 0.6; }
 .wallpaper-knot__name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .wallpaper-knot__badge { flex: none; font-size: 0.65rem; }
 /* Two classes: Book's own padding for this row is declared later and would otherwise win,

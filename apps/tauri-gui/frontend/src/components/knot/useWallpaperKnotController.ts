@@ -63,6 +63,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
   const [status, setStatus] = useState<'loading' | 'ready' | 'failed'>('loading');
   const [knotIndex, setKnotIndex] = useState(storedKnotIndex);
   const initialKnot = useRef(knotIndex);
+  const [clipLoading, setClipLoading] = useState(false);
   const [contextMenu, setContextMenu] = useState<{ entry: LibraryBrowserItemDTO; x: number; y: number } | null>(null);
 
   useEffect(() => {
@@ -98,12 +99,16 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     let pendingMenu: { id: number; x: number; y: number } | null = null;
     let suppressClick = false;
     let pausedAt: number | null = null;
-    // A drag that starts on a piece pulls the rope there; one that starts on empty space travels.
+    // Holding Shift, a drag that starts on a piece pulls the rope there. Any other drag travels: pieces are
+    // everywhere, and a pull by mistake when the hand meant to travel was the common case without the key.
     let drag: { id: number; x: number; y: number; startX: number; startY: number; moved: boolean; index: number | null;
       pull: { perPixel: number; x: number; y: number; z: number } | null } | null = null;
     let rope = createRope(count);
     const video = videoRef.current;
-    const clip = video ? new KnotClipPlayer(video, { load: (path) => api.previewClip(path) }) : null;
+    const clip = video ? new KnotClipPlayer(video, {
+      load: (path) => api.previewClip(path),
+      onState: (state) => setClipLoading(state === 'loading'),
+    }) : null;
     /** The clip plays on a video wallpaper the camera rests on; it rides along when the rope is pulled. */
     const syncClip = (quiet: boolean) => {
       if (!clip) return;
@@ -331,7 +336,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
       focus(); stopAuto(); clearIdle();
       stage.setPointerCapture(event.pointerId);
       const detail = hitDetail(event.clientX, event.clientY);
-      const perPixel = detail && !latest.current.reducedMotion ? renderer?.unitsPerPixel(detail.depth) ?? 0 : 0;
+      const perPixel = detail && event.shiftKey && !latest.current.reducedMotion ? renderer?.unitsPerPixel(detail.depth) ?? 0 : 0;
       drag = { id: event.pointerId, x: event.clientX, y: event.clientY, startX: event.clientX, startY: event.clientY, moved: false,
         index: detail?.index ?? null, pull: perPixel > 0 ? { perPixel, x: 0, y: 0, z: 0 } : null };
     };
@@ -536,7 +541,7 @@ export function useWallpaperKnotController(props: WallpaperKnotProps) {
     };
   }, [store]);
   useEffect(() => { engineRef.current?.sync(); }, [props.model.entries, props.model.active, props.model.replaceCount, props.model.currentPath, props.model.resetKey, props.model.queryReplacementPending, props.model.loadingMore, props.model.canAutoAppend, props.focusToken, props.returnFocusToken, reducedMotion]);
-  return { stageRef, canvasRef, videoRef, selection, selectedEntry: props.model.entries[selection.index], status,
+  return { stageRef, canvasRef, videoRef, clipLoading, selection, selectedEntry: props.model.entries[selection.index], status,
     knotIndex, reducedMotion, contextMenu,
     closeContextMenu: () => setContextMenu(null),
     focusStage: () => stageRef.current?.focus({ preventScroll: true }),
