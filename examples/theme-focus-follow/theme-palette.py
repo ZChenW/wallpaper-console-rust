@@ -257,8 +257,25 @@ def processes():
             pass
 
 
+# A consumer that cannot be reloaded (Clavis not running, say) stays pending. The follower activates
+# once a second, so retrying on every activation started a process and logged an error every second
+# for as long as the consumer stayed away. Retries back off instead; a fresh change always goes out
+# at once, and one-shot commands are new processes, so they always try.
+PENDING_RETRY_MAX = 60
+pending_retry = {'at': 0.0, 'delay': 1.0}
+
+
+def pending_retry_due(now):
+    return now >= pending_retry['at']
+
+
+def note_pending_retry(now, failed):
+    pending_retry['delay'] = min(PENDING_RETRY_MAX, pending_retry['delay'] * 2) if failed else 1.0
+    pending_retry['at'] = now + pending_retry['delay'] if failed else 0.0
+
+
 def reload_consumers(changed):
-    if os.environ.get('WCR_THEME_NO_RELOAD') == '1':
+    if os.environ.get('WCR_THEME_NO_RELOAD') == '1' or not changed:
         return []
     paths = '\n'.join(changed)
     signals = {}
@@ -342,7 +359,12 @@ def activate(output, timeout=30, full=False):
                 Path(temporary).unlink(missing_ok=True)
         pending_path = CACHE / 'pending-reloads.json'
         pending = read_json(pending_path, [])
-        remaining = reload_consumers(sorted(set(changed + pending)))
+        now = time.monotonic()
+        if changed or (pending and pending_retry_due(now)):
+            remaining = reload_consumers(sorted(set(changed + pending)))
+            note_pending_retry(now, bool(remaining))
+        else:
+            remaining = pending
         if remaining != pending:
             atomic_json(pending_path, remaining)
         # Record the complete revision so a partial activation still describes
